@@ -206,6 +206,9 @@ namespace ps2_stubs
         return snapshot;
     }
 
+    std::atomic<bool> g_hasReadInto120000{false};
+    std::atomic<uint32_t> g_postRead120000ExecCount{0};
+
     void sceCdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         push_trace("ps2_stubs::sceCdRead");
@@ -218,6 +221,14 @@ namespace ps2_stubs
         fprintf(stderr, "[sceCdRead] lsn=%u sectors=%u buf=0x%08x (phys=0x%08x)\n",
                 lsn, sectors, buf, phys);
         fflush(stderr);
+
+        if (phys < 0x0013F800u && (phys + sectors * 2048u) > 0x00120000u)
+        {
+            g_hasReadInto120000.store(true, std::memory_order_release);
+            fprintf(stderr, "[region-0x120000] sceCdRead targeting region 0x00120000..0x0013F800 (lsn=%u sectors=%u phys=0x%08x)\n",
+                    lsn, sectors, phys);
+            fflush(stderr);
+        }
 
         if (IsoDisc::instance().isOpen())
         {

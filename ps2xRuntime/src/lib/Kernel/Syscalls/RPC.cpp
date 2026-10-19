@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "RPC.h"
+#include "../Stubs/SIF.h"
 #include "../../ps2_iop_transport.h"
 
 namespace ps2_syscalls
@@ -26,6 +27,146 @@ namespace ps2_syscalls
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
             pushSifRpcDebugEventLocked(event);
+        }
+
+        struct RpcHleCallContext
+        {
+            uint8_t *rdram = nullptr;
+            R5900Context *ctx = nullptr;
+            PS2Runtime *runtime = nullptr;
+            uint32_t clientPtr = 0;
+            uint32_t sid = 0;
+            uint32_t rpcNum = 0;
+            uint32_t mode = 0;
+            uint32_t sendBuf = 0;
+            uint32_t sendSize = 0;
+            uint32_t recvBuf = 0;
+            uint32_t recvSize = 0;
+            uint32_t endFunc = 0;
+            uint32_t endParam = 0;
+        };
+
+        using RpcHleCallHandler = std::function<int32_t(const RpcHleCallContext &)>;
+        using RpcHleBindHandler = std::function<void(uint32_t sid, uint32_t clientPtr)>;
+
+        struct RpcHleService
+        {
+            uint32_t sid = 0;
+            std::string name;
+            RpcHleBindHandler onBind;
+            RpcHleCallHandler onCall;
+        };
+
+        static std::unordered_map<uint32_t, RpcHleService> s_rpcHleServices;
+        static uint32_t s_iopSregs[32] = {};
+
+        static void initRpcHleServices()
+        {
+            static bool s_initialized = false;
+            if (s_initialized) return;
+            s_initialized = true;
+
+            // 0x80001300: DBC Base service
+            s_rpcHleServices[0x80001300u] = {
+                0x80001300u,
+                "DBC_BASE",
+                [](uint32_t sid, uint32_t clientPtr) {
+                    fprintf(stderr, "[rpc:dbc] Bound DBC_BASE (0x%08x) client=0x%08x\n", sid, clientPtr);
+                    fflush(stderr);
+                },
+                [](const RpcHleCallContext &call) -> int32_t {
+                    fprintf(stderr, "[rpc:dbc] Call DBC_BASE fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
+                            call.rpcNum, call.sendBuf, call.sendSize, call.recvBuf, call.recvSize);
+                    fflush(stderr);
+                    if (call.rpcNum == 0x80001363u) // sceDbcGetModVersion
+                    {
+                        if (call.recvBuf && call.recvSize >= 4)
+                        {
+                            uint32_t version = 0x0310u; // (0x310 >> 4) == 0x31
+                            if (uint8_t *dst = getMemPtr(call.rdram, call.recvBuf))
+                            {
+                                std::memcpy(dst, &version, 4);
+                            }
+                        }
+                        return 0;
+                    }
+                    if (call.rpcNum == 0x80001304u) // sceDbcSetWorkAddr
+                    {
+                        uint32_t workAddr = 0;
+                        if (call.sendBuf && call.sendSize >= 8)
+                        {
+                            if (const uint8_t *src = getConstMemPtr(call.rdram, call.sendBuf))
+                            {
+                                std::memcpy(&workAddr, src + 4, 4);
+                            }
+                        }
+                        fprintf(stderr, "[rpc:dbc] sceDbcSetWorkAddr workAddr=0x%08x\n", workAddr);
+                        fflush(stderr);
+                        return 0;
+                    }
+                    return 0;
+                }
+            };
+
+            // 0x8000131Cu: DBC Pad Service
+            s_rpcHleServices[0x8000131Cu] = {
+                0x8000131Cu,
+                "DBC_PAD",
+                [](uint32_t sid, uint32_t clientPtr) {
+                    fprintf(stderr, "[rpc:dbc] Bound DBC_PAD (0x%08x) client=0x%08x\n", sid, clientPtr);
+                    fflush(stderr);
+                },
+                [](const RpcHleCallContext &call) -> int32_t {
+                    fprintf(stderr, "[rpc:dbc] Call DBC_PAD fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
+                            call.rpcNum, call.sendBuf, call.sendSize, call.recvBuf, call.recvSize);
+                    fflush(stderr);
+                    if (call.recvBuf && call.recvSize > 0)
+                    {
+                        rpcZeroRdram(call.rdram, call.recvBuf, call.recvSize);
+                    }
+                    return 0;
+                }
+            };
+
+            // 0x8000131Eu: DBC Port 0
+            s_rpcHleServices[0x8000131Eu] = {
+                0x8000131Eu,
+                "DBC_PORT0",
+                [](uint32_t sid, uint32_t clientPtr) {
+                    fprintf(stderr, "[rpc:dbc] Bound DBC_PORT0 (0x%08x) client=0x%08x\n", sid, clientPtr);
+                    fflush(stderr);
+                },
+                [](const RpcHleCallContext &call) -> int32_t {
+                    fprintf(stderr, "[rpc:dbc] Call DBC_PORT0 fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
+                            call.rpcNum, call.sendBuf, call.sendSize, call.recvBuf, call.recvSize);
+                    fflush(stderr);
+                    if (call.recvBuf && call.recvSize > 0)
+                    {
+                        rpcZeroRdram(call.rdram, call.recvBuf, call.recvSize);
+                    }
+                    return 0;
+                }
+            };
+
+            // 0x8000131Fu: DBC Port 1
+            s_rpcHleServices[0x8000131Fu] = {
+                0x8000131Fu,
+                "DBC_PORT1",
+                [](uint32_t sid, uint32_t clientPtr) {
+                    fprintf(stderr, "[rpc:dbc] Bound DBC_PORT1 (0x%08x) client=0x%08x\n", sid, clientPtr);
+                    fflush(stderr);
+                },
+                [](const RpcHleCallContext &call) -> int32_t {
+                    fprintf(stderr, "[rpc:dbc] Call DBC_PORT1 fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
+                            call.rpcNum, call.sendBuf, call.sendSize, call.recvBuf, call.recvSize);
+                    fflush(stderr);
+                    if (call.recvBuf && call.recvSize > 0)
+                    {
+                        rpcZeroRdram(call.rdram, call.recvBuf, call.recvSize);
+                    }
+                    return 0;
+                }
+            };
         }
 
         void fillRpcDebugPreview(const uint8_t *rdram, uint32_t addr, uint32_t size, uint8_t *preview, uint32_t &previewSize)
@@ -282,6 +423,7 @@ namespace ps2_syscalls
         client->hdr.sema_id = -1;
         client->hdr.mode = mode;
 
+        initRpcHleServices();
         uint32_t serverPtr = 0;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
@@ -295,7 +437,10 @@ namespace ps2_syscalls
             g_rpc_clients[clientPtr].sid = rpcId;
         }
 
-        if (!serverPtr && PS2IopTransport::canBindRpc(runtime, rpcId))
+        auto hleIt = s_rpcHleServices.find(rpcId);
+        const bool isHle = (hleIt != s_rpcHleServices.end());
+
+        if (!serverPtr && (isHle || PS2IopTransport::canBindRpc(runtime, rpcId)))
         {
             // EE-side servers and HLE routes need a descriptor in guest RAM.
             // With an emulated IOP, only publish it after the IRX has actually
@@ -313,6 +458,10 @@ namespace ps2_syscalls
                 std::lock_guard<std::mutex> lock(g_rpc_mutex);
                 g_rpc_servers[rpcId] = {rpcId, serverPtr};
             }
+            if (isHle && hleIt->second.onBind)
+            {
+                hleIt->second.onBind(rpcId, clientPtr);
+            }
         }
 
         if (serverPtr)
@@ -321,12 +470,18 @@ namespace ps2_syscalls
             client->server = serverPtr;
             client->buf = sd ? sd->buf : 0;
             client->cbuf = sd ? sd->cbuf : 0;
+            fprintf(stderr, "[rpc:bind] Bound sid=0x%08x client=0x%08x -> server=0x%08x (%s)\n",
+                    rpcId, clientPtr, serverPtr, isHle ? hleIt->second.name.c_str() : "IOP/RPC");
+            fflush(stderr);
         }
         else
         {
             client->server = 0;
             client->buf = 0;
             client->cbuf = 0;
+            fprintf(stderr, "[rpc:bind] UNIMPLEMENTED / refused sid=0x%08x client=0x%08x\n",
+                    rpcId, clientPtr);
+            fflush(stderr);
         }
 
         SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx, runtime);
@@ -502,6 +657,23 @@ namespace ps2_syscalls
         }
 
         const uint32_t serverPtr = client->server;
+        fprintf(stderr, "[rpc:call] sid=0x%08x fno=0x%x mode=0x%x sendBuf=0x%08x (%u bytes) recvBuf=0x%08x (%u bytes) endFunc=0x%08x endParam=0x%08x\n",
+                sid, rpcNum, mode, sendBuf, sendSize, receiveBuffer, receiveSize, endFunction, endParameter);
+        if (sendBuf != 0u && sendSize > 0u)
+        {
+            const uint32_t dumpLen = std::min<uint32_t>(sendSize, 64u);
+            if (const uint8_t *sptr = getConstMemPtr(rdram, sendBuf))
+            {
+                fprintf(stderr, "  send hex[%u]:", dumpLen);
+                for (uint32_t i = 0; i < dumpLen; ++i)
+                {
+                    fprintf(stderr, " %02x", sptr[i]);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+        fflush(stderr);
+
         auto *server = serverPtr
                            ? reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr))
                            : nullptr;
@@ -680,6 +852,37 @@ namespace ps2_syscalls
             };
             runtime->eeScheduler().invokeCurrent(std::move(callback));
         };
+
+        auto hleCallIt = s_rpcHleServices.find(sid);
+        if (hleCallIt != s_rpcHleServices.end() && hleCallIt->second.onCall)
+        {
+            RpcHleCallContext hleCall{};
+            hleCall.rdram = rdram;
+            hleCall.ctx = ctx;
+            hleCall.runtime = runtime;
+            hleCall.clientPtr = clientPtr;
+            hleCall.sid = sid;
+            hleCall.rpcNum = rpcNum;
+            hleCall.mode = mode;
+            hleCall.sendBuf = sendBuf;
+            hleCall.sendSize = sendSize;
+            hleCall.recvBuf = receiveBuffer;
+            hleCall.recvSize = receiveSize;
+            hleCall.endFunc = endFunction;
+            hleCall.endParam = endParameter;
+
+            hleCallIt->second.onCall(hleCall);
+
+            iopResult.handled = true;
+            iopResult.resultAddress = receiveBuffer;
+            if (completionSemaphore != 0u && completionSemaphore != 0xFFFFFFFFu)
+            {
+                (void)signalRpcCompletionSema(runtime, completionSemaphore);
+            }
+
+            finishCall(nullptr, *ctx);
+            return;
+        }
 
         if (serverDispatched)
         {
@@ -974,26 +1177,82 @@ namespace ps2_syscalls
         uint32_t packetAddr = getRegU32(ctx, 5);
         uint32_t packetSize = getRegU32(ctx, 6);
         uint32_t srcExtra = getRegU32(ctx, 7);
+        uint32_t destExtra = getRegU32(ctx, 8);
+        uint32_t sizeExtra = getRegU32(ctx, 9);
 
-        uint32_t sp = getRegU32(ctx, 29);
-        uint32_t destExtra = 0;
-        uint32_t sizeExtra = 0;
-        readStackU32(rdram, sp, 0x10, destExtra);
-        readStackU32(rdram, sp, 0x14, sizeExtra);
-
-        if (sizeExtra > 0 && srcExtra && destExtra)
+        if (sizeExtra > 0 && srcExtra != 0u && destExtra != 0u && runtime != nullptr)
         {
-            rpcCopyToRdram(rdram, destExtra, srcExtra, sizeExtra);
+            if (const uint8_t *src = getConstMemPtr(rdram, srcExtra))
+            {
+                runtime->writeIopMemory(destExtra, src, sizeExtra);
+            }
         }
 
         static int logCount = 0;
-        if (logCount < 5)
+        if (logCount < 10)
         {
-            RUNTIME_LOG("[sceSifSendCmd] cid=0x" << std::hex << cid
-                                                 << " packet=0x" << packetAddr
-                                                 << " psize=0x" << packetSize
-                                                 << " extra=0x" << destExtra << std::dec << std::endl);
+            std::fprintf(stderr, "[sceSifSendCmd] cid=0x%08x packet=0x%08x psize=%u src=0x%08x dst=0x%08x size=%u (ra=0x%08x)\n",
+                         cid, packetAddr, packetSize, srcExtra, destExtra, sizeExtra, getRegU32(ctx, 31));
+            std::fflush(stderr);
             ++logCount;
+        }
+
+        // Handle file3.irx command 1 (handshake and task dispatch)
+        if (cid == 1u)
+        {
+            if (const uint8_t *pkt = getConstMemPtr(rdram, packetAddr))
+            {
+                std::fprintf(stderr, "[CID1:packet 0x%08x] ", packetAddr);
+                for (int i = 0; i < 16; ++i) std::fprintf(stderr, "%02x ", pkt[i]);
+                std::fprintf(stderr, "\n");
+            }
+            const uint8_t *src = getConstMemPtr(rdram, srcExtra);
+            if (src)
+            {
+                std::fprintf(stderr, "[CID1:srcExtra 0x%08x] ", srcExtra);
+                for (int i = 0; i < 64; ++i) std::fprintf(stderr, "%02x ", src[i]);
+                std::fprintf(stderr, "\n");
+            }
+
+            uint32_t ptr08 = 0;
+            uint32_t seq = 0;
+            if (src)
+            {
+                std::memcpy(&ptr08, src + 8, 4);
+            }
+            if (const uint8_t *fcfdMem = getConstMemPtr(rdram, ptr08))
+            {
+                std::fprintf(stderr, "[CID1:fcfdMem at 0x%08x] ", ptr08);
+                for (int i = 0; i < 32; ++i) std::fprintf(stderr, "%02x ", fcfdMem[i]);
+                std::fprintf(stderr, "\n");
+                std::memcpy(&seq, fcfdMem + 4, 4);
+            }
+
+            struct SifReplyPacketCid1
+            {
+                uint32_t data = 0;
+                uint32_t packet_size = 64;
+                uint32_t cid = 1;
+                uint32_t pad0 = 0;
+                uint32_t pad1 = 0;
+                uint32_t cmd_type = 0;
+                uint32_t destExtra = 0;
+                uint32_t seq = 0;
+                uint32_t result = 0;
+                uint32_t pad2 = 0;
+                uint32_t success = 1;
+                uint32_t pad3[5] = {0};
+            } reply{};
+
+            reply.destExtra = ptr08 != 0u ? ptr08 : srcExtra;
+            reply.seq = seq;
+            reply.result = 0;
+            reply.success = 1;
+
+            std::fprintf(stderr, "[sceSifSendCmd:CID1] Dispatching reply: destExtra=0x%08x seq=%u\n", reply.destExtra, reply.seq);
+            std::fflush(stderr);
+
+            ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
         }
 
         // Handle SET_SREG command (0x80000001)
@@ -1011,6 +1270,7 @@ namespace ps2_syscalls
 
                 if (regIndex < 32)
                 {
+                    s_iopSregs[regIndex] = regVal;
                     if (uint8_t *sregMem = getMemPtr(rdram, 0x0076A6C0u))
                     {
                         std::memcpy(sregMem + regIndex * 4, &regVal, 4);
@@ -1020,14 +1280,13 @@ namespace ps2_syscalls
                         {
                             uint32_t ack = 1;
                             std::memcpy(sregMem + 31 * 4, &ack, 4);
-                            uint32_t sreg30 = 0;
-                            std::memcpy(&sreg30, sregMem + 30 * 4, 4);
+                            uint32_t sreg30 = s_iopSregs[30];
                             if (sreg30 == 0)
                             {
-                                uint32_t default30 = 0x80;
-                                std::memcpy(sregMem + 30 * 4, &default30, 4);
-                                sreg30 = default30;
+                                sreg30 = 0x80; // file3.irx status
+                                s_iopSregs[30] = sreg30;
                             }
+                            std::memcpy(sregMem + 30 * 4, &sreg30, 4);
                             std::fprintf(stderr, "[sceSifSendCmd:HANDSHAKE] IOP handshake acknowledged: sreg[31]=1 sreg[30]=0x%x\n", sreg30);
                             std::fflush(stderr);
                         }

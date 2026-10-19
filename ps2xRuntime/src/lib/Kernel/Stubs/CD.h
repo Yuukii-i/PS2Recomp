@@ -82,4 +82,7 @@ namespace ps2_stubs
     void sceCdStStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceCdSyncS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceCdTrayReq(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    extern std::atomic<bool> g_hasReadInto120000;
+    extern std::atomic<uint32_t> g_postRead120000ExecCount;
 }

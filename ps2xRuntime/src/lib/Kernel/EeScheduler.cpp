@@ -2,6 +2,7 @@
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
+#include "Stubs/CD.h"
 
 #include <algorithm>
 #include <cassert>
@@ -266,12 +267,22 @@ void EeScheduler::run()
             continue;
         }
 
+        static uint32_t s_lastDispatchedPc[32] = {0};
+        static uint32_t s_lastDispatchIdx = 0;
+
         if (!m_runtime.hasFunction(context.pc))
         {
-            fprintf(stderr, "[abort] EeScheduler: missing function at pc=0x%08x, ra=0x%08x, sp=0x%08x\n",
+            fprintf(stderr, "[abort] EeScheduler: missing function at pc=0x%08x, ra=0x%08x, sp=0x%08x, threadId=%d, invocations=%zu\n",
                     context.pc,
                     (uint32_t)_mm_extract_epi32(context.r[31], 0),
-                    (uint32_t)_mm_extract_epi32(context.r[29], 0));
+                    (uint32_t)_mm_extract_epi32(context.r[29], 0),
+                    running ? running->id : -999,
+                    running ? running->invocations.size() : 0);
+            fprintf(stderr, "[abort] Last dispatched PCs by EeScheduler:\n");
+            for (int i = 0; i < 32; ++i) {
+                uint32_t p = s_lastDispatchedPc[(s_lastDispatchIdx + i) % 32];
+                if (p) fprintf(stderr, "  [%d] 0x%08x\n", i, p);
+            }
             fflush(stderr);
             m_runtime.reportMissingFunction(m_rdram,
                                             &context,
@@ -290,8 +301,36 @@ void EeScheduler::run()
 
         try
         {
+            if (context.pc >= 0x00120000u && context.pc < 0x0013F800u)
+            {
+                static uint32_t s_range120kHitCount = 0;
+                s_range120kHitCount++;
+                static bool s_reported120k = false;
+                if (!s_reported120k)
+                {
+                    s_reported120k = true;
+                    fprintf(stderr, "[region-0x120000] First execution in 0x120000..0x13F800 at pc=0x%08x (total hits: %u)\n",
+                            context.pc, s_range120kHitCount);
+                    fflush(stderr);
+                }
+                if (ps2_stubs::g_hasReadInto120000.load(std::memory_order_acquire))
+                {
+                    uint32_t count = ++ps2_stubs::g_postRead120000ExecCount;
+                    static bool s_reportedPostRead = false;
+                    if (!s_reportedPostRead)
+                    {
+                        s_reportedPostRead = true;
+                        fprintf(stderr, "[region-0x120000:post-read] First execution in 0x120000..0x13F800 post-sceCdRead at pc=0x%08x (count=%u)\n",
+                                context.pc, count);
+                        fflush(stderr);
+                    }
+                }
+            }
+
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
             m_guestExecuting.store(true, std::memory_order_release);
+            const uint32_t entryPc = context.pc;
+            s_lastDispatchedPc[s_lastDispatchIdx++ % 32] = entryPc;
             function(m_rdram, &context, &m_runtime);
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;

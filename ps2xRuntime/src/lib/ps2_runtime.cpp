@@ -11,6 +11,7 @@
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
 #include "Kernel/Stubs/IsoDisc.h"
+#include "Stubs/CD.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
@@ -18,6 +19,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <fstream>
+#include <filesystem>
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -27,6 +29,10 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+
+#ifdef _WIN32
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *hModule, char *lpFilename, unsigned long nSize);
+#endif
 
 namespace ps2_stubs
 {
@@ -374,7 +380,7 @@ namespace
     }
 }
 
-static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
+static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight, uint64_t renderTick = 0u)
 {
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
     static bool s_hasLatchedInitialFrame = false;
@@ -388,7 +394,17 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
 
     const uint64_t currentTick = rt->eeScheduler().currentVSyncTick();
-    const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
+    const uint64_t dumpTick = (renderTick != 0u) ? renderTick : currentTick;
+
+    int dumpInterval = 0;
+    const char *dumpFramesCheck = std::getenv("PS2X_DUMP_FRAMES");
+    if (dumpFramesCheck && dumpFramesCheck[0] != '\0')
+    {
+        try { dumpInterval = std::stoi(dumpFramesCheck); } catch (...) { dumpInterval = 0; }
+    }
+    const bool isDumpScheduled = (dumpTick == 1u || dumpTick == 10u || dumpTick == 100u || (dumpInterval > 0 && (dumpTick % static_cast<uint64_t>(dumpInterval) == 0u)));
+
+    const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick || isDumpScheduled;
     if (needsLatch)
     {
         rt->gs().latchHostPresentationFrame();
@@ -476,6 +492,125 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     outWidth = width;
     outHeight = height;
     s_hasUploadedFrame = true;
+
+    static uint64_t s_lastDumpTick = std::numeric_limits<uint64_t>::max();
+    static uint32_t s_frameDumpCount = 0u;
+    static uint32_t s_vramDumpCount = 0u;
+
+    if (dumpTick != s_lastDumpTick)
+    {
+        s_lastDumpTick = dumpTick;
+        const char *dumpFramesEnv = std::getenv("PS2X_DUMP_FRAMES");
+        if (dumpFramesEnv && dumpFramesEnv[0] != '\0' && s_frameDumpCount < 20u)
+        {
+            int n = 0;
+            try { n = std::stoi(dumpFramesEnv); } catch (...) { n = 0; }
+            if (dumpTick == 1u || dumpTick == 10u || dumpTick == 100u || (n > 0 && (dumpTick % static_cast<uint64_t>(n) == 0u)))
+            {
+                std::filesystem::create_directories("frames");
+                const std::string framePath = "frames/frame_" + std::to_string(dumpTick) + ".png";
+                const uint32_t dumpW = FB_WIDTH;
+                const uint32_t dumpH = (height != 0u) ? std::min<uint32_t>(height, FB_HEIGHT) : DEFAULT_DISPLAY_HEIGHT;
+
+                uint32_t nonBlackPixels = 0u;
+                std::vector<uint8_t> dumpPixels(dumpW * dumpH * 4u);
+                for (uint32_t y = 0; y < dumpH; ++y)
+                {
+                    const uint8_t *srcRow = s_uploadBuffer.data() + y * FB_WIDTH * 4u;
+                    uint8_t *dstRow = dumpPixels.data() + y * dumpW * 4u;
+                    for (uint32_t x = 0; x < dumpW; ++x)
+                    {
+                        const uint8_t r = srcRow[x * 4u + 0];
+                        const uint8_t g = srcRow[x * 4u + 1];
+                        const uint8_t b = srcRow[x * 4u + 2];
+                        const uint8_t a = srcRow[x * 4u + 3];
+                        dstRow[x * 4u + 0] = r;
+                        dstRow[x * 4u + 1] = g;
+                        dstRow[x * 4u + 2] = b;
+                        dstRow[x * 4u + 3] = (a != 0u) ? a : 255u;
+                        if (r != 0u || g != 0u || b != 0u)
+                        {
+                            ++nonBlackPixels;
+                        }
+                    }
+                }
+                Image frameImg{};
+                frameImg.data = dumpPixels.data();
+                frameImg.width = static_cast<int>(dumpW);
+                frameImg.height = static_cast<int>(dumpH);
+                frameImg.mipmaps = 1;
+                frameImg.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+                ExportImage(frameImg, framePath.c_str());
+
+                const auto &regs = rt->memory().gs();
+                std::fprintf(stderr, "[frame-dump] tick=%llu width=%u height=%u non_black=%u DISPFB1=0x%016llx DISPLAY1=0x%016llx DISPFB2=0x%016llx DISPLAY2=0x%016llx\n",
+                             static_cast<unsigned long long>(dumpTick),
+                             dumpW,
+                             dumpH,
+                             nonBlackPixels,
+                             static_cast<unsigned long long>(regs.dispfb1),
+                             static_cast<unsigned long long>(regs.display1),
+                             static_cast<unsigned long long>(regs.dispfb2),
+                             static_cast<unsigned long long>(regs.display2));
+                std::fflush(stderr);
+                ++s_frameDumpCount;
+            }
+        }
+
+        const char *dumpVramEnv = std::getenv("PS2X_DUMP_VRAM");
+        if (dumpVramEnv && std::strcmp(dumpVramEnv, "1") == 0 && s_vramDumpCount < 20u)
+        {
+            int n = 0;
+            const char *dumpFramesEnv = std::getenv("PS2X_DUMP_FRAMES");
+            if (dumpFramesEnv && dumpFramesEnv[0] != '\0')
+            {
+                try { n = std::stoi(dumpFramesEnv); } catch (...) { n = 0; }
+            }
+            if (dumpTick == 1u || dumpTick == 10u || dumpTick == 100u || (n > 0 && (dumpTick % static_cast<uint64_t>(n) == 0u)))
+            {
+                std::filesystem::create_directories("frames");
+                const std::string vramPath = "frames/vram_" + std::to_string(dumpTick) + ".png";
+                std::vector<uint8_t> vramRgba(1024 * 1024 * 4, 255);
+                uint32_t vramNonBlack = 0u;
+                const uint32_t baseBlock = displayFbp * 32u;
+                for (uint32_t vy = 0; vy < 1024; ++vy)
+                {
+                    for (uint32_t vx = 0; vx < 1024; ++vx)
+                    {
+                        const uint32_t val = rt->gs().ReadVram(GS_PSM_CT32, baseBlock, 16u, vx, vy);
+                        const uint8_t r = static_cast<uint8_t>(val & 0xFFu);
+                        const uint8_t g = static_cast<uint8_t>((val >> 8u) & 0xFFu);
+                        const uint8_t b = static_cast<uint8_t>((val >> 16u) & 0xFFu);
+                        const size_t idx = (static_cast<size_t>(vy) * 1024u + vx) * 4u;
+                        vramRgba[idx + 0] = r;
+                        vramRgba[idx + 1] = g;
+                        vramRgba[idx + 2] = b;
+                        vramRgba[idx + 3] = 255u;
+                        if (r != 0u || g != 0u || b != 0u)
+                        {
+                            ++vramNonBlack;
+                        }
+                    }
+                }
+                Image vramImg{};
+                vramImg.data = vramRgba.data();
+                vramImg.width = 1024;
+                vramImg.height = 1024;
+                vramImg.mipmaps = 1;
+                vramImg.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+                ExportImage(vramImg, vramPath.c_str());
+
+                std::fprintf(stderr, "[vram-dump] tick=%llu displayFbp=%u baseBlock=%u non_black=%u path=%s\n",
+                             static_cast<unsigned long long>(dumpTick),
+                             displayFbp,
+                             baseBlock,
+                             vramNonBlack,
+                             vramPath.c_str());
+                std::fflush(stderr);
+                ++s_vramDumpCount;
+            }
+        }
+    }
 }
 
 PS2Runtime::PS2Runtime()
@@ -504,8 +639,12 @@ PS2Runtime::PS2Runtime()
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
+    // The main thread stack occupies [0x01FA0000, 0x02000000] (SetupThread: stack base=0x01FA0000, size=0x60000).
+    // Async callback stacks MUST NOT collide with the main thread's live stack frames.
+    // They are placed below the main stack in [0x01F00000, 0x01FA0000].
+    constexpr uint32_t kDefaultAsyncCallbackStackTop = 0x01FA0000u;
     m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-    m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    m_asyncCallbackStackTop = kDefaultAsyncCallbackStackTop;
 }
 
 void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
@@ -758,6 +897,8 @@ bool PS2Runtime::initialize(const char *title)
     return false;
 }
 
+static void registerConfigStubs(PS2Runtime &runtime, const std::string &configPath);
+
 bool PS2Runtime::loadELF(const std::string &elfPath)
 {
     configureIoPathsFromElf(elfPath);
@@ -974,7 +1115,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
         const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
         m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
-        m_asyncCallbackStackTop = PS2_RAM_SIZE;
+        m_asyncCallbackStackTop = 0x01FA0000u;
     }
 
     LoadedModule module;
@@ -1010,9 +1151,61 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
                                       elfCrc32,
                                       elfCrc32Valid);
 
-    // Override recompiled sceCdLayerSearchFile (0x003C5770) with runtime ISO search stub
-    replaceFunction(0x003C5770u, &ps2_stubs::sceCdLayerSearchFile);
-    fprintf(stderr, "[override] 0x003C5770 (sceCdLayerSearchFile) replaced with runtime stub\n");
+    // 1. Generic config.toml stub registration
+    registerConfigStubs(*this, "config.toml");
+
+    // 2. Behavior bypass runtime overrides (moved out of recomp_source):
+    // 0x003703D4: Early exit check returning non-zero error code -> force return 0
+    replaceFunction(0x003703D4u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        fprintf(stderr, "[override] 0x003703D4 called (ra=0x%08x) -> returning 0\n", getRegU32(ctx, 31));
+        fflush(stderr);
+        setReturnS32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+    });
+
+    // Syscall wrappers called via jump (J) instructions not emitted into recompiled table:
+    static auto wrapperSyscall2 = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        fprintf(stderr, "[syscall-wrapper] Dispatching syscall 2 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
+        fflush(stderr);
+        ps2_syscalls::dispatchNumericSyscall(2, rdram, ctx, runtime);
+        ctx->pc = getRegU32(ctx, 31);
+    };
+    static auto wrapperSyscall4 = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        fprintf(stderr, "[syscall-wrapper] Dispatching syscall 4 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
+        fflush(stderr);
+        ps2_syscalls::dispatchNumericSyscall(4, rdram, ctx, runtime);
+        ctx->pc = getRegU32(ctx, 31);
+    };
+    static auto wrapperSyscall6 = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        fprintf(stderr, "[syscall-wrapper] Dispatching syscall 6 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
+        fflush(stderr);
+        ps2_syscalls::dispatchNumericSyscall(6, rdram, ctx, runtime);
+        ctx->pc = getRegU32(ctx, 31);
+    };
+    replaceFunction(0x004356E0u, wrapperSyscall2);
+    replaceFunction(0x00435700u, wrapperSyscall4);
+    replaceFunction(0x00435720u, wrapperSyscall6);
+
+    static auto stub_sceSifGetSreg = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        const uint32_t reg = getRegU32(ctx, 4);
+        uint32_t val = 0;
+        if (reg < 32)
+        {
+            if (const uint8_t *mem = getMemPtr(rdram, 0x0076A6C0u + reg * 4))
+            {
+                std::memcpy(&val, mem, 4);
+            }
+        }
+        if (reg == 30 || reg == 31)
+        {
+            fprintf(stderr, "[sreg] EE queried sreg[%u] -> 0x%x (ra=0x%08x)\n", reg, val, getRegU32(ctx, 31));
+            fflush(stderr);
+        }
+        setReturnU32(ctx, val);
+        ctx->pc = getRegU32(ctx, 31);
+    };
+    replaceFunction(0x004388F8u, stub_sceSifGetSreg);
+    fprintf(stderr, "[override] 0x004388F8 (sceSifGetSreg) registered with runtime stub\n");
     fflush(stderr);
 
     IsoDisc::instance().open();
@@ -1115,6 +1308,178 @@ bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
 bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
 {
     return replaceFunction(address, func);
+}
+
+namespace
+{
+    struct BoundConfigStub
+    {
+        std::string name;
+        void (*handler)(uint8_t*, R5900Context*, PS2Runtime*);
+    };
+
+    static std::unordered_map<uint32_t, BoundConfigStub> s_boundConfigStubs;
+
+    static const std::unordered_map<std::string, void (*)(uint8_t*, R5900Context*, PS2Runtime*)> &getAvailableRuntimeStubs()
+    {
+        static const std::unordered_map<std::string, void (*)(uint8_t*, R5900Context*, PS2Runtime*)> s_stubs = []{
+            std::unordered_map<std::string, void (*)(uint8_t*, R5900Context*, PS2Runtime*)> m;
+#define REG_STUB(name) m[#name] = &ps2_stubs::name;
+            PS2_STUB_LIST(REG_STUB)
+#undef REG_STUB
+#define REG_SYSCALL(name) m[#name] = &ps2_syscalls::name;
+            PS2_SYSCALL_LIST(REG_SYSCALL)
+#undef REG_SYSCALL
+            return m;
+        }();
+        return s_stubs;
+    }
+
+    static void genericConfigStubThunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t pc = ctx->pc;
+        const uint32_t ra = getRegU32(ctx, 31);
+        ctx->pc = ra;
+        auto it = s_boundConfigStubs.find(pc);
+        if (it != s_boundConfigStubs.end())
+        {
+            it->second.handler(rdram, ctx, runtime);
+        }
+        else
+        {
+            fprintf(stderr, "[stub] genericConfigStubThunk: unbound stub at pc=0x%08x\n", pc);
+            fflush(stderr);
+        }
+        if (ctx->pc == pc)
+        {
+            ctx->pc = ra;
+        }
+    }
+
+    static std::unordered_map<uint32_t, std::string> s_unimplementedConfigStubs;
+
+    static void unimplementedConfigStubThunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t pc = ctx->pc;
+        const uint32_t ra = getRegU32(ctx, 31);
+        auto it = s_unimplementedConfigStubs.find(pc);
+        const char *name = (it != s_unimplementedConfigStubs.end()) ? it->second.c_str() : "unknown";
+        fprintf(stderr, "\n[FATAL] Called unimplemented config stub '%s' at 0x%08x (ra=0x%08x)!\n", name, pc, ra);
+        fflush(stderr);
+        std::abort();
+    }
+}
+
+static void registerConfigStubs(PS2Runtime &runtime, const std::string &configPath)
+{
+    std::ifstream file;
+    std::string resolvedPath;
+
+    std::vector<std::string> candidates;
+    candidates.push_back(configPath);
+    candidates.push_back("../" + configPath);
+    candidates.push_back("../../" + configPath);
+
+#ifdef _WIN32
+    char exeBuf[1024] = {0};
+    if (GetModuleFileNameA(NULL, exeBuf, static_cast<unsigned long>(sizeof(exeBuf))) > 0)
+    {
+        std::filesystem::path exeDir = std::filesystem::path(exeBuf).parent_path();
+        candidates.push_back((exeDir / configPath).string());
+        candidates.push_back((exeDir / ".." / configPath).string());
+        candidates.push_back((exeDir / ".." / ".." / configPath).string());
+        candidates.push_back((exeDir / ".." / ".." / ".." / configPath).string());
+    }
+#endif
+    candidates.push_back("c:/ApeEscape3_Recomp/" + configPath);
+
+    for (const auto &cand : candidates)
+    {
+        file.open(cand);
+        if (file.is_open())
+        {
+            resolvedPath = cand;
+            break;
+        }
+    }
+
+    if (!file.is_open())
+    {
+        fprintf(stderr, "\n[config-stubs] FATAL: Could not open %s in any searched location!\n", configPath.c_str());
+        fflush(stderr);
+        std::abort();
+    }
+
+    const auto &available = getAvailableRuntimeStubs();
+    size_t matchedCount = 0;
+    size_t unmatchedCount = 0;
+
+    std::string line;
+    while (std::getline(file, line))
+    {
+        const size_t atPos = line.find("@0x");
+        if (atPos == std::string::npos)
+        {
+            continue;
+        }
+
+        size_t startPos = line.find_first_not_of(" \t\"'");
+        if (startPos == std::string::npos || startPos >= atPos)
+        {
+            continue;
+        }
+        std::string name = line.substr(startPos, atPos - startPos);
+        while (!name.empty() && (name.back() == '\"' || name.back() == '\'' || name.back() == ' ' || name.back() == '\t'))
+        {
+            name.pop_back();
+        }
+
+        std::string addrStr = line.substr(atPos + 3);
+        size_t endHex = addrStr.find_first_not_of("0123456789abcdefABCDEF");
+        if (endHex != std::string::npos)
+        {
+            addrStr = addrStr.substr(0, endHex);
+        }
+        if (addrStr.empty())
+        {
+            continue;
+        }
+
+        uint32_t addr = 0;
+        try {
+            addr = static_cast<uint32_t>(std::stoul(addrStr, nullptr, 16));
+        } catch (...) {
+            continue;
+        }
+
+        auto it = available.find(name);
+        if (it != available.end())
+        {
+            s_boundConfigStubs[addr] = {name, it->second};
+            runtime.replaceFunction(addr, genericConfigStubThunk);
+            ++matchedCount;
+        }
+        else
+        {
+            ++unmatchedCount;
+            if (!runtime.hasFunction(addr))
+            {
+                s_unimplementedConfigStubs[addr] = name;
+                runtime.replaceFunction(addr, unimplementedConfigStubThunk);
+            }
+        }
+    }
+
+    if (matchedCount == 0)
+    {
+        fprintf(stderr, "\n[config-stubs] FATAL: 0 stubs matched from %s!\n", resolvedPath.c_str());
+        fflush(stderr);
+        std::abort();
+    }
+
+    fprintf(stderr, "[config-stubs] Registered %zu stubs from %s into function table (%zu stubs unmatched in runtime)\n",
+            matchedCount, resolvedPath.c_str(), unmatchedCount);
+    fflush(stderr);
 }
 
 bool PS2Runtime::hasFunction(uint32_t address) const
@@ -1360,6 +1725,32 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 {
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+    if (targetPc >= 0x00120000u && targetPc < 0x0013F800u)
+    {
+        static uint32_t s_range120kBranchHitCount = 0;
+        s_range120kBranchHitCount++;
+        static bool s_reported120kBranch = false;
+        if (!s_reported120kBranch)
+        {
+            s_reported120kBranch = true;
+            fprintf(stderr, "[region-0x120000:branch] First branch into 0x120000..0x13F800 at targetPc=0x%08x from sourcePc=0x%08x (total hits: %u)\n",
+                    targetPc, sourcePc, s_range120kBranchHitCount);
+            fflush(stderr);
+        }
+        if (ps2_stubs::g_hasReadInto120000.load(std::memory_order_acquire))
+        {
+            static uint32_t s_branchPostReadCount = 0;
+            s_branchPostReadCount++;
+            static bool s_reportedBranchPostRead = false;
+            if (!s_reportedBranchPostRead)
+            {
+                s_reportedBranchPostRead = true;
+                fprintf(stderr, "[region-0x120000:post-read-branch] First branch into 0x120000..0x13F800 post-sceCdRead at targetPc=0x%08x from sourcePc=0x%08x (count=%u)\n",
+                        targetPc, sourcePc, s_branchPostReadCount);
+                fflush(stderr);
+            }
+        }
+    }
 
     // Every inter-function transfer is also a deterministic EE safe point.
     // Backward edges inside generated functions use eeCheckpointDue(), while
@@ -1988,9 +2379,10 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
 
     std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
     uint32_t top = m_asyncCallbackStackTop;
-    if (top > PS2_RAM_SIZE)
+    constexpr uint32_t kMainThreadStackBottom = 0x01FA0000u;
+    if (top > kMainThreadStackBottom)
     {
-        top = PS2_RAM_SIZE;
+        top = kMainThreadStackBottom;
     }
     top &= ~(kGuestHeapDefaultAlignment - 1u);
 
@@ -2007,7 +2399,11 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     }
 
     m_asyncCallbackStackTop = base;
-    return top - 0x10u;
+    const uint32_t stackPointer = top - 0x10u;
+    std::fprintf(stderr, "[reserveAsyncCallbackStack] Reserved async stack [0x%08x..0x%08x], sp=0x%08x (floor=0x%08x)\n",
+                 base, top, stackPointer, m_asyncCallbackStackFloor);
+    std::fflush(stderr);
+    return stackPointer;
 }
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
@@ -2429,7 +2825,7 @@ void PS2Runtime::run()
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-        UploadFrame(frameTex, this, presentWidth, presentHeight);
+        UploadFrame(frameTex, this, presentWidth, presentHeight, tick);
 
         BeginDrawing();
         ClearBackground(BLACK);

@@ -27,6 +27,9 @@ namespace ps2_stubs
 
     void exit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        fprintf(stderr, "[exit] ps2_stubs::exit called! pc=0x%08x ra=0x%08x sp=0x%08x\n",
+                ctx ? ctx->pc : 0, ctx ? getRegU32(ctx, 31) : 0, ctx ? getRegU32(ctx, 29) : 0);
+        fflush(stderr);
         push_trace("ps2_stubs::exit");
         if (runtime)
         {
