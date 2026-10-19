@@ -1242,6 +1242,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             break;
         case 0x10003C30u:
             vif1_regs.mark = value & 0xFFFFu;
+            m_ioRegisters[0x10003C30u] = value & 0xFFFFu;
             vif1_regs.stat &= ~(1u << 6); // clear MRK flag on CPU write
             break;
         case 0x10003C40u:
@@ -1919,6 +1920,25 @@ std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
     return causes;
 }
 
+namespace {
+    std::vector<uint32_t> s_completedIntcCauses;
+    std::mutex s_completedIntcMutex;
+}
+
+void recordCompletedIntcCause(uint32_t cause)
+{
+    std::lock_guard<std::mutex> lock(s_completedIntcMutex);
+    s_completedIntcCauses.push_back(cause);
+}
+
+std::vector<uint32_t> consumeCompletedIntcCauses()
+{
+    std::lock_guard<std::mutex> lock(s_completedIntcMutex);
+    std::vector<uint32_t> causes;
+    causes.swap(s_completedIntcCauses);
+    return causes;
+}
+
 void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
 {
     if (m_path3Masked || m_path3MaskedFifo.empty())
@@ -2353,6 +2373,16 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
                (mode & 0x4u) |
                (ctrl & 0x8u);
         return stat;
+    }
+
+    if (address == 0x10003C00u) // VIF1_STAT
+    {
+        return vif1_regs.stat;
+    }
+
+    if (address == 0x10003C30u) // VIF1_MARK
+    {
+        return vif1_regs.mark;
     }
 
     if (address >= 0x10000000 && address < 0x10010000)

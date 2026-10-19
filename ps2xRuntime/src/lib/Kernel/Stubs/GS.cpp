@@ -1219,6 +1219,7 @@ namespace ps2_stubs
         if (mode == 0)
         {
             mem.processPendingTransfers();
+            runtime->drainCompletedDmacHandlers(rdram);
 
             uint32_t count = 0;
             constexpr uint32_t kTimeout = 0x1000000;

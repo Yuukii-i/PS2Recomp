@@ -1,6 +1,9 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
 #include <cstring>
+#include <cstdio>
+
+extern void recordCompletedIntcCause(uint32_t cause);
 
 enum VIFCmd : uint8_t
 {
@@ -344,7 +347,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         vif1_regs.code = cmd;
         vif1_regs.num = num;
         if (irq)
+        {
+            vif1_regs.stat |= (1u << 10); // VIS
             vif1_regs.stat |= (1u << 11); // INT
+            recordCompletedIntcCause(5u);
+            std::fprintf(stderr, "[vif1:irq] cmd=0x%08x opcode=0x%02x imm=0x%04x\n", cmd, opcode, imm);
+            std::fflush(stderr);
+        }
 
         if (opcode == VIF_NOP)
         {
@@ -394,6 +403,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         {
             vif1_regs.mark = imm;
             vif1_regs.stat |= (1u << 6); // MRK
+            m_ioRegisters[0x10003C30u] = imm;
+            recordCompletedIntcCause(5u);
+            std::fprintf(stderr, "[vif1:mark] imm=0x%04x irq=%d\n", imm, irq ? 1 : 0);
+            std::fflush(stderr);
             continue;
         }
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)

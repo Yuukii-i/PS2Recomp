@@ -1871,11 +1871,17 @@ void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
     raiseCop0Exception(ctx, EXCEPTION_BREAKPOINT);
 }
 
+extern std::vector<uint32_t> consumeCompletedIntcCauses();
+
 void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
 {
     for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
     {
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+    }
+    for (uint32_t cause : consumeCompletedIntcCauses())
+    {
+        m_eeScheduler->dispatchIrq(false, cause);
     }
 }
 

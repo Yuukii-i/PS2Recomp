@@ -1949,23 +1949,8 @@ namespace ps2_stubs
 
     void sceMpegClearRefBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)ctx;
+        (void)rdram;
         (void)runtime;
-        static const uint32_t kRefGlobalAddrs[] = {
-            0x171800u, 0x17180Cu, 0x171818u, 0x171804u, 0x171810u, 0x17181Cu};
-        for (uint32_t addr : kRefGlobalAddrs)
-        {
-            uint8_t *p = getMemPtr(rdram, addr);
-            if (!p)
-                continue;
-            uint32_t ptr = *reinterpret_cast<uint32_t *>(p);
-            if (ptr != 0u)
-            {
-                uint8_t *q = getMemPtr(rdram, ptr + 0x28u);
-                if (q)
-                    *reinterpret_cast<uint32_t *>(q) = 0u;
-            }
-        }
         setReturnU32(ctx, 1u);
     }
 
@@ -2038,21 +2023,13 @@ namespace ps2_stubs
         mpegGuestWrite64(rdram, uVar3 + 0x88, 0);
 
         mpegGuestWrite64(rdram, uVar3 + 0xF0, 0xFFFFFFFFFFFFFFFFULL);
-        mpegGuestWrite32(rdram, uVar3 + 0x1C, 0x1209F8u);
-        mpegGuestWrite32(rdram, uVar3 + 0x24, 0x120A08u);
+        mpegGuestWrite32(rdram, uVar3 + 0x1C, 0u);
+        mpegGuestWrite32(rdram, uVar3 + 0x24, 0u);
         mpegGuestWrite32(rdram, uVar3 + 0xB0, 1u);
         mpegGuestWrite32(rdram, uVar3 + 0x9C, 0xFFFFFFFFu);
         mpegGuestWrite32(rdram, uVar3 + 0x80, 0xFFFFFFFFu);
         mpegGuestWrite32(rdram, uVar3 + 0x94, 0xFFFFFFFFu);
         mpegGuestWrite32(rdram, uVar3 + 0x98, 0xFFFFFFFFu);
-
-        mpegGuestWrite32(rdram, 0x1717BCu, param_1);
-
-        static const uint32_t s_refValues[] = {
-            0x171A50u, 0x171C58u, 0x171CC0u, 0x171D28u, 0x171D90u,
-            0x171AB8u, 0x171B20u, 0x171B88u, 0x171BF0u};
-        for (unsigned i = 0; i < 9u; ++i)
-            mpegGuestWrite32(rdram, 0x171800u + i * 4u, s_refValues[i]);
 
         uint32_t setDynamicRet = a1_init;
         if (uint8_t *p = getMemPtr(rdram, puVar4 + 8))
@@ -2429,6 +2406,13 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        static bool s_warned = false;
+        if (!s_warned)
+        {
+            s_warned = true;
+            std::fprintf(stderr, "[MPEG] sceMpegIsEnd forced to 1, caller=0x%08x\n", ctx ? ctx->pc : 0u);
+            std::fflush(stderr);
+        }
         setReturnS32(ctx, 1);
     }
 
@@ -2472,7 +2456,6 @@ namespace ps2_stubs
         mpegGuestWrite32(rdram, param_1 + 0x08, 0u);
         mpegGuestWrite32(rdram, inner + 0x80, 0xFFFFFFFFu);
         mpegGuestWrite32(rdram, inner + 0xAC, 0u);
-        mpegGuestWrite32(rdram, 0x171904u, 0u);
     }
 
     void sceMpegResetDefaultPtsGap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
