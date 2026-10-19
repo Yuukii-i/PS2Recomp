@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include "../IsoDisc.h"
 
 namespace
 {
@@ -434,6 +435,18 @@ namespace
 
     bool readCdSectors(uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount)
     {
+        if (IsoDisc::instance().isOpen())
+        {
+            if (byteCount == 0 || !dst)
+            {
+                g_lastCdError = 0;
+                return true;
+            }
+            bool ok = IsoDisc::instance().readSectors(lbn, sectors, dst);
+            g_lastCdError = ok ? 0 : -1;
+            return ok;
+        }
+
         for (const auto &[key, entry] : g_cdFilesByKey)
         {
             const uint32_t endLbn = entry.baseLbn + entry.sectors;
@@ -846,16 +859,19 @@ namespace
         {
             uint32_t value = 0;
             (void)tryReadWordFromGuest(m_rdram, m_runtime, m_curr, value);
-            m_curr += 4;
+            m_curr += 8;
             return value;
         }
 
         uint64_t nextU64()
         {
             m_curr = (m_curr + 7u) & ~7u;
-            const uint64_t low = nextU32();
-            const uint64_t high = nextU32();
-            return low | (high << 32);
+            uint32_t low = 0;
+            uint32_t high = 0;
+            (void)tryReadWordFromGuest(m_rdram, m_runtime, m_curr, low);
+            (void)tryReadWordFromGuest(m_rdram, m_runtime, m_curr + 4, high);
+            m_curr += 8;
+            return static_cast<uint64_t>(low) | (static_cast<uint64_t>(high) << 32);
         }
 
     private:

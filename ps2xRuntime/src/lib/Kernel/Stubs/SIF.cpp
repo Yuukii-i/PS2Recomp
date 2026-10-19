@@ -4,6 +4,7 @@
 #include "../../ps2_iop_transport.h"
 #include "runtime/ps2_address.h"
 #include "runtime/ee_scheduler.h"
+#include "trace_logger.h"
 
 #include <algorithm>
 #include <cstring>
@@ -315,11 +316,13 @@ namespace ps2_stubs
 
     void sceSifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceSifBindRpc");
         ps2_syscalls::SifBindRpc(rdram, ctx, runtime);
     }
 
     void sceSifCheckStatRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceSifCheckStatRpc");
         ps2_syscalls::SifCheckStatRpc(rdram, ctx, runtime);
     }
 
@@ -463,6 +466,7 @@ namespace ps2_stubs
 
     void sceSifGetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceSifGetReg");
         const uint32_t reg = getRegU32(ctx, 4);
         uint32_t value = 0u;
         bool shouldLog = false;
@@ -524,6 +528,7 @@ namespace ps2_stubs
 
     void sceSifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceSifInitRpc");
         ps2_syscalls::SifInitRpc(rdram, ctx, runtime);
     }
 
@@ -559,6 +564,7 @@ namespace ps2_stubs
 
     void sceSifRebootIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceSifRebootIop");
         PS2IopTransport::reset(runtime);
         setReturnS32(ctx, 1);
     }
@@ -762,6 +768,7 @@ namespace ps2_stubs
 
     void sceSifSetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceSifSetReg");
         const uint32_t reg = getRegU32(ctx, 4);
         const uint32_t value = getRegU32(ctx, 5);
         uint32_t prev = 0u;
@@ -837,6 +844,7 @@ namespace ps2_stubs
 
     void sceSifSyncIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceSifSyncIop");
         setReturnS32(ctx, 1);
     }
 

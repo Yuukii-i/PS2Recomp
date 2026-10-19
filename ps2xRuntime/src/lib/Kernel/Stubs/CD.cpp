@@ -1,7 +1,9 @@
 #include "Common.h"
 #include "CD.h"
+#include "IsoDisc.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
+#include "trace_logger.h"
 
 namespace ps2_stubs
 {
@@ -206,125 +208,36 @@ namespace ps2_stubs
 
     void sceCdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t a0 = getRegU32(ctx, 4); // usually lbn
-        const uint32_t a1 = getRegU32(ctx, 5); // usually sector count
-        const uint32_t a2 = getRegU32(ctx, 6); // usually destination buffer
+        push_trace("ps2_stubs::sceCdRead");
+        const uint32_t lsn = getRegU32(ctx, 4);
+        const uint32_t sectors = getRegU32(ctx, 5);
+        const uint32_t buf = getRegU32(ctx, 6);
+        const uint32_t phys = buf & 0x1FFFFFFFu;
+        const uint32_t ramOffset = buf & PS2_RAM_MASK;
 
-        struct CdReadArgs
+        fprintf(stderr, "[sceCdRead] lsn=%u sectors=%u buf=0x%08x (phys=0x%08x)\n",
+                lsn, sectors, buf, phys);
+        fflush(stderr);
+
+        if (IsoDisc::instance().isOpen())
         {
-            uint32_t lbn = 0;
-            uint32_t sectors = 0;
-            uint32_t buf = 0;
-            const char *tag = "";
-        };
-
-        auto clampReadBytes = [](uint32_t sectors, uint32_t offset) -> size_t
+            IsoDisc::instance().readSectors(lsn, sectors, rdram + ramOffset);
+        }
+        else
         {
-            const uint64_t requested = static_cast<uint64_t>(sectors) * static_cast<uint64_t>(kCdSectorSize);
-            if (requested == 0)
-            {
-                return 0;
-            }
-
-            const uint64_t maxBytes = static_cast<uint64_t>(PS2_RAM_SIZE - offset);
-            const uint64_t clamped = std::min<uint64_t>(requested, maxBytes);
-            return static_cast<size_t>(clamped);
-        };
-
-        auto tryRead = [&](const CdReadArgs &args) -> bool
-        {
-            const uint32_t offset = args.buf & PS2_RAM_MASK;
-            const size_t bytes = clampReadBytes(args.sectors, offset);
-            if (bytes == 0)
-            {
-                return true;
-            }
-
-            return readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
-        };
-
-        CdReadArgs selected{a0, a1, a2, "a0/a1/a2"};
-        bool ok = tryRead(selected);
-
-        if (!ok)
-        {
-            // Some game-side wrappers use a nonstandard register layout.
-            // If primary decode does not resolve to a known LBN, try safe alternatives.
-            constexpr uint32_t kMaxReasonableSectors = PS2_RAM_SIZE / kCdSectorSize;
-            if (!isResolvableCdLbn(selected.lbn))
-            {
-                const std::array<CdReadArgs, 5> alternatives = {
-                    CdReadArgs{a2, a1, a0, "a2/a1/a0"},
-                    CdReadArgs{a0, a2, a1, "a0/a2/a1"},
-                    CdReadArgs{a1, a0, a2, "a1/a0/a2"},
-                    CdReadArgs{a1, a2, a0, "a1/a2/a0"},
-                    CdReadArgs{a2, a0, a1, "a2/a0/a1"}};
-
-                for (const CdReadArgs &candidate : alternatives)
-                {
-                    if (candidate.sectors > kMaxReasonableSectors)
-                    {
-                        continue;
-                    }
-                    if (!isResolvableCdLbn(candidate.lbn))
-                    {
-                        continue;
-                    }
-
-                    if (tryRead(candidate))
-                    {
-                        static uint32_t recoverLogCount = 0;
-                        if (recoverLogCount < 16)
-                        {
-                            RUNTIME_LOG("[sceCdRead] recovered with alternate args " << candidate.tag
-                                                                                     << " (pc=0x" << std::hex << ctx->pc
-                                                                                     << " ra=0x" << getRegU32(ctx, 31)
-                                                                                     << " a0=0x" << a0
-                                                                                     << " a1=0x" << a1
-                                                                                     << " a2=0x" << a2 << std::dec << ")" << std::endl);
-                            ++recoverLogCount;
-                        }
-                        selected = candidate;
-                        ok = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!ok)
-            {
-                const uint32_t offset = a2 & PS2_RAM_MASK;
-                const size_t bytes = clampReadBytes(a1, offset);
-                if (bytes > 0)
-                {
-                    std::memset(rdram + offset, 0, bytes);
-                }
-
-                static uint32_t unresolvedLogCount = 0;
-                if (unresolvedLogCount < 32)
-                {
-                    std::cerr << "[sceCdRead] unresolved request pc=0x" << std::hex << ctx->pc
-                              << " ra=0x" << getRegU32(ctx, 31)
-                              << " a0=0x" << a0
-                              << " a1=0x" << a1
-                              << " a2=0x" << a2 << std::dec << std::endl;
-                    ++unresolvedLogCount;
-                }
-            }
+            readCdSectors(lsn, sectors, rdram + ramOffset, static_cast<size_t>(sectors) * 2048);
         }
 
-        if (ok)
-        {
-            g_cdStreamingLbn = selected.lbn + selected.sectors;
-            setReturnS32(ctx, 1); // command accepted/success
-            return;
-        }
-
-        setReturnS32(ctx, 0);
+        g_cdStreamingLbn = lsn + sectors;
+        setReturnS32(ctx, 1);
     }
 
     void sceCdSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceCdSync");
+        const int32_t mode = static_cast<int32_t>(getRegU32(ctx, 4));
+        fprintf(stderr, "[sceCdSync] mode=%d -> 0\n", mode);
+        fflush(stderr);
         setReturnS32(ctx, 0); // 0 = completed/not busy
     }
 
@@ -370,13 +283,24 @@ namespace ps2_stubs
 
     void sceCdDiskReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceCdDiskReady");
+        const int32_t mode = static_cast<int32_t>(getRegU32(ctx, 4));
+        fprintf(stderr, "[sceCdDiskReady] mode=%d -> 2\n", mode);
+        fflush(stderr);
         setReturnS32(ctx, 2);
     }
 
     void sceCdGetDiskType(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // SCECdPS2DVD
-        setReturnS32(ctx, 0x14);
+        push_trace("ps2_stubs::sceCdGetDiskType");
+        int32_t diskType = 0x14; // SCECdPS2DVD default
+        if (IsoDisc::instance().isOpen())
+        {
+            diskType = (IsoDisc::instance().totalBytes() > 800ULL * 1024ULL * 1024ULL) ? 0x14 : 0x12;
+        }
+        fprintf(stderr, "[sceCdGetDiskType] -> 0x%02x\n", diskType);
+        fflush(stderr);
+        setReturnS32(ctx, diskType);
     }
 
     void sceCdGetReadPos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -396,6 +320,7 @@ namespace ps2_stubs
 
     void sceCdInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceCdInit");
         g_cdInitialized = true;
         g_lastCdError = 0;
         g_cdStreamTiming = {};
@@ -544,108 +469,93 @@ namespace ps2_stubs
 
     void sceCdSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t fileAddr = getRegU32(ctx, 4);
-        uint32_t pathAddr = getRegU32(ctx, 5);
+        push_trace("ps2_stubs::sceCdSearchFile");
+        const uint32_t fileAddr = getRegU32(ctx, 4);
+        const uint32_t pathAddr = getRegU32(ctx, 5);
         const std::string path = readPs2CStringBounded(rdram, pathAddr, 260);
-        const std::string normalizedPath = normalizeCdPathNoPrefix(path);
-        static uint32_t traceCount = 0;
-        const uint32_t callerRa = getRegU32(ctx, 31);
-        const bool shouldTrace = (traceCount < 128u) || ((traceCount % 512u) == 0u);
-        if (shouldTrace)
-        {
-            RUNTIME_LOG("[sceCdSearchFile] pc=0x" << std::hex << ctx->pc
-                                                  << " ra=0x" << callerRa
-                                                  << " file=0x" << fileAddr
-                                                  << " pathAddr=0x" << pathAddr
-                                                  << " path=\"" << sanitizeForLog(path) << "\""
-                                                  << std::dec << std::endl);
-        }
-        ++traceCount;
 
-        if (path.empty())
+        IsoDisc::Entry entry{};
+        bool found = IsoDisc::instance().find(path, entry, 0);
+
+        fprintf(stderr, "[sceCdSearchFile] path='%s' (fileAddr=0x%08x) -> result=%d lsn=%u size=%u\n",
+                path.c_str(), fileAddr, found ? 1 : 0, entry.lsn, entry.size);
+        fflush(stderr);
+
+        if (found)
         {
-            static uint32_t emptyPathCount = 0;
-            if (emptyPathCount < 64 || (emptyPathCount % 512u) == 0u)
+            uint8_t *fileStruct = getMemPtr(rdram, fileAddr);
+            if (fileStruct)
             {
-                std::ostringstream preview;
-                preview << std::hex;
-                for (uint32_t i = 0; i < 16; ++i)
-                {
-                    const uint8_t byte = *getConstMemPtr(rdram, pathAddr + i);
-                    preview << (i == 0 ? "" : " ") << static_cast<uint32_t>(byte);
-                }
-                std::cerr << "[sceCdSearchFile] empty path at 0x" << std::hex << pathAddr
-                          << " preview=" << preview.str()
-                          << " ra=0x" << callerRa << std::dec << std::endl;
+                std::memset(fileStruct, 0, 32);
+                std::memcpy(fileStruct + 0, &entry.lsn, 4);
+                std::memcpy(fileStruct + 4, &entry.size, 4);
+                std::strncpy(reinterpret_cast<char *>(fileStruct + 8), entry.name.c_str(), 15);
+                fileStruct[8 + 15] = '\0';
+                std::memcpy(fileStruct + 24, entry.date, 8);
             }
-            ++emptyPathCount;
-            g_lastCdError = -1;
-            setReturnS32(ctx, 0);
+            g_cdStreamingLbn = entry.lsn;
+            g_cdStreamingEndLbn = entry.lsn + (entry.size + 2047) / 2048;
+            setReturnS32(ctx, 1);
             return;
         }
 
-        if (normalizedPath.empty())
+        CdFileEntry legacyEntry{};
+        if (registerCdFile(path, legacyEntry) && writeCdSearchResult(rdram, fileAddr, path, legacyEntry))
         {
-            static uint32_t emptyNormalizedCount = 0;
-            if (emptyNormalizedCount < 64u || (emptyNormalizedCount % 512u) == 0u)
-            {
-                std::cerr << "sceCdSearchFile failed: " << sanitizeForLog(path)
-                          << " (normalized path is empty, root: " << getCdRootPath().string() << ")"
-                          << std::endl;
-            }
-            ++emptyNormalizedCount;
-            g_lastCdError = -1;
-            setReturnS32(ctx, 0);
+            g_cdStreamingLbn = legacyEntry.baseLbn;
+            g_cdStreamingEndLbn = legacyEntry.baseLbn + legacyEntry.sectors;
+            setReturnS32(ctx, 1);
             return;
         }
 
-        CdFileEntry entry;
-        bool found = registerCdFile(path, entry);
-        CdFileEntry resolvedEntry = entry;
-        std::string resolvedPath;
+        g_lastCdError = -1;
+        setReturnS32(ctx, 0);
+    }
 
-        if (!found)
+    void sceCdLayerSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        push_trace("ps2_stubs::sceCdLayerSearchFile");
+        const uint32_t fileAddr = getRegU32(ctx, 4);
+        const uint32_t pathAddr = getRegU32(ctx, 5);
+        const int32_t layer = static_cast<int32_t>(getRegU32(ctx, 6));
+        const std::string path = readPs2CStringBounded(rdram, pathAddr, 260);
+
+        IsoDisc::Entry entry{};
+        bool found = IsoDisc::instance().find(path, entry, layer);
+
+        fprintf(stderr, "[sceCdLayerSearchFile] path='%s' layer=%d (fileAddr=0x%08x) -> result=%d lsn=%u size=%u\n",
+                path.c_str(), layer, fileAddr, found ? 1 : 0, entry.lsn, entry.size);
+        fflush(stderr);
+
+        if (found)
         {
-            static std::string lastFailedPath;
-            static uint32_t samePathFailCount = 0;
-            if (path == lastFailedPath)
+            uint8_t *fileStruct = getMemPtr(rdram, fileAddr);
+            if (fileStruct)
             {
-                ++samePathFailCount;
+                std::memset(fileStruct, 0, 32);
+                std::memcpy(fileStruct + 0, &entry.lsn, 4);
+                std::memcpy(fileStruct + 4, &entry.size, 4);
+                std::strncpy(reinterpret_cast<char *>(fileStruct + 8), entry.name.c_str(), 15);
+                fileStruct[8 + 15] = '\0';
+                std::memcpy(fileStruct + 24, entry.date, 8);
             }
-            else
-            {
-                lastFailedPath = path;
-                samePathFailCount = 1;
-            }
-
-            if (samePathFailCount <= 16u || (samePathFailCount % 512u) == 0u)
-            {
-                std::cerr << "sceCdSearchFile failed: " << sanitizeForLog(path)
-                          << " (root: " << getCdRootPath().string()
-                          << ", repeat=" << samePathFailCount << ")" << std::endl;
-            }
-            setReturnS32(ctx, 0);
+            g_cdStreamingLbn = entry.lsn;
+            g_cdStreamingEndLbn = entry.lsn + (entry.size + 2047) / 2048;
+            setReturnS32(ctx, 1);
             return;
         }
 
-        if (!writeCdSearchResult(rdram, fileAddr, path, resolvedEntry))
+        CdFileEntry legacyEntry{};
+        if (registerCdFile(path, legacyEntry) && writeCdSearchResult(rdram, fileAddr, path, legacyEntry))
         {
-            g_lastCdError = -1;
-            setReturnS32(ctx, 0);
+            g_cdStreamingLbn = legacyEntry.baseLbn;
+            g_cdStreamingEndLbn = legacyEntry.baseLbn + legacyEntry.sectors;
+            setReturnS32(ctx, 1);
             return;
         }
 
-        g_cdStreamingLbn = resolvedEntry.baseLbn;
-        g_cdStreamingEndLbn = resolvedEntry.baseLbn + resolvedEntry.sectors;
-        if (shouldTrace)
-        {
-            RUNTIME_LOG("[sceCdSearchFile:ok] path=\"" << sanitizeForLog(path)
-                                                       << "\" lsn=0x" << std::hex << resolvedEntry.baseLbn
-                                                       << " size=0x" << resolvedEntry.sizeBytes
-                                                       << " sectors=0x" << resolvedEntry.sectors
-                                                       << std::dec << std::endl);
-        }
-        setReturnS32(ctx, 1);
+        g_lastCdError = -1;
+        setReturnS32(ctx, 0);
     }
 
     void sceCdSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -656,12 +566,18 @@ namespace ps2_stubs
 
     void sceCdStandby(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceCdStandby");
+        fprintf(stderr, "[sceCdStandby] -> 1\n");
+        fflush(stderr);
         setReturnS32(ctx, 1);
     }
 
     void sceCdStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, g_cdInitialized ? 6 : 0);
+        push_trace("ps2_stubs::sceCdStatus");
+        fprintf(stderr, "[sceCdStatus] -> 2\n");
+        fflush(stderr);
+        setReturnS32(ctx, 2);
     }
 
     void sceCdStInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -688,6 +604,9 @@ namespace ps2_stubs
 
     void sceCdStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceCdStop");
+        fprintf(stderr, "[sceCdStop] -> 1\n");
+        fflush(stderr);
         setReturnS32(ctx, 1);
     }
 
@@ -974,6 +893,7 @@ namespace ps2_stubs
 
     void sceCdSyncS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::sceCdSyncS");
         setReturnS32(ctx, 0);
     }
 

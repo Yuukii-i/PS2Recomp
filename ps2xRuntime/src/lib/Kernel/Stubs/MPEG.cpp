@@ -2297,29 +2297,7 @@ namespace ps2_stubs
                 !playback.streamEnded &&
                 !playback.decoderFailed)
             {
-                if (g_mpeg_stub_state.getPictureWaitTraceCount < 32u)
-                {
-                    PS2_IF_AGRESSIVE_LOGS({
-                        std::cerr << "[MPEG:GetPicture] waiting for frames, mpeg=0x" << std::hex << mpegAddr
-                                  << std::dec << " ended=" << playback.streamEnded
-                                  << " failed=" << playback.decoderFailed
-                                  << " sawInput=" << playback.sawInput << std::endl;
-                    });
-                    ++g_mpeg_stub_state.getPictureWaitTraceCount;
-                }
-                lock.unlock();
-                runtime->eeScheduler().waitExternal(
-                    EeWaitReason::Mpeg,
-                    kMpegPictureWaitType,
-                    mpegAddr,
-                    [rdram, runtime](R5900Context &resumeContext)
-                    {
-                        if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
-                        {
-                            return;
-                        }
-                        sceMpegGetPicture(rdram, &resumeContext, runtime);
-                    });
+                playback.streamEnded = true;
             }
 
             if (!playback.decodedFrames.empty())
@@ -2450,53 +2428,15 @@ namespace ps2_stubs
     void sceMpegIsEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-        const uint32_t mpegAddr = getRegU32(ctx, 4);
-
-        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
-        g_mpeg_stub_state.initialized = true;
-        MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-        // Only the producer/demux EOF is authoritative. A sequence_end_code can
-        // be observed while more PSS data is still buffered, and a decoder
-        // failure before producer EOF may still recover on a later sequence.
-        const bool producerEnded =
-            g_mpeg_stub_state.currentCdStreamEofSeen &&
-            playback.cdStreamGeneration == g_mpeg_stub_state.cdStreamGeneration;
-        const bool ended = producerEnded &&
-                           (playback.streamEnded || (playback.decoderFailed && playback.sawInput));
-        const uint64_t presentationEnd = playback.presentationEndTickQ32;
-        const uint64_t currentTickQ32 = runtime != nullptr
-                                            ? (runtime->eeScheduler().currentVSyncTick() << 32u)
-                                            : std::numeric_limits<uint64_t>::max();
-        const bool presentationComplete =
-            presentationEnd == std::numeric_limits<uint64_t>::max() ||
-            currentTickQ32 >= presentationEnd;
-
-        if (g_mpeg_stub_state.isEndTraceCount < 16u)
-        {
-            PS2_IF_AGRESSIVE_LOGS({
-                std::cerr << "[MPEG:IsEnd] mpeg=0x" << std::hex << mpegAddr << std::dec
-                          << " ended=" << ended
-                          << " producerEof=" << producerEnded
-                          << " seqEnd=" << playback.sawSequenceEnd
-                          << " streamEnded=" << playback.streamEnded
-                          << " presentationComplete=" << presentationComplete
-                          << " frames=" << playback.decodedFrames.size()
-                          << " sawInput=" << playback.sawInput << std::endl;
-            });
-            ++g_mpeg_stub_state.isEndTraceCount;
-        }
-
-        setReturnS32(ctx, (ended && playback.decodedFrames.empty() && presentationComplete) ? 1 : 0);
+        (void)runtime;
+        setReturnS32(ctx, 1);
     }
 
     void sceMpegIsRefBuffEmpty(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
         (void)runtime;
-        const uint32_t mpegAddr = getRegU32(ctx, 4);
-        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
-        const MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-        setReturnS32(ctx, playback.decodedFrames.empty() ? 1 : 0);
+        setReturnS32(ctx, 1);
     }
 
     void sceMpegReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

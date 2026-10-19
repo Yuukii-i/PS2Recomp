@@ -268,22 +268,18 @@ void EeScheduler::run()
 
         if (!m_runtime.hasFunction(context.pc))
         {
-            if (!running->invocations.empty())
-            {
-                context.pc = 0u;
-            }
-            else
-            {
-                m_runtime.reportMissingFunction(m_rdram,
-                                                &context,
-                                                context.pc,
-                                                context.pc,
-                                                PS2Runtime::GuestBranchKind::DirectJump,
-                                                "EE scheduler");
-                makeDormant(*running);
-                m_currentThreadId = 0;
-            }
-            continue;
+            fprintf(stderr, "[abort] EeScheduler: missing function at pc=0x%08x, ra=0x%08x, sp=0x%08x\n",
+                    context.pc,
+                    (uint32_t)_mm_extract_epi32(context.r[31], 0),
+                    (uint32_t)_mm_extract_epi32(context.r[29], 0));
+            fflush(stderr);
+            m_runtime.reportMissingFunction(m_rdram,
+                                            &context,
+                                            context.pc,
+                                            context.pc,
+                                            PS2Runtime::GuestBranchKind::DirectJump,
+                                            "EE scheduler");
+            std::abort();
         }
         PS2Runtime::RecompiledFunction function = m_runtime.lookupFunction(context.pc);
 

@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "System.h"
+#include "trace_logger.h"
 
 namespace ps2_stubs
 {
@@ -26,6 +27,7 @@ namespace ps2_stubs
 
     void exit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        push_trace("ps2_stubs::exit");
         if (runtime)
         {
             runtime->requestStop();

@@ -1118,6 +1118,8 @@ namespace ps2_stubs
         uint32_t file_handle = getRegU32(ctx, 4);  // $a0
         uint32_t format_addr = getRegU32(ctx, 5);  // $a1
         uint32_t va_list_addr = getRegU32(ctx, 6); // $a2
+        uint32_t a3 = getRegU32(ctx, 7);          // $a3
+        uint32_t sp = getRegU32(ctx, 29);         // $sp
         FILE *fp = get_file_ptr(file_handle);
         const std::string formatOwned = readPs2CStringBounded(rdram, runtime, format_addr, 1024);
         int ret = -1;
@@ -1126,6 +1128,32 @@ namespace ps2_stubs
         {
             std::string rendered = formatPs2StringWithVaList(rdram, runtime, formatOwned.c_str(), va_list_addr);
             ret = std::fprintf(fp, "%s", rendered.c_str());
+        }
+        else if (format_addr != 0)
+        {
+            uint32_t va0 = 0, va1 = 0;
+            (void)tryReadWordFromGuest(rdram, runtime, va_list_addr, va0);
+            (void)tryReadWordFromGuest(rdram, runtime, va_list_addr + 8, va1);
+            std::fprintf(stderr, "[vfprintf:diag] fmt=\"%s\" (0x%08x) a0=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x sp=0x%08x va0=0x%08x va1=0x%08x\n",
+                         formatOwned.c_str(), format_addr, file_handle, format_addr, va_list_addr, a3, sp, va0, va1);
+            std::fflush(stderr);
+
+            std::string rendered = formatPs2StringWithVaList(rdram, runtime, formatOwned.c_str(), va_list_addr);
+            std::fprintf(stderr, "[guest-log] %s", rendered.c_str());
+            std::fflush(stderr);
+            ret = static_cast<int>(rendered.size());
+
+            // If file_handle is a guest memory struct (e.g. snprintf temp FILE buffer on stack)
+            if (file_handle >= 0x100000u && file_handle < PS2_RAM_SIZE)
+            {
+                uint32_t p = 0;
+                if (tryReadWordFromGuest(rdram, runtime, file_handle, p) && p >= 0x100000u && p < PS2_RAM_SIZE)
+                {
+                    writeGuestBytes(rdram, runtime, p, reinterpret_cast<const uint8_t *>(rendered.c_str()), rendered.size());
+                    const uint32_t nextP = p + static_cast<uint32_t>(rendered.size());
+                    writeGuestBytes(rdram, runtime, file_handle, reinterpret_cast<const uint8_t *>(&nextP), sizeof(nextP));
+                }
+            }
         }
         else
         {

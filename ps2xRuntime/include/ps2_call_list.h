@@ -307,6 +307,7 @@
     X(sceCdReadClock)                         \
     X(sceCdReadIOPm)                          \
     X(sceCdSearchFile)                        \
+    X(sceCdLayerSearchFile)                   \
     X(sceCdSeek)                              \
     X(sceCdStInit)                            \
     X(sceCdStPause)                           \

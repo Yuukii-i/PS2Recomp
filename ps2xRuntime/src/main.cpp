@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "games_database.h"
+#include "Stubs/IsoDisc.h"
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
 #include "ps2_debug_panel.h"
 #endif
@@ -166,10 +167,35 @@ namespace
 
 int main(int argc, char *argv[])
 {
+    fprintf(stderr, "[boot] runner started\n");
+    extern const uint32_t g_ps2RecompiledFunctionTableBase;
+    extern const uint32_t g_ps2RecompiledFunctionTableEnd;
+    extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
+    extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
+    fprintf(stderr, "[boot] tableBase=0x%x tableEnd=0x%x slotCount=%u table[0]=%p table[77]=%p\n",
+        g_ps2RecompiledFunctionTableBase,
+        g_ps2RecompiledFunctionTableEnd,
+        g_ps2RecompiledFunctionTableSlotCount,
+        (void*)g_ps2RecompiledFunctionTable[0],
+        (void*)g_ps2RecompiledFunctionTable[77]);
+    fflush(stderr);
 #if defined(__ANDROID__)
     redirectStdioToLogcat();
 #endif
     setupTerminateLogger();
+
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string arg = argv[i];
+        if (arg == "--iso" && i + 1 < argc)
+        {
+            IsoDisc::instance().open(argv[++i]);
+        }
+        else if (arg.size() >= 4 && arg.substr(arg.size() - 4) == ".iso")
+        {
+            IsoDisc::instance().open(arg);
+        }
+    }
 
     try
     {

@@ -996,6 +996,46 @@ namespace ps2_syscalls
             ++logCount;
         }
 
+        // Handle SET_SREG command (0x80000001)
+        if (cid == 0x80000001u && packetAddr != 0u)
+        {
+            if (uint8_t *p = getMemPtr(rdram, packetAddr))
+            {
+                uint32_t regIndex = 0;
+                uint32_t regVal = 0;
+                std::memcpy(&regIndex, p + 0x10, 4);
+                std::memcpy(&regVal, p + 0x14, 4);
+
+                std::fprintf(stderr, "[sceSifSendCmd:SETSREG] index=%u value=0x%x\n", regIndex, regVal);
+                std::fflush(stderr);
+
+                if (regIndex < 32)
+                {
+                    if (uint8_t *sregMem = getMemPtr(rdram, 0x0076A6C0u))
+                    {
+                        std::memcpy(sregMem + regIndex * 4, &regVal, 4);
+
+                        // Emulate IOP handshake response when EE signals ready on sreg 31
+                        if (regIndex == 31)
+                        {
+                            uint32_t ack = 1;
+                            std::memcpy(sregMem + 31 * 4, &ack, 4);
+                            uint32_t sreg30 = 0;
+                            std::memcpy(&sreg30, sregMem + 30 * 4, 4);
+                            if (sreg30 == 0)
+                            {
+                                uint32_t default30 = 0x80;
+                                std::memcpy(sregMem + 30 * 4, &default30, 4);
+                                sreg30 = default30;
+                            }
+                            std::fprintf(stderr, "[sceSifSendCmd:HANDSHAKE] IOP handshake acknowledged: sreg[31]=1 sreg[30]=0x%x\n", sreg30);
+                            std::fflush(stderr);
+                        }
+                    }
+                }
+            }
+        }
+
         // Return non-zero on success.
         setReturnS32(ctx, 1);
     }

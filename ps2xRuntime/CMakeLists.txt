@@ -575,6 +575,8 @@ endif()
 # Work around WinAPI vs raylib symbol clash for CloseWindow on x64
 if(MSVC)
     target_link_options(ps2EntryRunner PRIVATE "/FORCE:MULTIPLE")
+elseif(MINGW OR (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND WIN32))
+    target_link_options(ps2EntryRunner PRIVATE "-Wl,--allow-multiple-definition")
 endif()
 
 # Vita: Work around for GCC 10's LTO plugin

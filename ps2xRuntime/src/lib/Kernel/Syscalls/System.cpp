@@ -542,8 +542,8 @@ namespace ps2_syscalls
 
         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
 
-        // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
-        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+        // Heap extends to bottom of main-thread stack (0x01FA0000) when size is -1 (0xFFFFFFFF) or 0
+        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01FA0000u;
         uint32_t heapLimit = kDefaultGuestHeapEnd;
 
         if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
@@ -568,6 +568,7 @@ namespace ps2_syscalls
                           << " size=0x" << heapSize
                           << " runtimeBase=0x" << runtime->guestHeapBase()
                           << " runtimeEnd=0x" << runtime->guestHeapEnd()
+                          << " runtimeLimit=0x" << runtime->guestHeapLimit()
                           << std::dec << std::endl;
             });
 

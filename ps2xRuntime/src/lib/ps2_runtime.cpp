@@ -10,6 +10,7 @@
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
+#include "Kernel/Stubs/IsoDisc.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
@@ -1009,6 +1010,13 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
                                       elfCrc32,
                                       elfCrc32Valid);
 
+    // Override recompiled sceCdLayerSearchFile (0x003C5770) with runtime ISO search stub
+    replaceFunction(0x003C5770u, &ps2_stubs::sceCdLayerSearchFile);
+    fprintf(stderr, "[override] 0x003C5770 (sceCdLayerSearchFile) replaced with runtime stub\n");
+    fflush(stderr);
+
+    IsoDisc::instance().open();
+
     RUNTIME_LOG("ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec);
     return true;
 }
@@ -1374,24 +1382,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (!hasFunction(targetPc))
     {
+        fprintf(stderr, "[abort] dispatchGuestBranch: missing target at targetPc=0x%08x, sourcePc=0x%08x, kind=%s, op=%s, ra=0x%08x, sp=0x%08x\n",
+                targetPc, sourcePc, describeGuestBranchKind(kind), (debugName ? debugName : "<unknown>"),
+                (uint32_t)_mm_extract_epi32(ctx->r[31], 0),
+                (uint32_t)_mm_extract_epi32(ctx->r[29], 0));
+        fflush(stderr);
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
-
-        const MissingFunctionPolicy policy = missingFunctionPolicy();
-
-        if (policy == MissingFunctionPolicy::SkipCallDebug && isCall)
-        {
-            ctx->pc = fallthroughPc;
-            return true;
-        }
-
-        if (policy == MissingFunctionPolicy::ContinueToTarget)
-        {
-            ctx->pc = targetPc;
-            // if you need the app to keep open to open debug pannel change this to false
-            return false;
-        }
-
-        return false;
+        std::abort();
     }
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
@@ -2388,8 +2385,18 @@ void PS2Runtime::run()
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
+        tick++;
+        if ((tick % 120) == 0)
+        {
+            const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
+            const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
+            const uint32_t dbgSp = m_debugSp.load(std::memory_order_relaxed);
+            const auto eeSnapshot = m_eeScheduler->snapshot();
+            fprintf(stderr, "[run:tick] tick=%llu pc=0x%08x ra=0x%08x sp=0x%08x activeThreads=%zu\n",
+                    (unsigned long long)tick, dbgPc, dbgRa, dbgSp, eeSnapshot.threads.size());
+            fflush(stderr);
+        }
         PS2_IF_AGRESSIVE_LOGS({
-            tick++;
             if ((tick % 120) == 0)
             {
                 uint64_t curDma = m_memory.dmaStartCount();

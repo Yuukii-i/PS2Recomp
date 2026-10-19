@@ -1,11 +1,16 @@
 #include "Common.h"
 #include "Dispatcher.h"
 #include "System.h"
+#include "trace_logger.h"
 
 namespace ps2_syscalls
 {
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        char traceBuf[64];
+        std::snprintf(traceBuf, sizeof(traceBuf), "syscall: 0x%02X (%d)", syscallNumber, static_cast<int32_t>(syscallNumber));
+        push_trace(traceBuf);
+
         if (dispatchSyscallOverride(syscallNumber, rdram, ctx, runtime))
         {
             return true;
