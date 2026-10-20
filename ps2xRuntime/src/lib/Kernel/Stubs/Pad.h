@@ -38,6 +38,17 @@ namespace ps2_stubs
     void scePadSetWarningLevel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void scePadStateIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
+    struct PadInputState
+    {
+        uint16_t buttons = 0xFFFFu; // active-low
+        uint8_t rx = 0x80u;
+        uint8_t ry = 0x80u;
+        uint8_t lx = 0x80u;
+        uint8_t ly = 0x80u;
+    };
+
+    PadInputState getCurrentPadInput(int port = 0, PS2Runtime *runtime = nullptr);
+
     static constexpr size_t kPadDebugPortCount = 2u;
     static constexpr size_t kPadDebugSlotCount = 1u;
     static constexpr size_t kPadDebugDataSize = 32u;

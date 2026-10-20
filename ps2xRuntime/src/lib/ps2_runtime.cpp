@@ -1188,7 +1188,10 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
     // 0x003703D4: Early exit check returning non-zero error code -> force return 0
     replaceFunction(0x003703D4u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
-        ps2xSafeLog("[override] 0x003703D4 called (ra=0x%08x) -> returning 0\n", getRegU32(ctx, 31));
+        const char *exdb = std::getenv("PS2X_TRACE_EXDB");
+        if (exdb && std::strcmp(exdb, "1") == 0) {
+            ps2xSafeLog("[override] 0x003703D4 called (ra=0x%08x) -> returning 0\n", getRegU32(ctx, 31));
+        }
         setReturnS32(ctx, 0);
         ctx->pc = getRegU32(ctx, 31);
     });
@@ -1257,6 +1260,9 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     replaceFunction(0x00435700u, wrapperSyscall4);
     replaceFunction(0x00435720u, wrapperSyscall6);
 
+    const char *traceExdbEnv = std::getenv("PS2X_TRACE_EXDB");
+    if (traceExdbEnv && std::strcmp(traceExdbEnv, "1") == 0)
+    {
     const uint32_t slot36ef00 = (0x0036EF00u - g_ps2RecompiledFunctionTableBase) >> 2;
     static RecompiledFunction s_orig36ef00 = g_ps2RecompiledFunctionTable[slot36ef00];
     replaceFunction(0x0036EF00u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
@@ -1557,6 +1563,22 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             return;
         }
         if (s_orig428c48) s_orig428c48(rdram, ctx, runtime);
+    });
+    }
+
+
+
+    const uint32_t slot4369a8 = (0x004369A8u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig4369a8 = g_ps2RecompiledFunctionTable[slot4369a8];
+    replaceFunction(0x004369A8u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        const char *env = std::getenv("PS2X_TRACE_SYNC");
+        if (env && std::strcmp(env, "1") == 0)
+        {
+            ps2xSafeLog("[sync:direct_iWakeupThread@0x4369A8] targetTid=%d ra=0x%08x\n",
+                        (int32_t)getRegU32(ctx, 4), getRegU32(ctx, 31));
+            fflush(stderr);
+        }
+        if (s_orig4369a8) s_orig4369a8(rdram, ctx, runtime);
     });
 
     static auto stub_sceSifGetSreg = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
@@ -2265,9 +2287,53 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
                                  "This breaks the atomic basic block model and is structurally unsupported by the emulator.");
     }
 
+
     const uint32_t syscallId = (encodedSyscallId != 0u)
                                    ? encodedSyscallId
                                    : getRegU32(ctx, 3); // $v1 / $3 is the EE kernel syscall number
+
+    static int s_traceSync = -1;
+    if (s_traceSync == -1)
+    {
+        const char *env = std::getenv("PS2X_TRACE_SYNC");
+        s_traceSync = (env && std::strcmp(env, "1") == 0) ? 1 : 0;
+    }
+    if (s_traceSync == 1)
+    {
+        if (syscallId == 0x20u)
+        {
+            uint32_t param = getRegU32(ctx, 4);
+            uint32_t entry = *reinterpret_cast<const uint32_t *>(rdram + ((param + 4) & 0x01FFFFFFu));
+            uint32_t stack = *reinterpret_cast<const uint32_t *>(rdram + ((param + 8) & 0x01FFFFFFu));
+            uint32_t stackSize = *reinterpret_cast<const uint32_t *>(rdram + ((param + 12) & 0x01FFFFFFu));
+            uint32_t prio = *reinterpret_cast<const uint32_t *>(rdram + ((param + 20) & 0x01FFFFFFu));
+            ps2xSafeLog("[sync:CreateThread] param=0x%08x entry=0x%08x stack=0x%08x size=0x%x prio=%u ra=0x%08x\n",
+                        param, entry, stack, stackSize, prio, getRegU32(ctx, 31));
+            fflush(stderr);
+        }
+        else if (syscallId == 0x32u)
+        {
+            static uint32_t s_sleepCount = 0;
+            if (s_sleepCount++ < 30 || (s_sleepCount % 500) == 0)
+            {
+                ps2xSafeLog("[sync:SleepThread #%u] pc=0x%08x ra=0x%08x sp=0x%08x\n",
+                            s_sleepCount, ctx->pc, getRegU32(ctx, 31), getRegU32(ctx, 29));
+                fflush(stderr);
+            }
+        }
+        else if (syscallId == 0x33u)
+        {
+            ps2xSafeLog("[sync:WakeupThread] targetTid=%d ra=0x%08x\n",
+                        (int32_t)getRegU32(ctx, 4), getRegU32(ctx, 31));
+            fflush(stderr);
+        }
+        else if (syscallId == (uint32_t)-52 || syscallId == 0xFFFFFFCCu)
+        {
+            ps2xSafeLog("[sync:iWakeupThread] targetTid=%d ra=0x%08x\n",
+                        (int32_t)getRegU32(ctx, 4), getRegU32(ctx, 31));
+            fflush(stderr);
+        }
+    }
 
     if (ps2_syscalls::dispatchNumericSyscall(syscallId, rdram, ctx, this))
     {

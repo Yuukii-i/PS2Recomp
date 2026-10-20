@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "RPC.h"
 #include "../Stubs/SIF.h"
+#include "../Stubs/Pad.h"
 #include "../Stubs/VfiArchive.h"
 #include "../../ps2_iop_transport.h"
 
@@ -63,6 +64,67 @@ namespace ps2_syscalls
         static std::unordered_map<uint32_t, RpcHleService> s_rpcHleServices;
         static uint32_t s_iopSregs[32] = {};
 
+        static uint32_t s_dbcSeq = 1u;
+        static uint32_t s_dbcPort0BufA = 0x00784D40u;
+        static uint32_t s_dbcPort0BufB = 0x00784DC0u;
+        static uint32_t s_dbcWorkAddr = 0x00757D40u;
+
+        static void dbcWritePacket(uint8_t *rdram, uint32_t addr, const ps2_stubs::PadInputState &pad, uint32_t seq)
+        {
+            if (!rdram || addr == 0 || addr >= 0x02000000u) return;
+            uint8_t *dst = getMemPtr(rdram, addr);
+            if (!dst) return;
+
+            dst[0x00] = 0x01; // status: DBC_STAT_CONNECTED
+            dst[0x01] = 0x00;
+            dst[0x02] = 0x20; // packet len: 32 bytes
+            dst[0x03] = 0x00;
+            dst[0x04] = 0x01; // valid / connected word
+
+            std::memset(dst + 0x1C, 0, 32);
+            dst[0x1C + 0x00] = 0x00; // terminal/status
+            dst[0x1C + 0x01] = 0x73; // pad type: DS2
+            dst[0x1C + 0x02] = static_cast<uint8_t>(pad.buttons & 0xFFu);
+            dst[0x1C + 0x03] = static_cast<uint8_t>((pad.buttons >> 8u) & 0xFFu);
+            dst[0x1C + 0x04] = pad.rx;
+            dst[0x1C + 0x05] = pad.ry;
+            dst[0x1C + 0x06] = pad.lx;
+            dst[0x1C + 0x07] = pad.ly;
+
+            // Pressure values: 0xFF if pressed, 0x00 if not:
+            dst[0x1C + 8]  = (pad.buttons & (1 << 5)) ? 0x00 : 0xFF; // Right
+            dst[0x1C + 9]  = (pad.buttons & (1 << 7)) ? 0x00 : 0xFF; // Left
+            dst[0x1C + 10] = (pad.buttons & (1 << 4)) ? 0x00 : 0xFF; // Up
+            dst[0x1C + 11] = (pad.buttons & (1 << 6)) ? 0x00 : 0xFF; // Down
+            dst[0x1C + 12] = (pad.buttons & (1 << 12)) ? 0x00 : 0xFF; // Triangle
+            dst[0x1C + 13] = (pad.buttons & (1 << 13)) ? 0x00 : 0xFF; // Circle
+            dst[0x1C + 14] = (pad.buttons & (1 << 14)) ? 0x00 : 0xFF; // Cross
+            dst[0x1C + 15] = (pad.buttons & (1 << 15)) ? 0x00 : 0xFF; // Square
+            dst[0x1C + 16] = (pad.buttons & (1 << 10)) ? 0x00 : 0xFF; // L1
+            dst[0x1C + 17] = (pad.buttons & (1 << 8)) ? 0x00 : 0xFF; // L2
+            dst[0x1C + 18] = (pad.buttons & (1 << 11)) ? 0x00 : 0xFF; // R1
+            dst[0x1C + 19] = (pad.buttons & (1 << 9)) ? 0x00 : 0xFF; // R2
+
+            // sequence counter at +0x7C:
+            std::memcpy(dst + 0x7C, &seq, sizeof(seq));
+        }
+
+        static void dbcUpdatePadBuffers(uint8_t *rdram, PS2Runtime *runtime)
+        {
+            if (!rdram) return;
+            ps2_stubs::PadInputState pad = ps2_stubs::getCurrentPadInput(0, runtime);
+
+            s_dbcSeq++;
+            uint32_t activeBuf = (s_dbcSeq & 1) ? s_dbcPort0BufB : s_dbcPort0BufA;
+            uint32_t olderBuf  = (s_dbcSeq & 1) ? s_dbcPort0BufA : s_dbcPort0BufB;
+
+            dbcWritePacket(rdram, olderBuf, pad, s_dbcSeq - 1);
+            dbcWritePacket(rdram, activeBuf, pad, s_dbcSeq);
+            if (s_dbcWorkAddr) {
+                dbcWritePacket(rdram, s_dbcWorkAddr, pad, s_dbcSeq);
+            }
+        }
+
         static void initRpcHleServices()
         {
             static bool s_initialized = false;
@@ -105,6 +167,27 @@ namespace ps2_syscalls
                         }
                         ps2xSafeLog( "[rpc:dbc] sceDbcSetWorkAddr workAddr=0x%08x\n", workAddr);
                         fflush(stderr);
+
+                        if (workAddr != 0) {
+                            s_dbcWorkAddr = workAddr;
+                        }
+                        dbcUpdatePadBuffers(call.rdram, call.runtime);
+                        return 0;
+                    }
+                    if (call.rpcNum == 0x80001301u) // DBC port double-buffer registration
+                    {
+                        if (call.sendBuf && call.sendSize >= 0x30)
+                        {
+                            if (const uint8_t *src = getConstMemPtr(call.rdram, call.sendBuf))
+                            {
+                                uint32_t bufA = 0, bufB = 0;
+                                std::memcpy(&bufA, src + 0x28, 4);
+                                std::memcpy(&bufB, src + 0x2C, 4);
+                                if (bufA) s_dbcPort0BufA = bufA;
+                                if (bufB) s_dbcPort0BufB = bufB;
+                            }
+                        }
+                        dbcUpdatePadBuffers(call.rdram, call.runtime);
                         return 0;
                     }
                     return 0;
@@ -221,6 +304,7 @@ namespace ps2_syscalls
                         uint32_t zeroBytes = std::min(call.recvSize, 448u);
                         rpcZeroRdram(call.rdram, call.recvBuf, zeroBytes);
                     }
+                    dbcUpdatePadBuffers(call.rdram, call.runtime);
                     return 0;
                 }
             };

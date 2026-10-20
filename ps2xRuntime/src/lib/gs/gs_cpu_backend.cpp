@@ -611,7 +611,7 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
 
         if (tex0.csm == 0u)
         {
-            const uint32_t sourceIndex = swizzleClutIndexCSM1(entry);
+            const uint32_t sourceIndex = sixteenBit ? swizzleClutIndexCSM1(entry) : entry;
             sourceX = sourceIndex & 0x0Fu;
             sourceY = sourceIndex >> 4u;
         }
@@ -817,6 +817,11 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
                       << std::dec << std::endl;
         }
     });
+
+    if (state.prim.tme && (isFourBitIndexedPsm(ctx.tex0.psm) || isEightBitIndexedPsm(ctx.tex0.psm)))
+    {
+        LoadClutUnlocked(ctx.tex0, state.texclut);
+    }
 
     switch (state.prim.type)
     {
@@ -1026,12 +1031,7 @@ uint32_t GSCpuBackend::LookupCLUT(const GSDrawState &state,
                                      ? (static_cast<uint32_t>(index) & 0x0Fu)
                                      : static_cast<uint32_t>(index);
 
-    uint32_t clutIndex = (clutBase + sourceIndex) & (sixteenBit ? 0x1FFu : 0x0FFu);
-    if (!sixteenBit && csm == 0u && isEightBitIndexedPsm(sourcePsm))
-    {
-        const uint32_t block = std::min((sourceIndex & 0xF0u) + clutBase, 240u);
-        clutIndex = block + (sourceIndex & 0x0Fu);
-    }
+    const uint32_t clutIndex = (clutBase + sourceIndex) & (sixteenBit ? 0x1FFu : 0x0FFu);
 
     switch (cpsm)
     {

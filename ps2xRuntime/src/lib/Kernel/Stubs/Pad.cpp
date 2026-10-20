@@ -33,14 +33,7 @@ namespace ps2_stubs
         constexpr uint16_t kPadBtnCross = 1u << 14;
         constexpr uint16_t kPadBtnSquare = 1u << 15;
 
-        struct PadInputState
-        {
-            uint16_t buttons = 0xFFFF; // active-low
-            uint8_t rx = kPadAnalogCenter;
-            uint8_t ry = kPadAnalogCenter;
-            uint8_t lx = kPadAnalogCenter;
-            uint8_t ly = kPadAnalogCenter;
-        };
+
 
         struct PadPortState
         {
@@ -859,5 +852,36 @@ namespace ps2_stubs
         std::lock_guard<std::mutex> lock(g_padOverrideMutex);
         g_padOverrideEnabled = false;
         g_padOverrideState = PadInputState{};
+    }
+    PadInputState getCurrentPadInput(int port, PS2Runtime *runtime)
+    {
+        PadInputState state;
+        bool useOverride = false;
+        {
+            std::lock_guard<std::mutex> lock(g_padOverrideMutex);
+            if (g_padOverrideEnabled)
+            {
+                state = g_padOverrideState;
+                useOverride = true;
+            }
+        }
+        if (!useOverride)
+        {
+            uint8_t backendData[32]{};
+            if (runtime && runtime->padBackend().readState(port, 0, backendData, sizeof(backendData)))
+            {
+                state.buttons = static_cast<uint16_t>(backendData[2] | (backendData[3] << 8));
+                state.rx = backendData[4];
+                state.ry = backendData[5];
+                state.lx = backendData[6];
+                state.ly = backendData[7];
+            }
+            else
+            {
+                applyGamepadState(state);
+                applyKeyboardState(state, true);
+            }
+        }
+        return state;
     }
 }
