@@ -29,6 +29,31 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+#include <mutex>
+#include <cstdarg>
+
+static std::mutex s_logMutex;
+
+std::mutex &ps2xLogMutex()
+{
+    return s_logMutex;
+}
+
+void ps2xSafeLog(const char *fmt, ...)
+{
+    char buf[4096];
+    va_list args;
+    va_start(args, fmt);
+    int len = std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (len > 0)
+    {
+        size_t writeLen = (len < static_cast<int>(sizeof(buf))) ? static_cast<size_t>(len) : (sizeof(buf) - 1);
+        std::lock_guard<std::mutex> lock(s_logMutex);
+        std::fwrite(buf, 1, writeLen, stderr);
+        std::fflush(stderr);
+    }
+}
 
 #ifdef _WIN32
 extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *hModule, char *lpFilename, unsigned long nSize);
@@ -451,13 +476,20 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
             width != s_lastWidth ||
             height != s_lastHeight)
         {
-            std::cout << "[frame:upload] idx=" << s_uploadDebugCount
-                      << " tick=" << currentTick
-                      << " displayFbp=" << displayFbp
-                      << " sourceFbp=" << sourceFbp
-                      << " size=" << width << "x" << height
-                      << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u)
-                      << std::endl;
+            uint32_t frameHash = 2166136261u;
+            for (size_t bi = 0; bi < s_scratch.size(); bi += 32)
+            {
+                frameHash = (frameHash ^ s_scratch[bi]) * 16777619u;
+            }
+            ps2xSafeLog("[frame:upload] idx=%u tick=%llu displayFbp=%u sourceFbp=%u size=%ux%u preferred=%u hash=0x%08x\n",
+                        s_uploadDebugCount,
+                        (unsigned long long)currentTick,
+                        displayFbp,
+                        sourceFbp,
+                        width,
+                        height,
+                        usedPreferredDisplaySource ? 1u : 0u,
+                        frameHash);
         }
         ++s_uploadDebugCount;
     });
@@ -543,7 +575,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                 ExportImage(frameImg, framePath.c_str());
 
                 const auto &regs = rt->memory().gs();
-                std::fprintf(stderr, "[frame-dump] tick=%llu width=%u height=%u non_black=%u DISPFB1=0x%016llx DISPLAY1=0x%016llx DISPFB2=0x%016llx DISPLAY2=0x%016llx\n",
+                ps2xSafeLog( "[frame-dump] tick=%llu width=%u height=%u non_black=%u DISPFB1=0x%016llx DISPLAY1=0x%016llx DISPFB2=0x%016llx DISPLAY2=0x%016llx\n",
                              static_cast<unsigned long long>(dumpTick),
                              dumpW,
                              dumpH,
@@ -600,7 +632,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                 vramImg.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
                 ExportImage(vramImg, vramPath.c_str());
 
-                std::fprintf(stderr, "[vram-dump] tick=%llu displayFbp=%u baseBlock=%u non_black=%u path=%s\n",
+                ps2xSafeLog( "[vram-dump] tick=%llu displayFbp=%u baseBlock=%u non_black=%u path=%s\n",
                              static_cast<unsigned long long>(dumpTick),
                              displayFbp,
                              baseBlock,
@@ -1154,30 +1186,69 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     // 1. Generic config.toml stub registration
     registerConfigStubs(*this, "config.toml");
 
-    // 2. Behavior bypass runtime overrides (moved out of recomp_source):
     // 0x003703D4: Early exit check returning non-zero error code -> force return 0
     replaceFunction(0x003703D4u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
-        fprintf(stderr, "[override] 0x003703D4 called (ra=0x%08x) -> returning 0\n", getRegU32(ctx, 31));
-        fflush(stderr);
+        ps2xSafeLog("[override] 0x003703D4 called (ra=0x%08x) -> returning 0\n", getRegU32(ctx, 31));
         setReturnS32(ctx, 0);
         ctx->pc = getRegU32(ctx, 31);
     });
 
+    // Logging for sub_0015993C:
+    if (0x0015993Cu >= g_ps2RecompiledFunctionTableBase && 0x0015993Cu < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t sub15993cSlot = (0x0015993Cu - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_origSub15993c = g_ps2RecompiledFunctionTable[sub15993cSlot];
+        replaceFunction(0x0015993Cu, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            static bool s_firstLogged = false;
+            if (!s_firstLogged)
+            {
+                s_firstLogged = true;
+                const uint8_t val69981c = *reinterpret_cast<const uint8_t *>(rdram + 0x0069981Cu);
+                const uint32_t val649714 = *reinterpret_cast<const uint32_t *>(rdram + 0x00649714u);
+                ps2xSafeLog( "[sub_0015993C:first_call] *(u8*)0x0069981C=0x%02x, *(u32*)0x00649714=0x%08x\n",
+                        val69981c, val649714);
+                fflush(stderr);
+            }
+            if (s_origSub15993c)
+            {
+                s_origSub15993c(rdram, ctx, runtime);
+            }
+        });
+    }
+
     // Syscall wrappers called via jump (J) instructions not emitted into recompiled table:
     static auto wrapperSyscall2 = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
-        fprintf(stderr, "[syscall-wrapper] Dispatching syscall 2 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
+        ps2xSafeLog( "[syscall-wrapper] Dispatching syscall 2 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
         fflush(stderr);
         ps2_syscalls::dispatchNumericSyscall(2, rdram, ctx, runtime);
         ctx->pc = getRegU32(ctx, 31);
     };
     static auto wrapperSyscall4 = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
-        fprintf(stderr, "[syscall-wrapper] Dispatching syscall 4 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
+        uint32_t sp = getRegU32(ctx, 29);
+        uint32_t ra = getRegU32(ctx, 31);
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t v0 = getRegU32(ctx, 2);
+        ps2xSafeLog("[syscall-wrapper] Dispatching syscall 4 (ExitThread) at pc=0x%08x ra=0x%08x sp=0x%08x a0=0x%08x a1=0x%08x v0=0x%08x\n",
+                    ctx->pc, ra, sp, a0, a1, v0);
+        if (sp >= 0x100000 && sp < 0x01fffe00) {
+            uint32_t dumpEnd = std::min(sp + 0x2000, 0x01fffe00u);
+            for (uint32_t off = sp; off < dumpEnd; off += 16) {
+                uint32_t w0 = *reinterpret_cast<const uint32_t *>(rdram + off);
+                uint32_t w1 = *reinterpret_cast<const uint32_t *>(rdram + off + 4);
+                uint32_t w2 = *reinterpret_cast<const uint32_t *>(rdram + off + 8);
+                uint32_t w3 = *reinterpret_cast<const uint32_t *>(rdram + off + 12);
+                if (w0 != 0 || w1 != 0 || w2 != 0 || w3 != 0) {
+                    ps2xSafeLog("  [stack 0x%08x] 0x%08x 0x%08x 0x%08x 0x%08x\n", off, w0, w1, w2, w3);
+                }
+            }
+        }
         fflush(stderr);
         ps2_syscalls::dispatchNumericSyscall(4, rdram, ctx, runtime);
         ctx->pc = getRegU32(ctx, 31);
     };
     static auto wrapperSyscall6 = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
-        fprintf(stderr, "[syscall-wrapper] Dispatching syscall 6 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
+        ps2xSafeLog( "[syscall-wrapper] Dispatching syscall 6 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
         fflush(stderr);
         ps2_syscalls::dispatchNumericSyscall(6, rdram, ctx, runtime);
         ctx->pc = getRegU32(ctx, 31);
@@ -1185,6 +1256,308 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     replaceFunction(0x004356E0u, wrapperSyscall2);
     replaceFunction(0x00435700u, wrapperSyscall4);
     replaceFunction(0x00435720u, wrapperSyscall6);
+
+    const uint32_t slot36ef00 = (0x0036EF00u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig36ef00 = g_ps2RecompiledFunctionTable[slot36ef00];
+    replaceFunction(0x0036EF00u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t size = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        if (s_orig36ef00) s_orig36ef00(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        ps2xSafeLog("[MemoryManager:allocate_dlmalloc] size=0x%x (%u) ra=0x%08x -> ret=0x%08x\n", size, size, ra, ret);
+        fflush(stderr);
+    });
+
+    const uint32_t slot36edac = (0x0036EDACu - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig36edac = g_ps2RecompiledFunctionTable[slot36edac];
+    replaceFunction(0x0036EDACu, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t ra = getRegU32(ctx, 31);
+        if (s_orig36edac) s_orig36edac(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        ps2xSafeLog("[func_36EDAC] a0=0x%x a1=0x%x a2=0x%x ra=0x%08x -> ret=0x%08x\n", a0, a1, a2, ra, ret);
+        fflush(stderr);
+    });
+
+    const uint32_t slot36ed64 = (0x0036ED64u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig36ed64 = g_ps2RecompiledFunctionTable[slot36ed64];
+    replaceFunction(0x0036ED64u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        if (s_orig36ed64) s_orig36ed64(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        ps2xSafeLog("[func_36ED64] a0=0x%x ra=0x%08x -> ret=0x%08x\n", a0, ra, ret);
+        fflush(stderr);
+    });
+
+    const uint32_t slot36e368 = (0x0036E368u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig36e368 = g_ps2RecompiledFunctionTable[slot36e368];
+    replaceFunction(0x0036E368u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        if (s_orig36e368) s_orig36e368(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        ps2xSafeLog("[func_36E368] a0=0x%x ra=0x%08x -> ret=0x%08x\n", a0, ra, ret);
+        fflush(stderr);
+    });
+
+    const uint32_t slot36ee4c = (0x0036EE4Cu - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig36ee4c = g_ps2RecompiledFunctionTable[slot36ee4c];
+    replaceFunction(0x0036EE4Cu, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        if (s_orig36ee4c) s_orig36ee4c(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        ps2xSafeLog("[func_36EE4C] a0=0x%x ra=0x%08x -> ret=0x%08x\n", a0, ra, ret);
+        fflush(stderr);
+    });
+
+    const uint32_t slot36e178 = (0x0036E178u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig36e178 = g_ps2RecompiledFunctionTable[slot36e178];
+    replaceFunction(0x0036E178u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t ra = getRegU32(ctx, 31);
+        if (s_orig36e178) s_orig36e178(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        ps2xSafeLog("[func_36E178] a0=0x%x a1=0x%x a2=0x%x ra=0x%08x -> ret=0x%08x\n", a0, a1, a2, ra, ret);
+        fflush(stderr);
+    });
+
+    const uint32_t slot1014a8 = (0x001014A8u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig1014a8 = g_ps2RecompiledFunctionTable[slot1014a8];
+    replaceFunction(0x001014A8u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t incr = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        if (s_orig1014a8) s_orig1014a8(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        ps2xSafeLog("[dlmalloc:MORECORE] incr=0x%x (%d) ra=0x%08x -> ret=0x%08x\n", incr, (int32_t)incr, ra, ret);
+        fflush(stderr);
+    });
+
+    const uint32_t slot41b800 = (0x0041B800u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig41b800 = g_ps2RecompiledFunctionTable[slot41b800];
+    replaceFunction(0x0041B800u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t size = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        if (s_orig41b800) s_orig41b800(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        if (ret == 0) {
+            ps2xSafeLog("[operator_new:FAILED] size=0x%x (%u) ra=0x%08x -> ret=0x%08x\n", size, size, ra, ret);
+            fflush(stderr);
+        }
+    });
+
+    const uint32_t slot41b6a8 = (0x0041B6A8u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig41b6a8 = g_ps2RecompiledFunctionTable[slot41b6a8];
+    replaceFunction(0x0041B6A8u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t ra = getRegU32(ctx, 31);
+        uint32_t sp = getRegU32(ctx, 29);
+        ps2xSafeLog("[cxa_throw:ENTER] obj=0x%08x typeinfo=0x%08x dtor=0x%08x ra=0x%08x sp=0x%08x\n", a0, a1, a2, ra, sp);
+        fflush(stderr);
+        if (s_orig41b6a8) s_orig41b6a8(rdram, ctx, runtime);
+    });
+
+    const uint32_t slot4159f8 = (0x004159F8u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig4159f8 = g_ps2RecompiledFunctionTable[slot4159f8];
+    replaceFunction(0x004159F8u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t strAddr = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        uint32_t sp = getRegU32(ctx, 29);
+        const char *msg = strAddr ? reinterpret_cast<const char *>(rdram + (strAddr & 0x01FFFFFFu)) : "<null>";
+        ps2xSafeLog("[throw_exception:ENTER] msg=\"%s\" (strAddr=0x%08x) ra=0x%08x sp=0x%08x\n", msg, strAddr, ra, sp);
+        fflush(stderr);
+        if (s_orig4159f8) s_orig4159f8(rdram, ctx, runtime);
+    });
+
+    const uint32_t slot428b28 = (0x00428B28u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig428b28 = g_ps2RecompiledFunctionTable[slot428b28];
+    replaceFunction(0x00428B28u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t ra = getRegU32(ctx, 31);
+        uint32_t sp = getRegU32(ctx, 29);
+        ps2xSafeLog("[std::terminate:ENTER] ra=0x%08x sp=0x%08x\n", ra, sp);
+        fflush(stderr);
+        if (s_orig428b28) s_orig428b28(rdram, ctx, runtime);
+    });
+
+    const uint32_t slot1f28c4 = (0x001F28C4u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig1f28c4 = g_ps2RecompiledFunctionTable[slot1f28c4];
+    replaceFunction(0x001F28C4u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4); // vector<string>*
+        uint32_t a1 = getRegU32(ctx, 5); // string*
+        uint32_t a2 = getRegU32(ctx, 6); // delimiter char
+        uint32_t ra = getRegU32(ctx, 31);
+        uint32_t sp = getRegU32(ctx, 29);
+        const char *strData = "<null>";
+        if (a1 && (a1 & 0x01FFFFFFu) < 0x02000000u - 4) {
+            uint32_t charPtr = *reinterpret_cast<const uint32_t *>(rdram + (a1 & 0x01FFFFFFu));
+            if (charPtr && (charPtr & 0x01FFFFFFu) < 0x02000000u) {
+                strData = reinterpret_cast<const char *>(rdram + (charPtr & 0x01FFFFFFu));
+            }
+        }
+        ps2xSafeLog("[func_1F28C4:ENTER] vec=0x%08x strPtr=0x%08x (\"%s\") delim='%c'(0x%x) ra=0x%08x sp=0x%08x\n",
+                    a0, a1, strData, (char)a2, a2, ra, sp);
+        fflush(stderr);
+        if (s_orig1f28c4) s_orig1f28c4(rdram, ctx, runtime);
+        uint32_t v_begin = *reinterpret_cast<const uint32_t *>(rdram + (a0 & 0x01FFFFFFu));
+        uint32_t v_end = *reinterpret_cast<const uint32_t *>(rdram + ((a0 + 4) & 0x01FFFFFFu));
+        uint32_t v_cap = *reinterpret_cast<const uint32_t *>(rdram + ((a0 + 8) & 0x01FFFFFFu));
+        uint32_t count = (v_end >= v_begin) ? (v_end - v_begin) / 4 : 0;
+        ps2xSafeLog("[func_1F28C4:EXIT] vector: begin=0x%08x end=0x%08x cap=0x%08x count=%u\n",
+                    v_begin, v_end, v_cap, count);
+        fflush(stderr);
+    });
+
+    const uint32_t slot360f00 = (0x00360F00u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig360f00 = g_ps2RecompiledFunctionTable[slot360f00];
+    replaceFunction(0x00360F00u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t ra = getRegU32(ctx, 31);
+        const char *s0 = (a0 && (a0 & 0x01FFFFFFu) < 0x02000000u) ? reinterpret_cast<const char *>(rdram + (a0 & 0x01FFFFFFu)) : "<null>";
+        const char *s1 = (a1 && (a1 & 0x01FFFFFFu) < 0x02000000u) ? reinterpret_cast<const char *>(rdram + (a1 & 0x01FFFFFFu)) : "<null>";
+        ps2xSafeLog("[sub_00360F00:ENTER] a0=0x%08x(\"%s\") a1=0x%08x(\"%s\") ra=0x%08x\n", a0, s0, a1, s1, ra);
+        fflush(stderr);
+        if (s_orig360f00) s_orig360f00(rdram, ctx, runtime);
+        ps2xSafeLog("[sub_00360F00:EXIT] v0=0x%08x\n", getRegU32(ctx, 2));
+        fflush(stderr);
+    });
+
+    const uint32_t slot35ab88 = (0x0035AB88u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig35ab88 = g_ps2RecompiledFunctionTable[slot35ab88];
+    replaceFunction(0x0035AB88u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t ra = getRegU32(ctx, 31);
+        const char *s1 = (a1 && (a1 & 0x01FFFFFFu) < 0x02000000u) ? reinterpret_cast<const char *>(rdram + (a1 & 0x01FFFFFFu)) : "<null>";
+        if (s_orig35ab88) s_orig35ab88(rdram, ctx, runtime);
+        if (a0 && (a0 & 0x01FFFFFFu) < 0x02000000u - 32) {
+            const uint8_t *k = rdram + (a0 & 0x01FFFFFFu);
+            ps2xSafeLog("[func_35AB88] str=\"%s\" (0x%08x) -> key=[%02x %02x %02x %02x %02x %02x %02x %02x ...] (ra=0x%08x)\n",
+                        s1, a1, k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], ra);
+            fflush(stderr);
+        }
+    });
+
+    const uint32_t slot1bb508 = (0x001BB508u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig1bb508 = g_ps2RecompiledFunctionTable[slot1bb508];
+    replaceFunction(0x001BB508u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4); // map
+        uint32_t a1 = getRegU32(ctx, 5); // key
+        uint32_t ra = getRegU32(ctx, 31);
+        uint8_t k[32] = {};
+        if (a1 && (a1 & 0x01FFFFFFu) < 0x02000000u - 32) {
+            std::memcpy(k, rdram + (a1 & 0x01FFFFFFu), 32);
+        }
+        uint32_t inner = 0;
+        if (a0 && (a0 & 0x01FFFFFFu) < 0x02000000u - 4) {
+            std::memcpy(&inner, rdram + (a0 & 0x01FFFFFFu), 4);
+        }
+        if (s_orig1bb508) s_orig1bb508(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        ps2xSafeLog("[func_1BB508] map=0x%08x (inner=0x%08x) key=[%02x %02x %02x %02x %02x %02x %02x %02x ...] (str=\"%s\") ra=0x%08x -> ret=0x%08x\n",
+                    a0, inner, k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], (char*)k, ra, ret);
+        uint32_t bucketArray = 0;
+        if (inner && (inner & 0x01FFFFFFu) < 0x02000000u - 20) {
+            std::memcpy(&bucketArray, rdram + ((inner + 16) & 0x01FFFFFFu), 4);
+        }
+        if (bucketArray && (bucketArray & 0x01FFFFFFu) < 0x02000000u - 512) {
+            int totalNodes = 0;
+            for (int b = 0; b < 128; ++b) {
+                uint32_t node = 0;
+                std::memcpy(&node, rdram + ((bucketArray + b * 4) & 0x01FFFFFFu), 4);
+                while (node && (node & 0x01FFFFFFu) < 0x02000000u - 40) {
+                    totalNodes++;
+                    char nodeKey[33] = {};
+                    std::memcpy(nodeKey, rdram + (node & 0x01FFFFFFu), 32);
+                    uint32_t valPtr = 0, nextNode = 0;
+                    std::memcpy(&valPtr, rdram + ((node + 0x20) & 0x01FFFFFFu), 4);
+                    std::memcpy(&nextNode, rdram + ((node + 0x24) & 0x01FFFFFFu), 4);
+                    if (std::strcmp(nodeKey, "p_3") == 0 || b < 3) {
+                        ps2xSafeLog("  [bucket %d] node=0x%08x key=\"%s\" val=0x%08x next=0x%08x\n",
+                                    b, node, nodeKey, valPtr, nextNode);
+                    }
+                    node = nextNode;
+                }
+            }
+            ps2xSafeLog("[func_1BB508] total nodes in real map: %d (bucketArray=0x%08x)\n", totalNodes, bucketArray);
+        }
+        fflush(stderr);
+    });
+
+    const uint32_t slot2bb03c = (0x002BB03Cu - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig2bb03c = g_ps2RecompiledFunctionTable[slot2bb03c];
+    replaceFunction(0x002BB03Cu, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t buf = getRegU32(ctx, 4);
+        uint32_t sz = getRegU32(ctx, 5);
+        uint32_t ra = getRegU32(ctx, 31);
+        char preview[65] = {};
+        if (buf && (buf & 0x01FFFFFFu) < 0x02000000u - 64) {
+            for (int i = 0; i < 64; ++i) {
+                uint8_t b = rdram[(buf & 0x01FFFFFFu) + i];
+                preview[i] = (b >= 32 && b < 127) ? (char)b : '.';
+            }
+        }
+        ps2xSafeLog("[sub_002BB03C:ENTER] buf=0x%08x size=%u ra=0x%08x preview=\"%.64s\"\n", buf, sz, ra, preview);
+        fflush(stderr);
+        if (s_orig2bb03c) s_orig2bb03c(rdram, ctx, runtime);
+    });
+
+    const uint32_t slot2ba584 = (0x002BA584u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig2ba584 = g_ps2RecompiledFunctionTable[slot2ba584];
+    replaceFunction(0x002BA584u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        uint32_t bufBefore = *reinterpret_cast<const uint32_t *>(rdram + (0x007406A8u & 0x01FFFFFFu));
+        uint32_t szBefore = *reinterpret_cast<const uint32_t *>(rdram + (0x007406B0u & 0x01FFFFFFu));
+        ps2xSafeLog("[sub_002BA584:ENTER] a0=0x%08x ra=0x%08x (buf=0x%08x sz=%u)\n", a0, ra, bufBefore, szBefore);
+        fflush(stderr);
+        if (s_orig2ba584) s_orig2ba584(rdram, ctx, runtime);
+        uint32_t buf = *reinterpret_cast<const uint32_t *>(rdram + (0x007406A8u & 0x01FFFFFFu));
+        uint32_t dataPtr = *reinterpret_cast<const uint32_t *>(rdram + (0x007406ACu & 0x01FFFFFFu));
+        uint32_t linesStart = *reinterpret_cast<const uint32_t *>(rdram + (0x007406B4u & 0x01FFFFFFu));
+        uint32_t linesEnd = *reinterpret_cast<const uint32_t *>(rdram + (0x007406B8u & 0x01FFFFFFu));
+        uint32_t numFields = *reinterpret_cast<const uint32_t *>(rdram + (0x007406C4u & 0x01FFFFFFu));
+        uint32_t numRecords = *reinterpret_cast<const uint32_t *>(rdram + (0x007406C8u & 0x01FFFFFFu));
+        uint32_t recordSize = *reinterpret_cast<const uint32_t *>(rdram + (0x007406CCu & 0x01FFFFFFu));
+        uint32_t nLines = (linesEnd >= linesStart) ? (linesEnd - linesStart) / 4 : 0;
+        ps2xSafeLog("[sub_002BA584:EXIT] buf=0x%08x dataPtr=0x%08x lines=%u fields=%u records=%u recSize=%u\n",
+                    buf, dataPtr, nLines, numFields, numRecords, recordSize);
+        fflush(stderr);
+    });
+
+    const uint32_t slot2bb0d0 = (0x002BB0D0u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig2bb0d0 = g_ps2RecompiledFunctionTable[slot2bb0d0];
+    replaceFunction(0x002BB0D0u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t ra = getRegU32(ctx, 31);
+        uint32_t curVal = *reinterpret_cast<const uint32_t *>(rdram + (0x007406C8u & 0x01FFFFFFu));
+        if (s_orig2bb0d0) s_orig2bb0d0(rdram, ctx, runtime);
+        uint32_t ret = getRegU32(ctx, 2);
+        ps2xSafeLog("[sub_002BB0D0] ra=0x%08x [0x7406C8]=%u -> v0=%u\n", ra, curVal, ret);
+        fflush(stderr);
+    });
+
+    const uint32_t slot428c48 = (0x00428C48u - g_ps2RecompiledFunctionTableBase) >> 2;
+    static RecompiledFunction s_orig428c48 = g_ps2RecompiledFunctionTable[slot428c48];
+    replaceFunction(0x00428C48u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        if (ra == 0x002BA6F8u || ra == 0x002BA6ACu || ra == 0x002BAA98u || ra == 0x002BAB48u) {
+            const char *str = (a0 && (a0 & 0x01FFFFFFu) < 0x02000000u) ? reinterpret_cast<const char *>(rdram + (a0 & 0x01FFFFFFu)) : "<null>";
+            if (s_orig428c48) s_orig428c48(rdram, ctx, runtime);
+            uint32_t ret = getRegU32(ctx, 2);
+            ps2xSafeLog("[atoi@0x%08x] str=\"%s\" (0x%08x) -> ret=%u\n", ra, str, a0, ret);
+            fflush(stderr);
+            return;
+        }
+        if (s_orig428c48) s_orig428c48(rdram, ctx, runtime);
+    });
 
     static auto stub_sceSifGetSreg = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
         const uint32_t reg = getRegU32(ctx, 4);
@@ -1198,14 +1571,14 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         }
         if (reg == 30 || reg == 31)
         {
-            fprintf(stderr, "[sreg] EE queried sreg[%u] -> 0x%x (ra=0x%08x)\n", reg, val, getRegU32(ctx, 31));
+            ps2xSafeLog( "[sreg] EE queried sreg[%u] -> 0x%x (ra=0x%08x)\n", reg, val, getRegU32(ctx, 31));
             fflush(stderr);
         }
         setReturnU32(ctx, val);
         ctx->pc = getRegU32(ctx, 31);
     };
     replaceFunction(0x004388F8u, stub_sceSifGetSreg);
-    fprintf(stderr, "[override] 0x004388F8 (sceSifGetSreg) registered with runtime stub\n");
+    ps2xSafeLog( "[override] 0x004388F8 (sceSifGetSreg) registered with runtime stub\n");
     fflush(stderr);
 
     IsoDisc::instance().open();
@@ -1344,10 +1717,18 @@ namespace
         if (it != s_boundConfigStubs.end())
         {
             it->second.handler(rdram, ctx, runtime);
+            if (it->second.name == "vfprintf" || it->second.name == "_vfprintf_r" ||
+                it->second.name == "sprintf" || it->second.name == "_sprintf_r" ||
+                it->second.name == "printf" || it->second.name == "_printf_r")
+            {
+                std::lock_guard<std::mutex> lock(s_logMutex);
+                std::fputc('\n', stderr);
+                std::fflush(stderr);
+            }
         }
         else
         {
-            fprintf(stderr, "[stub] genericConfigStubThunk: unbound stub at pc=0x%08x\n", pc);
+            ps2xSafeLog( "[stub] genericConfigStubThunk: unbound stub at pc=0x%08x\n", pc);
             fflush(stderr);
         }
         if (ctx->pc == pc)
@@ -1364,7 +1745,7 @@ namespace
         const uint32_t ra = getRegU32(ctx, 31);
         auto it = s_unimplementedConfigStubs.find(pc);
         const char *name = (it != s_unimplementedConfigStubs.end()) ? it->second.c_str() : "unknown";
-        fprintf(stderr, "\n[FATAL] Called unimplemented config stub '%s' at 0x%08x (ra=0x%08x)!\n", name, pc, ra);
+        ps2xSafeLog( "\n[FATAL] Called unimplemented config stub '%s' at 0x%08x (ra=0x%08x)!\n", name, pc, ra);
         fflush(stderr);
         std::abort();
     }
@@ -1405,7 +1786,7 @@ static void registerConfigStubs(PS2Runtime &runtime, const std::string &configPa
 
     if (!file.is_open())
     {
-        fprintf(stderr, "\n[config-stubs] FATAL: Could not open %s in any searched location!\n", configPath.c_str());
+        ps2xSafeLog( "\n[config-stubs] FATAL: Could not open %s in any searched location!\n", configPath.c_str());
         fflush(stderr);
         std::abort();
     }
@@ -1472,12 +1853,12 @@ static void registerConfigStubs(PS2Runtime &runtime, const std::string &configPa
 
     if (matchedCount == 0)
     {
-        fprintf(stderr, "\n[config-stubs] FATAL: 0 stubs matched from %s!\n", resolvedPath.c_str());
+        ps2xSafeLog( "\n[config-stubs] FATAL: 0 stubs matched from %s!\n", resolvedPath.c_str());
         fflush(stderr);
         std::abort();
     }
 
-    fprintf(stderr, "[config-stubs] Registered %zu stubs from %s into function table (%zu stubs unmatched in runtime)\n",
+    ps2xSafeLog( "[config-stubs] Registered %zu stubs from %s into function table (%zu stubs unmatched in runtime)\n",
             matchedCount, resolvedPath.c_str(), unmatchedCount);
     fflush(stderr);
 }
@@ -1733,7 +2114,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         if (!s_reported120kBranch)
         {
             s_reported120kBranch = true;
-            fprintf(stderr, "[region-0x120000:branch] First branch into 0x120000..0x13F800 at targetPc=0x%08x from sourcePc=0x%08x (total hits: %u)\n",
+            ps2xSafeLog( "[region-0x120000:branch] First branch into 0x120000..0x13F800 at targetPc=0x%08x from sourcePc=0x%08x (total hits: %u)\n",
                     targetPc, sourcePc, s_range120kBranchHitCount);
             fflush(stderr);
         }
@@ -1745,7 +2126,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             if (!s_reportedBranchPostRead)
             {
                 s_reportedBranchPostRead = true;
-                fprintf(stderr, "[region-0x120000:post-read-branch] First branch into 0x120000..0x13F800 post-sceCdRead at targetPc=0x%08x from sourcePc=0x%08x (count=%u)\n",
+                ps2xSafeLog( "[region-0x120000:post-read-branch] First branch into 0x120000..0x13F800 post-sceCdRead at targetPc=0x%08x from sourcePc=0x%08x (count=%u)\n",
                         targetPc, sourcePc, s_branchPostReadCount);
                 fflush(stderr);
             }
@@ -1762,6 +2143,14 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (!isCall)
     {
+        if ((kind == GuestBranchKind::DirectJump || kind == GuestBranchKind::IndirectJump) && hasFunction(targetPc))
+        {
+            RecompiledFunction targetFn = lookupFunction(targetPc);
+            ctx->pc = targetPc;
+            targetFn(rdram, ctx, this);
+            return false;
+        }
+
         if (!hasFunction(targetPc))
         {
             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
@@ -1773,7 +2162,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (!hasFunction(targetPc))
     {
-        fprintf(stderr, "[abort] dispatchGuestBranch: missing target at targetPc=0x%08x, sourcePc=0x%08x, kind=%s, op=%s, ra=0x%08x, sp=0x%08x\n",
+        ps2xSafeLog( "[abort] dispatchGuestBranch: missing target at targetPc=0x%08x, sourcePc=0x%08x, kind=%s, op=%s, ra=0x%08x, sp=0x%08x\n",
                 targetPc, sourcePc, describeGuestBranchKind(kind), (debugName ? debugName : "<unknown>"),
                 (uint32_t)_mm_extract_epi32(ctx->r[31], 0),
                 (uint32_t)_mm_extract_epi32(ctx->r[29], 0));
@@ -1786,14 +2175,37 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     const uint32_t entryPc = ctx->pc;
     targetFn(rdram, ctx, this);
 
-    if (isStopRequested() || ctx->pc == 0u)
-    {
-        return false;
-    }
-
     if (ctx->pc == entryPc)
     {
         ctx->pc = fallthroughPc;
+    }
+
+    // If the target function fell through or tail-jumped to another function,
+    // continue dispatching chained functions until it returns to fallthroughPc.
+    uint32_t dispatchChainSteps = 0;
+    while (ctx->pc != fallthroughPc && !isStopRequested() && ctx->pc != 0u && hasFunction(ctx->pc))
+    {
+        if (++dispatchChainSteps > 1000)
+        {
+            // Safety bound against runaway dispatch chains
+            break;
+        }
+        if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+        {
+            return false;
+        }
+        const uint32_t nextPc = ctx->pc;
+        RecompiledFunction nextFn = lookupFunction(nextPc);
+        nextFn(rdram, ctx, this);
+        if (ctx->pc == nextPc)
+        {
+            break;
+        }
+    }
+
+    if (isStopRequested() || ctx->pc == 0u)
+    {
+        return false;
     }
 
     return ctx->pc == fallthroughPc;
@@ -2406,8 +2818,9 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
 
     m_asyncCallbackStackTop = base;
     const uint32_t stackPointer = top - 0x10u;
-    std::fprintf(stderr, "[reserveAsyncCallbackStack] Reserved async stack [0x%08x..0x%08x], sp=0x%08x (floor=0x%08x)\n",
-                 base, top, stackPointer, m_asyncCallbackStackFloor);
+    const uint32_t poolRemaining = (base >= m_asyncCallbackStackFloor) ? (base - m_asyncCallbackStackFloor) : 0u;
+    ps2xSafeLog( "[reserveAsyncCallbackStack] Reserved async stack [0x%08x..0x%08x], sp=0x%08x (floor=0x%08x, poolRemaining=%u bytes)\n",
+                 base, top, stackPointer, m_asyncCallbackStackFloor, poolRemaining);
     std::fflush(stderr);
     return stackPointer;
 }
@@ -2784,51 +3197,169 @@ void PS2Runtime::run()
         }
         gameThreadFinished.store(true, std::memory_order_release); });
 
+    extern void dumpEeDiagnostics(const EeScheduler *scheduler, uint32_t stuckPc);
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
         tick++;
+
+        if ((tick % 60) == 0)
+        {
+            extern std::string ps2xGetIntcSummary();
+            ps2xSafeLog("[run:sec] tick=%llu dma=%llu gif=%llu vif=%llu intc:[%s]\n",
+                        (unsigned long long)tick,
+                        (unsigned long long)m_memory.dmaStartCount(),
+                        (unsigned long long)m_memory.gifCopyCount(),
+                        (unsigned long long)m_memory.vifWriteCount(),
+                        ps2xGetIntcSummary().c_str());
+        }
+
+        if (tick == 300 || tick == 900 || tick == 1500)
+        {
+            extern void dumpEeDiagnostics(const EeScheduler *scheduler, uint32_t stuckPc);
+            const uint32_t curPc = m_debugPc.load(std::memory_order_relaxed);
+            dumpEeDiagnostics(m_eeScheduler.get(), curPc);
+        }
         if ((tick % 120) == 0)
         {
             const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
             const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
             const uint32_t dbgSp = m_debugSp.load(std::memory_order_relaxed);
+            const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
+            const uint64_t curDma = m_memory.dmaStartCount();
+            const uint64_t curGif = m_memory.gifCopyCount();
+            const uint64_t curGs = m_memory.gsWriteCount();
+            const uint64_t curVif = m_memory.vifWriteCount();
             const auto eeSnapshot = m_eeScheduler->snapshot();
-            fprintf(stderr, "[run:tick] tick=%llu pc=0x%08x ra=0x%08x sp=0x%08x activeThreads=%zu\n",
-                    (unsigned long long)tick, dbgPc, dbgRa, dbgSp, eeSnapshot.threads.size());
-            fflush(stderr);
-        }
-        PS2_IF_AGRESSIVE_LOGS({
-            if ((tick % 120) == 0)
+            ps2xSafeLog("[run:tick] tick=%llu pc=0x%08x ra=0x%08x sp=0x%08x gp=0x%08x activeThreads=%zu dma=%llu gif=%llu gsw=%llu vif=%llu\n",
+                        (unsigned long long)tick, dbgPc, dbgRa, dbgSp, dbgGp, eeSnapshot.threads.size(),
+                        (unsigned long long)curDma, (unsigned long long)curGif, (unsigned long long)curGs, (unsigned long long)curVif);
+
+            static std::vector<uint32_t> s_watchAddrs;
+            static bool s_watchParsed = false;
+            if (!s_watchParsed)
             {
-                uint64_t curDma = m_memory.dmaStartCount();
-                uint64_t curGif = m_memory.gifCopyCount();
-                uint64_t curGs = m_memory.gsWriteCount();
-                uint64_t curVif = m_memory.vifWriteCount();
-                const GSRegisters &gs = m_memory.gs();
-                const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
-                const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
-                const uint32_t dbgSp = m_debugSp.load(std::memory_order_relaxed);
-                const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
-                const auto eeSnapshot = m_eeScheduler->snapshot();
-
-                RUNTIME_LOG("[run:tick] tick=" << tick
-                                               << " pc=0x" << std::hex << dbgPc
-                                               << " ra=0x" << dbgRa
-                                               << " sp=0x" << dbgSp
-                                               << " gp=0x" << dbgGp
-                                               << " dispfb1=0x" << gs.dispfb1
-                                               << " display1=0x" << gs.display1
-                                               << std::dec
-                                               << " activeThreads=" << eeSnapshot.threads.size()
-                                               << " dma=" << curDma
-                                               << " gif=" << curGif
-                                               << " gsw=" << curGs
-                                               << " vif=" << curVif
-                                               << std::endl);
-
+                s_watchParsed = true;
+                if (const char *envWatch = std::getenv("PS2X_WATCH"))
+                {
+                    std::string envStr(envWatch);
+                    size_t start = 0;
+                    while (start < envStr.size())
+                    {
+                        size_t comma = envStr.find(',', start);
+                        std::string token = envStr.substr(start, (comma == std::string::npos) ? std::string::npos : (comma - start));
+                        if (!token.empty())
+                        {
+                            try {
+                                s_watchAddrs.push_back(std::stoul(token, nullptr, 0));
+                            } catch (...) {}
+                        }
+                        if (comma == std::string::npos) break;
+                        start = comma + 1;
+                    }
+                }
             }
-        });
+            if (!s_watchAddrs.empty())
+            {
+                uint8_t *rdram = m_memory.getRDRAM();
+                std::string watchLine = "[run:watch]";
+                char buf[64];
+                for (uint32_t addr : s_watchAddrs)
+                {
+                    if (addr + 4 <= PS2_RAM_SIZE)
+                    {
+                        uint32_t val32 = *reinterpret_cast<const uint32_t *>(rdram + addr);
+                        uint8_t val8 = *reinterpret_cast<const uint8_t *>(rdram + addr);
+                        std::snprintf(buf, sizeof(buf), " 0x%08x=0x%08x(u8=0x%02x)", addr, val32, val8);
+                        watchLine += buf;
+                    }
+                }
+                watchLine += "\n";
+                ps2xSafeLog("%s", watchLine.c_str());
+            }
+
+
+            static uint32_t s_lastPc = 0;
+            static int s_consecutiveSamePc = 0;
+            static bool s_dumpDone = false;
+            const bool inStuckLoop = (dbgPc >= 0x0024FA40u && dbgPc <= 0x0024FA60u) || (dbgPc == 0x0035f4b4u);
+            if (inStuckLoop)
+            {
+                s_consecutiveSamePc++;
+                if (s_consecutiveSamePc >= 5 && !s_dumpDone)
+                {
+                    s_dumpDone = true;
+                    if (const char *dumpEnv = std::getenv("PS2X_THREAD_DUMP"))
+                    {
+                        if (std::strcmp(dumpEnv, "1") == 0)
+                        {
+                            dumpEeDiagnostics(m_eeScheduler.get(), dbgPc);
+
+                            const GuestThread *th1 = m_eeScheduler->thread(1);
+                            if (th1)
+                            {
+                                const R5900Context &c1 = th1->activeContext();
+                                uint32_t s7 = getRegU32(&c1, 23);
+                                uint32_t s3 = getRegU32(&c1, 19);
+                                uint32_t t6 = getRegU32(&c1, 14);
+                                uint32_t t7 = getRegU32(&c1, 15);
+                                uint32_t a0 = getRegU32(&c1, 4);
+                                uint32_t a1 = getRegU32(&c1, 5);
+                                uint32_t v0 = getRegU32(&c1, 2);
+                                uint8_t *rdram = m_memory.getRDRAM();
+                                std::string stallMsg;
+                                char sbuf[256];
+                                std::snprintf(sbuf, sizeof(sbuf), "\n[STALL_DIAG] Thread 1 regs: s7=0x%08x s3=0x%08x t6=0x%08x t7=0x%08x a0=0x%08x a1=0x%08x v0=0x%08x\n",
+                                             s7, s3, t6, t7, a0, a1, v0);
+                                stallMsg += sbuf;
+                                if (s7 != 0 && s7 + 0x30 <= PS2_RAM_SIZE)
+                                {
+                                    uint32_t iterCur = *reinterpret_cast<const uint32_t *>(rdram + s7 + 0x1C);
+                                    uint32_t iterEnd = *reinterpret_cast<const uint32_t *>(rdram + s7 + 0x2C);
+                                    std::snprintf(sbuf, sizeof(sbuf), "[STALL_DIAG] Container at 0x%08x: iterCur=0x%08x iterEnd=0x%08x (diff=%d)\n",
+                                                 s7, iterCur, iterEnd, static_cast<int>(iterEnd - iterCur));
+                                    stallMsg += sbuf;
+                                }
+                                if (s3 != 0 && s3 + 0x64 <= PS2_RAM_SIZE)
+                                {
+                                    uint32_t taskId = *reinterpret_cast<const uint32_t *>(rdram + s3 + 0x14);
+                                    uint32_t state = *reinterpret_cast<const uint32_t *>(rdram + s3 + 0x18);
+                                    uint32_t ptr1c = *reinterpret_cast<const uint32_t *>(rdram + s3 + 0x1C);
+                                    uint32_t err5c = *reinterpret_cast<const uint32_t *>(rdram + s3 + 0x5C);
+                                    std::snprintf(sbuf, sizeof(sbuf), "[STALL_DIAG] Element at 0x%08x: taskId=0x%08x state=%u ptr1c=0x%08x err5c=0x%08x\n",
+                                                 s3, taskId, state, ptr1c, err5c);
+                                    stallMsg += sbuf;
+                                    if (ptr1c != 0 && ptr1c < PS2_RAM_SIZE)
+                                    {
+                                        const char *str = reinterpret_cast<const char *>(rdram + ptr1c);
+                                        std::snprintf(sbuf, sizeof(sbuf), "[STALL_DIAG] Element string at ptr1c: '%.64s'\n", str);
+                                        stallMsg += sbuf;
+                                    }
+                                }
+                                constexpr uint32_t kFile3Base = 0x00771798u;
+                                if (kFile3Base + 0x40 <= PS2_RAM_SIZE)
+                                {
+                                    std::snprintf(sbuf, sizeof(sbuf), "[STALL_DIAG] file3 at 0x%08x:\n", kFile3Base);
+                                    stallMsg += sbuf;
+                                    for (uint32_t i = 0; i < 32; i += 4)
+                                    {
+                                        uint32_t val = *reinterpret_cast<const uint32_t *>(rdram + kFile3Base + i);
+                                        std::snprintf(sbuf, sizeof(sbuf), "  +0x%02x: 0x%08x\n", i, val);
+                                        stallMsg += sbuf;
+                                    }
+                                }
+                                ps2xSafeLog("%s", stallMsg.c_str());
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                s_lastPc = dbgPc;
+                s_consecutiveSamePc = 1;
+            }
+        }
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight, tick);

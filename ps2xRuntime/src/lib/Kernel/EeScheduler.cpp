@@ -1,3 +1,4 @@
+void ps2xSafeLog(const char *fmt, ...);
 #include "runtime/ee_scheduler.h"
 
 #include "ps2_log.h"
@@ -6,6 +7,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <mutex>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -71,7 +73,53 @@ namespace
         } while (candidate != first);
         return 0;
     }
+
+    static std::unordered_map<int, EeAlarm> s_diagAlarms;
+    static std::unordered_map<int, EeIrqHandler> s_diagIntcHandlers;
+    static std::unordered_map<int, EeIrqHandler> s_diagDmacHandlers;
+    static std::unordered_map<int, uint64_t> s_diagIntcFireCounts;
+    static std::unordered_map<int, uint64_t> s_diagDmacFireCounts;
+    static bool isSchedTraceEnabled()
+    {
+        static int s_enabled = -1;
+        if (s_enabled == -1)
+        {
+            const char *env = std::getenv("PS2X_SCHED_TRACE");
+            s_enabled = (env && std::strcmp(env, "1") == 0) ? 1 : 0;
+        }
+        return s_enabled == 1;
+    }
+
+    static const char *threadStatusName(EeThreadStatus s)
+    {
+        switch (s)
+        {
+        case EeThreadStatus::Running: return "RUNNING";
+        case EeThreadStatus::Ready: return "READY";
+        case EeThreadStatus::Waiting: return "WAITING";
+        case EeThreadStatus::WaitingSuspended: return "WAIT_SUSP";
+        case EeThreadStatus::Suspended: return "SUSPENDED";
+        case EeThreadStatus::Dormant: return "DORMANT";
+        default: return "UNKNOWN";
+        }
+    }
+
+    
+
 }
+
+std::string ps2xGetIntcSummary()
+    {
+        std::string s;
+        char b[64];
+        for (const auto &pair : s_diagIntcHandlers)
+        {
+            uint64_t fires = s_diagIntcFireCounts[pair.first];
+            std::snprintf(b, sizeof(b), " cause%u(#%d)=%llu", pair.second.cause, pair.first, (unsigned long long)fires);
+            s += b;
+        }
+        return s;
+    }
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
     : m_runtime(runtime)
@@ -94,6 +142,11 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_alarms.clear();
     m_intcHandlers.clear();
     m_dmacHandlers.clear();
+    s_diagAlarms.clear();
+    s_diagIntcHandlers.clear();
+    s_diagDmacHandlers.clear();
+    s_diagIntcFireCounts.clear();
+    s_diagDmacFireCounts.clear();
     m_nextThreadId = kFirstThreadId;
     m_nextInvocationThreadId = -1;
     m_nextSemaphoreId = 1;
@@ -481,6 +534,14 @@ int EeScheduler::createThread(const EeThreadCreateParams &params)
     thread.currentPriority = params.priority;
     thread.status = EeThreadStatus::Dormant;
     m_threads.emplace(id, std::move(thread));
+    if (isSchedTraceEnabled())
+    {
+        const GuestThread *self = currentThread();
+        uint32_t pc = self ? self->activeContext().pc : 0;
+        uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0;
+        ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=CreateThread thid=%d entry=0x%08x stack=0x%08x stackSize=%u prio=%d\n",
+                    (unsigned long long)m_vsyncTick, pc, ra, id, params.entry, params.stack, params.stackSize, params.priority);
+    }
     publishSnapshot();
     return id;
 }
@@ -539,6 +600,13 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     SET_GPR_U32(&target->context, 31, 0u);
     enqueueReady(*target);
     requestPreemptionIfHigher(*target, interruptSafe);
+    if (isSchedTraceEnabled())
+    {
+        uint32_t pc = caller.pc;
+        uint32_t ra = getRegU32(&caller, 31);
+        ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=StartThread target=%d state=DORMANT->READY wakeups=0 intSafe=%d\n",
+                    (unsigned long long)m_vsyncTick, pc, ra, id, interruptSafe ? 1 : 0);
+    }
     publishSnapshot();
     return KE_OK;
 }
@@ -549,6 +617,13 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     GuestThread *exiting = currentThread();
     assert(exiting != nullptr);
     const int id = exiting->id;
+    if (isSchedTraceEnabled())
+    {
+        const uint32_t pc = exiting->activeContext().pc;
+        const uint32_t ra = getRegU32(&exiting->activeContext(), 31);
+        ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=ExitThread thid=%d state=%s->DORMANT\n",
+                    (unsigned long long)m_vsyncTick, pc, ra, id, threadStatusName(exiting->status));
+    }
     const uint32_t ownedStack = deleteThreadRecord && exiting->ownsStack ? exiting->stack : 0u;
     makeDormant(*exiting);
     m_currentThreadId = 0;
@@ -677,11 +752,28 @@ void EeScheduler::sleepCurrent()
     assertExecutor();
     GuestThread *self = currentThread();
     assert(self != nullptr);
+    const uint32_t pc = self->activeContext().pc;
+    const uint32_t ra = getRegU32(&self->activeContext(), 31);
+    const EeThreadStatus statusBefore = self->status;
+    const uint32_t wakeBefore = self->wakeupCount;
     if (self->wakeupCount != 0u)
     {
         --self->wakeupCount;
         setReturnS32(&self->activeContext(), KE_OK);
+        if (isSchedTraceEnabled())
+        {
+            ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=SleepThread(ConsumedWakeup) thid=%d state=%s->%s wakeups=%u->%u\n",
+                        (unsigned long long)m_vsyncTick, pc, ra, self->id,
+                        threadStatusName(statusBefore), threadStatusName(self->status),
+                        wakeBefore, self->wakeupCount);
+        }
         return;
+    }
+    if (isSchedTraceEnabled())
+    {
+        ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=SleepThread(Blocked) thid=%d state=%s->WAITING wakeups=%u->0\n",
+                    (unsigned long long)m_vsyncTick, pc, ra, self->id,
+                    threadStatusName(statusBefore), wakeBefore);
     }
     blockCurrent(EeWaitState{EeWaitReason::Sleep, std::monostate{}});
 }
@@ -702,6 +794,11 @@ int EeScheduler::wakeupThread(int id, bool interruptSafe)
     {
         return KE_DORMANT;
     }
+    const GuestThread *self = currentThread();
+    const uint32_t pc = self ? self->activeContext().pc : 0;
+    const uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0;
+    const EeThreadStatus statusBefore = target->status;
+    const uint32_t wakeBefore = target->wakeupCount;
     if ((target->status == EeThreadStatus::Waiting || target->status == EeThreadStatus::WaitingSuspended) &&
         target->wait.reason == EeWaitReason::Sleep)
     {
@@ -710,6 +807,14 @@ int EeScheduler::wakeupThread(int id, bool interruptSafe)
     else
     {
         ++target->wakeupCount;
+    }
+    if (isSchedTraceEnabled())
+    {
+        ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=%s target=%d state=%s->%s wakeups=%u->%u intSafe=%d\n",
+                    (unsigned long long)m_vsyncTick, pc, ra,
+                    interruptSafe ? "iWakeupThread" : "WakeupThread",
+                    id, threadStatusName(statusBefore), threadStatusName(target->status),
+                    wakeBefore, target->wakeupCount, interruptSafe ? 1 : 0);
     }
     publishSnapshot();
     return KE_OK;
@@ -729,6 +834,14 @@ int EeScheduler::cancelWakeup(int id)
     }
     const int old = static_cast<int>(target->wakeupCount);
     target->wakeupCount = 0;
+    if (isSchedTraceEnabled())
+    {
+        const GuestThread *self = currentThread();
+        uint32_t pc = self ? self->activeContext().pc : 0;
+        uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0;
+        ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=CancelWakeup target=%d wakeups=%d->0\n",
+                    (unsigned long long)m_vsyncTick, pc, ra, id, old);
+    }
     publishSnapshot();
     return old;
 }
@@ -787,6 +900,27 @@ int EeScheduler::rotateReadyQueue(int priority, bool interruptSafe)
     if (priority < 0 || priority >= kPriorityCount)
     {
         return KE_ILLEGAL_PRIORITY;
+    }
+
+    static int s_lastRotPrio = -1;
+    static int s_lastRotThid = -1;
+    static uint64_t s_rotCount = 0;
+    s_rotCount++;
+    const int curThid = m_currentThreadId;
+    if (isSchedTraceEnabled())
+    {
+        if (priority != s_lastRotPrio || curThid != s_lastRotThid || (s_rotCount % 300) == 0)
+        {
+            s_lastRotPrio = priority;
+            s_lastRotThid = curThid;
+            const GuestThread *self = currentThread();
+            uint32_t pc = self ? self->activeContext().pc : 0;
+            uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0;
+            ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=%s targetPrio=%d curThid=%d totalRotates=%llu\n",
+                        (unsigned long long)m_vsyncTick, pc, ra,
+                        interruptSafe ? "iRotateReadyQueue" : "RotateReadyQueue",
+                        priority, curThid, (unsigned long long)s_rotCount);
+        }
     }
 
     GuestThread *self = currentThread();
@@ -920,7 +1054,15 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
     {
         return KE_SEMA_OVF;
     }
-    ++object->count;
+    const int oldCount = object->count++;
+    if (isSchedTraceEnabled())
+    {
+        const GuestThread *self = currentThread();
+        uint32_t pc = self ? self->activeContext().pc : 0;
+        uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0;
+        ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=%s semId=%d count=%d->%d\n",
+                    (unsigned long long)m_vsyncTick, pc, ra, interruptSafe ? "iSignalSema" : "SignalSema", id, oldCount, object->count);
+    }
     publishSnapshot();
     return id;
 }
@@ -1016,7 +1158,16 @@ int EeScheduler::setEventFlag(int id, uint32_t bits, bool interruptSafe)
     {
         return KE_UNKNOWN_EVFID;
     }
+    const uint32_t prevBits = flag->bits;
     flag->bits |= bits;
+    if (isSchedTraceEnabled())
+    {
+        const GuestThread *self = currentThread();
+        uint32_t pc = self ? self->activeContext().pc : 0;
+        uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0;
+        ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=%s evfId=%d bits=0x%08x flagBits=0x%08x->0x%08x\n",
+                    (unsigned long long)m_vsyncTick, pc, ra, interruptSafe ? "iSetEventFlag" : "SetEventFlag", id, bits, prevBits, flag->bits);
+    }
     finishEventWaiters(*flag, interruptSafe);
     publishSnapshot();
     return KE_OK;
@@ -1109,6 +1260,7 @@ int EeScheduler::setAlarm(uint16_t ticks,
         return KE_ERROR;
     }
     m_alarms.emplace(id, EeAlarm{id, ticks, handler, argument, gp, sp});
+    s_diagAlarms[id] = EeAlarm{id, ticks, handler, argument, gp, sp};
     const uint64_t tickCount = ticks == 0u ? 1u : static_cast<uint64_t>(ticks);
     scheduleEvent(m_eeCycle + tickCount * kAlarmTickCycles,
                   std::chrono::steady_clock::now() + std::chrono::microseconds(tickCount * kAlarmTickMicroseconds),
@@ -1119,6 +1271,7 @@ int EeScheduler::setAlarm(uint16_t ticks,
 int EeScheduler::cancelAlarm(int id)
 {
     assertExecutor();
+    s_diagAlarms.erase(id);
     if (m_alarms.erase(id) == 0u)
     {
         return KE_ERROR;
@@ -1233,21 +1386,25 @@ int EeScheduler::addIrqHandler(bool dmac,
     }
     int &head = dmac ? m_dmacHeadOrder : m_intcHeadOrder;
     int &tail = dmac ? m_dmacTailOrder : m_intcTailOrder;
-    handlers.emplace(id,
-                     EeIrqHandler{id,
-                                  cause,
-                                  handler,
-                                  argument,
-                                  gp,
-                                  sp,
-                                  true,
-                                  append ? ++tail : --head});
+    EeIrqHandler irqHandler{id,
+                            cause,
+                            handler,
+                            argument,
+                            gp,
+                            sp,
+                            true,
+                            append ? ++tail : --head};
+    handlers.emplace(id, irqHandler);
+    if (dmac) s_diagDmacHandlers[id] = irqHandler;
+    else s_diagIntcHandlers[id] = irqHandler;
     return id;
 }
 
 int EeScheduler::removeIrqHandler(bool dmac, uint32_t cause, int id)
 {
     assertExecutor();
+    if (dmac) s_diagDmacHandlers.erase(id);
+    else s_diagIntcHandlers.erase(id);
     auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
     auto it = handlers.find(id);
     if (it != handlers.end() && it->second.cause == cause)
@@ -1260,6 +1417,16 @@ int EeScheduler::removeIrqHandler(bool dmac, uint32_t cause, int id)
 int EeScheduler::setIrqHandlerEnabled(bool dmac, int id, bool enabled)
 {
     assertExecutor();
+    if (dmac)
+    {
+        auto dit = s_diagDmacHandlers.find(id);
+        if (dit != s_diagDmacHandlers.end()) dit->second.enabled = enabled;
+    }
+    else
+    {
+        auto iit = s_diagIntcHandlers.find(id);
+        if (iit != s_diagIntcHandlers.end()) iit->second.enabled = enabled;
+    }
     auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
     auto it = handlers.find(id);
     if (it != handlers.end())
@@ -1299,11 +1466,12 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     std::vector<EeIrqHandler> matching;
     for (const auto &[id, handler] : handlers)
     {
-        (void)id;
         if (handler.enabled && handler.cause == cause && handler.handler != 0u &&
             m_runtime.hasFunction(handler.handler))
         {
             matching.push_back(handler);
+            if (dmac) s_diagDmacFireCounts[id]++;
+            else s_diagIntcFireCounts[id]++;
         }
     }
     std::sort(matching.begin(), matching.end(), [](const EeIrqHandler &left, const EeIrqHandler &right)
@@ -1954,6 +2122,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         }
         const EeAlarm alarm = it->second;
         m_alarms.erase(it);
+        s_diagAlarms.erase(static_cast<int>(event.id));
         GuestInvocation invocation{};
         invocation.kind = GuestInvocationKind::Alarm;
         invocation.context.pc = alarm.handler;
@@ -2178,4 +2347,96 @@ void EeScheduler::publishIdleDebugContext()
     {
         publishDebugContext(selected->activeContext());
     }
+}
+
+void dumpEeDiagnostics(const EeScheduler *scheduler, uint32_t stuckPc)
+{
+    if (!scheduler) return;
+    extern std::mutex &ps2xLogMutex();
+    std::lock_guard<std::mutex> lock(ps2xLogMutex());
+    std::fprintf(stderr, "\n=== EE DIAGNOSTICS DUMP (Stuck at PC 0x%08X) ===\n", stuckPc);
+
+    EeKernelSnapshot snap = scheduler->snapshot();
+    std::fprintf(stderr, "--- Threads (running=%d, total=%zu) ---\n", snap.runningThreadId, snap.threads.size());
+    for (const auto &th : snap.threads)
+    {
+        const char *statusStr = "UNKNOWN";
+        switch (th.status)
+        {
+        case EeThreadStatus::Running: statusStr = "RUNNING"; break;
+        case EeThreadStatus::Ready: statusStr = "READY"; break;
+        case EeThreadStatus::Waiting: statusStr = "WAITING"; break;
+        case EeThreadStatus::WaitingSuspended: statusStr = "WAITING_SUSPENDED"; break;
+        case EeThreadStatus::Suspended: statusStr = "SUSPENDED"; break;
+        case EeThreadStatus::Dormant: statusStr = "DORMANT"; break;
+        }
+        const char *waitStr = "None";
+        switch (th.waitReason)
+        {
+        case EeWaitReason::None: waitStr = "None"; break;
+        case EeWaitReason::Sleep: waitStr = "Sleep"; break;
+        case EeWaitReason::Semaphore: waitStr = "Semaphore"; break;
+        case EeWaitReason::EventFlag: waitStr = "EventFlag"; break;
+        case EeWaitReason::VSync: waitStr = "VSync"; break;
+        case EeWaitReason::External: waitStr = "External"; break;
+        case EeWaitReason::Mpeg: waitStr = "Mpeg"; break;
+        }
+        std::fprintf(stderr, "  Thread id=%d prio=%d(init=%d) status=%s pc=0x%08X ra=0x%08X sp=0x%08X wait=%s (id=%d) invocations=%u\n",
+                     th.id, th.currentPriority, th.initialPriority, statusStr, th.pc, th.ra, th.sp, waitStr, th.waitId, th.invocationDepth);
+    }
+
+    std::fprintf(stderr, "--- Semaphores (total=%zu) ---\n", snap.semaphores.size());
+    for (const auto &s : snap.semaphores)
+    {
+        const EeSemaphore *sem = scheduler->semaphore(s.id);
+        std::fprintf(stderr, "  Sema id=%d count=%d max=%d waiters=%u [", s.id, s.count, s.maxCount, s.waiters);
+        if (sem)
+        {
+            for (size_t i = 0; i < sem->waiters.size(); ++i)
+            {
+                std::fprintf(stderr, "%s%d", (i > 0 ? ", " : ""), sem->waiters[i]);
+            }
+        }
+        std::fprintf(stderr, "]\n");
+    }
+
+    std::fprintf(stderr, "--- Event Flags (total=%zu) ---\n", snap.eventFlags.size());
+    for (const auto &ef : snap.eventFlags)
+    {
+        const EeEventFlag *flag = scheduler->eventFlag(ef.id);
+        std::fprintf(stderr, "  EventFlag id=%d bits=0x%08X init=0x%08X waiters=%u [", ef.id, ef.bits, ef.initBits, ef.waiters);
+        if (flag)
+        {
+            for (size_t i = 0; i < flag->waiters.size(); ++i)
+            {
+                std::fprintf(stderr, "%s%d", (i > 0 ? ", " : ""), flag->waiters[i]);
+            }
+        }
+        std::fprintf(stderr, "]\n");
+    }
+
+    std::fprintf(stderr, "--- Alarms (total=%zu) ---\n", s_diagAlarms.size());
+    for (const auto &pair : s_diagAlarms)
+    {
+        std::fprintf(stderr, "  Alarm id=%d ticks=%u handler=0x%08X arg=0x%08X\n",
+                     pair.first, pair.second.ticks, pair.second.handler, pair.second.argument);
+    }
+
+    std::fprintf(stderr, "--- INTC Handlers (total=%zu) ---\n", s_diagIntcHandlers.size());
+    for (const auto &pair : s_diagIntcHandlers)
+    {
+        uint64_t fires = s_diagIntcFireCounts[pair.first];
+        std::fprintf(stderr, "  INTC id=%d cause=%u handler=0x%08X enabled=%d fires=%llu\n",
+                     pair.first, pair.second.cause, pair.second.handler, pair.second.enabled, (unsigned long long)fires);
+    }
+
+    std::fprintf(stderr, "--- DMAC Handlers (total=%zu) ---\n", s_diagDmacHandlers.size());
+    for (const auto &pair : s_diagDmacHandlers)
+    {
+        uint64_t fires = s_diagDmacFireCounts[pair.first];
+        std::fprintf(stderr, "  DMAC id=%d cause=%u handler=0x%08X enabled=%d fires=%llu\n",
+                     pair.first, pair.second.cause, pair.second.handler, pair.second.enabled, (unsigned long long)fires);
+    }
+    std::fprintf(stderr, "===============================================\n\n");
+    std::fflush(stderr);
 }

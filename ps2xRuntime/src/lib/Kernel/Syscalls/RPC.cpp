@@ -1,7 +1,10 @@
 #include "Common.h"
 #include "RPC.h"
 #include "../Stubs/SIF.h"
+#include "../Stubs/VfiArchive.h"
 #include "../../ps2_iop_transport.h"
+
+void ps2xSafeLog(const char *fmt, ...);
 
 namespace ps2_syscalls
 {
@@ -71,11 +74,11 @@ namespace ps2_syscalls
                 0x80001300u,
                 "DBC_BASE",
                 [](uint32_t sid, uint32_t clientPtr) {
-                    fprintf(stderr, "[rpc:dbc] Bound DBC_BASE (0x%08x) client=0x%08x\n", sid, clientPtr);
+                    ps2xSafeLog( "[rpc:dbc] Bound DBC_BASE (0x%08x) client=0x%08x\n", sid, clientPtr);
                     fflush(stderr);
                 },
                 [](const RpcHleCallContext &call) -> int32_t {
-                    fprintf(stderr, "[rpc:dbc] Call DBC_BASE fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
+                    ps2xSafeLog( "[rpc:dbc] Call DBC_BASE fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
                             call.rpcNum, call.sendBuf, call.sendSize, call.recvBuf, call.recvSize);
                     fflush(stderr);
                     if (call.rpcNum == 0x80001363u) // sceDbcGetModVersion
@@ -100,7 +103,7 @@ namespace ps2_syscalls
                                 std::memcpy(&workAddr, src + 4, 4);
                             }
                         }
-                        fprintf(stderr, "[rpc:dbc] sceDbcSetWorkAddr workAddr=0x%08x\n", workAddr);
+                        ps2xSafeLog( "[rpc:dbc] sceDbcSetWorkAddr workAddr=0x%08x\n", workAddr);
                         fflush(stderr);
                         return 0;
                     }
@@ -113,11 +116,11 @@ namespace ps2_syscalls
                 0x8000131Cu,
                 "DBC_PAD",
                 [](uint32_t sid, uint32_t clientPtr) {
-                    fprintf(stderr, "[rpc:dbc] Bound DBC_PAD (0x%08x) client=0x%08x\n", sid, clientPtr);
+                    ps2xSafeLog( "[rpc:dbc] Bound DBC_PAD (0x%08x) client=0x%08x\n", sid, clientPtr);
                     fflush(stderr);
                 },
                 [](const RpcHleCallContext &call) -> int32_t {
-                    fprintf(stderr, "[rpc:dbc] Call DBC_PAD fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
+                    ps2xSafeLog( "[rpc:dbc] Call DBC_PAD fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
                             call.rpcNum, call.sendBuf, call.sendSize, call.recvBuf, call.recvSize);
                     fflush(stderr);
                     if (call.recvBuf && call.recvSize > 0)
@@ -133,11 +136,11 @@ namespace ps2_syscalls
                 0x8000131Eu,
                 "DBC_PORT0",
                 [](uint32_t sid, uint32_t clientPtr) {
-                    fprintf(stderr, "[rpc:dbc] Bound DBC_PORT0 (0x%08x) client=0x%08x\n", sid, clientPtr);
+                    ps2xSafeLog( "[rpc:dbc] Bound DBC_PORT0 (0x%08x) client=0x%08x\n", sid, clientPtr);
                     fflush(stderr);
                 },
                 [](const RpcHleCallContext &call) -> int32_t {
-                    fprintf(stderr, "[rpc:dbc] Call DBC_PORT0 fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
+                    ps2xSafeLog( "[rpc:dbc] Call DBC_PORT0 fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
                             call.rpcNum, call.sendBuf, call.sendSize, call.recvBuf, call.recvSize);
                     fflush(stderr);
                     if (call.recvBuf && call.recvSize > 0)
@@ -153,11 +156,11 @@ namespace ps2_syscalls
                 0x8000131Fu,
                 "DBC_PORT1",
                 [](uint32_t sid, uint32_t clientPtr) {
-                    fprintf(stderr, "[rpc:dbc] Bound DBC_PORT1 (0x%08x) client=0x%08x\n", sid, clientPtr);
+                    ps2xSafeLog( "[rpc:dbc] Bound DBC_PORT1 (0x%08x) client=0x%08x\n", sid, clientPtr);
                     fflush(stderr);
                 },
                 [](const RpcHleCallContext &call) -> int32_t {
-                    fprintf(stderr, "[rpc:dbc] Call DBC_PORT1 fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
+                    ps2xSafeLog( "[rpc:dbc] Call DBC_PORT1 fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
                             call.rpcNum, call.sendBuf, call.sendSize, call.recvBuf, call.recvSize);
                     fflush(stderr);
                     if (call.recvBuf && call.recvSize > 0)
@@ -167,6 +170,72 @@ namespace ps2_syscalls
                     return 0;
                 }
             };
+
+            // 0x11223344u: SG2 Audio Server
+            s_rpcHleServices[0x11223344u] = {
+                0x11223344u,
+                "SG2_AUDIO",
+                [](uint32_t sid, uint32_t clientPtr) {
+                    ps2xSafeLog( "[rpc:sg2] Bound SG2_AUDIO (0x%08x) client=0x%08x\n", sid, clientPtr);
+                    fflush(stderr);
+                },
+                [](const RpcHleCallContext &call) -> int32_t {
+                    static bool s_firstCallLogged = false;
+                    ps2xSafeLog( "[rpc:sg2] Call SG2_AUDIO fno=0x%x sendBuf=0x%08x (%u) recvBuf=0x%08x (%u)\n",
+                            call.rpcNum, call.sendBuf, call.sendSize, call.recvBuf, call.recvSize);
+                    if (!s_firstCallLogged && call.sendBuf && call.sendSize >= 16)
+                    {
+                        s_firstCallLogged = true;
+                        const uint8_t *src = getConstMemPtr(call.rdram, call.sendBuf);
+                        if (src)
+                        {
+                            ps2xSafeLog( "[SG2:first_call] buffer (%u bytes):\n", call.sendSize);
+                            for (uint32_t i = 0; i < call.sendSize; ++i)
+                            {
+                                ps2xSafeLog( "%02x%c", src[i], ((i + 1) % 16 == 0 || i + 1 == call.sendSize) ? '\n' : ' ');
+                            }
+                            uint32_t numPackets = call.sendSize / 16;
+                            static const char *const kOpcodeNames[] = {
+                                "Ping/No-Op", "Play SFX", "Key On", "Key Off", "Set Voice Param", "Stop Voice/Fade",
+                                "Master Volume", "Reverb Mode", "Core Effects", "Voice Status", "Core Volume",
+                                "Pause Voices", "Resume Voices", "Stop All Voices", "Group Volume", "Group Pitch",
+                                "Group Pan", "Load Sound Bank", "Unload Sound Bank", "BGM Volume", "BGM Start",
+                                "BGM Stop", "BGM Tempo", "BGM Mute/Solo", "Transfer Waveform", "Wave DMA Poll",
+                                "Voice Pitch Bend", "Voice Modulation", "Voice Envelope", "Reset Audio Driver",
+                                "Reverb Workarea", "Digital Output Rate", "Voice Noise Mode", "Flush Audio Buffers",
+                                "Voice Panpot/3D", "Driver Heartbeat/Sync"
+                            };
+                            for (uint32_t p = 0; p < numPackets; ++p)
+                            {
+                                const uint32_t *pkt = reinterpret_cast<const uint32_t *>(src + p * 16);
+                                uint32_t op = pkt[0];
+                                const char *opName = (op < sizeof(kOpcodeNames)/sizeof(kOpcodeNames[0])) ? kOpcodeNames[op] : "UNKNOWN";
+                                ps2xSafeLog( "  pkt[%02u]: opcode=0x%08x (%s) arg1=0x%08x arg2=0x%08x arg3=0x%08x\n",
+                                        p, op, opName, pkt[1], pkt[2], pkt[3]);
+                            }
+                        }
+                    }
+                    fflush(stderr);
+                    if (call.recvBuf && call.recvSize > 0)
+                    {
+                        uint32_t zeroBytes = std::min(call.recvSize, 448u);
+                        rpcZeroRdram(call.rdram, call.recvBuf, zeroBytes);
+                    }
+                    return 0;
+                }
+            };
+
+            std::string initMsg = "[RPC:init] Registered HLE SIDs:";
+            char hbuf[64];
+            for (const auto &pair : s_rpcHleServices)
+            {
+                std::snprintf(hbuf, sizeof(hbuf), " 0x%08X (%s)", pair.first, pair.second.name.c_str());
+                initMsg += hbuf;
+            }
+            initMsg += " | 0x80001800 registered: ";
+            initMsg += (s_rpcHleServices.find(0x80001800u) != s_rpcHleServices.end()) ? "YES\n" : "NO (myth confirmed)\n";
+            ps2xSafeLog("%s", initMsg.c_str());
+            std::fflush(stderr);
         }
 
         void fillRpcDebugPreview(const uint8_t *rdram, uint32_t addr, uint32_t size, uint8_t *preview, uint32_t &previewSize)
@@ -383,7 +452,7 @@ namespace ps2_syscalls
                 g_sif_rpc_debug_history[i] = SifRpcDebugEvent{};
             }
             g_rpc_initialized = true;
-            RUNTIME_LOG("[SifInitRpc] Initialized");
+            ps2xSafeLog("[SifInitRpc] Initialized\n");
         }
 
         SifRpcDebugEvent event = makeRpcDebugEvent("InitRpc", ctx, runtime);
@@ -470,7 +539,7 @@ namespace ps2_syscalls
             client->server = serverPtr;
             client->buf = sd ? sd->buf : 0;
             client->cbuf = sd ? sd->cbuf : 0;
-            fprintf(stderr, "[rpc:bind] Bound sid=0x%08x client=0x%08x -> server=0x%08x (%s)\n",
+            ps2xSafeLog( "[rpc:bind] Bound sid=0x%08x client=0x%08x -> server=0x%08x (%s)\n",
                     rpcId, clientPtr, serverPtr, isHle ? hleIt->second.name.c_str() : "IOP/RPC");
             fflush(stderr);
         }
@@ -479,7 +548,7 @@ namespace ps2_syscalls
             client->server = 0;
             client->buf = 0;
             client->cbuf = 0;
-            fprintf(stderr, "[rpc:bind] UNIMPLEMENTED / refused sid=0x%08x client=0x%08x\n",
+            ps2xSafeLog( "[rpc:bind] UNIMPLEMENTED / refused sid=0x%08x client=0x%08x\n",
                     rpcId, clientPtr);
             fflush(stderr);
         }
@@ -657,22 +726,34 @@ namespace ps2_syscalls
         }
 
         const uint32_t serverPtr = client->server;
-        fprintf(stderr, "[rpc:call] sid=0x%08x fno=0x%x mode=0x%x sendBuf=0x%08x (%u bytes) recvBuf=0x%08x (%u bytes) endFunc=0x%08x endParam=0x%08x\n",
-                sid, rpcNum, mode, sendBuf, sendSize, receiveBuffer, receiveSize, endFunction, endParameter);
+                char rpcLine[512];
+        std::snprintf(rpcLine, sizeof(rpcLine),
+                      "[rpc:call] sid=0x%08x fno=0x%x mode=0x%x sendBuf=0x%08x (%u bytes) recvBuf=0x%08x (%u bytes) endFunc=0x%08x endParam=0x%08x\n",
+                      sid, rpcNum, mode, sendBuf, sendSize, receiveBuffer, receiveSize, endFunction, endParameter);
         if (sendBuf != 0u && sendSize > 0u)
         {
             const uint32_t dumpLen = std::min<uint32_t>(sendSize, 64u);
             if (const uint8_t *sptr = getConstMemPtr(rdram, sendBuf))
             {
-                fprintf(stderr, "  send hex[%u]:", dumpLen);
+                std::string hexDump = "  send hex[" + std::to_string(dumpLen) + "]:";
+                char hexByte[8];
                 for (uint32_t i = 0; i < dumpLen; ++i)
                 {
-                    fprintf(stderr, " %02x", sptr[i]);
+                    std::snprintf(hexByte, sizeof(hexByte), " %02x", sptr[i]);
+                    hexDump += hexByte;
                 }
-                fprintf(stderr, "\n");
+                hexDump += "\n";
+                ps2xSafeLog("%s%s", rpcLine, hexDump.c_str());
+            }
+            else
+            {
+                ps2xSafeLog("%s", rpcLine);
             }
         }
-        fflush(stderr);
+        else
+        {
+            ps2xSafeLog("%s", rpcLine);
+        }
 
         auto *server = serverPtr
                            ? reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr))
@@ -744,6 +825,34 @@ namespace ps2_syscalls
             guestDefaultResult = server->buf != 0u ? server->buf : receiveBuffer;
         }
         const bool serverDispatched = guestFunction != 0u && runtime->hasFunction(guestFunction);
+
+        auto hleCallIt = s_rpcHleServices.find(sid);
+        if (hleCallIt != s_rpcHleServices.end() && hleCallIt->second.onCall)
+        {
+            RpcHleCallContext hleCall{};
+            hleCall.rdram = rdram;
+            hleCall.ctx = ctx;
+            hleCall.runtime = runtime;
+            hleCall.clientPtr = clientPtr;
+            hleCall.sid = sid;
+            hleCall.rpcNum = rpcNum;
+            hleCall.mode = mode;
+            hleCall.sendBuf = sendBuf;
+            hleCall.sendSize = sendSize;
+            hleCall.recvBuf = receiveBuffer;
+            hleCall.recvSize = receiveSize;
+            hleCall.endFunc = endFunction;
+            hleCall.endParam = endParameter;
+
+            hleCallIt->second.onCall(hleCall);
+
+            iopResult.handled = true;
+            iopResult.resultAddress = receiveBuffer;
+            if (completionSemaphore != 0u && completionSemaphore != 0xFFFFFFFFu)
+            {
+                (void)signalRpcCompletionSema(runtime, completionSemaphore);
+            }
+        }
 
         auto finishCall = [=](const R5900Context *guestResult, R5900Context &parent)
         {
@@ -853,33 +962,8 @@ namespace ps2_syscalls
             runtime->eeScheduler().invokeCurrent(std::move(callback));
         };
 
-        auto hleCallIt = s_rpcHleServices.find(sid);
         if (hleCallIt != s_rpcHleServices.end() && hleCallIt->second.onCall)
         {
-            RpcHleCallContext hleCall{};
-            hleCall.rdram = rdram;
-            hleCall.ctx = ctx;
-            hleCall.runtime = runtime;
-            hleCall.clientPtr = clientPtr;
-            hleCall.sid = sid;
-            hleCall.rpcNum = rpcNum;
-            hleCall.mode = mode;
-            hleCall.sendBuf = sendBuf;
-            hleCall.sendSize = sendSize;
-            hleCall.recvBuf = receiveBuffer;
-            hleCall.recvSize = receiveSize;
-            hleCall.endFunc = endFunction;
-            hleCall.endParam = endParameter;
-
-            hleCallIt->second.onCall(hleCall);
-
-            iopResult.handled = true;
-            iopResult.resultAddress = receiveBuffer;
-            if (completionSemaphore != 0u && completionSemaphore != 0xFFFFFFFFu)
-            {
-                (void)signalRpcCompletionSema(runtime, completionSemaphore);
-            }
-
             finishCall(nullptr, *ctx);
             return;
         }
@@ -1191,7 +1275,7 @@ namespace ps2_syscalls
         static int logCount = 0;
         if (logCount < 10)
         {
-            std::fprintf(stderr, "[sceSifSendCmd] cid=0x%08x packet=0x%08x psize=%u src=0x%08x dst=0x%08x size=%u (ra=0x%08x)\n",
+            ps2xSafeLog( "[sceSifSendCmd] cid=0x%08x packet=0x%08x psize=%u src=0x%08x dst=0x%08x size=%u (ra=0x%08x)\n",
                          cid, packetAddr, packetSize, srcExtra, destExtra, sizeExtra, getRegU32(ctx, 31));
             std::fflush(stderr);
             ++logCount;
@@ -1200,56 +1284,364 @@ namespace ps2_syscalls
         // Handle file3.irx command 1 (handshake and task dispatch)
         if (cid == 1u)
         {
-            if (const uint8_t *pkt = getConstMemPtr(rdram, packetAddr))
+            struct VfiDescriptorSlot
             {
-                std::fprintf(stderr, "[CID1:packet 0x%08x] ", packetAddr);
-                for (int i = 0; i < 16; ++i) std::fprintf(stderr, "%02x ", pkt[i]);
-                std::fprintf(stderr, "\n");
-            }
-            const uint8_t *src = getConstMemPtr(rdram, srcExtra);
-            if (src)
+                bool open = false;
+                ps2x::vfi::VfiEntry entry;
+                uint64_t offset = 0;
+            };
+            static VfiDescriptorSlot s_vfiDescriptors[16] = {};
+
+            ps2x::vfi::VfiArchive::instance().initialize();
+
+            const uint8_t *src = (srcExtra != 0u) ? getConstMemPtr(rdram, srcExtra) : nullptr;
+            if (!src)
             {
-                std::fprintf(stderr, "[CID1:srcExtra 0x%08x] ", srcExtra);
-                for (int i = 0; i < 64; ++i) std::fprintf(stderr, "%02x ", src[i]);
-                std::fprintf(stderr, "\n");
+                ps2xSafeLog( "[CID1] ERROR: srcExtra 0x%08x is invalid\n", srcExtra);
+                std::fflush(stderr);
+                return;
             }
 
-            uint32_t ptr08 = 0;
-            uint32_t seq = 0;
-            if (src)
+            uint32_t cmdSize = *reinterpret_cast<const uint32_t *>(src + 0);
+            uint32_t opcode = *reinterpret_cast<const uint32_t *>(src + 4);
+            uint32_t slotPtr = *reinterpret_cast<const uint32_t *>(src + 8);
+            uint32_t seq = *reinterpret_cast<const uint32_t *>(src + 12);
+
+            uint32_t alignedCmdSize = (cmdSize + 15u) & ~15u;
+            uint32_t ringTail = destExtra + alignedCmdSize;
+
+            const char *traceEnv = std::getenv("PS2X_CID1_TRACE");
+            const bool doTrace = (traceEnv && std::strcmp(traceEnv, "1") == 0);
+            if (doTrace)
             {
-                std::memcpy(&ptr08, src + 8, 4);
-            }
-            if (const uint8_t *fcfdMem = getConstMemPtr(rdram, ptr08))
-            {
-                std::fprintf(stderr, "[CID1:fcfdMem at 0x%08x] ", ptr08);
-                for (int i = 0; i < 32; ++i) std::fprintf(stderr, "%02x ", fcfdMem[i]);
-                std::fprintf(stderr, "\n");
-                std::memcpy(&seq, fcfdMem + 4, 4);
+                ps2xSafeLog( "[CID1:trace request] srcExtra=0x%08x size=%u (aligned=%u) op=0x%x slot=0x%08x seq=%u\n",
+                             srcExtra, cmdSize, alignedCmdSize, opcode, slotPtr, seq);
+                const uint32_t dumpLen = std::min(cmdSize, 64u);
+                std::string reqDump = "  req bytes[" + std::to_string(dumpLen) + "]:";
+                char bbuf[8];
+                for (uint32_t i = 0; i < dumpLen; ++i) { std::snprintf(bbuf, sizeof(bbuf), " %02x", src[i]); reqDump += bbuf; }
+                reqDump += "\n";
+                ps2xSafeLog("%s", reqDump.c_str());
+                std::fflush(stderr);
             }
 
-            struct SifReplyPacketCid1
+#pragma pack(push, 1)
+            struct SifReplyPacketCid1Full
             {
-                uint32_t data = 0;
-                uint32_t packet_size = 64;
-                uint32_t cid = 1;
-                uint32_t pad0 = 0;
+                uint32_t sifData = 0;
+                uint32_t sifPacketSize = sizeof(SifReplyPacketCid1Full);
+                uint32_t sifCid = 1;
+                uint32_t sifPad0 = 0;
+
                 uint32_t pad1 = 0;
-                uint32_t cmd_type = 0;
-                uint32_t destExtra = 0;
+                uint32_t cmd = 0;
+                uint32_t slotPtr = 0;
                 uint32_t seq = 0;
                 uint32_t result = 0;
-                uint32_t pad2 = 0;
-                uint32_t success = 1;
-                uint32_t pad3[5] = {0};
+                uint32_t ringTail = 0;
+                uint32_t isDone = 1;
+                uint32_t statDstPtr = 0;
+
+                uint8_t statData[64] = {};
             } reply{};
+#pragma pack(pop)
+            static_assert(sizeof(SifReplyPacketCid1Full) == 112, "SifReplyPacketCid1Full must be 112 bytes");
 
-            reply.destExtra = ptr08 != 0u ? ptr08 : srcExtra;
+            reply.cmd = opcode;
+            reply.slotPtr = slotPtr;
             reply.seq = seq;
-            reply.result = 0;
-            reply.success = 1;
+            reply.ringTail = ringTail;
+            reply.isDone = 1;
 
-            std::fprintf(stderr, "[sceSifSendCmd:CID1] Dispatching reply: destExtra=0x%08x seq=%u\n", reply.destExtra, reply.seq);
+            switch (opcode)
+            {
+            case 0x03: // Open
+            {
+                const char *pathPtr = reinterpret_cast<const char *>(src + 0x20);
+                std::string path(pathPtr);
+                const auto *entry = ps2x::vfi::VfiArchive::instance().find(path);
+                if (!entry)
+                {
+                    ps2xSafeLog( "[CID1:Open] NOT FOUND: '%s'\n", path.c_str());
+                    reply.result = static_cast<uint32_t>(-1);
+                }
+                else
+                {
+                    constexpr int kCid1FdBase = 3;
+                    int allocSlot = -1;
+                    for (int i = 0; i < 16; ++i)
+                    {
+                        if (!s_vfiDescriptors[i].open)
+                        {
+                            allocSlot = i;
+                            break;
+                        }
+                    }
+                    if (allocSlot < 0)
+                    {
+                        ps2xSafeLog( "[CID1:Open] ERROR: out of FDs for '%s'\n", path.c_str());
+                        reply.result = static_cast<uint32_t>(-1);
+                    }
+                    else
+                    {
+                        s_vfiDescriptors[allocSlot].open = true;
+                        s_vfiDescriptors[allocSlot].entry = *entry;
+                        s_vfiDescriptors[allocSlot].offset = 0;
+                        int allocFd = allocSlot + kCid1FdBase;
+                        reply.result = static_cast<uint32_t>(allocFd);
+                        ps2xSafeLog( "[CID1:Open] fd=%d (slot=%d) -> '%s' (size=%llu, LSN=%u)\n",
+                                     allocFd, allocSlot, path.c_str(), static_cast<unsigned long long>(entry->fileSize), entry->isoLsn);
+                    }
+                }
+                break;
+            }
+            case 0x04: // Close
+            {
+                constexpr int kCid1FdBase = 3;
+                uint32_t fd = *reinterpret_cast<const uint32_t *>(src + 0x10);
+                int fdSlot = static_cast<int>(fd) - kCid1FdBase;
+                if (fdSlot >= 0 && fdSlot < 16 && s_vfiDescriptors[fdSlot].open)
+                {
+                    s_vfiDescriptors[fdSlot].open = false;
+                    reply.result = 0;
+                    ps2xSafeLog( "[CID1:Close] fd=%u (slot=%d)\n", fd, fdSlot);
+                }
+                else
+                {
+                    ps2xSafeLog( "[CID1:Close] fd=%u (slot=%d) INVALID\n", fd, fdSlot);
+                    reply.result = static_cast<uint32_t>(-1);
+                }
+                break;
+            }
+            case 0x06: // Read fd
+            {
+                constexpr int kCid1FdBase = 3;
+                uint32_t fd = *reinterpret_cast<const uint32_t *>(src + 0x10);
+                uint32_t eeDst = *reinterpret_cast<const uint32_t *>(src + 0x14);
+                uint32_t reqSize = *reinterpret_cast<const uint32_t *>(src + 0x18);
+                int fdSlot = static_cast<int>(fd) - kCid1FdBase;
+                if (fdSlot >= 0 && fdSlot < 16 && s_vfiDescriptors[fdSlot].open)
+                {
+                    auto &slot = s_vfiDescriptors[fdSlot];
+                    uint64_t avail = (slot.entry.fileSize > slot.offset) ? (slot.entry.fileSize - slot.offset) : 0ull;
+                    uint64_t toRead = std::min(static_cast<uint64_t>(reqSize), avail);
+                    if (eeDst + toRead > PS2_RAM_SIZE)
+                    {
+                        ps2xSafeLog( "[CID1:ReadFd] ERROR: eeDst 0x%08x + %llu exceeds RAM\n", eeDst, (unsigned long long)toRead);
+                        reply.result = static_cast<uint32_t>(-1);
+                    }
+                    else
+                    {
+                        if (toRead > 0)
+                        {
+                            ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + eeDst);
+                        }
+                        slot.offset += toRead;
+                        reply.result = static_cast<uint32_t>(toRead);
+
+                        uint32_t crc = 0xFFFFFFFFu;
+                        for (size_t i = 0; i < toRead; ++i)
+                        {
+                            crc ^= (rdram + eeDst)[i];
+                            for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+                        }
+                        crc ^= 0xFFFFFFFFu;
+
+                        ps2xSafeLog( "[CID1:ReadFd] fd=%u eeDst=0x%08x req=%u read=%llu (newOff=%llu CRC32=0x%08X)\n",
+                                     fd, eeDst, reqSize, (unsigned long long)toRead, (unsigned long long)slot.offset, crc);
+                    }
+                }
+                else
+                {
+                    ps2xSafeLog( "[CID1:ReadFd] fd=%u INVALID\n", fd);
+                    reply.result = static_cast<uint32_t>(-1);
+                }
+                break;
+            }
+            case 0x07: // Seek
+            {
+                constexpr int kCid1FdBase = 3;
+                uint32_t fd = *reinterpret_cast<const uint32_t *>(src + 0x10);
+                int32_t seekOffset = *reinterpret_cast<const int32_t *>(src + 0x14);
+                uint32_t whence = *reinterpret_cast<const uint32_t *>(src + 0x18);
+                int fdSlot = static_cast<int>(fd) - kCid1FdBase;
+                if (fdSlot >= 0 && fdSlot < 16 && s_vfiDescriptors[fdSlot].open)
+                {
+                    auto &slot = s_vfiDescriptors[fdSlot];
+                    int64_t newOff = 0;
+                    if (whence == 0) // SEEK_SET
+                        newOff = seekOffset;
+                    else if (whence == 1) // SEEK_CUR
+                        newOff = static_cast<int64_t>(slot.offset) + seekOffset;
+                    else if (whence == 2) // SEEK_END
+                        newOff = static_cast<int64_t>(slot.entry.fileSize) + seekOffset;
+                    if (newOff < 0) newOff = 0;
+                    if (static_cast<uint64_t>(newOff) > slot.entry.fileSize) newOff = static_cast<int64_t>(slot.entry.fileSize);
+                    slot.offset = static_cast<uint64_t>(newOff);
+                    reply.result = static_cast<uint32_t>(newOff);
+                    ps2xSafeLog( "[CID1:Seek] fd=%u whence=%u off=%d -> newOff=%lld\n", fd, whence, seekOffset, (long long)newOff);
+                }
+                else
+                {
+                    ps2xSafeLog( "[CID1:Seek] fd=%u INVALID\n", fd);
+                    reply.result = static_cast<uint32_t>(-1);
+                }
+                break;
+            }
+            case 0x09: // Getstat
+            {
+                uint32_t statDst = *reinterpret_cast<const uint32_t *>(src + 0x10);
+                const char *pathPtr = reinterpret_cast<const char *>(src + 0x18);
+                std::string path(pathPtr);
+                const auto *entry = ps2x::vfi::VfiArchive::instance().find(path);
+                const auto *dirEntry = entry ? nullptr : ps2x::vfi::VfiArchive::instance().findDir(path);
+                if (!entry && !dirEntry)
+                {
+                    ps2xSafeLog( "[CID1:Getstat] NOT FOUND: '%s'\n", path.c_str());
+                    reply.result = static_cast<uint32_t>(-1);
+                }
+                else
+                {
+                    uint8_t statBuf[64] = {};
+                    if (entry)
+                    {
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x00) = 0x1000u; // mode: regular file
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x04) = entry->startSector;
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x08) = static_cast<uint32_t>(entry->fileSize);
+                        *reinterpret_cast<uint64_t *>(statBuf + 0x08) = entry->fileSize;
+                        ps2xSafeLog( "[CID1:Getstat] '%s' -> FILE size=%llu startSec=%u\n",
+                                     path.c_str(), static_cast<unsigned long long>(entry->fileSize), entry->startSector);
+                    }
+                    else
+                    {
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x00) = 0x2000u; // mode: directory
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x04) = 0u;
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x08) = 0u;
+                        *reinterpret_cast<uint64_t *>(statBuf + 0x08) = 0ull;
+                        ps2xSafeLog( "[CID1:Getstat] '%s' -> DIR (mode=0x2000)\n", path.c_str());
+                    }
+                    reply.statDstPtr = statDst;
+                    std::memcpy(reply.statData, statBuf, 64);
+                    if (statDst != 0u && statDst + 64 <= PS2_RAM_SIZE)
+                    {
+                        std::memcpy(rdram + statDst, statBuf, 64);
+                    }
+                    reply.result = 0;
+                }
+                break;
+            }
+            case 0x0A: // Getstat (alternate format with path at +0x20)
+            {
+                uint32_t statDst = *reinterpret_cast<const uint32_t *>(src + 0x10);
+                const char *pathPtr = reinterpret_cast<const char *>(src + 0x20);
+                std::string path(pathPtr);
+                const auto *entry = ps2x::vfi::VfiArchive::instance().find(path);
+                const auto *dirEntry = entry ? nullptr : ps2x::vfi::VfiArchive::instance().findDir(path);
+                if (!entry && !dirEntry)
+                {
+                    ps2xSafeLog( "[CID1:Getstat-0x0A] NOT FOUND: '%s'\n", path.c_str());
+                    reply.result = static_cast<uint32_t>(-1);
+                }
+                else
+                {
+                    uint8_t statBuf[64] = {};
+                    if (entry)
+                    {
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x00) = 0x1000u; // mode: regular file
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x04) = entry->startSector;
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x08) = static_cast<uint32_t>(entry->fileSize);
+                        *reinterpret_cast<uint64_t *>(statBuf + 0x08) = entry->fileSize;
+                        ps2xSafeLog( "[CID1:Getstat-0x0A] '%s' -> FILE size=%llu startSec=%u\n",
+                                     path.c_str(), static_cast<unsigned long long>(entry->fileSize), entry->startSector);
+                    }
+                    else
+                    {
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x00) = 0x2000u; // mode: directory
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x04) = 0u;
+                        *reinterpret_cast<uint32_t *>(statBuf + 0x08) = 0u;
+                        *reinterpret_cast<uint64_t *>(statBuf + 0x08) = 0ull;
+                        ps2xSafeLog( "[CID1:Getstat-0x0A] '%s' -> DIR (mode=0x2000)\n", path.c_str());
+                    }
+                    reply.statDstPtr = statDst;
+                    std::memcpy(reply.statData, statBuf, 64);
+                    if (statDst != 0u && statDst + 64 <= PS2_RAM_SIZE)
+                    {
+                        std::memcpy(rdram + statDst, statBuf, 64);
+                    }
+                    reply.result = 0;
+                }
+                break;
+            }
+            case 0x0B: // Read path
+            {
+                uint32_t eeDst = *reinterpret_cast<const uint32_t *>(src + 0x10);
+                uint32_t fileOffset = *reinterpret_cast<const uint32_t *>(src + 0x14);
+                uint32_t reqSize = *reinterpret_cast<const uint32_t *>(src + 0x18);
+                const char *pathPtr = reinterpret_cast<const char *>(src + 0x20);
+                std::string path(pathPtr);
+                const auto *entry = ps2x::vfi::VfiArchive::instance().find(path);
+                if (!entry)
+                {
+                    ps2xSafeLog( "[CID1:ReadPath] NOT FOUND: '%s'\n", path.c_str());
+                    reply.result = static_cast<uint32_t>(-1);
+                }
+                else
+                {
+                    uint64_t avail = (entry->fileSize > fileOffset) ? (entry->fileSize - fileOffset) : 0ull;
+                    uint64_t toRead = (reqSize == 0u) ? avail : std::min(static_cast<uint64_t>(reqSize), avail);
+                    if (eeDst + toRead > PS2_RAM_SIZE)
+                    {
+                        ps2xSafeLog( "[CID1:ReadPath] ERROR: eeDst 0x%08x + %llu exceeds RAM\n", eeDst, (unsigned long long)toRead);
+                        reply.result = static_cast<uint32_t>(-1);
+                    }
+                    else
+                    {
+                        if (toRead > 0)
+                        {
+                            ps2x::vfi::VfiArchive::instance().readFileData(*entry, fileOffset, toRead, rdram + eeDst);
+                        }
+                        reply.result = static_cast<uint32_t>(toRead);
+
+                        uint32_t crc = 0xFFFFFFFFu;
+                        for (size_t i = 0; i < toRead; ++i)
+                        {
+                            crc ^= (rdram + eeDst)[i];
+                            for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+                        }
+                        crc ^= 0xFFFFFFFFu;
+
+                        ps2xSafeLog( "[CID1:ReadPath] '%s' off=%u reqSize=%u -> read %llu bytes to 0x%08x (CRC32=0x%08X)\n",
+                                     path.c_str(), fileOffset, reqSize, (unsigned long long)toRead, eeDst, crc);
+                    }
+                }
+                break;
+            }
+            case 0x0D: // Mount
+            {
+                reply.result = 0;
+                ps2xSafeLog( "[CID1:Mount] Mount acknowledged\n");
+                break;
+            }
+            default:
+            {
+                uint32_t flags = (cmdSize >= 0x18) ? *reinterpret_cast<const uint32_t *>(src + 0x14) : 0u;
+                ps2xSafeLog( "[cid1] UNIMPLEMENTED cmd=0x%02x flags=0x%x\n", opcode, flags);
+                reply.result = static_cast<uint32_t>(-1);
+                break;
+            }
+            }
+
+            if (doTrace)
+            {
+                ps2xSafeLog( "[CID1:trace reply] destExtra=0x%08x ringTail=0x%08x res=0x%x\n",
+                             destExtra, reply.ringTail, reply.result);
+                const uint8_t *rptr = reinterpret_cast<const uint8_t *>(&reply);
+                std::string repDump;
+                char rbuf[8];
+                for (size_t i = 0; i < sizeof(reply); ++i) { std::snprintf(rbuf, sizeof(rbuf), "%02x ", rptr[i]); repDump += rbuf; }
+                repDump += "\n";
+                ps2xSafeLog("%s", repDump.c_str());
+            }
             std::fflush(stderr);
 
             ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
@@ -1265,7 +1657,7 @@ namespace ps2_syscalls
                 std::memcpy(&regIndex, p + 0x10, 4);
                 std::memcpy(&regVal, p + 0x14, 4);
 
-                std::fprintf(stderr, "[sceSifSendCmd:SETSREG] index=%u value=0x%x\n", regIndex, regVal);
+                ps2xSafeLog( "[sceSifSendCmd:SETSREG] index=%u value=0x%x\n", regIndex, regVal);
                 std::fflush(stderr);
 
                 if (regIndex < 32)
@@ -1287,7 +1679,7 @@ namespace ps2_syscalls
                                 s_iopSregs[30] = sreg30;
                             }
                             std::memcpy(sregMem + 30 * 4, &sreg30, 4);
-                            std::fprintf(stderr, "[sceSifSendCmd:HANDSHAKE] IOP handshake acknowledged: sreg[31]=1 sreg[30]=0x%x\n", sreg30);
+                            ps2xSafeLog( "[sceSifSendCmd:HANDSHAKE] IOP handshake acknowledged: sreg[31]=1 sreg[30]=0x%x\n", sreg30);
                             std::fflush(stderr);
                         }
                     }
