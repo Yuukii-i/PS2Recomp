@@ -442,6 +442,32 @@ namespace
     }
 }
 
+#include <atomic>
+#include <vector>
+#include <utility>
+
+static std::atomic<uint32_t> s_diagPrimsPerFbp[512]{};
+void gsRecordPrimitiveFbp(uint32_t fbp)
+{
+    if (fbp < 512u)
+    {
+        s_diagPrimsPerFbp[fbp].fetch_add(1u, std::memory_order_relaxed);
+    }
+}
+
+void gsGetAndResetPrimsPerFbp(std::vector<std::pair<uint32_t, uint32_t>> &out)
+{
+    out.clear();
+    for (uint32_t i = 0; i < 512u; ++i)
+    {
+        uint32_t count = s_diagPrimsPerFbp[i].exchange(0u, std::memory_order_relaxed);
+        if (count > 0u)
+        {
+            out.emplace_back(i, count);
+        }
+    }
+}
+
 GSCpuBackend::GSCpuBackend()
 {
     using namespace GSMem;
@@ -590,6 +616,10 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 
 void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
+    const uint32_t effectiveCbp = (tex0.cbp != 0u) ? tex0.cbp : m_clutCbp[0];
+    if (effectiveCbp == 0u)
+        return;
+
     const bool fourBit = isFourBitIndexedPsm(tex0.psm);
     const bool sixteenBit = tex0.cpsm == GS_PSM_CT16 || tex0.cpsm == GS_PSM_CT16S;
     const bool thirtyTwoBit = tex0.cpsm == GS_PSM_CT32 || tex0.cpsm == GS_PSM_CT24;
@@ -622,7 +652,7 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
             sourceY = static_cast<uint32_t>(texclut.cov);
         }
 
-        const uint32_t raw = ReadTextureVramUnlocked(tex0.cpsm, tex0.cbp, sourceWidth, sourceX, sourceY); 
+        const uint32_t raw = ReadTextureVramUnlocked(tex0.cpsm, effectiveCbp, sourceWidth, sourceX, sourceY); 
         const uint32_t destination = (loadCsm1Suffix ? entry : destinationBase + entry) & (sixteenBit ? 0x1FFu : 0x0FFu);
         if (sixteenBit)
         {
@@ -714,6 +744,13 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     const auto &ctx = state.context;
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
+        if (primitiveIndex == 64u)
+        {
+            extern void ps2xSafeLog(const char *fmt, ...);
+            ps2xSafeLog("[log] cap reached for tag gs:prim at idx 64\n");
+            std::fflush(stderr);
+        }
+        gsRecordPrimitiveFbp(ctx.frame.fbp);
         if (primitiveIndex < 64u)
         {
             std::cout << "[gs:prim] idx=" << primitiveIndex
@@ -820,7 +857,10 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 
     if (state.prim.tme && (isFourBitIndexedPsm(ctx.tex0.psm) || isEightBitIndexedPsm(ctx.tex0.psm)))
     {
-        LoadClutUnlocked(ctx.tex0, state.texclut);
+        if (ctx.tex0.cbp != 0u || m_clutCbp[0] != 0u)
+        {
+            LoadClutUnlocked(ctx.tex0, state.texclut);
+        }
     }
 
     switch (state.prim.type)
@@ -1899,7 +1939,7 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
         if (pixels.empty() && !CopyFrameToHostRgba(displayFrame, width, height, pixels, preserveAlpha, true, true, origin.x, origin.y))
             return false;
 
-        if (!usedPreferred && displayFrame.fbp == 0u && countNonBlackPixels(pixels, width, height) == 0u)
+        if (!usedPreferred && countNonBlackPixels(pixels, width, height) <= 256u)
         {
             for (const GSFrameReg &candidate : request.contextFrames)
             {

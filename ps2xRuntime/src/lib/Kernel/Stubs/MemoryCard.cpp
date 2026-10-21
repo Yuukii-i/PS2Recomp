@@ -1,6 +1,9 @@
 #include "Common.h"
 #include "MemoryCard.h"
 
+#include <atomic>
+std::atomic<uint32_t> g_diagMcCalls{0};
+
 namespace ps2_stubs
 {
     namespace
@@ -696,6 +699,7 @@ namespace ps2_stubs
 
     void sceMcGetDir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        g_diagMcCalls.fetch_add(1, std::memory_order_relaxed);
         const int32_t port = static_cast<int32_t>(getRegU32(ctx, 4));
         const int32_t slot = static_cast<int32_t>(getRegU32(ctx, 5));
         const std::string rawPath = readPs2CStringBounded(rdram, getRegU32(ctx, 6), kMcMaxPathLen);
@@ -840,6 +844,22 @@ namespace ps2_stubs
                 }
             }
 
+            if (result == kMcResultNoEntry)
+            {
+                const char *mcEnv = std::getenv("PS2X_MC_GETDIR");
+                const char *modeStr = "noentry";
+                if (mcEnv && std::strcmp(mcEnv, "zero") == 0)
+                {
+                    result = 0;
+                    modeStr = "zero";
+                }
+                else if (mcEnv && std::strcmp(mcEnv, "nodev") == 0)
+                {
+                    result = kMcResultNoFormat;
+                    modeStr = "nodev";
+                }
+                RUNTIME_LOG("[MC] GetDir non-existent dir returned " << result << " (mode=" << modeStr << ")");
+            }
             setMcCommandResultLocked(kMcCmdGetDir, result);
         }
         RUNTIME_LOG("[MC] GetDir port=" << port << " '" << rawPath

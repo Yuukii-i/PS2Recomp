@@ -1,4 +1,7 @@
 #include "ps2_runtime.h"
+#include "diag/DiagSampler.h"
+std::atomic<uint32_t> g_diagMscalCount{0};
+std::atomic<uint32_t> g_diagGifPacketCount{0};
 #include "ps2_log.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -492,6 +495,11 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                         frameHash);
         }
         ++s_uploadDebugCount;
+        if (s_uploadDebugCount == 128u)
+        {
+            ps2xSafeLog("[log] cap reached for tag frame:upload at idx 128\n");
+            std::fflush(stderr);
+        }
     });
     s_lastDisplayFbp = displayFbp;
     s_lastSourceFbp = sourceFbp;
@@ -524,6 +532,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     outWidth = width;
     outHeight = height;
     s_hasUploadedFrame = true;
+    ps2_diag::DiagSampler::onFrame(rt, currentTick, s_uploadBuffer, displayFbp, sourceFbp, width, height);
 
     static uint64_t s_lastDumpTick = std::numeric_limits<uint64_t>::max();
     static uint32_t s_frameDumpCount = 0u;
@@ -838,10 +847,11 @@ bool PS2Runtime::syncCoreSubsystems()
 
     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
-                                    { m_gs.processGIFPacket(data, size); });
+                                    { g_diagGifPacketCount.fetch_add(1, std::memory_order_relaxed); m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
+                                     g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
                                      if (!cpuContext)
                                      {

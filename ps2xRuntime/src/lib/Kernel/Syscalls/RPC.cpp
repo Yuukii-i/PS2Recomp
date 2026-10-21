@@ -7,6 +7,33 @@
 
 void ps2xSafeLog(const char *fmt, ...);
 
+#include <atomic>
+#include <mutex>
+#include <cstring>
+#include <string>
+
+std::atomic<uint32_t> g_diagSg2Fno0Calls{0};
+std::atomic<uint32_t> g_diagDbcBufferWrites{0};
+std::atomic<uint32_t> g_diagCid1Requests{0};
+std::atomic<uint64_t> g_diagCid1BytesServed{0};
+static std::mutex s_diagCid1PathMutex;
+static char s_diagLastCid1Path[256] = "";
+
+void diagGetLastCid1Path(char *out, size_t maxLen)
+{
+    if (!out || maxLen == 0) return;
+    std::lock_guard<std::mutex> lock(s_diagCid1PathMutex);
+    std::strncpy(out, s_diagLastCid1Path, maxLen - 1);
+    out[maxLen - 1] = '\0';
+}
+
+void diagSetLastCid1Path(const std::string &path)
+{
+    std::lock_guard<std::mutex> lock(s_diagCid1PathMutex);
+    std::strncpy(s_diagLastCid1Path, path.c_str(), sizeof(s_diagLastCid1Path) - 1);
+    s_diagLastCid1Path[sizeof(s_diagLastCid1Path) - 1] = '\0';
+}
+
 namespace ps2_syscalls
 {
     namespace
@@ -67,6 +94,8 @@ namespace ps2_syscalls
         static uint32_t s_dbcSeq = 1u;
         static uint32_t s_dbcPort0BufA = 0x00784D40u;
         static uint32_t s_dbcPort0BufB = 0x00784DC0u;
+        static uint32_t s_dbcPort1BufA = 0x00784E80u;
+        static uint32_t s_dbcPort1BufB = 0x00784F00u;
         static uint32_t s_dbcWorkAddr = 0x00757D40u;
 
         static void dbcWritePacket(uint8_t *rdram, uint32_t addr, const ps2_stubs::PadInputState &pad, uint32_t seq)
@@ -112,17 +141,32 @@ namespace ps2_syscalls
         static void dbcUpdatePadBuffers(uint8_t *rdram, PS2Runtime *runtime)
         {
             if (!rdram) return;
-            ps2_stubs::PadInputState pad = ps2_stubs::getCurrentPadInput(0, runtime);
+            ps2_stubs::PadInputState pad0 = ps2_stubs::getCurrentPadInput(0, runtime);
 
             s_dbcSeq++;
-            uint32_t activeBuf = (s_dbcSeq & 1) ? s_dbcPort0BufB : s_dbcPort0BufA;
-            uint32_t olderBuf  = (s_dbcSeq & 1) ? s_dbcPort0BufA : s_dbcPort0BufB;
+            uint32_t activeBuf0 = (s_dbcSeq & 1) ? s_dbcPort0BufB : s_dbcPort0BufA;
+            uint32_t olderBuf0  = (s_dbcSeq & 1) ? s_dbcPort0BufA : s_dbcPort0BufB;
 
-            dbcWritePacket(rdram, olderBuf, pad, s_dbcSeq - 1);
-            dbcWritePacket(rdram, activeBuf, pad, s_dbcSeq);
-            if (s_dbcWorkAddr) {
-                dbcWritePacket(rdram, s_dbcWorkAddr, pad, s_dbcSeq);
+            if (olderBuf0)  dbcWritePacket(rdram, olderBuf0, pad0, s_dbcSeq - 1);
+            if (activeBuf0) dbcWritePacket(rdram, activeBuf0, pad0, s_dbcSeq);
+
+            if (s_dbcPort1BufA && s_dbcPort1BufB) {
+                ps2_stubs::PadInputState pad1 = ps2_stubs::getCurrentPadInput(1, runtime);
+                uint32_t activeBuf1 = (s_dbcSeq & 1) ? s_dbcPort1BufB : s_dbcPort1BufA;
+                uint32_t olderBuf1  = (s_dbcSeq & 1) ? s_dbcPort1BufA : s_dbcPort1BufB;
+                dbcWritePacket(rdram, olderBuf1, pad1, s_dbcSeq - 1);
+                dbcWritePacket(rdram, activeBuf1, pad1, s_dbcSeq);
             }
+
+            if (s_dbcWorkAddr) {
+                if (uint8_t *workDst = getMemPtr(rdram, s_dbcWorkAddr)) {
+                    uint32_t status0 = 1; // Port 0 connected
+                    uint32_t status1 = 1; // Port 1 connected
+                    std::memcpy(workDst, &status0, 4);
+                    std::memcpy(workDst + 4, &status1, 4);
+                }
+            }
+            g_diagDbcBufferWrites.fetch_add(1, std::memory_order_relaxed);
         }
 
         static void initRpcHleServices()
@@ -180,14 +224,62 @@ namespace ps2_syscalls
                         {
                             if (const uint8_t *src = getConstMemPtr(call.rdram, call.sendBuf))
                             {
+                                uint32_t port = 0;
+                                std::memcpy(&port, src + 8, 4);
                                 uint32_t bufA = 0, bufB = 0;
                                 std::memcpy(&bufA, src + 0x28, 4);
                                 std::memcpy(&bufB, src + 0x2C, 4);
-                                if (bufA) s_dbcPort0BufA = bufA;
-                                if (bufB) s_dbcPort0BufB = bufB;
+                                if (port == 0)
+                                {
+                                    if (bufA) s_dbcPort0BufA = bufA;
+                                    if (bufB) s_dbcPort0BufB = bufB;
+                                }
+                                else
+                                {
+                                    if (bufA) s_dbcPort1BufA = bufA;
+                                    if (bufB) s_dbcPort1BufB = bufB;
+                                }
+                                if (call.recvBuf && call.recvSize >= 0x28)
+                                {
+                                    if (uint8_t *dst = getMemPtr(call.rdram, call.recvBuf))
+                                    {
+                                        uint32_t one = 1;
+                                        std::memcpy(dst, &one, 4);
+                                        std::memcpy(dst + 0x24, &port, 4);
+                                    }
+                                }
+                                ps2xSafeLog("[rpc:dbc] Registered port %u buffers: A=0x%08x B=0x%08x\n", port, bufA, bufB);
+                                fflush(stderr);
                             }
                         }
                         dbcUpdatePadBuffers(call.rdram, call.runtime);
+                        return 0;
+                    }
+                    if (call.rpcNum == 0x80001303u) // DBC check/poll port connection
+                    {
+                        if (call.recvBuf && call.recvSize >= 8)
+                        {
+                            if (uint8_t *dst = getMemPtr(call.rdram, call.recvBuf))
+                            {
+                                uint32_t status = 1; // 1 = connected
+                                std::memcpy(dst + 4, &status, 4);
+                            }
+                        }
+                        return 0;
+                    }
+                    if (call.rpcNum == 0x8000131au) // DBC get pad mode / capabilities
+                    {
+                        if (call.recvBuf && call.recvSize >= 0x90)
+                        {
+                            if (uint8_t *dst = getMemPtr(call.rdram, call.recvBuf))
+                            {
+                                uint32_t retLen = 1;
+                                uint32_t retCode = 0;
+                                std::memcpy(dst + 8, &retLen, 4);
+                                dst[0xC] = 0x07; // DualShock 2 analog controller mode
+                                std::memcpy(dst + 0x8C, &retCode, 4);
+                            }
+                        }
                         return 0;
                     }
                     return 0;
@@ -305,6 +397,7 @@ namespace ps2_syscalls
                         rpcZeroRdram(call.rdram, call.recvBuf, zeroBytes);
                     }
                     dbcUpdatePadBuffers(call.rdram, call.runtime);
+                    g_diagSg2Fno0Calls.fetch_add(1, std::memory_order_relaxed);
                     return 0;
                 }
             };
@@ -1393,6 +1486,7 @@ namespace ps2_syscalls
 
             uint32_t alignedCmdSize = (cmdSize + 15u) & ~15u;
             uint32_t ringTail = destExtra + alignedCmdSize;
+            g_diagCid1Requests.fetch_add(1, std::memory_order_relaxed);
 
             const char *traceEnv = std::getenv("PS2X_CID1_TRACE");
             const bool doTrace = (traceEnv && std::strcmp(traceEnv, "1") == 0);
@@ -1443,6 +1537,7 @@ namespace ps2_syscalls
             {
                 const char *pathPtr = reinterpret_cast<const char *>(src + 0x20);
                 std::string path(pathPtr);
+                    diagSetLastCid1Path(path);
                 const auto *entry = ps2x::vfi::VfiArchive::instance().find(path);
                 if (!entry)
                 {
@@ -1521,6 +1616,8 @@ namespace ps2_syscalls
                             ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + eeDst);
                         }
                         slot.offset += toRead;
+                        g_diagCid1BytesServed.fetch_add(toRead, std::memory_order_relaxed);
+                        diagSetLastCid1Path(slot.entry.fullPath);
                         reply.result = static_cast<uint32_t>(toRead);
 
                         uint32_t crc = 0xFFFFFFFFu;
@@ -1684,6 +1781,8 @@ namespace ps2_syscalls
                         {
                             ps2x::vfi::VfiArchive::instance().readFileData(*entry, fileOffset, toRead, rdram + eeDst);
                         }
+                        g_diagCid1BytesServed.fetch_add(toRead, std::memory_order_relaxed);
+                        diagSetLastCid1Path(path);
                         reply.result = static_cast<uint32_t>(toRead);
 
                         uint32_t crc = 0xFFFFFFFFu;

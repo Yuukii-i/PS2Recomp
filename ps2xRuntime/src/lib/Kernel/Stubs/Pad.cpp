@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "Pad.h"
 
+extern void ps2xSafeLog(const char *fmt, ...);
 namespace ps2_stubs
 {
     namespace
@@ -637,6 +638,16 @@ namespace ps2_stubs
         }
 
         PS2_IF_AGRESSIVE_LOGS({
+            if (g_padReadLogCount == 48)
+            {
+                static bool s_padCapReported = false;
+                if (!s_padCapReported)
+                {
+                    s_padCapReported = true;
+                    ::ps2xSafeLog("[log] cap reached for tag pad:read at idx 48\n");
+                    std::fflush(stderr);
+                }
+            }
             if (g_padReadLogCount < 48)
             {
                 const int gamepad = findFirstGamepad();
@@ -882,6 +893,77 @@ namespace ps2_stubs
                 applyKeyboardState(state, true);
             }
         }
+
+        // PS2X_INJECT_PAD support
+        struct PadInjection {
+            std::string button;
+            uint16_t mask = 0;
+            uint64_t startMs = 0;
+            uint64_t durMs = 0;
+            bool active = false;
+        };
+        static std::vector<PadInjection> s_injections;
+        static bool s_injParsed = false;
+        static auto s_bootTime = std::chrono::steady_clock::now();
+
+        if (!s_injParsed)
+        {
+            s_injParsed = true;
+            const char *env = std::getenv("PS2X_INJECT_PAD");
+            if (env && env[0] != '\0')
+            {
+                std::string str(env);
+                size_t pos = 0;
+                while (pos < str.size())
+                {
+                    size_t comma = str.find(',', pos);
+                    std::string item = str.substr(pos, (comma == std::string::npos) ? std::string::npos : (comma - pos));
+                    pos = (comma == std::string::npos) ? str.size() : (comma + 1);
+
+                    size_t c1 = item.find(':');
+                    size_t c2 = (c1 != std::string::npos) ? item.find(':', c1 + 1) : std::string::npos;
+                    if (c1 != std::string::npos && c2 != std::string::npos)
+                    {
+                        PadInjection inj;
+                        inj.button = item.substr(0, c1);
+                        try {
+                            inj.startMs = std::stoull(item.substr(c1 + 1, c2 - c1 - 1));
+                            inj.durMs = std::stoull(item.substr(c2 + 1));
+                        } catch (...) { continue; }
+
+                        if (inj.button == "START") inj.mask = kPadBtnStart;
+                        else if (inj.button == "CROSS") inj.mask = kPadBtnCross;
+                        else if (inj.button == "CIRCLE") inj.mask = kPadBtnCircle;
+                        else if (inj.button == "UP") inj.mask = kPadBtnUp;
+                        else if (inj.button == "DOWN") inj.mask = kPadBtnDown;
+                        else if (inj.button == "LEFT") inj.mask = kPadBtnLeft;
+                        else if (inj.button == "RIGHT") inj.mask = kPadBtnRight;
+
+                        if (inj.mask != 0)
+                        {
+                            s_injections.push_back(inj);
+                        }
+                    }
+                }
+            }
+        }
+
+        const uint64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - s_bootTime).count();
+        for (auto &inj : s_injections)
+        {
+            bool shouldBeActive = (nowMs >= inj.startMs && nowMs < (inj.startMs + inj.durMs));
+            if (shouldBeActive != inj.active)
+            {
+                inj.active = shouldBeActive;
+                ::ps2xSafeLog("[pad] inject %s %s\n", inj.button.c_str(), shouldBeActive ? "down" : "up");
+                std::fflush(stderr);
+            }
+            if (inj.active)
+            {
+                state.buttons &= ~inj.mask;
+            }
+        }
+
         return state;
     }
 }
