@@ -1804,12 +1804,13 @@ namespace ps2_syscalls
                 }
                 break;
             }
-            case 0x07: // Seek
+            case 0x07: // Stream read / Seek+Read (file3.irx:0x1290 worker)
             {
                 constexpr int kCid1FdBase = 3;
                 uint32_t fd = *reinterpret_cast<const uint32_t *>(src + 0x10);
-                int32_t seekOffset = *reinterpret_cast<const int32_t *>(src + 0x14);
-                uint32_t whence = *reinterpret_cast<const uint32_t *>(src + 0x18);
+                uint32_t dstAddr = *reinterpret_cast<const uint32_t *>(src + 0x14);
+                uint32_t reqSize = *reinterpret_cast<const uint32_t *>(src + 0x18);
+                uint32_t flags = *reinterpret_cast<const uint32_t *>(src + 0x1C);
 
                 // Requirement 1: Log all raw 32-bit words of the CID1:Seek request
                 {
@@ -1829,25 +1830,31 @@ namespace ps2_syscalls
                 if (fdSlot >= 0 && fdSlot < 16 && s_vfiDescriptors[fdSlot].open)
                 {
                     auto &slot = s_vfiDescriptors[fdSlot];
-                    int64_t newOff = 0;
-                    uint32_t seekMode = whence & 0xFFFFu;
-                    if (seekMode == 0) // SEEK_SET
-                        newOff = seekOffset;
-                    else if (seekMode == 1) // SEEK_CUR
-                        newOff = static_cast<int64_t>(slot.offset) + seekOffset;
-                    else if (seekMode == 2) // SEEK_END
-                        newOff = static_cast<int64_t>(slot.entry.fileSize) + seekOffset;
-                    else
+                    const uint64_t remaining = (slot.offset < slot.entry.fileSize) ? (slot.entry.fileSize - slot.offset) : 0;
+                    const uint64_t toRead = std::min(static_cast<uint64_t>(reqSize), remaining);
+
+                    if (toRead > 0 && dstAddr != 0u && dstAddr < 0x02000000u && (dstAddr + toRead) <= 0x02000000u)
                     {
-                        ps2xSafeLog("[CID1:Seek] UNKNOWN whence=0x%08x (mode=%u)\n", whence, seekMode);
+                        ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + dstAddr);
                     }
-                    if (newOff < 0) newOff = 0;
-                    if (static_cast<uint64_t>(newOff) > slot.entry.fileSize) newOff = static_cast<int64_t>(slot.entry.fileSize);
-                    slot.offset = static_cast<uint64_t>(newOff);
-                    reply.result = 0; // file3.irx:0x0c30 returns 0 (SCE_OK)
+                    slot.offset += toRead;
+                    reply.result = static_cast<uint32_t>(toRead);
+                    reply.isDone = 1;
+
+                    // Direct writeback to slot descriptor to guarantee completion flag
+                    if (slotPtr != 0u)
+                    {
+                        if (uint8_t *slotMem = getMemPtr(rdram, slotPtr))
+                        {
+                            slotMem[0x0B] |= 0x80;
+                            *reinterpret_cast<uint32_t *>(slotMem + 0x0C) = static_cast<uint32_t>(slot.offset);
+                        }
+                    }
+
                     g_movieSeekDone.store(true, std::memory_order_relaxed);
-                    ps2xSafeLog("[CID1:Seek] fd=%u raw_whence=0x%08x (mode=%u) raw_offset=%d file_size=%llu -> returned_newOff=%lld\n",
-                                fd, whence, seekMode, seekOffset, (unsigned long long)slot.entry.fileSize, (long long)newOff);
+                    g_movieReadsCount.fetch_add(1, std::memory_order_relaxed);
+                    ps2xSafeLog("[CID1:Seek] fd=%u dstAddr=0x%08x reqSize=%u read=%llu newOff=%llu flags=0x%x\n",
+                                fd, dstAddr, reqSize, (unsigned long long)toRead, (unsigned long long)slot.offset, flags);
                 }
                 else
                 {
