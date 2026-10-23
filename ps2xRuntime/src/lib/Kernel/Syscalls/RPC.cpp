@@ -7,7 +7,7 @@
 
 void ps2xSafeLog(const char *fmt, ...);
 extern "C" bool IsGamepadAvailable(int gamepad);
-extern std::atomic<uint32_t> g_hostPadButtons;
+extern std::atomic<uint16_t> g_hostPadButtons;
 extern std::atomic<uint32_t> g_trackedCurVtable;
 extern std::atomic<bool> g_movieSeekDone;
 extern std::atomic<uint32_t> g_movieReadsCount;
@@ -1852,16 +1852,6 @@ namespace ps2_syscalls
                         }
                     }
 
-                    // Populate stream descriptor (0x006e3890 / 0x006e38a0) to match movie name so sub_004E2730:5328 vector comparison matches
-                    if (rdram)
-                    {
-                        uint32_t curScene = ::g_trackedCurScene.load(std::memory_order_relaxed);
-                        if (curScene != 0 && curScene < PS2_RAM_SIZE - 0x40)
-                        {
-                            std::memcpy(rdram + (0x006e3890u & PS2_RAM_MASK), rdram + ((curScene + 0x10) & PS2_RAM_MASK), 16);
-                            std::memset(rdram + (0x006e38a0u & PS2_RAM_MASK), 0, 16);
-                        }
-                    }
 
                     g_movieSeekDone.store(true, std::memory_order_relaxed);
                     g_movieReadsCount.fetch_add(1, std::memory_order_relaxed);

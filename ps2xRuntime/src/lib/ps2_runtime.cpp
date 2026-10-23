@@ -183,6 +183,22 @@ std::atomic<uint32_t> g_trackedCurVtable{0};
 std::atomic<bool> g_movieSeekDone{false};
 std::atomic<uint32_t> g_movieReadsCount{0};
 std::atomic<uint32_t> g_movieGetPictureCount{0};
+std::atomic<uint32_t> g_probe_319f38{0};
+std::atomic<uint32_t> g_probe_F{0};
+std::atomic<uint32_t> g_probe_G{0};
+std::atomic<uint32_t> g_probe_24bdc8{0};
+std::atomic<uint32_t> g_probe_31a240{0};
+std::atomic<uint32_t> g_probe_408e90{0};
+std::atomic<uint32_t> g_probe_408f68{0};
+std::atomic<uint32_t> g_probe_408fe0{0};
+std::atomic<uint32_t> g_probe_319e0c{0};
+std::atomic<uint32_t> g_probe_31a1b4{0};
+std::atomic<uint32_t> g_probe_4e2730{0};
+std::atomic<uint32_t> g_probe_H{0};
+std::atomic<uint32_t> g_probe_31a514{0};
+std::atomic<uint32_t> g_probe_31a514_ret{0};
+
+
 std::atomic<uint32_t> g_movieIsEndCount{0};
 std::atomic<bool> g_movieFallbackTriggered{false};
 std::atomic<uint32_t> g_movieSceneFrames{0};
@@ -1732,6 +1748,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         static RecompiledFunction s_orig408e90 = g_ps2RecompiledFunctionTable[slot408e90];
         replaceFunction(0x00408E90u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
             g_movieIsEndCount.fetch_add(1, std::memory_order_relaxed);
+            g_probe_408e90.fetch_add(1, std::memory_order_relaxed);
             static const char *fallbackEnv = std::getenv("PS2X_MOVIE_FALLBACK");
             static const bool s_movieFallback = (fallbackEnv && (fallbackEnv[0] == '1' || fallbackEnv[0] == 't'));
             if (s_movieFallback && g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u && g_movieSceneFrames.load(std::memory_order_relaxed) >= 120) {
@@ -1757,23 +1774,48 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         });
     }
 
-    // 0x00408D28: guest MPEG frame decode call in sub_0031A1B4:121
-    if (0x00408D28u >= g_ps2RecompiledFunctionTableBase && 0x00408D28u < g_ps2RecompiledFunctionTableEnd)
-    {
-        const uint32_t slot408d28 = (0x00408D28u - g_ps2RecompiledFunctionTableBase) >> 2;
-        static RecompiledFunction s_orig408d28 = g_ps2RecompiledFunctionTable[slot408d28];
-        replaceFunction(0x00408D28u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
-            ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
-            if (s_orig408d28)
-            {
-                s_orig408d28(rdram, ctx, runtime);
-            }
-            else
-            {
-                setReturnS32(ctx, 1);
-                ctx->pc = getRegU32(ctx, 31);
-            }
-        });
+
+
+    
+    // TASK AB Probes (Stateless lambdas for function pointer compatibility)
+#define INSTALL_STATENESS_PROBE(addr, counter) \
+    do { \
+        constexpr uint32_t probeAddr = (addr); \
+        if (probeAddr >= g_ps2RecompiledFunctionTableBase && probeAddr < g_ps2RecompiledFunctionTableEnd) { \
+            const uint32_t slot = (probeAddr - g_ps2RecompiledFunctionTableBase) >> 2; \
+            static RecompiledFunction s_origFunc = g_ps2RecompiledFunctionTable[slot]; \
+            if (s_origFunc) { \
+                replaceFunction(probeAddr, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) { \
+                    counter.fetch_add(1, std::memory_order_relaxed); \
+                    s_origFunc(rdram, ctx, runtime); \
+                }); \
+            } \
+        } \
+    } while (0)
+
+    INSTALL_STATENESS_PROBE(0x00319F38u, g_probe_319f38);
+    INSTALL_STATENESS_PROBE(0x0024C164u, g_probe_F);
+    INSTALL_STATENESS_PROBE(0x0024CE28u, g_probe_G);
+    INSTALL_STATENESS_PROBE(0x0024BDC8u, g_probe_24bdc8);
+    INSTALL_STATENESS_PROBE(0x0031A240u, g_probe_31a240);
+    INSTALL_STATENESS_PROBE(0x00408F68u, g_probe_408f68);
+    INSTALL_STATENESS_PROBE(0x00408FE0u, g_probe_408fe0);
+    INSTALL_STATENESS_PROBE(0x00319E0Cu, g_probe_319e0c);
+    INSTALL_STATENESS_PROBE(0x0031A1B4u, g_probe_31a1b4);
+    INSTALL_STATENESS_PROBE(0x004E2730u, g_probe_4e2730);
+    INSTALL_STATENESS_PROBE(0x0024C64Cu, g_probe_H);
+#undef INSTALL_STATENESS_PROBE
+
+    if (0x0031A514u >= g_ps2RecompiledFunctionTableBase && 0x0031A514u < g_ps2RecompiledFunctionTableEnd) {
+        const uint32_t slot31a514 = (0x0031A514u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig31a514 = g_ps2RecompiledFunctionTable[slot31a514];
+        if (s_orig31a514) {
+            replaceFunction(0x0031A514u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+                g_probe_31a514.fetch_add(1, std::memory_order_relaxed);
+                s_orig31a514(rdram, ctx, runtime);
+                g_probe_31a514_ret.store(getRegU32(ctx, 2), std::memory_order_relaxed);
+            });
+        }
     }
 
     // Trace sub_0052DFA8 (Update method of 0x006B0110 container)
@@ -4610,13 +4652,37 @@ void PS2Runtime::run()
                     std::memcpy(&flag771bb8, rdram + (0x00771bb8u & PS2_RAM_MASK), sizeof(flag771bb8));
                     std::memcpy(desc6e3890, rdram + (0x006e3890u & PS2_RAM_MASK), 16);
                 }
-                ps2xSafeLog("[movie] seekDone=%d reads=%u getPicture=%u isEnd=%u fallback=%d s3=0x%08x state=%u timer=%.2f flag771bb8=0x%x desc6e3890='%s'\n",
+                static uint32_t s_last_s3_state = 0xFFFFFFFF;
+                if (s3_state != s_last_s3_state) {
+                    ps2xSafeLog("[movie:state] s3=0x%08x state %u -> %u\n", s3, s_last_s3_state, s3_state);
+                    s_last_s3_state = s3_state;
+                }
+                uint32_t c_319f38 = g_probe_319f38.exchange(0, std::memory_order_relaxed);
+                uint32_t c_F = g_probe_F.exchange(0, std::memory_order_relaxed);
+                uint32_t c_G = g_probe_G.exchange(0, std::memory_order_relaxed);
+                uint32_t c_24bdc8 = g_probe_24bdc8.exchange(0, std::memory_order_relaxed);
+                uint32_t c_31a240 = g_probe_31a240.exchange(0, std::memory_order_relaxed);
+                uint32_t c_408e90 = g_probe_408e90.exchange(0, std::memory_order_relaxed);
+                uint32_t c_408f68 = g_probe_408f68.exchange(0, std::memory_order_relaxed);
+                uint32_t c_408fe0 = g_probe_408fe0.exchange(0, std::memory_order_relaxed);
+                uint32_t c_319e0c = g_probe_319e0c.exchange(0, std::memory_order_relaxed);
+                uint32_t c_31a1b4 = g_probe_31a1b4.exchange(0, std::memory_order_relaxed);
+                uint32_t c_4e2730 = g_probe_4e2730.exchange(0, std::memory_order_relaxed);
+                uint32_t c_H = g_probe_H.exchange(0, std::memory_order_relaxed);
+                uint32_t c_31a514 = g_probe_31a514.exchange(0, std::memory_order_relaxed);
+                uint32_t ret_31a514 = g_probe_31a514_ret.load(std::memory_order_relaxed);
+                uint32_t s3_100 = 0;
+                if (rdram && s3 != 0 && s3 < PS2_RAM_SIZE - 0x200) {
+                    std::memcpy(&s3_100, rdram + ((s3 + 0x100) & PS2_RAM_MASK), sizeof(s3_100));
+                }
+
+                ps2xSafeLog("[movie] seekDone=%d reads=%u gp_stub_hits=%u isEnd=%u 319f38=%u F=%u G=%u H=%u 24bdc8=%u 31a240=%u 408e90=%u 408f68=%u 408fe0=%u 319e0c=%u 31a1b4=%u 4e2730=%u 31a514=%u ret31a514=%u s3_100=%u s3=0x%08x state=%u timer=%.2f\n",
                             g_movieSeekDone.load() ? 1 : 0,
                             g_movieReadsCount.load(),
                             g_movieGetPictureCount.load(),
                             g_movieIsEndCount.load(),
-                            g_movieFallbackTriggered.load() ? 1 : 0,
-                            s3, s3_state, s3_timer, flag771bb8, desc6e3890);
+                            c_319f38, c_F, c_G, c_H, c_24bdc8, c_31a240, c_408e90, c_408f68, c_408fe0, c_319e0c, c_31a1b4, c_4e2730, c_31a514,
+                            ret_31a514, s3_100, s3, s3_state, s3_timer);
             }
 
             const auto timeInScene = std::chrono::duration_cast<std::chrono::seconds>(now - g_lastSceneTransitionTime).count();
