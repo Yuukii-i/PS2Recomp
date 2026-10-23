@@ -4,6 +4,8 @@ std::atomic<uint16_t> g_hostPadButtons{0};
 #include <io.h>
 #endif
 #include "ps2_runtime.h"
+#include "probe_ae.h"
+#include "probe_ae.cpp"
 #include "diag/DiagSampler.h"
 std::atomic<uint32_t> g_diagMscalCount{0};
 std::atomic<uint32_t> g_diagGifPacketCount{0};
@@ -4676,7 +4678,7 @@ void PS2Runtime::run()
                     std::memcpy(&s3_100, rdram + ((s3 + 0x100) & PS2_RAM_MASK), sizeof(s3_100));
                 }
 
-                ps2xSafeLog("[movie] seekDone=%d reads=%u gp_stub_hits=%u isEnd=%u 319f38=%u F=%u G=%u H=%u 24bdc8=%u 31a240=%u 408e90=%u 408f68=%u 408fe0=%u 319e0c=%u 31a1b4=%u 4e2730=%u 31a514=%u ret31a514=%u s3_100=%u s3=0x%08x state=%u timer=%.2f\n",
+                ps2xSafeLog("[movie] seekDone=%d reads=%u gp_stub_hits=%u isEnd=%u 319f38=%u F=%u G=%u H_hook=%u 24bdc8=%u 31a240=%u 408e90=%u 408f68=%u 408fe0=%u 319e0c=%u 31a1b4=%u 4e2730=%u 31a514=%u ret31a514=%u s3_100=%u s3=0x%08x state=%u timer=%.2f\n",
                             g_movieSeekDone.load() ? 1 : 0,
                             g_movieReadsCount.load(),
                             g_movieGetPictureCount.load(),
@@ -4685,7 +4687,11 @@ void PS2Runtime::run()
                             ret_31a514, s3_100, s3, s3_state, s3_timer);
             }
 
+            
             const auto timeInScene = std::chrono::duration_cast<std::chrono::seconds>(now - g_lastSceneTransitionTime).count();
+            if (probe_ae::isEnabled()) {
+                probe_ae::printOncePerSec(static_cast<uint32_t>(timeInScene));
+            }
             static long long s_lastStallReported10s = 0;
             if (timeInScene >= 10 && (timeInScene / 10 != s_lastStallReported10s))
             {
