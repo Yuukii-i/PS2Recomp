@@ -1844,7 +1844,7 @@ namespace ps2_syscalls
                     if (newOff < 0) newOff = 0;
                     if (static_cast<uint64_t>(newOff) > slot.entry.fileSize) newOff = static_cast<int64_t>(slot.entry.fileSize);
                     slot.offset = static_cast<uint64_t>(newOff);
-                    reply.result = static_cast<uint32_t>(newOff);
+                    reply.result = 0; // file3.irx:0x0c30 returns 0 (SCE_OK)
                     g_movieSeekDone.store(true, std::memory_order_relaxed);
                     ps2xSafeLog("[CID1:Seek] fd=%u raw_whence=0x%08x (mode=%u) raw_offset=%d file_size=%llu -> returned_newOff=%lld\n",
                                 fd, whence, seekMode, seekOffset, (unsigned long long)slot.entry.fileSize, (long long)newOff);

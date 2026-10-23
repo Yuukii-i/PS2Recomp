@@ -696,7 +696,9 @@ namespace ps2_stubs
                 ok = false;
                 break;
             }
-            if (!runtime || !canAccessEeRange(rdram, xfer.src, sizeBytes) || !runtime->isIopMemoryRange(xfer.dest, sizeBytes))
+            const bool isEeToIop = canAccessEeRange(rdram, xfer.src, sizeBytes) && runtime->isIopMemoryRange(xfer.dest, sizeBytes);
+            const bool isIopToEe = runtime->isIopMemoryRange(xfer.src, sizeBytes) && canAccessEeRange(rdram, xfer.dest, sizeBytes);
+            if (!runtime || (!isEeToIop && !isIopToEe))
             {
                 ok = false;
                 break;
@@ -722,10 +724,22 @@ namespace ps2_stubs
                 }
                 const uint32_t sizeBytes = static_cast<uint32_t>(xfer.size);
                 std::vector<uint8_t> payload(sizeBytes);
-                if (!readEeRange(rdram, xfer.src, payload.data(), sizeBytes) || !runtime->writeIopMemory(xfer.dest, payload.data(), payload.size()))
+                const bool isEeToIop = canAccessEeRange(rdram, xfer.src, sizeBytes) && runtime->isIopMemoryRange(xfer.dest, sizeBytes);
+                if (isEeToIop)
                 {
-                    ok = false;
-                    break;
+                    if (!readEeRange(rdram, xfer.src, payload.data(), sizeBytes) || !runtime->writeIopMemory(xfer.dest, payload.data(), payload.size()))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                else
+                {
+                    if (!runtime->readIopMemory(xfer.src, payload.data(), sizeBytes) || !writeEeRange(rdram, xfer.dest, payload.data(), sizeBytes))
+                    {
+                        ok = false;
+                        break;
+                    }
                 }
                 if (runtime)
                 {
