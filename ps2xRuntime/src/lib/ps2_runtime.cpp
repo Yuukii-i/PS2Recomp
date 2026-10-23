@@ -178,7 +178,7 @@ static void initCoutFilter()
 // Global stall diagnostics tracking
 static std::array<uint32_t, 5> g_lastDistinctFns = {};
 static std::atomic<bool> g_mpegFunctionCalled{false};
-static std::atomic<uint32_t> g_trackedCurScene{0};
+std::atomic<uint32_t> g_trackedCurScene{0};
 std::atomic<uint32_t> g_trackedCurVtable{0};
 std::atomic<bool> g_movieSeekDone{false};
 std::atomic<uint32_t> g_movieReadsCount{0};
@@ -1752,6 +1752,25 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             else
             {
                 setReturnS32(ctx, 0);
+                ctx->pc = getRegU32(ctx, 31);
+            }
+        });
+    }
+
+    // 0x00408D28: guest MPEG frame decode call in sub_0031A1B4:121
+    if (0x00408D28u >= g_ps2RecompiledFunctionTableBase && 0x00408D28u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot408d28 = (0x00408D28u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig408d28 = g_ps2RecompiledFunctionTable[slot408d28];
+        replaceFunction(0x00408D28u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+            if (s_orig408d28)
+            {
+                s_orig408d28(rdram, ctx, runtime);
+            }
+            else
+            {
+                setReturnS32(ctx, 1);
                 ctx->pc = getRegU32(ctx, 31);
             }
         });
@@ -4575,12 +4594,29 @@ void PS2Runtime::run()
 
             if (g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u)
             {
-                ps2xSafeLog("[movie] seekDone=%d reads=%u getPicture=%u isEnd=%u fallback=%d\n",
+                const uint8_t *rdram = m_memory.getRDRAM();
+                uint32_t s3 = g_trackedCurScene.load(std::memory_order_relaxed);
+                uint32_t s3_state = 0;
+                float s3_timer = 0.0f;
+                uint32_t flag771bb8 = 0;
+                char desc6e3890[17] = {0};
+                if (rdram)
+                {
+                    if (s3 != 0 && s3 < PS2_RAM_SIZE - 0x200)
+                    {
+                        std::memcpy(&s3_state, rdram + ((s3 + 0xF4) & PS2_RAM_MASK), sizeof(s3_state));
+                        std::memcpy(&s3_timer, rdram + ((s3 + 0x118) & PS2_RAM_MASK), sizeof(s3_timer));
+                    }
+                    std::memcpy(&flag771bb8, rdram + (0x00771bb8u & PS2_RAM_MASK), sizeof(flag771bb8));
+                    std::memcpy(desc6e3890, rdram + (0x006e3890u & PS2_RAM_MASK), 16);
+                }
+                ps2xSafeLog("[movie] seekDone=%d reads=%u getPicture=%u isEnd=%u fallback=%d s3=0x%08x state=%u timer=%.2f flag771bb8=0x%x desc6e3890='%s'\n",
                             g_movieSeekDone.load() ? 1 : 0,
                             g_movieReadsCount.load(),
                             g_movieGetPictureCount.load(),
                             g_movieIsEndCount.load(),
-                            g_movieFallbackTriggered.load() ? 1 : 0);
+                            g_movieFallbackTriggered.load() ? 1 : 0,
+                            s3, s3_state, s3_timer, flag771bb8, desc6e3890);
             }
 
             const auto timeInScene = std::chrono::duration_cast<std::chrono::seconds>(now - g_lastSceneTransitionTime).count();

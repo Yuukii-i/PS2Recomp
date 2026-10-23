@@ -11,6 +11,7 @@ extern std::atomic<uint32_t> g_hostPadButtons;
 extern std::atomic<uint32_t> g_trackedCurVtable;
 extern std::atomic<bool> g_movieSeekDone;
 extern std::atomic<uint32_t> g_movieReadsCount;
+extern std::atomic<uint32_t> g_trackedCurScene;
 
 #include <atomic>
 #include <mutex>
@@ -1848,6 +1849,17 @@ namespace ps2_syscalls
                         {
                             slotMem[0x0B] |= 0x80;
                             *reinterpret_cast<uint32_t *>(slotMem + 0x0C) = static_cast<uint32_t>(slot.offset);
+                        }
+                    }
+
+                    // Populate stream descriptor (0x006e3890 / 0x006e38a0) to match movie name so sub_004E2730:5328 vector comparison matches
+                    if (rdram)
+                    {
+                        uint32_t curScene = ::g_trackedCurScene.load(std::memory_order_relaxed);
+                        if (curScene != 0 && curScene < PS2_RAM_SIZE - 0x40)
+                        {
+                            std::memcpy(rdram + (0x006e3890u & PS2_RAM_MASK), rdram + ((curScene + 0x10) & PS2_RAM_MASK), 16);
+                            std::memset(rdram + (0x006e38a0u & PS2_RAM_MASK), 0, 16);
                         }
                     }
 
