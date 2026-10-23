@@ -27,6 +27,7 @@ extern std::atomic<uint32_t> g_diagMcCalls;
 extern void gsGetAndResetPrimsPerFbp(std::vector<std::pair<uint32_t, uint32_t>> &out);
 extern std::atomic<uint32_t> g_diagMscalCount;
 extern std::atomic<uint32_t> g_diagGifPacketCount;
+extern void ps2xDumpVramAndState(const char *triggerName, uint64_t tick, void *rtVoid);
 
 namespace ps2_diag
 {
@@ -58,6 +59,13 @@ namespace ps2_diag
             static uint32_t s_dumpMax = 20u;
             static bool s_enableStats = false;
             static bool s_enableSampler = false;
+            static const char *s_vramDumpTrigger = nullptr;
+            static bool s_vramDumpDone = false;
+            static uint64_t s_targetTick = 0;
+            static bool s_isTickTrigger = false;
+            static bool s_isMcTrigger = false;
+            static std::string s_cid1Substr;
+            static bool s_isCrossTrigger = false;
 
             if (!s_envChecked)
             {
@@ -86,6 +94,64 @@ namespace ps2_diag
                 if (samplerEnv && (std::strcmp(samplerEnv, "1") == 0 || std::strcmp(samplerEnv, "true") == 0))
                 {
                     s_enableSampler = true;
+                }
+                const char *vramDumpEnv = std::getenv("PS2X_GS_VRAM_DUMP");
+                if (vramDumpEnv && vramDumpEnv[0] != '\0')
+                {
+                    s_vramDumpTrigger = vramDumpEnv;
+                    if (std::strncmp(vramDumpEnv, "tick:", 5) == 0)
+                    {
+                        s_isTickTrigger = true;
+                        try { s_targetTick = std::stoull(vramDumpEnv + 5); } catch (...) {}
+                    }
+                    else if (std::strcmp(vramDumpEnv, "mc") == 0)
+                    {
+                        s_isMcTrigger = true;
+                    }
+                    else if (std::strncmp(vramDumpEnv, "cid1:", 5) == 0)
+                    {
+                        s_cid1Substr = vramDumpEnv + 5;
+                    }
+                    else if (std::strcmp(vramDumpEnv, "cross") == 0)
+                    {
+                        s_isCrossTrigger = true;
+                    }
+                }
+            }
+
+            if (s_vramDumpTrigger && !s_vramDumpDone)
+            {
+                bool triggerFired = false;
+                if (s_isTickTrigger && currentTick >= s_targetTick)
+                {
+                    triggerFired = true;
+                }
+                else if (s_isMcTrigger && g_diagMcCalls.load(std::memory_order_relaxed) > 0u)
+                {
+                    triggerFired = true;
+                }
+                else if (!s_cid1Substr.empty())
+                {
+                    char lastPath[256] = {0};
+                    diagGetLastCid1Path(lastPath, sizeof(lastPath));
+                    if (std::strstr(lastPath, s_cid1Substr.c_str()) != nullptr)
+                    {
+                        triggerFired = true;
+                    }
+                }
+                else if (s_isCrossTrigger)
+                {
+                    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_initTime).count();
+                    if (elapsedMs >= 25000)
+                    {
+                        triggerFired = true;
+                    }
+                }
+
+                if (triggerFired)
+                {
+                    s_vramDumpDone = true;
+                    ps2xDumpVramAndState(s_vramDumpTrigger, currentTick, rt);
                 }
             }
 

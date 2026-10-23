@@ -15,6 +15,184 @@
 #include <iostream>
 #include <stdexcept>
 
+#include <filesystem>
+#include <fstream>
+
+#include <chrono>
+
+std::atomic<uint64_t> g_profGsUs{0};
+std::atomic<uint64_t> g_profXferUs{0};
+std::atomic<uint64_t> g_profPrims{0};
+std::atomic<uint64_t> g_profPixels{0};
+
+static inline bool isVerboseLog()
+{
+    static int s_verbose = -1;
+    if (s_verbose == -1)
+    {
+        const char *v = std::getenv("PS2X_VERBOSE_LOG");
+        s_verbose = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+    }
+    return s_verbose == 1;
+}
+
+// --- Task K: Offline Oracle & Diagnostic Helpers ---
+static uint32_t calculateCrc32(const uint8_t *data, size_t length)
+{
+    static uint32_t table[256];
+    static bool haveTable = false;
+    if (!haveTable)
+    {
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k)
+            {
+                c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            }
+            table[i] = c;
+        }
+        haveTable = true;
+    }
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < length; ++i)
+    {
+        crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+static uint32_t adler32(const uint8_t *data, size_t length)
+{
+    uint32_t s1 = 1u;
+    uint32_t s2 = 0u;
+    for (size_t i = 0; i < length; ++i)
+    {
+        s1 = (s1 + data[i]) % 65521u;
+        s2 = (s2 + s1) % 65521u;
+    }
+    return (s2 << 16u) | s1;
+}
+
+void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename)
+{
+    std::vector<uint8_t> raw;
+    raw.reserve((w * 4u + 1u) * h);
+    for (uint32_t y = 0; y < h; ++y)
+    {
+        raw.push_back(0); // filter byte
+        raw.insert(raw.end(), rgba + y * w * 4u, rgba + (y + 1u) * w * 4u);
+    }
+
+    std::vector<uint8_t> zstream;
+    zstream.push_back(0x78);
+    zstream.push_back(0x01);
+
+    size_t pos = 0;
+    while (pos < raw.size())
+    {
+        uint16_t chunkLen = static_cast<uint16_t>(std::min<size_t>(32768, raw.size() - pos));
+        uint8_t isFinal = (pos + chunkLen >= raw.size()) ? 1u : 0u;
+        zstream.push_back(isFinal);
+        uint16_t nlen = chunkLen ^ 0xFFFFu;
+        zstream.push_back(static_cast<uint8_t>(chunkLen & 0xFFu));
+        zstream.push_back(static_cast<uint8_t>((chunkLen >> 8u) & 0xFFu));
+        zstream.push_back(static_cast<uint8_t>(nlen & 0xFFu));
+        zstream.push_back(static_cast<uint8_t>((nlen >> 8u) & 0xFFu));
+        zstream.insert(zstream.end(), raw.data() + pos, raw.data() + pos + chunkLen);
+        pos += chunkLen;
+    }
+    uint32_t adler = adler32(raw.data(), raw.size());
+    zstream.push_back(static_cast<uint8_t>((adler >> 24u) & 0xFFu));
+    zstream.push_back(static_cast<uint8_t>((adler >> 16u) & 0xFFu));
+    zstream.push_back(static_cast<uint8_t>((adler >> 8u) & 0xFFu));
+    zstream.push_back(static_cast<uint8_t>(adler & 0xFFu));
+
+    std::vector<uint8_t> png;
+    const uint8_t sig[] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+    png.insert(png.end(), sig, sig + sizeof(sig));
+
+    // IHDR
+    uint8_t ihdrData[13];
+    ihdrData[0] = static_cast<uint8_t>((w >> 24u) & 0xFFu);
+    ihdrData[1] = static_cast<uint8_t>((w >> 16u) & 0xFFu);
+    ihdrData[2] = static_cast<uint8_t>((w >> 8u) & 0xFFu);
+    ihdrData[3] = static_cast<uint8_t>(w & 0xFFu);
+    ihdrData[4] = static_cast<uint8_t>((h >> 24u) & 0xFFu);
+    ihdrData[5] = static_cast<uint8_t>((h >> 16u) & 0xFFu);
+    ihdrData[6] = static_cast<uint8_t>((h >> 8u) & 0xFFu);
+    ihdrData[7] = static_cast<uint8_t>(h & 0xFFu);
+    ihdrData[8] = 8; // bit depth
+    ihdrData[9] = 6; // color type: RGBA
+    ihdrData[10] = 0; // compression
+    ihdrData[11] = 0; // filter
+    ihdrData[12] = 0; // interlace
+
+    auto writeChunk = [&](const char *type, const uint8_t *data, size_t len)
+    {
+        uint32_t ulen = static_cast<uint32_t>(len);
+        png.push_back(static_cast<uint8_t>((ulen >> 24u) & 0xFFu));
+        png.push_back(static_cast<uint8_t>((ulen >> 16u) & 0xFFu));
+        png.push_back(static_cast<uint8_t>((ulen >> 8u) & 0xFFu));
+        png.push_back(static_cast<uint8_t>(ulen & 0xFFu));
+        size_t typePos = png.size();
+        png.insert(png.end(), type, type + 4);
+        if (len > 0)
+            png.insert(png.end(), data, data + len);
+        uint32_t chunkCrc = calculateCrc32(png.data() + typePos, len + 4);
+        png.push_back(static_cast<uint8_t>((chunkCrc >> 24u) & 0xFFu));
+        png.push_back(static_cast<uint8_t>((chunkCrc >> 16u) & 0xFFu));
+        png.push_back(static_cast<uint8_t>((chunkCrc >> 8u) & 0xFFu));
+        png.push_back(static_cast<uint8_t>(chunkCrc & 0xFFu));
+    };
+
+    writeChunk("IHDR", ihdrData, sizeof(ihdrData));
+    writeChunk("IDAT", zstream.data(), zstream.size());
+    writeChunk("IEND", nullptr, 0);
+
+    std::filesystem::create_directories("logs/gs");
+    FILE *fp = std::fopen(filename, "wb");
+    if (fp)
+    {
+        std::fwrite(png.data(), 1, png.size(), fp);
+        std::fclose(fp);
+    }
+}
+
+// Global instrumentation state
+static GSCpuBackend *s_cpuBackendInstance = nullptr;
+static uint8_t s_lastSeenCld = 0u;
+static uint16_t s_savedClut[512] = {0};
+static uint32_t s_savedClutCbp[2] = {0};
+static int s_clut32Swizzle = -1;
+static int s_clutDrawtimeReload = -1;
+static int s_presentFallback = -1;
+static int s_uploadDump = -1;
+static int s_texDump = -1;
+static uint32_t s_uploadSeq = 0u;
+static std::vector<uint8_t> s_currentUploadPayload;
+static GSTransferCommand s_currentUploadCommand{};
+static bool s_inUpload = false;
+
+static int s_primLogFrom = -1;
+static int s_primLogMax = -1;
+static int s_drawStepDump = -1;
+
+struct DumpedTexKey {
+    uint32_t tbp0;
+    uint32_t tbw;
+    uint8_t psm;
+    uint32_t tw;
+    uint32_t th;
+    uint32_t cbp;
+    uint8_t cpsm;
+    uint8_t csm;
+    uint8_t csa;
+    uint32_t clutHash;
+};
+static std::vector<DumpedTexKey> s_dumpedTexKeys;
+
+
 using namespace GSInternal;
 
 namespace
@@ -547,6 +725,7 @@ void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
     std::lock_guard<std::mutex> lock(m_mutex);
     m_vram = vram;
     m_vramSize = vramSize;
+    s_cpuBackendInstance = this;
     ResetUnlocked();
 }
 
@@ -574,7 +753,11 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_vram || batch.vertexCount == 0u)
         return;
+    const auto t0 = std::chrono::steady_clock::now();
     DrawPrimitive(batch);
+    const auto t1 = std::chrono::steady_clock::now();
+    g_profGsUs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()), std::memory_order_relaxed);
+    g_profPrims.fetch_add(1u, std::memory_order_relaxed);
 }
 
 void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
@@ -583,6 +766,7 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
     if (!m_vram || (!isFourBitIndexedPsm(tex0.psm) && !isEightBitIndexedPsm(tex0.psm)))
         return;
 
+    s_lastSeenCld = tex0.cld;
     switch (tex0.cld)
     {
     case 0u:
@@ -641,7 +825,13 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
 
         if (tex0.csm == 0u)
         {
-            const uint32_t sourceIndex = sixteenBit ? swizzleClutIndexCSM1(entry) : entry;
+            if (s_clut32Swizzle == -1)
+        {
+            const char *env = std::getenv("PS2X_GS_CLUT32_SWIZZLE");
+            s_clut32Swizzle = (env && (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0)) ? 0 : 1;
+        }
+        const bool doSwizzle = !fourBit && (sixteenBit || (thirtyTwoBit && s_clut32Swizzle == 1));
+        const uint32_t sourceIndex = doSwizzle ? swizzleClutIndexCSM1(entry) : entry;
             sourceX = sourceIndex & 0x0Fu;
             sourceY = sourceIndex >> 4u;
         }
@@ -664,6 +854,9 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
             m_clut[destination + 256u] = static_cast<uint16_t>(raw >> 16u);
         }
     }
+    std::memcpy(s_savedClut, m_clut.data(), sizeof(s_savedClut));
+    s_savedClutCbp[0] = m_clutCbp[0];
+    s_savedClutCbp[1] = m_clutCbp[1];
 }
 
 void GSCpuBackend::Flush()
@@ -744,14 +937,14 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     const auto &ctx = state.context;
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
-        if (primitiveIndex == 64u)
+        if (primitiveIndex == 512u)
         {
             extern void ps2xSafeLog(const char *fmt, ...);
-            ps2xSafeLog("[log] cap reached for tag gs:prim at idx 64\n");
+            ps2xSafeLog("[log] cap reached for tag gs:prim at idx 512\n");
             std::fflush(stderr);
         }
         gsRecordPrimitiveFbp(ctx.frame.fbp);
-        if (primitiveIndex < 64u)
+        if (isVerboseLog() && primitiveIndex < 512u)
         {
             std::cout << "[gs:prim] idx=" << primitiveIndex
                       << " type=" << static_cast<uint32_t>(state.prim.type)
@@ -855,11 +1048,143 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
         }
     });
 
+    static std::atomic<uint32_t> s_globalPrimIndex{0};
+    uint32_t currentPrimIdx = s_globalPrimIndex.fetch_add(1u, std::memory_order_relaxed);
+
+    if (s_primLogFrom == -1)
+    {
+        const char *envFrom = std::getenv("PS2X_GS_PRIM_LOG_FROM");
+        s_primLogFrom = envFrom ? std::atoi(envFrom) : 0;
+        const char *envMax = std::getenv("PS2X_GS_PRIM_LOG_MAX");
+        s_primLogMax = envMax ? std::atoi(envMax) : 0;
+    }
+
+    if (s_primLogMax > 0 &&
+        currentPrimIdx >= static_cast<uint32_t>(s_primLogFrom) &&
+        currentPrimIdx < static_cast<uint32_t>(s_primLogFrom + s_primLogMax))
+    {
+        const char *primName = "UNKNOWN";
+        switch (state.prim.type)
+        {
+        case GS_PRIM_POINT: primName = "POINT"; break;
+        case GS_PRIM_LINE: primName = "LINE"; break;
+        case GS_PRIM_LINESTRIP: primName = "LINESTRIP"; break;
+        case GS_PRIM_TRIANGLE: primName = "TRIANGLE"; break;
+        case GS_PRIM_TRISTRIP: primName = "TRISTRIP"; break;
+        case GS_PRIM_TRIFAN: primName = "TRIFAN"; break;
+        case GS_PRIM_SPRITE: primName = "SPRITE"; break;
+        }
+        int ofx = ctx.xyoffset.ofx >> 4;
+        int ofy = ctx.xyoffset.ofy >> 4;
+        float x0 = batch.vertices.size() > 0 ? (batch.vertices[0].x - static_cast<float>(ofx)) : 0.f;
+        float y0 = batch.vertices.size() > 0 ? (batch.vertices[0].y - static_cast<float>(ofy)) : 0.f;
+        float x1 = batch.vertices.size() > 1 ? (batch.vertices[1].x - static_cast<float>(ofx)) : 0.f;
+        float y1 = batch.vertices.size() > 1 ? (batch.vertices[1].y - static_cast<float>(ofy)) : 0.f;
+
+        if (isVerboseLog()) std::fprintf(stderr, "[GS:PRIM] idx=%u type=%s(0x%x) fbp=%u fbw=%u psm=0x%x tme=%u abe=%u fst=%u "
+                             "tbp0=%u tbw=%u tpsm=0x%x tw=%u th=%u cbp=%u cpsm=0x%x csm=%u csa=%u "
+                             "alpha=0x%llx test=0x%llx rect=(%.1f,%.1f)-(%.1f,%.1f) v1_rgba=(%u,%u,%u,%u)\n",
+                     currentPrimIdx, primName, static_cast<unsigned>(state.prim.type),
+                     ctx.frame.fbp, ctx.frame.fbw, static_cast<unsigned>(ctx.frame.psm),
+                     state.prim.tme, state.prim.abe, state.prim.fst,
+                     ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw), static_cast<unsigned>(ctx.tex0.psm),
+                     static_cast<unsigned>(ctx.tex0.tw), static_cast<unsigned>(ctx.tex0.th),
+                     (ctx.tex0.cbp != 0u) ? ctx.tex0.cbp : m_clutCbp[0],
+                     static_cast<unsigned>(ctx.tex0.cpsm), static_cast<unsigned>(ctx.tex0.csm), static_cast<unsigned>(ctx.tex0.csa),
+                     static_cast<unsigned long long>(ctx.alpha), static_cast<unsigned long long>(ctx.test),
+                     x0, y0, x1, y1,
+                     batch.vertices.size() > 1 ? batch.vertices[1].r : (batch.vertices.size() > 0 ? batch.vertices[0].r : 0),
+                     batch.vertices.size() > 1 ? batch.vertices[1].g : (batch.vertices.size() > 0 ? batch.vertices[0].g : 0),
+                     batch.vertices.size() > 1 ? batch.vertices[1].b : (batch.vertices.size() > 0 ? batch.vertices[0].b : 0),
+                     batch.vertices.size() > 1 ? batch.vertices[1].a : (batch.vertices.size() > 0 ? batch.vertices[0].a : 0));
+        std::fflush(stderr);
+    }
+
+    if (s_clutDrawtimeReload == -1)
+    {
+        const char *env = std::getenv("PS2X_GS_CLUT_DRAWTIME_RELOAD");
+        s_clutDrawtimeReload = (env && (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0)) ? 0 : 1;
+    }
     if (state.prim.tme && (isFourBitIndexedPsm(ctx.tex0.psm) || isEightBitIndexedPsm(ctx.tex0.psm)))
     {
-        if (ctx.tex0.cbp != 0u || m_clutCbp[0] != 0u)
+        if (s_clutDrawtimeReload != 0 && (ctx.tex0.cbp != 0u || m_clutCbp[0] != 0u))
         {
             LoadClutUnlocked(ctx.tex0, state.texclut);
+        }
+    }
+
+    if (s_texDump == -1)
+    {
+        const char *env = std::getenv("PS2X_TEX_DUMP");
+        if (!env) env = std::getenv("PS2X_GS_TEXDUMP");
+        s_texDump = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ? 1 : 0;
+    }
+    if ((s_texDump == 1 || ctx.tex0.tbp0 == 10752u) && state.prim.tme && s_dumpedTexKeys.size() < 16u)
+    {
+        const uint32_t effectiveCbp = (ctx.tex0.cbp != 0u) ? ctx.tex0.cbp : m_clutCbp[0];
+        uint32_t clutHash = calculateCrc32(reinterpret_cast<const uint8_t*>(m_clut.data()), sizeof(m_clut));
+        uint32_t tw_px = 1u << ctx.tex0.tw;
+        uint32_t th_px = 1u << ctx.tex0.th;
+
+        bool alreadyDumped = false;
+        for (const auto &k : s_dumpedTexKeys)
+        {
+            if (k.tbp0 == ctx.tex0.tbp0 && k.tbw == ctx.tex0.tbw && k.psm == ctx.tex0.psm &&
+                k.tw == ctx.tex0.tw && k.th == ctx.tex0.th && k.cbp == effectiveCbp &&
+                k.cpsm == ctx.tex0.cpsm && k.csm == ctx.tex0.csm && k.csa == ctx.tex0.csa &&
+                k.clutHash == clutHash)
+            {
+                alreadyDumped = true;
+                break;
+            }
+        }
+        if (!alreadyDumped)
+        {
+            s_dumpedTexKeys.push_back({ctx.tex0.tbp0, ctx.tex0.tbw, ctx.tex0.psm, ctx.tex0.tw, ctx.tex0.th,
+                                       effectiveCbp, ctx.tex0.cpsm, ctx.tex0.csm, ctx.tex0.csa, clutHash});
+            uint32_t seq = static_cast<uint32_t>(s_dumpedTexKeys.size());
+            std::vector<uint8_t> sampledRgba(tw_px * th_px * 4u, 0u);
+            for (uint32_t sy = 0; sy < th_px; ++sy)
+            {
+                for (uint32_t sx = 0; sx < tw_px; ++sx)
+                {
+                    uint32_t rgba = SampleTexture(state, 0.f, 0.f, 1.f, static_cast<uint16_t>(sx * 16u), static_cast<uint16_t>(sy * 16u));
+                    sampledRgba[(sy * tw_px + sx) * 4u + 0] = static_cast<uint8_t>(rgba & 0xFFu);
+                    sampledRgba[(sy * tw_px + sx) * 4u + 1] = static_cast<uint8_t>((rgba >> 8u) & 0xFFu);
+                    sampledRgba[(sy * tw_px + sx) * 4u + 2] = static_cast<uint8_t>((rgba >> 16u) & 0xFFu);
+                    sampledRgba[(sy * tw_px + sx) * 4u + 3] = static_cast<uint8_t>((rgba >> 24u) & 0xFFu);
+                }
+            }
+            std::filesystem::create_directories("frames/tex");
+            char fn[256];
+            std::snprintf(fn, sizeof(fn), "frames/tex/tex_%u_tbp%u_psm0x%02x_%ux%u.png",
+                          seq, ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.psm), tw_px, th_px);
+            writeUncompressedPng(tw_px, th_px, sampledRgba.data(), fn);
+
+            // Dump CLUT 16x16
+            std::vector<uint8_t> clutRgba(16u * 16u * 4u, 0u);
+            for (uint32_t ci = 0; ci < 256u; ++ci)
+            {
+                uint32_t raw = (ctx.tex0.cpsm == GS_PSM_CT16 || ctx.tex0.cpsm == GS_PSM_CT16S)
+                    ? Rgba5551ToRgba8888(m_clut[ci])
+                    : (static_cast<uint32_t>(m_clut[ci]) | (static_cast<uint32_t>(m_clut[ci + 256u]) << 16u));
+                clutRgba[ci * 4u + 0] = static_cast<uint8_t>(raw & 0xFFu);
+                clutRgba[ci * 4u + 1] = static_cast<uint8_t>((raw >> 8u) & 0xFFu);
+                clutRgba[ci * 4u + 2] = static_cast<uint8_t>((raw >> 16u) & 0xFFu);
+                clutRgba[ci * 4u + 3] = static_cast<uint8_t>((raw >> 24u) & 0xFFu);
+            }
+            char clutFn[256];
+            std::snprintf(clutFn, sizeof(clutFn), "frames/tex/clut_%u_cbp%u_cpsm0x%02x.png",
+                          seq, effectiveCbp, static_cast<unsigned>(ctx.tex0.cpsm));
+            writeUncompressedPng(16u, 16u, clutRgba.data(), clutFn);
+
+            const bool csm1Remapped = (ctx.tex0.csm == 0 && (ctx.tex0.cpsm == GS_PSM_CT16 || ctx.tex0.cpsm == GS_PSM_CT16S));
+            std::fprintf(stderr, "[GS:TEXDUMP] [%u/16] tex=(tbp0=%u, tbw=%u, psm=0x%02x, tw=%u, th=%u, %ux%u) cbp=%u csa=%u csm=%u csm1_remap=%d clutHash=0x%08x -> %s\n",
+                         seq, ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw), static_cast<unsigned>(ctx.tex0.psm),
+                         static_cast<unsigned>(ctx.tex0.tw), static_cast<unsigned>(ctx.tex0.th), tw_px, th_px,
+                         effectiveCbp, static_cast<unsigned>(ctx.tex0.csa), static_cast<unsigned>(ctx.tex0.csm),
+                         csm1Remapped ? 1 : 0, clutHash, fn);
+            std::fflush(stderr);
         }
     }
 
@@ -889,6 +1214,37 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     default:
         break;
     }
+
+    if (s_drawStepDump == -1)
+    {
+        const char *envStep = std::getenv("PS2X_DRAW_STEP_DUMP");
+        s_drawStepDump = envStep ? std::atoi(envStep) : -2;
+    }
+    if (s_drawStepDump >= 0 && currentPrimIdx == static_cast<uint32_t>(s_drawStepDump))
+    {
+        std::filesystem::create_directories("logs/gs");
+        char stepFn[256];
+        std::snprintf(stepFn, sizeof(stepFn), "logs/gs/step_draw_%u.png", currentPrimIdx);
+        std::vector<uint8_t> snapRgba(640u * 512u * 4u, 0u);
+        const uint32_t fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+        const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+        for (uint32_t py = 0; py < 512u; ++py)
+        {
+            for (uint32_t px = 0; px < 640u; ++px)
+            {
+                uint32_t raw = ReadVramUnlocked(ctx.frame.psm, fbp, fbw, px, py);
+                uint32_t c = (ctx.frame.psm == GS_PSM_CT32) ? raw :
+                             ((ctx.frame.psm == GS_PSM_CT16 || ctx.frame.psm == GS_PSM_CT16S) ? Rgba5551ToRgba8888(raw) : raw);
+                snapRgba[(py * 640u + px) * 4u + 0] = static_cast<uint8_t>(c & 0xFFu);
+                snapRgba[(py * 640u + px) * 4u + 1] = static_cast<uint8_t>((c >> 8u) & 0xFFu);
+                snapRgba[(py * 640u + px) * 4u + 2] = static_cast<uint8_t>((c >> 16u) & 0xFFu);
+                snapRgba[(py * 640u + px) * 4u + 3] = static_cast<uint8_t>((c >> 24u) & 0xFFu);
+            }
+        }
+        writeUncompressedPng(640u, 512u, snapRgba.data(), stepFn);
+        std::fprintf(stderr, "[GS:STEP_DUMP] Prim %u dumped framebuffer fbp=%u to %s\n", currentPrimIdx, ctx.frame.fbp, stepFn);
+        std::fflush(stderr);
+    }
 }
 
 void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
@@ -896,6 +1252,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
     const auto &ctx = state.context;
     if (x < ctx.scissor.x0 || x > ctx.scissor.x1 || y < ctx.scissor.y0 || y > ctx.scissor.y1)
         return;
+    g_profPixels.fetch_add(1u, std::memory_order_relaxed);
 
     if (state.prim.fge)
     {
@@ -1500,8 +1857,55 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
     }
 }
 
+static void flushCurrentUploadDump()
+{
+    if (!s_inUpload || s_currentUploadPayload.empty())
+        return;
+    s_inUpload = false;
+    if (s_uploadSeq >= 64u)
+        return;
+
+    std::filesystem::create_directories("logs/gs");
+    uint32_t seq = ++s_uploadSeq;
+    uint32_t crc = calculateCrc32(s_currentUploadPayload.data(), s_currentUploadPayload.size());
+    char fn[256];
+    std::snprintf(fn, sizeof(fn), "logs/gs/upload_%03u_dbp%u_psm0x%02x_%ux%u.bin",
+                  seq, s_currentUploadCommand.bitbltbuf.dbp, static_cast<unsigned>(s_currentUploadCommand.bitbltbuf.dpsm),
+                  s_currentUploadCommand.trxreg.rrw, s_currentUploadCommand.trxreg.rrh);
+
+    FILE *fp = std::fopen(fn, "wb");
+    if (fp)
+    {
+        std::fwrite(s_currentUploadPayload.data(), 1, s_currentUploadPayload.size(), fp);
+        std::fclose(fp);
+    }
+    std::fprintf(stderr, "[GS:UPLOAD] seq=%u BITBLTBUF(dbp=%u, dbw=%u, dpsm=0x%02x) TRXPOS(dsax=%u, dsay=%u) TRXREG(rrw=%u, rrh=%u) TRXDIR=%u bytes=%zu crc32=0x%08X\n",
+                 seq, s_currentUploadCommand.bitbltbuf.dbp, s_currentUploadCommand.bitbltbuf.dbw,
+                 static_cast<unsigned>(s_currentUploadCommand.bitbltbuf.dpsm),
+                 s_currentUploadCommand.trxpos.dsax, s_currentUploadCommand.trxpos.dsay,
+                 s_currentUploadCommand.trxreg.rrw, s_currentUploadCommand.trxreg.rrh,
+                 s_currentUploadCommand.direction, s_currentUploadPayload.size(), crc);
+    std::fflush(stderr);
+    s_currentUploadPayload.clear();
+}
+
 void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 {
+    if (s_uploadDump == -1)
+    {
+        const char *env = std::getenv("PS2X_GS_UPLOAD_DUMP");
+        s_uploadDump = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ? 1 : 0;
+    }
+    if (s_uploadDump == 1)
+    {
+        flushCurrentUploadDump();
+        if (command.direction == 0u)
+        {
+            s_inUpload = true;
+            s_currentUploadCommand = command;
+            s_currentUploadPayload.clear();
+        }
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     m_transfer = command;
     m_transferState.x = command.trxpos.dsax;
@@ -1520,13 +1924,55 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (s_uploadDump == 1 && s_inUpload && data && sizeBytes > 0u)
+    {
+        if (s_currentUploadPayload.size() + sizeBytes <= 8u * 1024u * 1024u)
+        {
+            s_currentUploadPayload.insert(s_currentUploadPayload.end(), data, data + sizeBytes);
+        }
+    }
     if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)
         return;
     if (m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)
         return;
 
+    const auto t0 = std::chrono::steady_clock::now();
+    struct XferScope {
+        std::chrono::steady_clock::time_point start;
+        ~XferScope() {
+            auto end = std::chrono::steady_clock::now();
+            g_profXferUs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()), std::memory_order_relaxed);
+        }
+    } xferScope{t0};
+
     const uint32_t dbp = m_transfer.bitbltbuf.dbp;
     const uint32_t dbw = std::max<uint32_t>(m_transfer.bitbltbuf.dbw, 1u);
+    if (dbp == 10752)
+    {
+        static bool s_dumped10752 = false;
+        if (!s_dumped10752)
+        {
+            s_dumped10752 = true;
+            std::filesystem::create_directories("logs/gs");
+            FILE *f = std::fopen("logs/gs/upload_fixed_10752.bin", "wb");
+            if (f) { std::fwrite(data, 1, sizeBytes, f); std::fclose(f); }
+            std::fprintf(stderr, "[GS:UPLOAD_IMAGE] Dumped fixed upload to logs/gs/upload_fixed_10752.bin (size=%u)\n", sizeBytes);
+            std::fflush(stderr);
+        }
+    }
+    if (dbp == 10784)
+    {
+        static bool s_dumped10784 = false;
+        if (!s_dumped10784)
+        {
+            s_dumped10784 = true;
+            std::filesystem::create_directories("logs/gs");
+            FILE *f = std::fopen("logs/gs/upload_fixed_10784.bin", "wb");
+            if (f) { std::fwrite(data, 1, sizeBytes, f); std::fclose(f); }
+            std::fprintf(stderr, "[GS:UPLOAD_IMAGE] Dumped fixed upload to logs/gs/upload_fixed_10784.bin (size=%u)\n", sizeBytes);
+            std::fflush(stderr);
+        }
+    }
     const uint8_t dpsm = m_transfer.bitbltbuf.dpsm;
     const uint32_t rrw = m_transfer.trxreg.rrw;
     const uint32_t dsax = m_transfer.trxpos.dsax;
@@ -1547,6 +1993,14 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 
         m_transferState.x = dsax + (m_transferState.copiedPixels % rrw);
         m_transferState.y = m_transfer.trxpos.dsay + (m_transferState.copiedPixels / rrw);
+    };
+
+    auto checkUploadFinished = [&]()
+    {
+        if (s_uploadDump == 1 && s_inUpload && m_transferState.direction == 3u)
+        {
+            flushCurrentUploadDump();
+        }
     };
 
     while (offset < sizeBytes && m_transferState.direction == 0u)
@@ -1622,6 +2076,7 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
             return;
         }
     }
+    checkUploadFinished();
 }
 
 void GSCpuBackend::PerformLocalToLocalTransfer()
@@ -1939,7 +2394,12 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
         if (pixels.empty() && !CopyFrameToHostRgba(displayFrame, width, height, pixels, preserveAlpha, true, true, origin.x, origin.y))
             return false;
 
-        if (!usedPreferred && countNonBlackPixels(pixels, width, height) <= 256u)
+        if (s_presentFallback == -1)
+        {
+            const char *env = std::getenv("PS2X_GS_PRESENT_FALLBACK");
+            s_presentFallback = (env && (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0)) ? 0 : 1;
+        }
+        if (s_presentFallback != 0 && !usedPreferred && countNonBlackPixels(pixels, width, height) <= 256u)
         {
             for (const GSFrameReg &candidate : request.contextFrames)
             {
@@ -2017,4 +2477,60 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     result.displayFbp = displayFrame.fbp;
     result.sourceFbp = selected.fbp;
     return result;
+}
+
+// Global VRAM dump function for Step 1.b
+void ps2xDumpVramAndState(const char *triggerName, uint64_t tick, void *rtVoid)
+{
+    if (!s_cpuBackendInstance)
+        return;
+
+    std::filesystem::create_directories("logs/gs");
+    char binFn[256], txtFn[256];
+    std::snprintf(binFn, sizeof(binFn), "logs/gs/vram_%llu.bin", static_cast<unsigned long long>(tick));
+    std::snprintf(txtFn, sizeof(txtFn), "logs/gs/vram_%llu.txt", static_cast<unsigned long long>(tick));
+
+    std::vector<uint8_t> vramSnap;
+    s_cpuBackendInstance->SnapshotVram(vramSnap);
+
+    if (!vramSnap.empty())
+    {
+        FILE *fp = std::fopen(binFn, "wb");
+        if (fp)
+        {
+            std::fwrite(vramSnap.data(), 1, vramSnap.size(), fp);
+            std::fclose(fp);
+        }
+    }
+
+    FILE *tfp = std::fopen(txtFn, "w");
+    if (tfp)
+    {
+        std::fprintf(tfp, "=== GS VRAM & State Dump (Tick %llu, Trigger: %s) ===\n",
+                     static_cast<unsigned long long>(tick), triggerName ? triggerName : "unknown");
+
+        // Registers from GSCpuBackend
+        std::fprintf(tfp, "m_clutCbp[0] = %u\n", s_savedClutCbp[0]);
+        std::fprintf(tfp, "m_clutCbp[1] = %u\n", s_savedClutCbp[1]);
+        std::fprintf(tfp, "last_cld = %u\n\n", static_cast<unsigned>(s_lastSeenCld));
+
+        // CLUT 256 entries
+        std::fprintf(tfp, "=== CLUT (256 entries) ===\n");
+        for (uint32_t i = 0; i < 256u; ++i)
+        {
+            uint32_t val32 = static_cast<uint32_t>(s_savedClut[i]) |
+                             (static_cast<uint32_t>(s_savedClut[i + 256u]) << 16u);
+            uint8_t r = static_cast<uint8_t>(val32 & 0xFFu);
+            uint8_t g = static_cast<uint8_t>((val32 >> 8u) & 0xFFu);
+            uint8_t b = static_cast<uint8_t>((val32 >> 16u) & 0xFFu);
+            uint8_t a = static_cast<uint8_t>((val32 >> 24u) & 0xFFu);
+            std::fprintf(tfp, "[%03u] R=%02x G=%02x B=%02x A=%02x (0x%08X)\n", i, r, g, b, a, val32);
+        }
+
+        std::fclose(tfp);
+    }
+
+    std::fprintf(stderr, "[GS:VRAM_DUMP] Triggered by %s at tick %llu -> %s and %s\n",
+                 triggerName ? triggerName : "unknown", static_cast<unsigned long long>(tick), binFn, txtFn);
+    std::fflush(stderr);
 }

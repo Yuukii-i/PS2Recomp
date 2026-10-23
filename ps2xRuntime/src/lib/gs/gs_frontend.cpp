@@ -12,6 +12,17 @@
 
 namespace
 {
+    static inline bool isVerboseLog()
+    {
+        static int s_verbose = -1;
+        if (s_verbose == -1)
+        {
+            const char *v = std::getenv("PS2X_VERBOSE_LOG");
+            s_verbose = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+        }
+        return s_verbose == 1;
+    }
+
     static constexpr uint32_t kHostFrameWidth = 640u;
 
     GSPrimReg decodePrimRegister(uint64_t value)
@@ -1101,7 +1112,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         if (interestingReg)
         {
             const uint32_t debugIndex = s_debugGsRegisterCount.fetch_add(1, std::memory_order_relaxed);
-            if (debugIndex < 128u)
+            if (isVerboseLog() && debugIndex < 128u)
             {
                 RUNTIME_LOG("[gs:reg] idx=" << debugIndex
                                             << " reg=0x" << std::hex << static_cast<uint32_t>(regAddr)
@@ -1123,7 +1134,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         regAddr == GS_REG_XYOFFSET_2 ||
         regAddr == GS_REG_SCISSOR_2;
     PS2_IF_AGRESSIVE_LOGS({
-        if (isCopyRelevantReg &&
+        if (isVerboseLog() && isCopyRelevantReg &&
             s_debugCopyRegCount.fetch_add(1u, std::memory_order_relaxed) < 64u)
         {
             RUNTIME_LOG("[gs:copy-reg] reg=0x"
@@ -1531,7 +1542,7 @@ void GS::vertexKick(bool drawing)
 
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t debugIndex = s_debugGsVertexKickCount.fetch_add(1, std::memory_order_relaxed);
-        if (debugIndex < 96u)
+        if (isVerboseLog() && debugIndex < 96u)
         {
             RUNTIME_LOG("[gs:kick] idx=" << debugIndex
                                          << " drawing=" << static_cast<uint32_t>(drawing ? 1u : 0u)

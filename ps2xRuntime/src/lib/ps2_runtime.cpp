@@ -1,8 +1,30 @@
+#include <atomic>
+std::atomic<uint16_t> g_hostPadButtons{0};
+#ifdef _WIN32
+#include <io.h>
+#endif
 #include "ps2_runtime.h"
 #include "diag/DiagSampler.h"
 std::atomic<uint32_t> g_diagMscalCount{0};
 std::atomic<uint32_t> g_diagGifPacketCount{0};
+
+extern "C" {
+void push_trace(const char* msg) { (void)msg; }
+void dump_trace() {}
+}
 #include "ps2_log.h"
+
+#if AGRESSIVE_LOGS
+namespace {
+    struct Ps2LogDisabler {
+        Ps2LogDisabler() {
+            if (!std::getenv("PS2X_TRACE_LOG")) {
+                ps2_log::log_stream().setstate(std::ios_base::badbit | std::ios_base::failbit);
+            }
+        }
+    } s_ps2LogDisabler;
+}
+#endif
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "game_overrides.h"
@@ -42,8 +64,163 @@ std::mutex &ps2xLogMutex()
     return s_logMutex;
 }
 
+static FILE *s_realStderrFile = nullptr;
+
+static inline bool isVerboseLog()
+{
+    static int s_verbose = -1;
+    if (s_verbose == -1)
+    {
+        const char *v = std::getenv("PS2X_VERBOSE_LOG");
+        s_verbose = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+    }
+    return s_verbose == 1;
+}
+
+class FilteredCoutStreambuf : public std::streambuf
+{
+    std::streambuf *m_orig = nullptr;
+    std::string m_line;
+    std::string m_lastMcLine;
+    std::mutex m_mutex;
+
+public:
+    FilteredCoutStreambuf(std::streambuf *orig) : m_orig(orig) {}
+
+    int overflow(int c) override
+    {
+        if (c == EOF) return !EOF;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (c == '\n')
+        {
+            processLine(m_line);
+            m_line.clear();
+        }
+        else
+        {
+            m_line.push_back(static_cast<char>(c));
+        }
+        return c;
+    }
+
+    void processLine(const std::string &line)
+    {
+        // 1. [MC] line: print only when its values change
+        if (line.rfind("[MC]", 0) == 0)
+        {
+            size_t dmaPos = line.find("[sceDmaSend");
+            std::string mcPart = (dmaPos != std::string::npos) ? line.substr(0, dmaPos) : line;
+            if (mcPart != m_lastMcLine)
+            {
+                m_lastMcLine = mcPart;
+                if (m_orig)
+                {
+                    m_orig->sputn(mcPart.c_str(), mcPart.size());
+                    if (isVerboseLog() && dmaPos != std::string::npos)
+                    {
+                        m_orig->sputn(line.c_str() + dmaPos, line.size() - dmaPos);
+                    }
+                    m_orig->sputc('\n');
+                    m_orig->pubsync();
+                }
+            }
+            else if (isVerboseLog() && dmaPos != std::string::npos && m_orig)
+            {
+                m_orig->sputn(line.c_str() + dmaPos, line.size() - dmaPos);
+                m_orig->sputc('\n');
+                m_orig->pubsync();
+            }
+            return;
+        }
+
+        // 2. [sceDmaSend] / [sceDmaSend:head]: gate behind PS2X_VERBOSE_LOG
+        if (line.rfind("[sceDmaSend", 0) == 0)
+        {
+            if (isVerboseLog() && m_orig)
+            {
+                m_orig->sputn(line.c_str(), line.size());
+                m_orig->sputc('\n');
+                m_orig->pubsync();
+            }
+            return;
+        }
+
+        // Other cout lines: output normally
+        if (m_orig)
+        {
+            m_orig->sputn(line.c_str(), line.size());
+            m_orig->sputc('\n');
+            m_orig->pubsync();
+        }
+    }
+
+    int sync() override
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_line.empty())
+        {
+            processLine(m_line);
+            m_line.clear();
+        }
+        return m_orig ? m_orig->pubsync() : 0;
+    }
+};
+
+static void initCoutFilter()
+{
+    static bool s_init = false;
+    if (s_init) return;
+    s_init = true;
+    static FilteredCoutStreambuf s_filteredCout(std::cout.rdbuf());
+    std::cout.rdbuf(&s_filteredCout);
+}
+
+// Global stall diagnostics tracking
+static std::array<uint32_t, 5> g_lastDistinctFns = {};
+static std::atomic<bool> g_mpegFunctionCalled{false};
+static std::atomic<uint32_t> g_trackedCurScene{0};
+std::atomic<uint32_t> g_trackedCurVtable{0};
+std::atomic<bool> g_movieSeekDone{false};
+std::atomic<uint32_t> g_movieReadsCount{0};
+std::atomic<uint32_t> g_movieGetPictureCount{0};
+std::atomic<uint32_t> g_movieIsEndCount{0};
+std::atomic<bool> g_movieFallbackTriggered{false};
+std::atomic<uint32_t> g_movieSceneFrames{0};
+extern std::atomic<uint64_t> g_profGsUs;
+extern std::atomic<uint64_t> g_profXferUs;
+extern std::atomic<uint64_t> g_profPrims;
+extern std::atomic<uint64_t> g_profPixels;
+std::atomic<uint64_t> g_profEeUs{0};
+static uint64_t s_profPresentUs = 0;
+static auto g_lastSceneTransitionTime = std::chrono::steady_clock::now();
+
+static void initStderrRedirection()
+{
+    static bool s_init = false;
+    if (s_init) return;
+    s_init = true;
+    initCoutFilter();
+#ifdef _WIN32
+    if (!isVerboseLog())
+    {
+        int realStderrFd = _dup(2);
+        if (realStderrFd >= 0)
+        {
+            s_realStderrFile = _fdopen(realStderrFd, "w");
+            FILE *nul = std::fopen("NUL", "w");
+            if (nul)
+            {
+                _dup2(_fileno(nul), 2);
+                std::fclose(nul);
+            }
+        }
+    }
+#endif
+}
+
 void ps2xSafeLog(const char *fmt, ...)
 {
+    initStderrRedirection();
     char buf[4096];
     va_list args;
     va_start(args, fmt);
@@ -53,8 +230,9 @@ void ps2xSafeLog(const char *fmt, ...)
     {
         size_t writeLen = (len < static_cast<int>(sizeof(buf))) ? static_cast<size_t>(len) : (sizeof(buf) - 1);
         std::lock_guard<std::mutex> lock(s_logMutex);
-        std::fwrite(buf, 1, writeLen, stderr);
-        std::fflush(stderr);
+        FILE *target = s_realStderrFile ? s_realStderrFile : stderr;
+        std::fwrite(buf, 1, writeLen, target);
+        std::fflush(target);
     }
 }
 
@@ -408,6 +586,12 @@ namespace
     }
 }
 
+namespace ps2_stubs
+{
+    void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
+    void clearPadOverrideState();
+}
+
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight, uint64_t renderTick = 0u)
 {
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
@@ -423,6 +607,81 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
 
     const uint64_t currentTick = rt->eeScheduler().currentVSyncTick();
     const uint64_t dumpTick = (renderTick != 0u) ? renderTick : currentTick;
+
+    // Pad injection for headless progression / automated runs (executed unconditionally every frame)
+    {
+        struct PadInj {
+            std::string button;
+            uint16_t mask = 0;
+            uint64_t startMs = 0;
+            uint64_t durMs = 0;
+            bool active = false;
+        };
+        static std::vector<PadInj> s_injections;
+        static bool s_parsed = false;
+        static auto s_bootTime = std::chrono::steady_clock::now();
+        if (!s_parsed) {
+            s_parsed = true;
+            const char *env = std::getenv("PS2X_INJECT_PAD");
+            if (env && env[0] != '\0') {
+                std::string str(env);
+                size_t pos = 0;
+                while (pos < str.size()) {
+                    size_t comma = str.find(',', pos);
+                    std::string item = str.substr(pos, (comma == std::string::npos) ? std::string::npos : (comma - pos));
+                    pos = (comma == std::string::npos) ? str.size() : (comma + 1);
+                    size_t c1 = item.find(':');
+                    size_t c2 = (c1 != std::string::npos) ? item.find(':', c1 + 1) : std::string::npos;
+                    if (c1 != std::string::npos && c2 != std::string::npos) {
+                        PadInj inj;
+                        inj.button = item.substr(0, c1);
+                        try {
+                            inj.startMs = std::stoull(item.substr(c1 + 1, c2 - c1 - 1));
+                            inj.durMs = std::stoull(item.substr(c2 + 1));
+                        } catch (...) { continue; }
+                        if (inj.button == "START") inj.mask = 1u << 3;
+                        else if (inj.button == "CROSS") inj.mask = 1u << 14;
+                        else if (inj.button == "CIRCLE") inj.mask = 1u << 13;
+                        else if (inj.button == "TRIANGLE") inj.mask = 1u << 12;
+                        else if (inj.button == "SQUARE") inj.mask = 1u << 15;
+                        if (inj.mask != 0) s_injections.push_back(inj);
+                    }
+                }
+            }
+        }
+
+        uint16_t activeMask = 0;
+        if (!s_injections.empty()) {
+            const uint64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - s_bootTime).count();
+            for (auto &inj : s_injections) {
+                bool shouldBeActive = (nowMs >= inj.startMs && nowMs < (inj.startMs + inj.durMs));
+                if (shouldBeActive != inj.active) {
+                    inj.active = shouldBeActive;
+                    ps2xSafeLog("[pad:inject] %s %s at %llums (tick=%llu)\n",
+                                inj.button.c_str(), shouldBeActive ? "DOWN" : "UP",
+                                (unsigned long long)nowMs, (unsigned long long)currentTick);
+                    std::fflush(stderr);
+                }
+                if (inj.active) activeMask |= inj.mask;
+            }
+        } else {
+            static int s_autoPadUpload = -1;
+            if (s_autoPadUpload == -1) {
+                const char *env = std::getenv("PS2X_AUTO_PAD");
+                s_autoPadUpload = (env && (env[0] == '1' || env[0] == 't')) ? 1 : 0;
+            }
+            if (s_autoPadUpload && currentTick >= 68 && currentTick < 300) {
+                bool pressConfirm = ((currentTick % 20) < 10);
+                if (pressConfirm) {
+                    activeMask |= (1u << 14) | (1u << 13); // CROSS + CIRCLE
+                }
+            }
+        }
+
+        if (activeMask != 0) {
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~activeMask), 0x80, 0x80, 0x80, 0x80);
+        }
+    }
 
     int dumpInterval = 0;
     const char *dumpFramesCheck = std::getenv("PS2X_DUMP_FRAMES");
@@ -470,20 +729,101 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         return;
     }
 
+    uint32_t frameHash = 2166136261u;
+    bool hasNonZeroPixels = false;
+    for (size_t bi = 0; bi < s_scratch.size(); bi += 32)
+    {
+        frameHash = (frameHash ^ s_scratch[bi]) * 16777619u;
+        if (s_scratch[bi] != 0 || (bi + 1 < s_scratch.size() && s_scratch[bi + 1] != 0) || (bi + 2 < s_scratch.size() && s_scratch[bi + 2] != 0))
+        {
+            hasNonZeroPixels = true;
+        }
+    }
+
+    if ((currentTick >= 68 && currentTick <= 75) || frameHash == 0xefb69dc5u)
+    {
+        static bool s_tick70Dumped = false;
+        if (!s_tick70Dumped && !s_scratch.empty() && width != 0 && height != 0)
+        {
+            s_tick70Dumped = true;
+            extern void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
+            std::filesystem::create_directories("frames");
+            writeUncompressedPng(width, height, s_scratch.data(), "frames/frame_tick70.png");
+            ps2xSafeLog("[frame:dump] Dumped frame at tick=%llu hash=0x%08x to frames/frame_tick70.png\n",
+                        (unsigned long long)currentTick, frameHash);
+        }
+    }
+
+    static uint32_t s_publogoHash = 0;
+    const char *dumpFramesEnv = std::getenv("PS2X_DUMP_FRAMES");
+    const bool allowDumpFrames = (dumpFramesEnv && std::strcmp(dumpFramesEnv, "1") == 0);
+    if (allowDumpFrames && hasNonZeroPixels && !s_scratch.empty() && width != 0 && height != 0)
+    {
+        static uint64_t s_lastLiveDumpTick = 0;
+        if (currentTick != s_lastLiveDumpTick && currentTick >= 120 && currentTick <= 170)
+        {
+            s_lastLiveDumpTick = currentTick;
+            extern void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
+            std::filesystem::create_directories("frames");
+            std::string name = "frames/frame_live_" + std::to_string(currentTick) + ".png";
+            writeUncompressedPng(width, height, s_scratch.data(), name.c_str());
+            ps2xSafeLog("[frame:dump] Dumped live frame at tick=%llu hash=0x%08x to %s\n",
+                        (unsigned long long)currentTick, frameHash, name.c_str());
+        }
+    }
+
+    if (currentTick >= 85 && currentTick <= 250)
+    {
+        static bool s_publogoDumped = false;
+        if (!s_publogoDumped && !s_scratch.empty() && width != 0 && height != 0 && hasNonZeroPixels)
+        {
+            s_publogoDumped = true;
+            s_publogoHash = frameHash;
+            extern void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
+            std::filesystem::create_directories("frames");
+            writeUncompressedPng(width, height, s_scratch.data(), "frames/frame_publogo.png");
+            ps2xSafeLog("[frame:dump] Dumped publogo at tick=%llu hash=0x%08x to frames/frame_publogo.png\n",
+                        (unsigned long long)currentTick, frameHash);
+        }
+    }
+
+    if (currentTick >= 380)
+    {
+        static uint64_t s_lastPostSceaDump = 0;
+        if (currentTick >= s_lastPostSceaDump + 30 && !s_scratch.empty() && width != 0 && height != 0 && hasNonZeroPixels)
+        {
+            s_lastPostSceaDump = currentTick;
+            extern void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
+            std::filesystem::create_directories("frames");
+            std::string name = "frames/frame_post_scea_" + std::to_string(currentTick) + ".png";
+            writeUncompressedPng(width, height, s_scratch.data(), name.c_str());
+            ps2xSafeLog("[frame:dump] Dumped post-SCEA frame at tick=%llu hash=0x%08x to %s\n",
+                        (unsigned long long)currentTick, frameHash, name.c_str());
+        }
+    }
+    if (currentTick >= 400)
+    {
+        static uint32_t s_lastTitleHash = 0;
+        if (frameHash != s_publogoHash && frameHash != s_lastTitleHash && !s_scratch.empty() && width != 0 && height != 0 && hasNonZeroPixels)
+        {
+            s_lastTitleHash = frameHash;
+            extern void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
+            std::filesystem::create_directories("frames");
+            writeUncompressedPng(width, height, s_scratch.data(), "frames/frame_title.png");
+            ps2xSafeLog("[frame:dump] Dumped title screen at tick=%llu (hasNonZero=%d) hash=0x%08x to frames/frame_title.png\n",
+                        (unsigned long long)currentTick, hasNonZeroPixels ? 1 : 0, frameHash);
+        }
+    }
+
     PS2_IF_AGRESSIVE_LOGS({
         static uint32_t s_uploadDebugCount = 0u;
-        if (s_uploadDebugCount < 128u ||
+        if (isVerboseLog() && (s_uploadDebugCount < 128u ||
             displayFbp != s_lastDisplayFbp ||
             sourceFbp != s_lastSourceFbp ||
             usedPreferredDisplaySource != s_lastPreferred ||
             width != s_lastWidth ||
-            height != s_lastHeight)
+            height != s_lastHeight))
         {
-            uint32_t frameHash = 2166136261u;
-            for (size_t bi = 0; bi < s_scratch.size(); bi += 32)
-            {
-                frameHash = (frameHash ^ s_scratch[bi]) * 16777619u;
-            }
             ps2xSafeLog("[frame:upload] idx=%u tick=%llu displayFbp=%u sourceFbp=%u size=%ux%u preferred=%u hash=0x%08x\n",
                         s_uploadDebugCount,
                         (unsigned long long)currentTick,
@@ -495,7 +835,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                         frameHash);
         }
         ++s_uploadDebugCount;
-        if (s_uploadDebugCount == 128u)
+        if (isVerboseLog() && s_uploadDebugCount == 128u)
         {
             ps2xSafeLog("[log] cap reached for tag frame:upload at idx 128\n");
             std::fflush(stderr);
@@ -1206,6 +1546,330 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         ctx->pc = getRegU32(ctx, 31);
     });
 
+    // 0x003DF928: UTF-8 BOM/3-byte check helper (missing secondary entry in sub_003DF728)
+    replaceFunction(0x003DF928u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        (void)runtime;
+        const uint32_t a1 = getRegU32(ctx, 5);
+        const uint8_t *p = getMemPtr(rdram, a1);
+        if (!p)
+        {
+            setReturnU32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+        const uint8_t b0 = p[0];
+        const uint8_t b1 = p[1];
+        const uint8_t b2 = p[2];
+
+        if ((b2 & 0x80u) == 0)
+        {
+            setReturnU32(ctx, 1);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+
+        uint32_t res = 0;
+        const uint8_t t6_c0 = b2 & 0xC0u;
+
+        if (b0 == 0xEFu && b1 == 0xBFu)
+        {
+            if (b2 >= 0xBEu)
+            {
+                setReturnU32(ctx, 1);
+                ctx->pc = getRegU32(ctx, 31);
+                return;
+            }
+        }
+        else if (t6_c0 == 0xC0u)
+        {
+            setReturnU32(ctx, 1);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+
+        if (b0 == 0xE0u)
+        {
+            if (b1 < 0xA0u || (b1 & 0xC0u) == 0xC0u)
+                res = 1;
+        }
+        else
+        {
+            if ((b1 & 0x80u) == 0)
+            {
+                res = 1;
+            }
+            else if (b0 == 0xEDu)
+            {
+                if (b1 >= 0xA0u)
+                    res = 1;
+            }
+            else
+            {
+                if ((b1 & 0xC0u) == 0xC0u)
+                    res = 1;
+            }
+        }
+
+        setReturnU32(ctx, res);
+        ctx->pc = getRegU32(ctx, 31);
+    });
+
+    // 0x003DFA08: UTF-8 4-byte check helper (missing secondary entry in sub_003DF728)
+    replaceFunction(0x003DFA08u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        (void)runtime;
+        const uint32_t a1 = getRegU32(ctx, 5);
+        const uint8_t *p = getMemPtr(rdram, a1);
+        if (!p)
+        {
+            setReturnU32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+        const uint8_t b0 = p[0];
+        const uint8_t b1 = p[1];
+        const uint8_t b2 = p[2];
+        const uint8_t b3 = p[3];
+
+        if ((b3 & 0x80u) == 0 || (b3 & 0xC0u) == 0xC0u ||
+            (b2 & 0x80u) == 0 || (b2 & 0xC0u) == 0xC0u)
+        {
+            setReturnU32(ctx, 1);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+
+        uint32_t res = 0;
+        if (b0 == 0xF0u)
+        {
+            if (b1 < 0x90u || (b1 & 0xC0u) == 0xC0u)
+                res = 1;
+        }
+        else
+        {
+            if ((b1 & 0x80u) == 0)
+            {
+                res = 1;
+            }
+            else if (b0 != 0xF4u)
+            {
+                if ((b1 & 0xC0u) == 0xC0u)
+                    res = 1;
+            }
+            else
+            {
+                if (b1 < 0x90u || (b1 & 0xC0u) == 0xC0u)
+                    res = 1;
+            }
+        }
+
+        setReturnU32(ctx, res);
+        ctx->pc = getRegU32(ctx, 31);
+    });
+
+    // 0x003DF4B8: Exit/tail-call stub calling 0x003DF700 and deallocating 16 bytes stack
+    replaceFunction(0x003DF4B8u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t sp = getRegU32(ctx, 29);
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        ctx->r[29] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(sp + 16))); // $sp += 16
+        ctx->r[15] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(0x003DF6F8u))); // $t7 = 0x003df6f8
+        ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(-1)); // $v0 = -1
+        if (a0 != 0 && (a0 + 4) <= PS2_RAM_SIZE) {
+            *reinterpret_cast<uint32_t*>(rdram + (a0 & PS2_RAM_MASK)) = 0x003DF6F8u;
+        }
+        ctx->pc = ra;
+    });
+
+    // 0x003DF6F8: Return 0 stub
+    replaceFunction(0x003DF6F8u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        (void)rdram; (void)runtime;
+        setReturnS32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+    });
+
+    // 0x003DF700: Stub setting v0=-1, writing 0x003DF6F8 to 0($a0), jr $ra
+    replaceFunction(0x003DF700u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        (void)runtime;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t ra = getRegU32(ctx, 31);
+        ctx->r[15] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(0x003DF6F8u))); // $t7 = 0x003df6f8
+        ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(-1)); // $v0 = -1
+        if (a0 != 0 && (a0 + 4) <= PS2_RAM_SIZE) {
+            *reinterpret_cast<uint32_t*>(rdram + (a0 & PS2_RAM_MASK)) = 0x003DF6F8u;
+        }
+        ctx->pc = ra;
+    });
+
+    // 0x001E39D4: Native replacement for secondary entry in sub_001E39CC (color unpacking)
+    replaceFunction(0x001E39D4u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        (void)runtime;
+        const uint32_t a0 = getRegU32(ctx, 4);
+        const uint32_t ra = getRegU32(ctx, 31);
+        if (a0 != 0 && (a0 + 0x90) <= PS2_RAM_SIZE) {
+            const uint32_t t6 = *reinterpret_cast<const uint32_t *>(rdram + (a0 + 0x5Cu));
+            const uint32_t t4 = (t6 >> 24) & 0xFFu;
+            const uint32_t t5 = (t6 >> 16) & 0xFFu;
+            const uint32_t t7 = (t6 >> 8) & 0xFFu;
+            const uint32_t t6_b = t6 & 0xFFu;
+            *reinterpret_cast<uint32_t *>(rdram + (a0 + 0x88u)) = 0x80u;
+            *reinterpret_cast<uint32_t *>(rdram + (a0 + 0x64u)) = t4;
+            *reinterpret_cast<uint32_t *>(rdram + (a0 + 0x84u)) = t4;
+            *reinterpret_cast<uint32_t *>(rdram + (a0 + 0x7Cu)) = t7;
+            *reinterpret_cast<uint32_t *>(rdram + (a0 + 0x80u)) = t5;
+            *reinterpret_cast<uint32_t *>(rdram + (a0 + 0x78u)) = t6_b;
+            ctx->r[12] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(t4)));
+            ctx->r[13] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(t5)));
+            ctx->r[14] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(t6_b)));
+            ctx->r[15] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(t7)));
+        }
+        ctx->pc = ra;
+    });
+
+    // 0x00408E90: sceMpegIsEnd in game ELF (called by sub_0031A1B4:264 to test movie end)
+    if (0x00408E90u >= g_ps2RecompiledFunctionTableBase && 0x00408E90u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot408e90 = (0x00408E90u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig408e90 = g_ps2RecompiledFunctionTable[slot408e90];
+        replaceFunction(0x00408E90u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            g_movieIsEndCount.fetch_add(1, std::memory_order_relaxed);
+            static const char *fallbackEnv = std::getenv("PS2X_MOVIE_FALLBACK");
+            static const bool s_movieFallback = (fallbackEnv && (fallbackEnv[0] == '1' || fallbackEnv[0] == 't'));
+            if (s_movieFallback && g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u && g_movieSceneFrames.load(std::memory_order_relaxed) >= 120) {
+                g_movieFallbackTriggered.store(true, std::memory_order_relaxed);
+                static bool s_warned = false;
+                if (!s_warned) {
+                    s_warned = true;
+                    ps2xSafeLog("[movie] PS2X_MOVIE_FALLBACK triggered at frame %u: 0x00408E90 returning 1\n", g_movieSceneFrames.load());
+                }
+                setReturnS32(ctx, 1);
+                ctx->pc = getRegU32(ctx, 31);
+                return;
+            }
+            if (s_orig408e90)
+            {
+                s_orig408e90(rdram, ctx, runtime);
+            }
+            else
+            {
+                setReturnS32(ctx, 0);
+                ctx->pc = getRegU32(ctx, 31);
+            }
+        });
+    }
+
+    // Trace sub_0052DFA8 (Update method of 0x006B0110 container)
+    if (0x0052DFA8u >= g_ps2RecompiledFunctionTableBase && 0x0052DFA8u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot52dfa8 = (0x0052DFA8u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig52dfa8 = g_ps2RecompiledFunctionTable[slot52dfa8];
+        replaceFunction(0x0052DFA8u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            static int s_count = 0;
+            if (++s_count <= 5 || s_count % 60 == 0)
+            {
+                uint32_t a0 = getRegU32(ctx, 4);
+                uint32_t child = (a0 != 0 && a0 + 0x34 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + a0 + 0x30) : 0;
+                uint32_t childVtable = (child != 0 && child + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + child) : 0;
+                ps2xSafeLog("[scene] sub_0052DFA8 called #%d a0=0x%08x child=0x%08x (vtable=0x%08x)\n", s_count, a0, child, childVtable);
+            }
+            if (s_orig52dfa8) s_orig52dfa8(rdram, ctx, runtime);
+        });
+    }
+
+    // Trace sub_004E914C (Publogo update)
+    if (0x004E914Cu >= g_ps2RecompiledFunctionTableBase && 0x004E914Cu < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot4e914c = (0x004E914Cu - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig4e914c = g_ps2RecompiledFunctionTable[slot4e914c];
+        replaceFunction(0x004E914Cu, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            static int s_count = 0;
+            if (++s_count <= 5 || s_count % 60 == 0)
+            {
+                ps2xSafeLog("[scene] sub_004E914C called #%d\n", s_count);
+            }
+            if (s_orig4e914c) s_orig4e914c(rdram, ctx, runtime);
+        });
+    }
+
+    // Publogo timer acceleration (behind env PS2X_HACK_FF_PUBLOGO=1, default OFF)
+    if (0x004E9278u >= g_ps2RecompiledFunctionTableBase && 0x004E9278u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot4e9278 = (0x004E9278u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig4e9278 = g_ps2RecompiledFunctionTable[slot4e9278];
+        replaceFunction(0x004E9278u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            static int s_publogoFrames = 0;
+            s_publogoFrames++;
+            uint32_t a0 = getRegU32(ctx, 4);
+            const char *ffEnv = std::getenv("PS2X_HACK_FF_PUBLOGO");
+            if (ffEnv && std::strcmp(ffEnv, "1") == 0)
+            {
+                if (s_publogoFrames >= 3 && a0 != 0 && a0 + 8 <= PS2_RAM_SIZE)
+                {
+                    ps2xSafeLog("[scene] Fast-forwarding Publogo timer at frame %d (a0=0x%08x)...\n", s_publogoFrames, a0);
+                    *reinterpret_cast<float *>(rdram + a0 + 4) = 6.25f;
+                }
+            }
+            if (s_orig4e9278) s_orig4e9278(rdram, ctx, runtime);
+        });
+    }
+
+    // Diagnostics for movie functions (sub_0031A1B4, 0x0031A240)
+    if (0x0031A1B4u >= g_ps2RecompiledFunctionTableBase && 0x0031A1B4u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot = (0x0031A1B4u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig31a1b4 = g_ps2RecompiledFunctionTable[slot];
+        replaceFunction(0x0031A1B4u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            static bool s_logged = false;
+            if (!s_logged) { s_logged = true; ps2xSafeLog("[movie:diag] sub_0031A1B4 called!\n"); }
+            g_mpegFunctionCalled.store(true, std::memory_order_relaxed);
+            if (s_orig31a1b4) s_orig31a1b4(rdram, ctx, runtime);
+        });
+    }
+    if (0x0031A240u >= g_ps2RecompiledFunctionTableBase && 0x0031A240u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot = (0x0031A240u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig31a240 = g_ps2RecompiledFunctionTable[slot];
+        replaceFunction(0x0031A240u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            static bool s_logged = false;
+            if (!s_logged) { s_logged = true; ps2xSafeLog("[movie:diag] 0x0031A240 called!\n"); }
+            g_mpegFunctionCalled.store(true, std::memory_order_relaxed);
+            if (s_orig31a240) s_orig31a240(rdram, ctx, runtime);
+        });
+    }
+
+    // SceneManager (sub_0015A488) transition tracker
+    if (0x0015A488u >= g_ps2RecompiledFunctionTableBase && 0x0015A488u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot15a488 = (0x0015A488u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig15a488 = g_ps2RecompiledFunctionTable[slot15a488];
+        replaceFunction(0x0015A488u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            uint32_t sm = getRegU32(ctx, 4); // a0 = SceneManager
+            static uint32_t s_lastCur = 0;
+            static uint32_t s_lastNext = 0;
+            if (sm != 0 && sm + 8 <= PS2_RAM_SIZE)
+            {
+                uint32_t curScene = *reinterpret_cast<const uint32_t *>(rdram + sm);
+                uint32_t nextScene = *reinterpret_cast<const uint32_t *>(rdram + sm + 4);
+                if (curScene != s_lastCur || nextScene != s_lastNext)
+                {
+                    uint32_t curVtable = (curScene != 0 && curScene + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + curScene) : 0;
+                    uint32_t nextVtable = (nextScene != 0 && nextScene + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + nextScene) : 0;
+                    ps2xSafeLog("[scene] SceneManager transition: sm=0x%08x cur=0x%08x (vtable=0x%08x) next=0x%08x (vtable=0x%08x)\n",
+                                sm, curScene, curVtable, nextScene, nextVtable);
+                    s_lastCur = curScene;
+                    s_lastNext = nextScene;
+                    g_trackedCurScene.store(curScene, std::memory_order_relaxed);
+                    g_trackedCurVtable.store(curVtable, std::memory_order_relaxed);
+                    g_lastSceneTransitionTime = std::chrono::steady_clock::now();
+                    if (curVtable == 0x006adfa8u) {
+                        g_movieSceneFrames.store(0, std::memory_order_relaxed);
+                        g_movieFallbackTriggered.store(false, std::memory_order_relaxed);
+                    }
+                }
+            }
+            if (s_orig15a488) s_orig15a488(rdram, ctx, runtime);
+        });
+    }
+
     // Logging for sub_0015993C:
     if (0x0015993Cu >= g_ps2RecompiledFunctionTableBase && 0x0015993Cu < g_ps2RecompiledFunctionTableEnd)
     {
@@ -1748,14 +2412,47 @@ namespace
         auto it = s_boundConfigStubs.find(pc);
         if (it != s_boundConfigStubs.end())
         {
-            it->second.handler(rdram, ctx, runtime);
-            if (it->second.name == "vfprintf" || it->second.name == "_vfprintf_r" ||
-                it->second.name == "sprintf" || it->second.name == "_sprintf_r" ||
-                it->second.name == "printf" || it->second.name == "_printf_r")
+            static int s_tracePrintf = -1;
+            if (s_tracePrintf == -1)
             {
-                std::lock_guard<std::mutex> lock(s_logMutex);
-                std::fputc('\n', stderr);
+                const char *env = std::getenv("PS2X_TRACE_PRINTF");
+                s_tracePrintf = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ? 1 : 0;
+            }
+
+            if (s_tracePrintf == 0 && (it->second.name == "vfprintf" || it->second.name == "_vfprintf_r"))
+            {
+#ifdef _WIN32
+                static int s_nullFd = -1;
+                if (s_nullFd == -1) {
+                    s_nullFd = _open("NUL", 0x0002 /* _O_RDWR */);
+                }
                 std::fflush(stderr);
+                int saved_stderr = _dup(2);
+                if (s_nullFd >= 0) {
+                    _dup2(s_nullFd, 2);
+                }
+                it->second.handler(rdram, ctx, runtime);
+                std::fflush(stderr);
+                if (saved_stderr >= 0) {
+                    _dup2(saved_stderr, 2);
+                    _close(saved_stderr);
+                }
+#else
+                it->second.handler(rdram, ctx, runtime);
+#endif
+            }
+            else
+            {
+                it->second.handler(rdram, ctx, runtime);
+                if (s_tracePrintf == 1 &&
+                    (it->second.name == "vfprintf" || it->second.name == "_vfprintf_r" ||
+                     it->second.name == "sprintf" || it->second.name == "_sprintf_r" ||
+                     it->second.name == "printf" || it->second.name == "_printf_r"))
+                {
+                    std::lock_guard<std::mutex> lock(s_logMutex);
+                    std::fputc('\n', stderr);
+                    std::fflush(stderr);
+                }
             }
         }
         else
@@ -2128,6 +2825,287 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
+static bool executeUnrecompiledCode(uint8_t *rdram,
+                                    R5900Context *ctx,
+                                    uint32_t targetPc,
+                                    uint32_t sourcePc,
+                                    uint32_t fallthroughPc,
+                                    PS2Runtime::GuestBranchKind kind,
+                                    const char *debugName,
+                                    PS2Runtime *runtime)
+{
+    const bool isCall = (kind == PS2Runtime::GuestBranchKind::DirectCall || kind == PS2Runtime::GuestBranchKind::IndirectCall);
+    uint32_t pc = targetPc;
+    const uint32_t initialRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+
+    static uint32_t s_interpCount = 0;
+    if (++s_interpCount <= 20 || (s_interpCount % 1000) == 0)
+    {
+        ps2xSafeLog("[guest-fallback-interp] entry #%u targetPc=0x%08x from sourcePc=0x%08x kind=%s ra=0x%08x\n",
+                    s_interpCount, targetPc, sourcePc, describeGuestBranchKind(kind), initialRa);
+        fflush(stderr);
+    }
+
+    auto readGPR = [ctx](int r) -> uint64_t {
+        if (r == 0) return 0;
+        return static_cast<uint64_t>(_mm_cvtsi128_si64(ctx->r[r]));
+    };
+    auto readGPR32 = [ctx](int r) -> uint32_t {
+        if (r == 0) return 0;
+        return static_cast<uint32_t>(_mm_extract_epi32(ctx->r[r], 0));
+    };
+    auto writeGPR32 = [ctx](int r, uint32_t val) {
+        if (r != 0) {
+            ctx->r[r] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(val)));
+        }
+    };
+    auto writeGPR64 = [ctx](int r, uint64_t val) {
+        if (r != 0) {
+            ctx->r[r] = _mm_set_epi64x(0, static_cast<int64_t>(val));
+        }
+    };
+
+    auto read8 = [rdram](uint32_t a) -> uint8_t {
+        return *reinterpret_cast<const uint8_t *>(rdram + (a & PS2_RAM_MASK));
+    };
+    auto read16 = [rdram](uint32_t a) -> uint16_t {
+        return *reinterpret_cast<const uint16_t *>(rdram + (a & PS2_RAM_MASK));
+    };
+    auto read32 = [rdram](uint32_t a) -> uint32_t {
+        return *reinterpret_cast<const uint32_t *>(rdram + (a & PS2_RAM_MASK));
+    };
+    auto read64 = [rdram](uint32_t a) -> uint64_t {
+        return *reinterpret_cast<const uint64_t *>(rdram + (a & PS2_RAM_MASK));
+    };
+    auto write8 = [rdram](uint32_t a, uint8_t v) {
+        *reinterpret_cast<uint8_t *>(rdram + (a & PS2_RAM_MASK)) = v;
+    };
+    auto write16 = [rdram](uint32_t a, uint16_t v) {
+        *reinterpret_cast<uint16_t *>(rdram + (a & PS2_RAM_MASK)) = v;
+    };
+    auto write32 = [rdram](uint32_t a, uint32_t v) {
+        *reinterpret_cast<uint32_t *>(rdram + (a & PS2_RAM_MASK)) = v;
+    };
+    auto write64 = [rdram](uint32_t a, uint64_t v) {
+        *reinterpret_cast<uint64_t *>(rdram + (a & PS2_RAM_MASK)) = v;
+    };
+
+    uint32_t stepLimit = 50000;
+    while (stepLimit-- > 0 && !runtime->isStopRequested())
+    {
+        if (pc != targetPc && runtime->hasFunction(pc))
+        {
+            ctx->pc = pc;
+            PS2Runtime::RecompiledFunction fn = runtime->lookupFunction(pc);
+            fn(rdram, ctx, runtime);
+            if (isCall && (ctx->pc == initialRa || ctx->pc == fallthroughPc || ctx->pc == 0))
+            {
+                return true;
+            }
+            pc = ctx->pc;
+            if (pc == 0 || pc == initialRa || pc == fallthroughPc)
+            {
+                break;
+            }
+            continue;
+        }
+
+        if (pc < 0x00100000u || pc >= PS2_RAM_SIZE)
+        {
+            ps2xSafeLog("[guest-fallback-interp] PC out of range: 0x%08x\n", pc);
+            break;
+        }
+
+        uint32_t inst = read32(pc);
+        uint32_t op = inst >> 26;
+        uint32_t rs = (inst >> 21) & 0x1F;
+        uint32_t rt = (inst >> 16) & 0x1F;
+        uint32_t rd = (inst >> 11) & 0x1F;
+        uint32_t shamt = (inst >> 6) & 0x1F;
+        uint32_t funct = inst & 0x3F;
+        int16_t imm16 = static_cast<int16_t>(inst & 0xFFFF);
+        uint16_t uimm16 = static_cast<uint16_t>(inst & 0xFFFF);
+        uint32_t signImm32 = static_cast<uint32_t>(static_cast<int32_t>(imm16));
+
+        auto execInst = [&](uint32_t i_pc, uint32_t i_inst) {
+            uint32_t i_op = i_inst >> 26;
+            uint32_t i_rs = (i_inst >> 21) & 0x1F;
+            uint32_t i_rt = (i_inst >> 16) & 0x1F;
+            uint32_t i_rd = (i_inst >> 11) & 0x1F;
+            uint32_t i_shamt = (i_inst >> 6) & 0x1F;
+            uint32_t i_funct = i_inst & 0x3F;
+            int16_t i_imm16 = static_cast<int16_t>(i_inst & 0xFFFF);
+            uint16_t i_uimm16 = static_cast<uint16_t>(i_inst & 0xFFFF);
+            uint32_t i_signImm32 = static_cast<uint32_t>(static_cast<int32_t>(i_imm16));
+
+            if (i_op == 0) // SPECIAL
+            {
+                switch (i_funct)
+                {
+                case 0x00: writeGPR32(i_rd, readGPR32(i_rt) << i_shamt); break; // SLL
+                case 0x02: writeGPR32(i_rd, readGPR32(i_rt) >> i_shamt); break; // SRL
+                case 0x03: writeGPR32(i_rd, static_cast<int32_t>(readGPR32(i_rt)) >> i_shamt); break; // SRA
+                case 0x04: writeGPR32(i_rd, readGPR32(i_rt) << (readGPR32(i_rs) & 0x1F)); break; // SLLV
+                case 0x06: writeGPR32(i_rd, readGPR32(i_rt) >> (readGPR32(i_rs) & 0x1F)); break; // SRLV
+                case 0x07: writeGPR32(i_rd, static_cast<int32_t>(readGPR32(i_rt)) >> (readGPR32(i_rs) & 0x1F)); break; // SRAV
+                case 0x0A: if (readGPR32(i_rt) == 0) writeGPR64(i_rd, readGPR(i_rs)); break; // MOVZ
+                case 0x0B: if (readGPR32(i_rt) != 0) writeGPR64(i_rd, readGPR(i_rs)); break; // MOVN
+                case 0x0F: break; // SYNC
+                case 0x14: writeGPR64(i_rd, readGPR(i_rt) << (readGPR32(i_rs) & 0x3F)); break; // DSLLV
+                case 0x16: writeGPR64(i_rd, readGPR(i_rt) >> (readGPR32(i_rs) & 0x3F)); break; // DSRLV
+                case 0x17: writeGPR64(i_rd, static_cast<int64_t>(readGPR(i_rt)) >> (readGPR32(i_rs) & 0x3F)); break; // DSRAV
+                case 0x20: // ADD
+                case 0x21: writeGPR32(i_rd, readGPR32(i_rs) + readGPR32(i_rt)); break; // ADDU
+                case 0x22: // SUB
+                case 0x23: writeGPR32(i_rd, readGPR32(i_rs) - readGPR32(i_rt)); break; // SUBU
+                case 0x24: writeGPR64(i_rd, readGPR(i_rs) & readGPR(i_rt)); break; // AND
+                case 0x25: writeGPR64(i_rd, readGPR(i_rs) | readGPR(i_rt)); break; // OR
+                case 0x26: writeGPR64(i_rd, readGPR(i_rs) ^ readGPR(i_rt)); break; // XOR
+                case 0x27: writeGPR64(i_rd, ~(readGPR(i_rs) | readGPR(i_rt))); break; // NOR
+                case 0x2A: writeGPR32(i_rd, (static_cast<int32_t>(readGPR32(i_rs)) < static_cast<int32_t>(readGPR32(i_rt))) ? 1 : 0); break; // SLT
+                case 0x2B: writeGPR32(i_rd, (readGPR32(i_rs) < readGPR32(i_rt)) ? 1 : 0); break; // SLTU
+                case 0x2C: // DADD
+                case 0x2D: writeGPR64(i_rd, readGPR(i_rs) + readGPR(i_rt)); break; // DADDU
+                case 0x2E: // DSUB
+                case 0x2F: writeGPR64(i_rd, readGPR(i_rs) - readGPR(i_rt)); break; // DSUBU
+                case 0x38: writeGPR64(i_rd, readGPR(i_rt) << i_shamt); break; // DSLL
+                case 0x3A: writeGPR64(i_rd, readGPR(i_rt) >> i_shamt); break; // DSRL
+                case 0x3B: writeGPR64(i_rd, static_cast<int64_t>(readGPR(i_rt)) >> i_shamt); break; // DSRA
+                case 0x3C: writeGPR64(i_rd, readGPR(i_rt) << (i_shamt + 32)); break; // DSLL32
+                case 0x3E: writeGPR64(i_rd, readGPR(i_rt) >> (i_shamt + 32)); break; // DSRL32
+                case 0x3F: writeGPR64(i_rd, static_cast<int64_t>(readGPR(i_rt)) >> (i_shamt + 32)); break; // DSRA32
+                default: break;
+                }
+            }
+            else
+            {
+                switch (i_op)
+                {
+                case 0x08: // ADDI
+                case 0x09: writeGPR32(i_rt, readGPR32(i_rs) + i_signImm32); break; // ADDIU
+                case 0x0A: writeGPR32(i_rt, (static_cast<int32_t>(readGPR32(i_rs)) < static_cast<int32_t>(i_signImm32)) ? 1 : 0); break; // SLTI
+                case 0x0B: writeGPR32(i_rt, (readGPR32(i_rs) < i_signImm32) ? 1 : 0); break; // SLTIU
+                case 0x0C: writeGPR64(i_rt, readGPR(i_rs) & static_cast<uint64_t>(i_uimm16)); break; // ANDI
+                case 0x0D: writeGPR64(i_rt, readGPR(i_rs) | static_cast<uint64_t>(i_uimm16)); break; // ORI
+                case 0x0E: writeGPR64(i_rt, readGPR(i_rs) ^ static_cast<uint64_t>(i_uimm16)); break; // XORI
+                case 0x0F: writeGPR32(i_rt, static_cast<uint32_t>(i_uimm16) << 16); break; // LUI
+                case 0x19: writeGPR64(i_rt, readGPR(i_rs) + static_cast<int64_t>(i_imm16)); break; // DADDIU
+                case 0x20: { uint32_t ea = readGPR32(i_rs) + i_signImm32; writeGPR32(i_rt, static_cast<int8_t>(read8(ea))); break; } // LB
+                case 0x21: { uint32_t ea = readGPR32(i_rs) + i_signImm32; writeGPR32(i_rt, static_cast<int16_t>(read16(ea))); break; } // LH
+                case 0x23: { uint32_t ea = readGPR32(i_rs) + i_signImm32; writeGPR32(i_rt, read32(ea)); break; } // LW
+                case 0x24: { uint32_t ea = readGPR32(i_rs) + i_signImm32; writeGPR32(i_rt, read8(ea)); break; } // LBU
+                case 0x25: { uint32_t ea = readGPR32(i_rs) + i_signImm32; writeGPR32(i_rt, read16(ea)); break; } // LHU
+                case 0x27: { uint32_t ea = readGPR32(i_rs) + i_signImm32; writeGPR64(i_rt, read32(ea)); break; } // LWU
+                case 0x37: { uint32_t ea = readGPR32(i_rs) + i_signImm32; writeGPR64(i_rt, read64(ea)); break; } // LD
+                case 0x28: { uint32_t ea = readGPR32(i_rs) + i_signImm32; write8(ea, static_cast<uint8_t>(readGPR32(i_rt))); break; } // SB
+                case 0x29: { uint32_t ea = readGPR32(i_rs) + i_signImm32; write16(ea, static_cast<uint16_t>(readGPR32(i_rt))); break; } // SH
+                case 0x2B: { uint32_t ea = readGPR32(i_rs) + i_signImm32; write32(ea, readGPR32(i_rt)); break; } // SW
+                case 0x3F: { uint32_t ea = readGPR32(i_rs) + i_signImm32; write64(ea, readGPR(i_rt)); break; } // SD
+                default: break;
+                }
+            }
+        };
+
+        if (op == 0 && funct == 0x08) // JR rs
+        {
+            uint32_t jumpTarget = readGPR32(rs);
+            execInst(pc + 4, read32(pc + 4));
+            ctx->pc = jumpTarget;
+            if (isCall && (jumpTarget == initialRa || jumpTarget == fallthroughPc || rs == 31))
+            {
+                return true;
+            }
+            pc = jumpTarget;
+            continue;
+        }
+        else if (op == 0 && funct == 0x09) // JALR rd, rs
+        {
+            uint32_t callTarget = readGPR32(rs);
+            uint32_t returnAddr = pc + 8;
+            writeGPR32(rd, returnAddr);
+            execInst(pc + 4, read32(pc + 4));
+            if (runtime->hasFunction(callTarget))
+            {
+                ctx->pc = callTarget;
+                PS2Runtime::RecompiledFunction fn = runtime->lookupFunction(callTarget);
+                fn(rdram, ctx, runtime);
+                pc = returnAddr;
+            }
+            else
+            {
+                pc = callTarget;
+            }
+            continue;
+        }
+        else if (op == 0x02) // J target
+        {
+            uint32_t jumpTarget = (pc & 0xF0000000u) | ((inst & 0x03FFFFFFu) << 2);
+            execInst(pc + 4, read32(pc + 4));
+            pc = jumpTarget;
+            continue;
+        }
+        else if (op == 0x03) // JAL target
+        {
+            uint32_t callTarget = (pc & 0xF0000000u) | ((inst & 0x03FFFFFFu) << 2);
+            uint32_t returnAddr = pc + 8;
+            writeGPR32(31, returnAddr);
+            execInst(pc + 4, read32(pc + 4));
+            if (runtime->hasFunction(callTarget))
+            {
+                ctx->pc = callTarget;
+                PS2Runtime::RecompiledFunction fn = runtime->lookupFunction(callTarget);
+                fn(rdram, ctx, runtime);
+                pc = returnAddr;
+            }
+            else
+            {
+                pc = callTarget;
+            }
+            continue;
+        }
+        else if (op == 0x04 || op == 0x05 || op == 0x06 || op == 0x07 || op == 0x01) // Branches
+        {
+            bool taken = false;
+            if (op == 0x04) taken = (readGPR(rs) == readGPR(rt)); // BEQ
+            else if (op == 0x05) taken = (readGPR(rs) != readGPR(rt)); // BNE
+            else if (op == 0x06) taken = (static_cast<int64_t>(readGPR(rs)) <= 0); // BLEZ
+            else if (op == 0x07) taken = (static_cast<int64_t>(readGPR(rs)) > 0); // BGTZ
+            else if (op == 0x01) { // REGIMM
+                if (rt == 0x00) taken = (static_cast<int64_t>(readGPR(rs)) < 0); // BLTZ
+                else if (rt == 0x01) taken = (static_cast<int64_t>(readGPR(rs)) >= 0); // BGEZ
+            }
+            uint32_t branchTarget = pc + 4 + (static_cast<int32_t>(imm16) << 2);
+            execInst(pc + 4, read32(pc + 4)); // delay slot
+            pc = taken ? branchTarget : (pc + 8);
+            continue;
+        }
+        else
+        {
+            execInst(pc, inst);
+            pc += 4;
+        }
+    }
+
+    ctx->pc = pc;
+    return true;
+}
+
+struct EeProfilerScope {
+    static inline thread_local int s_depth = 0;
+    static inline thread_local std::chrono::steady_clock::time_point s_start{};
+    EeProfilerScope() {
+        if (s_depth++ == 0) {
+            s_start = std::chrono::steady_clock::now();
+        }
+    }
+    ~EeProfilerScope() {
+        if (--s_depth == 0) {
+            auto end = std::chrono::steady_clock::now();
+            g_profEeUs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - s_start).count()), std::memory_order_relaxed);
+        }
+    }
+};
+
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
@@ -2136,6 +3114,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
+    EeProfilerScope eeScope;
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
     if (targetPc >= 0x00120000u && targetPc < 0x0013F800u)
@@ -2165,12 +3144,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         }
     }
 
-    // Every inter-function transfer is also a deterministic EE safe point.
-    // Backward edges inside generated functions use eeCheckpointDue(), while
-    // this charge bounds straight-line call chains that have no local loop.
-    if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+    // Every inter-function transfer accounts cycles.
+    // Never return false here for calls/transfers, as that unwinds host C++ frames and breaks main loop.
+    if (m_eeScheduler)
     {
-        return false;
+        m_eeScheduler->accountCycles(EeScheduler::kGuestDispatchCycles);
     }
 
     if (!isCall)
@@ -2185,6 +3163,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
         if (!hasFunction(targetPc))
         {
+            if (m_memory.isCodeAddress(targetPc) || (targetPc >= 0x00100000u && targetPc < 0x00628248u))
+            {
+                return executeUnrecompiledCode(rdram, ctx, targetPc, sourcePc, 0u, kind, debugName, this);
+            }
             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
         }
 
@@ -2194,6 +3176,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (!hasFunction(targetPc))
     {
+        if (m_memory.isCodeAddress(targetPc) || (targetPc >= 0x00100000u && targetPc < 0x00628248u))
+        {
+            return executeUnrecompiledCode(rdram, ctx, targetPc, sourcePc, fallthroughPc, kind, debugName, this);
+        }
+
         ps2xSafeLog( "[abort] dispatchGuestBranch: missing target at targetPc=0x%08x, sourcePc=0x%08x, kind=%s, op=%s, ra=0x%08x, sp=0x%08x\n",
                 targetPc, sourcePc, describeGuestBranchKind(kind), (debugName ? debugName : "<unknown>"),
                 (uint32_t)_mm_extract_epi32(ctx->r[31], 0),
@@ -2203,9 +3190,45 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         std::abort();
     }
 
+    extern thread_local uint32_t g_currentExecutingFunction;
+    const uint32_t prevExecutingFn = g_currentExecutingFunction;
+    g_currentExecutingFunction = targetPc;
+
+    // Track for movie/MPEG calls:
+    if (targetPc == 0x0031A1B4u || targetPc == 0x0031A240u ||
+        (targetPc >= 0x00408000u && targetPc <= 0x00413000u))
+    {
+        g_mpegFunctionCalled.store(true, std::memory_order_relaxed);
+    }
+    // Track last 5 distinct function entry addresses:
+    if (targetPc != g_lastDistinctFns[0])
+    {
+        g_lastDistinctFns[4] = g_lastDistinctFns[3];
+        g_lastDistinctFns[3] = g_lastDistinctFns[2];
+        g_lastDistinctFns[2] = g_lastDistinctFns[1];
+        g_lastDistinctFns[1] = g_lastDistinctFns[0];
+        g_lastDistinctFns[0] = targetPc;
+    }
+
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
     targetFn(rdram, ctx, this);
+    g_currentExecutingFunction = prevExecutingFn;
+
+    if (targetPc == 0x001037E8u)
+    {
+        while (!isStopRequested() && ctx->pc != 0u && hasFunction(ctx->pc))
+        {
+            const uint32_t currentPc = ctx->pc;
+            RecompiledFunction fn = lookupFunction(currentPc);
+            fn(rdram, ctx, this);
+            if (ctx->pc == currentPc)
+            {
+                break;
+            }
+        }
+        return true;
+    }
 
     if (ctx->pc == entryPc)
     {
@@ -2222,9 +3245,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             // Safety bound against runaway dispatch chains
             break;
         }
-        if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+        if (m_eeScheduler)
         {
-            return false;
+            m_eeScheduler->accountCycles(EeScheduler::kGuestDispatchCycles);
         }
         const uint32_t nextPc = ctx->pc;
         RecompiledFunction nextFn = lookupFunction(nextPc);
@@ -3099,7 +4122,7 @@ void PS2Runtime::postEeEvent(EeEvent event)
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
-    return m_eeScheduler->checkpointDue(cycles);
+    return m_eeScheduler ? m_eeScheduler->checkpointDue(cycles) : false;
 }
 
 [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)
@@ -3245,6 +4268,13 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
+#if AGRESSIVE_LOGS
+    if (!std::getenv("PS2X_ENABLE_CALL_TRACE"))
+    {
+        ps2_log::log_stream().setstate(std::ios_base::badbit | std::ios_base::failbit);
+    }
+#endif
+
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
     Texture2D frameTex = LoadTextureFromImage(blank);
@@ -3275,11 +4305,20 @@ void PS2Runtime::run()
 
     extern void dumpEeDiagnostics(const EeScheduler *scheduler, uint32_t stuckPc);
     uint64_t tick = 0;
+    if (isVerboseLog()) {
+        fprintf(stderr, "=== MAIN THREAD RUN LOOP STARTING ===\n");
+        fflush(stderr);
+    }
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
         tick++;
+        if (isVerboseLog() && (tick <= 5 || (tick % 60) == 0))
+        {
+            fprintf(stderr, "=== TICK %llu ===\n", (unsigned long long)tick);
+            fflush(stderr);
+        }
 
-        if ((tick % 60) == 0)
+        if (isVerboseLog() && ((tick % 60) == 0))
         {
             extern std::string ps2xGetIntcSummary();
             ps2xSafeLog("[run:sec] tick=%llu dma=%llu gif=%llu vif=%llu intc:[%s]\n",
@@ -3296,7 +4335,7 @@ void PS2Runtime::run()
             const uint32_t curPc = m_debugPc.load(std::memory_order_relaxed);
             dumpEeDiagnostics(m_eeScheduler.get(), curPc);
         }
-        if ((tick % 120) == 0)
+        if (isVerboseLog() && ((tick % 120) == 0))
         {
             const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
             const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
@@ -3436,31 +4475,129 @@ void PS2Runtime::run()
                 s_consecutiveSamePc = 1;
             }
         }
-        uint32_t presentWidth = FB_WIDTH;
-        uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-        UploadFrame(frameTex, this, presentWidth, presentHeight, tick);
+        // Sample real keyboard state from Raylib window thread
+        uint16_t activeButtons = 0;
+        if (IsKeyDown(KEY_ENTER)) activeButtons |= (1u << 3); // START
+        if (IsKeyDown(KEY_RIGHT_SHIFT) || IsKeyDown(KEY_BACKSPACE)) activeButtons |= (1u << 0); // SELECT
+        if (IsKeyDown(KEY_X) || IsKeyDown(KEY_K)) activeButtons |= (1u << 14); // CROSS
+        if (IsKeyDown(KEY_Z) || IsKeyDown(KEY_L) || IsKeyDown(KEY_SPACE)) activeButtons |= (1u << 13); // CIRCLE
+        if (IsKeyDown(KEY_A) || IsKeyDown(KEY_J)) activeButtons |= (1u << 15); // SQUARE
+        if (IsKeyDown(KEY_S) || IsKeyDown(KEY_I)) activeButtons |= (1u << 12); // TRIANGLE
+        if (IsKeyDown(KEY_UP)) activeButtons |= (1u << 4); // UP
+        if (IsKeyDown(KEY_RIGHT)) activeButtons |= (1u << 5); // RIGHT
+        if (IsKeyDown(KEY_DOWN)) activeButtons |= (1u << 6); // DOWN
+        if (IsKeyDown(KEY_LEFT)) activeButtons |= (1u << 7); // LEFT
+        if (IsKeyDown(KEY_Q)) activeButtons |= (1u << 10); // L1
+        if (IsKeyDown(KEY_W)) activeButtons |= (1u << 8); // L2
+        if (IsKeyDown(KEY_E)) activeButtons |= (1u << 11); // R1
+        if (IsKeyDown(KEY_R)) activeButtons |= (1u << 9); // R2
+        g_hostPadButtons.store(activeButtons, std::memory_order_release);
 
-        BeginDrawing();
-        ClearBackground(BLACK);
-        const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
-        const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
-        const float screenWidth = static_cast<float>(GetScreenWidth());
-        const float screenHeight = static_cast<float>(GetScreenHeight());
-        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
-        const float dstWidth = srcWidth * scale;
-        const float dstHeight = srcHeight * scale;
-        const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
-        const Rectangle dstRect{
-            (screenWidth - dstWidth) * 0.5f,
-            (screenHeight - dstHeight) * 0.5f,
-            dstWidth,
-            dstHeight};
-        DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
-        if (m_debugUiInitialized && m_debugUiDrawCallback)
+        extern std::atomic<uint64_t> g_gsFrameKicks;
+        static uint64_t s_lastPresentedGsKicks = std::numeric_limits<uint64_t>::max();
+        static auto s_lastPresentTime = std::chrono::steady_clock::now();
+        static uint32_t s_fpsCounter = 0;
+        static auto s_lastFpsLogTime = std::chrono::steady_clock::now();
+
+        const uint64_t currentGsKicks = g_gsFrameKicks.load(std::memory_order_acquire);
+        const auto now = std::chrono::steady_clock::now();
+        const auto timeSinceLastPresent = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastPresentTime).count();
+        const bool shouldPresent = (currentGsKicks != s_lastPresentedGsKicks) || (timeSinceLastPresent >= 33);
+
+        if (shouldPresent)
         {
-            m_debugUiDrawCallback(*this, m_debugUiUserData);
+            s_lastPresentedGsKicks = currentGsKicks;
+            s_lastPresentTime = now;
+            s_fpsCounter++;
+            if (g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u)
+            {
+                g_movieSceneFrames.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            const auto presT0 = std::chrono::steady_clock::now();
+            uint32_t presentWidth = FB_WIDTH;
+            uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+            UploadFrame(frameTex, this, presentWidth, presentHeight, tick);
+
+            BeginDrawing();
+            ClearBackground(BLACK);
+            const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
+            const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
+            const float screenWidth = static_cast<float>(GetScreenWidth());
+            const float screenHeight = static_cast<float>(GetScreenHeight());
+            const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+            const float dstWidth = srcWidth * scale;
+            const float dstHeight = srcHeight * scale;
+            const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
+            const Rectangle dstRect{
+                (screenWidth - dstWidth) * 0.5f,
+                (screenHeight - dstHeight) * 0.5f,
+                dstWidth,
+                dstHeight};
+            DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            if (m_debugUiInitialized && m_debugUiDrawCallback)
+            {
+                m_debugUiDrawCallback(*this, m_debugUiUserData);
+            }
+            EndDrawing();
+            const auto presT1 = std::chrono::steady_clock::now();
+            s_profPresentUs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(presT1 - presT0).count());
         }
-        EndDrawing();
+        else
+        {
+            PollInputEvents();
+            std::this_thread::yield();
+        }
+
+        const auto timeSinceLastFpsLog = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastFpsLogTime).count();
+        if (timeSinceLastFpsLog >= 1000)
+        {
+            uint32_t currentFps = static_cast<uint32_t>(s_fpsCounter * 1000.0 / timeSinceLastFpsLog);
+            ps2xSafeLog("[fps] FPS: %u (GS frames/sec), kicks=%llu, vsyncTick=%llu\n",
+                        currentFps, (unsigned long long)currentGsKicks, (unsigned long long)(m_eeScheduler ? m_eeScheduler->currentVSyncTick() : 0));
+
+            uint64_t eeUs = g_profEeUs.exchange(0, std::memory_order_relaxed);
+            uint64_t gsUs = g_profGsUs.exchange(0, std::memory_order_relaxed);
+            uint64_t xferUs = g_profXferUs.exchange(0, std::memory_order_relaxed);
+            uint64_t presentUs = s_profPresentUs;
+            s_profPresentUs = 0;
+            uint64_t prims = g_profPrims.exchange(0, std::memory_order_relaxed);
+            uint64_t pixels = g_profPixels.exchange(0, std::memory_order_relaxed);
+
+            double ee_ms = eeUs / 1000.0;
+            double gs_ms = gsUs / 1000.0;
+            double xfer_ms = xferUs / 1000.0;
+            double present_ms = presentUs / 1000.0;
+
+            ps2xSafeLog("[prof] fps=%u ee_ms=%.2f gs_ms=%.2f xfer_ms=%.2f present_ms=%.2f prims=%llu pixels=%llu\n",
+                        currentFps, ee_ms, gs_ms, xfer_ms, present_ms,
+                        (unsigned long long)prims, (unsigned long long)pixels);
+
+            if (g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u)
+            {
+                ps2xSafeLog("[movie] seekDone=%d reads=%u getPicture=%u isEnd=%u fallback=%d\n",
+                            g_movieSeekDone.load() ? 1 : 0,
+                            g_movieReadsCount.load(),
+                            g_movieGetPictureCount.load(),
+                            g_movieIsEndCount.load(),
+                            g_movieFallbackTriggered.load() ? 1 : 0);
+            }
+
+            const auto timeInScene = std::chrono::duration_cast<std::chrono::seconds>(now - g_lastSceneTransitionTime).count();
+            static long long s_lastStallReported10s = 0;
+            if (timeInScene >= 10 && (timeInScene / 10 != s_lastStallReported10s))
+            {
+                s_lastStallReported10s = timeInScene / 10;
+                ps2xSafeLog("[stall:diag] Same scene for %llds: cur=0x%08x (vtable=0x%08x) FPS=%u. Last 5 distinct fns: 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x.\n",
+                            (long long)timeInScene, g_trackedCurScene.load(), g_trackedCurVtable.load(), currentFps,
+                            g_lastDistinctFns[0], g_lastDistinctFns[1], g_lastDistinctFns[2], g_lastDistinctFns[3], g_lastDistinctFns[4]);
+            }
+            char titleBuf[128];
+            std::snprintf(titleBuf, sizeof(titleBuf), "Ape Escape 3 Recomp - FPS: %u (GS %llu)", currentFps, (unsigned long long)currentGsKicks);
+            SetWindowTitle(titleBuf);
+            s_fpsCounter = 0;
+            s_lastFpsLogTime = now;
+        }
 
         if (WindowShouldClose())
         {

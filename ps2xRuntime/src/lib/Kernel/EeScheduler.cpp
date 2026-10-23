@@ -1,4 +1,24 @@
+#include <cstdint>
+#include <cstdlib>
 void ps2xSafeLog(const char *fmt, ...);
+static inline bool isVerboseLog()
+{
+    static int s_verbose = -1;
+    if (s_verbose == -1)
+    {
+        const char *v = std::getenv("PS2X_VERBOSE_LOG");
+        s_verbose = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+    }
+    return s_verbose == 1;
+}
+namespace ps2_stubs {
+    void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
+    void clearPadOverrideState();
+}
+class PS2Runtime;
+namespace ps2_syscalls {
+    void ps2xUpdateDbcPadBuffers(uint8_t *rdram, PS2Runtime *runtime);
+}
 #include "runtime/ee_scheduler.h"
 
 #include "ps2_log.h"
@@ -38,6 +58,12 @@ namespace
     constexpr auto kVBlankDuration = std::chrono::microseconds(500);
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
+}
+
+thread_local uint32_t g_currentExecutingFunction = 0u;
+
+namespace
+{
 
     constexpr uint64_t microsecondsToEeCycles(uint64_t microseconds)
     {
@@ -383,8 +409,11 @@ void EeScheduler::run()
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
             m_guestExecuting.store(true, std::memory_order_release);
             const uint32_t entryPc = context.pc;
+            const uint32_t prevExecutingFunction = g_currentExecutingFunction;
+            g_currentExecutingFunction = entryPc;
             s_lastDispatchedPc[s_lastDispatchIdx++ % 32] = entryPc;
             function(m_rdram, &context, &m_runtime);
+            g_currentExecutingFunction = prevExecutingFunction;
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
@@ -444,6 +473,33 @@ void EeScheduler::postEvent(EeEvent event)
 
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
+    uint32_t pc = g_currentExecutingFunction;
+    if (m_currentThreadId != 0)
+    {
+        const GuestThread *running = currentThread();
+        if (running != nullptr)
+        {
+            pc = running->activeContext().pc;
+        }
+    }
+    if ((pc >= 0x003D7000u && pc <= 0x003E5000u) ||
+        (g_currentExecutingFunction >= 0x003D7000u && g_currentExecutingFunction <= 0x003E5000u))
+    {
+        static thread_local uint32_t s_throttleCount = 0;
+        if ((++s_throttleCount & 0x3FFu) != 0)
+        {
+            return false;
+        }
+    }
+
+    if (m_currentThreadId == kMainThreadId && (pc == 0x0010384Cu || (g_currentExecutingFunction == 0x001037E8u && pc >= 0x00103960u)))
+    {
+        accountCycles(kVBlankPeriodCycles / 4);
+        processPendingEvents();
+
+        return false;
+    }
+
     accountCycles(cycles);
 
     if (m_checkpointPending.load(std::memory_order_acquire) ||
@@ -1981,43 +2037,16 @@ void EeScheduler::processDueDeadlines()
     for (;;)
     {
         std::vector<ScheduledEvent> due;
-        std::chrono::steady_clock::time_point pacingDeadline{};
         {
             std::unique_lock lock(m_eventMutex);
-            const auto now = std::chrono::steady_clock::now();
-            for (const ScheduledEvent &item : m_deadlines)
-            {
-                if (item.deadlineCycle <= m_eeCycle &&
-                    (pacingDeadline == std::chrono::steady_clock::time_point{} ||
-                     item.hostDeadline < pacingDeadline))
-                {
-                    pacingDeadline = item.hostDeadline;
-                }
-            }
-
-            if (pacingDeadline == std::chrono::steady_clock::time_point{})
+            auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
+                                              [this](const ScheduledEvent &item)
+                                              { return item.deadlineCycle <= m_eeCycle; });
+            if (firstFuture == m_deadlines.begin())
             {
                 updateNextDeadline();
                 return;
             }
-
-            if (now < pacingDeadline)
-            {
-                m_eventCv.wait_until(lock, pacingDeadline, [this]()
-                                     { return !m_events.empty() ||
-                                              m_stopRequested.load(std::memory_order_acquire); });
-                if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
-                {
-                    updateNextDeadline();
-                    return;
-                }
-            }
-
-            const auto pacedNow = std::chrono::steady_clock::now();
-            auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
-                                              [this, pacedNow](const ScheduledEvent &item)
-                                              { return item.deadlineCycle <= m_eeCycle &&
-                                                       item.hostDeadline <= pacedNow; });
             due.insert(due.end(),
                        std::make_move_iterator(m_deadlines.begin()),
                        std::make_move_iterator(firstFuture));
@@ -2050,11 +2079,17 @@ void EeScheduler::processDueDeadlines()
         {
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
+                const auto now = std::chrono::steady_clock::now();
+                auto nextHost = scheduled.hostDeadline + kVBlankPeriod;
+                if (nextHost < now || nextHost > now + kVBlankPeriod * 2)
+                {
+                    nextHost = now + kVBlankPeriod;
+                }
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
-                              scheduled.hostDeadline + kVBlankDuration,
+                              nextHost - kVBlankPeriod + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
                 scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
-                              scheduled.hostDeadline + kVBlankPeriod,
+                              nextHost,
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);
@@ -2092,6 +2127,98 @@ void EeScheduler::processEvent(const EeEvent &event)
         m_vsyncFlagAddress = 0u;
         m_vsyncTickAddress = 0u;
         completeVSync(m_vsyncTick);
+
+        // GameThread pad injection
+        {
+            struct PadInj {
+                std::string button;
+                uint16_t mask = 0;
+                uint64_t startMs = 0;
+                uint64_t durMs = 0;
+                bool active = false;
+            };
+            static std::vector<PadInj> s_injections;
+            static bool s_parsed = false;
+            static auto s_bootTime = std::chrono::steady_clock::now();
+            if (!s_parsed) {
+                s_parsed = true;
+                const char *env = std::getenv("PS2X_INJECT_PAD");
+                if (env && env[0] != '\0') {
+                    std::string str(env);
+                    size_t pos = 0;
+                    while (pos < str.size()) {
+                        size_t comma = str.find(',', pos);
+                        std::string item = str.substr(pos, (comma == std::string::npos) ? std::string::npos : (comma - pos));
+                        pos = (comma == std::string::npos) ? str.size() : (comma + 1);
+                        size_t c1 = item.find(':');
+                        size_t c2 = (c1 != std::string::npos) ? item.find(':', c1 + 1) : std::string::npos;
+                        if (c1 != std::string::npos && c2 != std::string::npos) {
+                            PadInj inj;
+                            inj.button = item.substr(0, c1);
+                            try {
+                                inj.startMs = std::stoull(item.substr(c1 + 1, c2 - c1 - 1));
+                                inj.durMs = std::stoull(item.substr(c2 + 1));
+                            } catch (...) { continue; }
+                            if (inj.button == "START") inj.mask = 1u << 3;
+                            else if (inj.button == "CROSS") inj.mask = 1u << 14;
+                            else if (inj.button == "CIRCLE") inj.mask = 1u << 13;
+                            else if (inj.button == "TRIANGLE") inj.mask = 1u << 12;
+                            else if (inj.button == "SQUARE") inj.mask = 1u << 15;
+                            if (inj.mask != 0) s_injections.push_back(inj);
+                        }
+                    }
+                }
+            }
+
+            uint16_t activeMask = 0;
+            if (!s_injections.empty()) {
+                const uint64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - s_bootTime).count();
+                for (auto &inj : s_injections) {
+                    bool shouldBeActive = (nowMs >= inj.startMs && nowMs < (inj.startMs + inj.durMs));
+                    if (shouldBeActive != inj.active) {
+                        inj.active = shouldBeActive;
+                        ps2xSafeLog("[pad:inject] %s %s at %llums (vsync=%llu)\n",
+                                    inj.button.c_str(), shouldBeActive ? "DOWN" : "UP",
+                                    (unsigned long long)nowMs, (unsigned long long)m_vsyncTick);
+                        std::fflush(stderr);
+                    }
+                    if (inj.active) activeMask |= inj.mask;
+                }
+            } else {
+                extern std::atomic<uint16_t> g_hostPadButtons;
+                static int s_autoPad = -1;
+                if (s_autoPad == -1) {
+                    const char *env = std::getenv("PS2X_AUTO_PAD");
+                    s_autoPad = (env && (env[0] == '1' || env[0] == 't')) ? 1 : 0;
+                }
+                if (s_autoPad && m_vsyncTick >= 5) {
+                    const uint64_t phase = (m_vsyncTick / 10) % 3;
+                    const bool press = ((m_vsyncTick % 10) < 5);
+                    if (press) {
+                        if (phase == 0) activeMask |= (1u << 14); // CROSS
+                        else if (phase == 1) activeMask |= (1u << 13); // CIRCLE
+                        else activeMask |= (1u << 3); // START
+                    }
+                    static uint64_t s_lastLogVsync = 0;
+                    if (isVerboseLog() && m_vsyncTick != s_lastLogVsync && (m_vsyncTick % 60) == 0) {
+                        s_lastLogVsync = m_vsyncTick;
+                        ps2xSafeLog("[pad:inject:auto] vsync=%llu phase=%llu press=%d btn=0x%04x\n",
+                                    (unsigned long long)m_vsyncTick, (unsigned long long)phase, press ? 1 : 0, activeMask);
+                        std::fflush(stderr);
+                    }
+                } else {
+                    activeMask = g_hostPadButtons.load(std::memory_order_acquire);
+                }
+            }
+
+            if (activeMask != 0) {
+                ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~activeMask), 0x80, 0x80, 0x80, 0x80);
+            } else {
+                ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+            }
+
+            ps2_syscalls::ps2xUpdateDbcPadBuffers(m_rdram, &m_runtime);
+        }
         if (m_gsVSyncCallback != 0u && m_runtime.hasFunction(m_gsVSyncCallback))
         {
             GuestInvocation invocation{};

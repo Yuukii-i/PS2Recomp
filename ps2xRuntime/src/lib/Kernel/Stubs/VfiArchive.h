@@ -385,6 +385,7 @@ namespace ps2x::vfi
         uint16_t crc16 = 0;       // Kermit CRC16
         bool isDecompressedSz = false;
         uint64_t rawFileSize = 0;
+        uint16_t dirRelOff = 0;
     };
 
     struct VfiDirRecord
@@ -510,6 +511,7 @@ namespace ps2x::vfi
                 entry.isoLsn = m_dataBinLsn + startSector;
                 entry.fileSize = static_cast<uint64_t>(fileSize);
                 entry.crc16 = crc;
+                entry.dirRelOff = dirRelOff;
 
                 m_files.push_back(entry);
                 m_filesByPath[normPath] = entry;
@@ -518,6 +520,7 @@ namespace ps2x::vfi
             }
 
             // Populate directory lookup by path
+            m_dirsByPath[""] = VfiDirEntry{"", "", 0};
             for (const auto &[relOff, rec] : m_dirs)
             {
                 std::string fullPath = getDirPath(relOff);
@@ -552,6 +555,42 @@ namespace ps2x::vfi
                 return &it->second;
             }
             return nullptr;
+        }
+
+        struct VfiDirChild
+        {
+            std::string name;
+            bool isDirectory = false;
+            uint32_t startSector = 0;
+            uint64_t fileSize = 0;
+        };
+
+        std::vector<VfiDirChild> enumerateDirectory(const std::string &path)
+        {
+            if (!m_initialized) initialize();
+            if (!m_loadSuccess) return {};
+
+            const VfiDirEntry *dir = findDir(path);
+            if (!dir) return {};
+
+            std::vector<VfiDirChild> children;
+            // 1. Enumerate subdirectories belonging to this directory (matches file3.irx:0x0dec loop 1)
+            for (const auto &[relOff, rec] : m_dirs)
+            {
+                if (rec.parentOff == dir->relOff && relOff != dir->relOff && !rec.name.empty())
+                {
+                    children.push_back({rec.name, true, 0u, 0ull});
+                }
+            }
+            // 2. Enumerate regular files belonging to this directory (matches file3.irx:0x0dec loop 2)
+            for (const auto &f : m_files)
+            {
+                if (f.dirRelOff == dir->relOff)
+                {
+                    children.push_back({f.name, false, f.startSector, f.fileSize});
+                }
+            }
+            return children;
         }
 
         const VfiEntry *find(const std::string &path)

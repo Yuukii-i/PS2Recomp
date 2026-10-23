@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+std::atomic<uint64_t> g_gsFrameKicks{0};
+
 namespace
 {
     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
@@ -40,6 +42,7 @@ namespace
     {
         return Ps2AddressInRange(addr, PS2_GS_PRIV_REG_BASE, PS2_GS_PRIV_REG_SIZE);
     }
+
 
     inline bool isIoRegister(uint32_t addr)
     {
@@ -1326,7 +1329,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     if (channelBase == 0x1000A000u)
                         m_pendingGifTransfers.push_back(pt);
                     else if (channelBase == 0x10009000u)
+                    {
                         m_pendingVif1Transfers.push_back(pt);
+                        g_gsFrameKicks.fetch_add(1, std::memory_order_release);
+                    }
                     else if (channelBase == 0x10008000u)
                         m_pendingVif0Transfers.push_back(pt);
                 };
@@ -1516,6 +1522,35 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                         if (hasPayload)
                             appendData(dataAddr, tagQwc);
+
+                        if (channelBase == 0x10009000u && (tagQwc == 512 || tagQwc == 64 || (tagQwc > 0 && tagsProcessed <= 6)))
+                        {
+                            uint32_t w2 = 0, w3 = 0;
+                            if (physTag + 16 <= tagMax) {
+                                std::memcpy(&w2, tp + 8, 4);
+                                std::memcpy(&w3, tp + 12, 4);
+                            }
+                            uint8_t sample[16] = {};
+                            if (hasPayload) {
+                                uint32_t dp = 0;
+                                try { dp = translateAddress(dataAddr); } catch(...) {}
+                                const uint8_t *db = isScratchpad(dataAddr) ? m_scratchpad : m_rdram;
+                                const uint32_t dm = isScratchpad(dataAddr) ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                if (dp + 16 <= dm) std::memcpy(sample, db + dp, 16);
+                            }
+                            static int s_tagLogCount = 0;
+                            static int s_vifTagVerbose = -1;
+                            if (s_vifTagVerbose == -1) {
+                                const char *v = std::getenv("PS2X_VERBOSE_LOG");
+                                s_vifTagVerbose = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+                            }
+                            if (s_vifTagVerbose && s_tagLogCount++ < 50) {
+                                std::fprintf(stderr, "[DMA:VIF1_TAG] tagAddr=0x%08X id=%u qwc=%u dataAddr=0x%08X w2=0x%08X w3=0x%08X TTE=%d payload0..7=[%u,%u,%u,%u,%u,%u,%u,%u]\n",
+                                             currentTagAddr, id, tagQwc, dataAddr, w2, w3, transferTagData ? 1 : 0,
+                                             sample[0], sample[1], sample[2], sample[3], sample[4], sample[5], sample[6], sample[7]);
+                                std::fflush(stderr);
+                            }
+                        }
                         if (irq && tieEnabled)
                             endChain = true;
                         if (endChain)
@@ -1543,6 +1578,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         else if (channelBase == 0x10009000u)
                         {
                             m_pendingVif1Transfers.push_back(std::move(pt));
+                            g_gsFrameKicks.fetch_add(1, std::memory_order_release);
                         }
                         else if (channelBase == 0x10008000u)
                         {
@@ -2188,6 +2224,24 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
     const uint8_t *imageData = nullptr;
     if (!resolveContiguous(imageDataAddr, imageBytes, imageData))
         return false;
+
+    static uint32_t s_uploadChainSeq = 0;
+    ++s_uploadChainSeq;
+    uint32_t dbp = static_cast<uint32_t>(setupRegs[0] & 0x3FFFull);
+    uint32_t dpsm = static_cast<uint32_t>((setupRegs[0] >> 24u) & 0x3Full);
+    uint32_t rrw = static_cast<uint32_t>(setupRegs[2] & 0xFFFull);
+    uint32_t rrh = static_cast<uint32_t>((setupRegs[2] >> 32u) & 0xFFFull);
+    std::fprintf(stderr, "[GIF:DMA_SRC] seq=%u guestAddr=0x%08X bytes=%u tagId=%u tagAddr=0x%08X dbp=%u dpsm=0x%02X (%ux%u)\n",
+                 s_uploadChainSeq, imageDataAddr, imageBytes, payloadTag.id, payloadTagAddr, dbp, dpsm, rrw, rrh);
+    if (imageData && imageBytes >= 16)
+    {
+        std::fprintf(stderr, "[GIF:DMA_SRC_DATA] first16=[%u,%u,%u,%u,%u,%u,%u,%u, %u,%u,%u,%u,%u,%u,%u,%u]\n",
+                     imageData[0], imageData[1], imageData[2], imageData[3],
+                     imageData[4], imageData[5], imageData[6], imageData[7],
+                     imageData[8], imageData[9], imageData[10], imageData[11],
+                     imageData[12], imageData[13], imageData[14], imageData[15]);
+    }
+    std::fflush(stderr);
 
     m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
     m_seenGifCopy = true;
