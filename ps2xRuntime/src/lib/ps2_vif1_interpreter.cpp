@@ -456,6 +456,15 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
+#if defined(PS2X_PROBE_AE) || 1
+            if (probe_ae::isEnabled()) {
+                probe_ae::onBbVif1Mscal(startPC, runItop, runTop, runTop,
+                                        vif1_regs.base & 0x3FFu, vif1_regs.ofst & 0x3FFu,
+                                        vif1_regs.cycle & 0xFFu, (vif1_regs.cycle >> 8) & 0xFFu,
+                                        vif1_regs.mode & 3u);
+            }
+#endif
+
             if (m_vu1MscalCallback) {
                 auto tVu1Start = std::chrono::steady_clock::now();
                 m_vu1MscalCallback(startPC, runTop, runItop);
@@ -656,6 +665,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 uint32_t computed_words = totalBytes / 4u;
                 probe_ae::onAwUnpack(fmt, num, cl, wl, usn, flg, addr, computed_words);
                 probe_ae::onAyUnpackCheck(fmt, addr, num, pos_payload, data + pos_payload, sizeBytes);
+                probe_ae::onBbRecordUnpack(pos_payload, totalBytes, vuAddr, fmt, num);
             }
 #endif
 

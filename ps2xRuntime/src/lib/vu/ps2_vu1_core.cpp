@@ -978,6 +978,11 @@ void VU1Interpreter::finishXgkick()
     if (!m_xgkick.active)
         return;
 
+    if (probe_ae::isEnabled())
+    {
+        probe_ae::onBbXgkickPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
+    }
+
     const auto tXgkickStart = std::chrono::steady_clock::now();
     if (m_activeMemory)
         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
@@ -1664,6 +1669,9 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     if (probe_ae::isEnabled())
     {
         probe_ae::onBaMscalStart(startPC, m_state.vi);
+        probe_ae::onBbRunStart(startPC, vuCode, codeSize, vuData, dataSize,
+                               m_state.vf, m_state.vi, m_state.acc,
+                               m_state.q, m_state.p, m_state.i);
     }
     m_state.ebit = false;
     m_state.haltAfterDelaySlot = false;
@@ -1928,5 +1936,6 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         uint64_t totalRunNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tRunEnd - tRunStart).count());
         uint64_t loopNs = (totalRunNs > s_currentRunXgkickNs) ? (totalRunNs - s_currentRunXgkickNs) : 0;
         probe_ae::onBaRunEnd(instrsThisRun, loopNs);
+        probe_ae::onBbRunEnd(vuData, dataSize);
     }
 }

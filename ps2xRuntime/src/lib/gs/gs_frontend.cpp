@@ -2,6 +2,7 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
+#include "probe_ae.h"
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -1078,6 +1079,11 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
 {
+#if defined(PS2X_PROBE_AE) || 1
+    if (probe_ae::isEnabled()) {
+        probe_ae::onGsWriteRegister(regAddr, value);
+    }
+#endif
     const bool interestingReg =
         regAddr == GS_REG_PRIM ||
         regAddr == GS_REG_RGBAQ ||

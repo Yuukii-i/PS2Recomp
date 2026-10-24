@@ -636,4 +636,19 @@ namespace probe_ae {
     void onBaXgkick(uint32_t qwords, uint64_t xgkickNs, uint32_t prims);
     void onBaRunEnd(uint32_t instructionsExecuted, uint64_t loopNs);
     void dumpBaVu1IfDue(uint32_t sec);
+
+    // Task BB Probes
+    void onBbChainStart(uint32_t tadr, uint32_t tagCount, const std::vector<AySpan> &spans);
+    void onBbVif1Mscal(uint32_t startPC, uint32_t itop, uint32_t top, uint32_t tops,
+                       uint32_t base, uint32_t ofst, uint32_t cl, uint32_t wl, uint32_t mode);
+    void onBbRecordUnpack(uint32_t posPayload, uint32_t totalBytes, uint32_t vuAddr, uint8_t fmt, uint8_t num);
+    void onBbRunStart(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize,
+                      const uint8_t *vuData, uint32_t dataSize,
+                      const float vf[32][4], const int32_t vi[16],
+                      const float acc[4], float q, float p, float i);
+    void onBbXgkickPacket(const uint8_t *data, uint32_t byteCount);
+    void onBbRunEnd(const uint8_t *vuData, uint32_t dataSize);
+    void onGsWriteRegister(uint8_t regAddr, uint64_t value);
+    void onGsPrivRegister(uint32_t addr, uint64_t value);
+    void onBbCheckRaw8(bool validFrame, uint32_t numMbs, uint32_t dst, const uint8_t *rdram);
 }

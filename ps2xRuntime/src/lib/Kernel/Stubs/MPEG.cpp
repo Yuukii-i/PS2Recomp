@@ -2690,6 +2690,7 @@ struct MpegCallLogger {
             probe_ae::onAyRaw8(n, dst, mbCapacity, getMemPtr(rdram, dst));
             probe_ae::onAzRaw8Call(validFrame, width, height, getMemPtr(rdram, dst));
             probe_ae::onBaRows(validFrame, mbCols, mbRows, dst, rdram);
+            probe_ae::onBbCheckRaw8(validFrame, numMbs, dst, rdram);
         }
 #endif
         if (n < 3u || (n % 100u == 0u))

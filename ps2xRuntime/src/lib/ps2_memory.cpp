@@ -970,6 +970,11 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
             uint64_t mask = 0xFFFFFFFFULL << (off * 8);
             uint64_t newVal = (*reg & ~mask) | ((uint64_t)value << (off * 8));
             *reg = newVal;
+#if defined(PS2X_PROBE_AE) || 1
+            if (probe_ae::isEnabled()) {
+                probe_ae::onGsPrivRegister(address, newVal);
+            }
+#endif
         }
         return;
     }
@@ -1027,6 +1032,11 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {
             *reg = value;
+#if defined(PS2X_PROBE_AE) || 1
+            if (probe_ae::isEnabled()) {
+                probe_ae::onGsPrivRegister(address, value);
+            }
+#endif
         }
         return;
     }
@@ -1348,6 +1358,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 else if (mode == 1)
                 {
                     uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
+                    const uint32_t initialTagAddr = tagAddr;
                     if (channelBase == 0x10009000u) {
 #if defined(PS2X_PROBE_AE) || 1
                         if (probe_ae::isEnabled()) {
@@ -1624,6 +1635,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         probe_ae::onAyTimeChain(std::chrono::duration_cast<std::chrono::microseconds>(tChainEnd - tChainStart).count());
                         probe_ae::onAyKick();
                         probe_ae::onAyChainStart(tagsProcessed, aySpans);
+                        probe_ae::onBbChainStart(initialTagAddr, tagsProcessed, aySpans);
                     }
 #endif
 
