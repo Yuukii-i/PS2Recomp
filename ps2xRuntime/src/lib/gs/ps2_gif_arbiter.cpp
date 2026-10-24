@@ -1,4 +1,7 @@
 #include "runtime/gs/ps2_gif_arbiter.h"
+#include "probe_ae.h"
+#include "probe_ae.h"
+#include "probe_ae.h"
 #include <algorithm>
 #include <cstring>
 
@@ -20,6 +23,9 @@ bool GifArbiter::isImagePacket(const uint8_t *data, uint32_t sizeBytes)
 
 void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
 {
+    probe_ae::onBhRecordQueueDepth(static_cast<uint32_t>(m_queue.size()));
+    probe_ae::onBhRecordQueueDepth(static_cast<uint32_t>(m_queue.size()));
+    probe_ae::onBhRecordQueueDepth(static_cast<uint32_t>(m_queue.size()));
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
 

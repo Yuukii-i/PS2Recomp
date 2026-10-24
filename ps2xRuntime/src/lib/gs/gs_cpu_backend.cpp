@@ -754,11 +754,18 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_vram || batch.vertexCount == 0u)
         return;
+    uint64_t pxBefore = g_profPixels.load(std::memory_order_relaxed);
     const auto t0 = std::chrono::steady_clock::now();
     DrawPrimitive(batch);
     const auto t1 = std::chrono::steady_clock::now();
-    g_profGsUs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()), std::memory_order_relaxed);
+    uint64_t elapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+    g_profGsUs.fetch_add(elapsedUs, std::memory_order_relaxed);
     g_profPrims.fetch_add(1u, std::memory_order_relaxed);
+    probe_ae::onBhGsRasterTime(elapsedUs);
+    uint64_t pxDrawn = g_profPixels.load(std::memory_order_relaxed) - pxBefore;
+    probe_ae::onBhGsPacket(elapsedUs, static_cast<uint32_t>(batch.state.prim.type), static_cast<uint32_t>(pxDrawn),
+                           batch.state.prim.tme != 0, batch.state.prim.abe != 0,
+                           1u << batch.state.context.tex0.tw, 1u << batch.state.context.tex0.th);
 }
 
 void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)

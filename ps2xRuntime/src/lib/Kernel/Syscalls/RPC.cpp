@@ -1694,6 +1694,7 @@ namespace ps2_syscalls
         // Handle file3.irx command 1 (handshake and task dispatch)
         if (cid == 1u)
         {
+            auto tCid1Start = std::chrono::steady_clock::now();
             struct VfiDescriptorSlot
             {
                 bool open = false;
@@ -2287,6 +2288,8 @@ namespace ps2_syscalls
                     s_batchLogCount++;
                 }
             }
+            auto tCid1End = std::chrono::steady_clock::now();
+            probe_ae::onBhCid1Time(std::chrono::duration_cast<std::chrono::microseconds>(tCid1End - tCid1Start).count());
         }
 
         // Handle SET_SREG command (0x80000001)

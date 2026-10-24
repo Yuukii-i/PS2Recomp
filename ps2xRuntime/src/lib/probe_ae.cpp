@@ -1,4 +1,8 @@
 #include "probe_ae.h"
+
+extern std::atomic<uint64_t> g_profPrims;
+extern std::atomic<uint64_t> g_profPixels;
+
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
@@ -2863,6 +2867,7 @@ namespace probe_ae {
                 doMovieFrameTransfer(gs, memory, base, native_ms, xfer_ms);
                 s_secNativeMsTotal += native_ms;
                 s_secXferMsTotal += xfer_ms;
+                onBhMovieHleTime(static_cast<uint64_t>((native_ms + xfer_ms) * 1000.0));
             }
 
             // Per-second probe dump
@@ -2904,5 +2909,390 @@ namespace probe_ae {
         } else {
             return false; // Interpret
         }
+    }
+
+    // =========================================================================
+    // Task BH Probes
+    // =========================================================================
+    bool isMovieActivePublic() {
+        return isMovieActive(s_cachedRdram);
+    }
+
+    struct SlowPacketInfo {
+        double ms = 0.0;
+        uint32_t primType = 0;
+        uint32_t pixelCount = 0;
+        bool texOn = false;
+        bool blendOn = false;
+        uint32_t tw = 0;
+        uint32_t th = 0;
+    };
+
+    struct SleepSite {
+        const char *desc;
+        const char *durationConst;
+        std::atomic<uint32_t> hits{0};
+        std::atomic<uint64_t> totalUs{0};
+    };
+
+    static SleepSite s_sleepSites[] = {
+        {"ps2_runtime.cpp:4612", "0"},
+        {"Kernel/EeScheduler.cpp:2372", "inf"},
+        {"Kernel/EeScheduler.cpp:2403", "timer_or_deadline"}
+    };
+
+    static bool s_bhStartupPrinted = false;
+    void bhInitStartup() {
+        if (!isEnabled()) return;
+        if (!s_bhStartupPrinted) {
+            s_bhStartupPrinted = true;
+            for (const auto &site : s_sleepSites) {
+                std::printf("[probe] bh sleepsite %s ms=%s\n", site.desc, site.durationConst);
+            }
+            std::fflush(stdout);
+        }
+    }
+
+    // Thread-local recursion tracking for VIF1 and GIF
+    static thread_local int tl_vif1Depth = 0;
+    static thread_local std::chrono::steady_clock::time_point tl_vif1Start;
+    static thread_local uint64_t tl_vif1GifUs = 0;
+
+    static thread_local int tl_submitGifDepth = 0;
+    static thread_local std::chrono::steady_clock::time_point tl_submitGifStart;
+
+    // Per-second accumulators
+    static std::atomic<uint64_t> s_bhVif1Us{0};
+    static std::atomic<uint64_t> s_bhGifUs{0};
+    static std::atomic<uint64_t> s_bhGsBlockUs{0};
+    static std::atomic<uint32_t> s_bhGsBlockCnt{0};
+
+    static std::atomic<uint64_t> s_bhRaw8FeedUs{0};
+    static std::atomic<uint64_t> s_bhRaw8DecUs{0};
+    static std::atomic<uint64_t> s_bhRaw8YccUs{0};
+    static std::atomic<uint32_t> s_bhRaw8Calls{0};
+
+    static std::atomic<uint64_t> s_bhMovieHleUs{0};
+
+    static std::atomic<uint64_t> s_bhSchedWaitUs{0};
+    static std::atomic<uint32_t> s_bhSchedWaitCnt{0};
+
+    static std::atomic<uint64_t> s_bhDmaPollUs{0};
+    static std::atomic<uint64_t> s_bhCid1Us{0};
+
+    static std::atomic<uint64_t> s_bhIntcUs{0};
+    static std::atomic<uint32_t> s_bhIntcCnt{0};
+    static std::atomic<uint64_t> s_bhIntcCauseUs[32]{};
+    static std::atomic<uint32_t> s_bhIntcCauseCnt[32]{};
+
+    static std::atomic<uint32_t> s_bhIters{0};
+
+    // GS thread metrics
+    static std::atomic<uint64_t> s_bhGsBusyUs{0};
+    static std::atomic<uint32_t> s_bhQueueDepthMax{0};
+    static std::atomic<uint64_t> s_bhQueueDepthSum{0};
+    static std::atomic<uint32_t> s_bhQueueDepthSamples{0};
+
+    static std::mutex s_slowPktsMutex;
+    static std::vector<SlowPacketInfo> s_slowPkts;
+
+    static auto s_bhLastSec = std::chrono::steady_clock::now();
+
+    void onBhVif1Start() {
+        if (!isEnabled()) return;
+        if (tl_vif1Depth == 0) {
+            tl_vif1Start = std::chrono::steady_clock::now();
+            tl_vif1GifUs = 0;
+        }
+        tl_vif1Depth++;
+    }
+
+    void onBhVif1End() {
+        if (!isEnabled()) return;
+        tl_vif1Depth--;
+        if (tl_vif1Depth == 0) {
+            auto now = std::chrono::steady_clock::now();
+            uint64_t totalUs = std::chrono::duration_cast<std::chrono::microseconds>(now - tl_vif1Start).count();
+            uint64_t selfUs = (totalUs > tl_vif1GifUs) ? (totalUs - tl_vif1GifUs) : 0;
+            s_bhVif1Us.fetch_add(selfUs, std::memory_order_relaxed);
+        }
+    }
+
+    void onBhSubmitGifStart() {
+        if (!isEnabled()) return;
+        if (tl_submitGifDepth == 0) {
+            tl_submitGifStart = std::chrono::steady_clock::now();
+        }
+        tl_submitGifDepth++;
+    }
+
+    void onBhSubmitGifEnd() {
+        if (!isEnabled()) return;
+        tl_submitGifDepth--;
+        if (tl_submitGifDepth == 0) {
+            auto now = std::chrono::steady_clock::now();
+            uint64_t us = std::chrono::duration_cast<std::chrono::microseconds>(now - tl_submitGifStart).count();
+            s_bhGifUs.fetch_add(us, std::memory_order_relaxed);
+            if (tl_vif1Depth > 0) {
+                tl_vif1GifUs += us;
+            }
+        }
+    }
+
+    void onBhGsBlockWait(uint64_t waitUs) {
+        if (!isEnabled()) return;
+        s_bhGsBlockUs.fetch_add(waitUs, std::memory_order_relaxed);
+        s_bhGsBlockCnt.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void onBhRaw8FeedTime(uint64_t us) {
+        if (!isEnabled()) return;
+        s_bhRaw8FeedUs.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onBhRaw8DecTime(uint64_t us) {
+        if (!isEnabled()) return;
+        s_bhRaw8DecUs.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onBhRaw8YccTime(uint64_t us) {
+        if (!isEnabled()) return;
+        s_bhRaw8YccUs.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onBhRaw8Call() {
+        if (!isEnabled()) return;
+        s_bhRaw8Calls.fetch_add(1, std::memory_order_relaxed);
+        onBhIteration();
+    }
+
+    void onBhMovieHleTime(uint64_t us) {
+        if (!isEnabled()) return;
+        s_bhMovieHleUs.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onBhSchedWait(uint64_t waitUs) {
+        if (!isEnabled()) return;
+        s_bhSchedWaitUs.fetch_add(waitUs, std::memory_order_relaxed);
+        s_bhSchedWaitCnt.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void onBhDmaPollTime(uint64_t us) {
+        if (!isEnabled()) return;
+        s_bhDmaPollUs.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onBhCid1Time(uint64_t us) {
+        if (!isEnabled()) return;
+        s_bhCid1Us.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onBhIntcHandler(uint32_t cause, uint64_t execUs) {
+        if (!isEnabled()) return;
+        s_bhIntcUs.fetch_add(execUs, std::memory_order_relaxed);
+        s_bhIntcCnt.fetch_add(1, std::memory_order_relaxed);
+        if (cause < 32) {
+            s_bhIntcCauseUs[cause].fetch_add(execUs, std::memory_order_relaxed);
+            s_bhIntcCauseCnt[cause].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    void onBhGsPacket(uint64_t packetUs, uint32_t primType, uint32_t pixelCount, bool texOn, bool blendOn, uint32_t tw, uint32_t th) {
+        if (!isEnabled()) return;
+        SlowPacketInfo info;
+        info.ms = static_cast<double>(packetUs) / 1000.0;
+        info.primType = primType;
+        info.pixelCount = pixelCount;
+        info.texOn = texOn;
+        info.blendOn = blendOn;
+        info.tw = tw;
+        info.th = th;
+
+        std::lock_guard<std::mutex> lock(s_slowPktsMutex);
+        s_slowPkts.push_back(info);
+        std::sort(s_slowPkts.begin(), s_slowPkts.end(), [](const SlowPacketInfo &a, const SlowPacketInfo &b) {
+            return a.ms > b.ms;
+        });
+        if (s_slowPkts.size() > 3) {
+            s_slowPkts.resize(3);
+        }
+    }
+
+    void onBhGsRasterTime(uint64_t us) {
+        if (!isEnabled()) return;
+        s_bhGsBusyUs.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onBhRecordQueueDepth(uint32_t depth) {
+        if (!isEnabled()) return;
+        uint32_t curMax = s_bhQueueDepthMax.load(std::memory_order_relaxed);
+        while (depth > curMax && !s_bhQueueDepthMax.compare_exchange_weak(curMax, depth, std::memory_order_relaxed)) {}
+        s_bhQueueDepthSum.fetch_add(depth, std::memory_order_relaxed);
+        s_bhQueueDepthSamples.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void onBhSleepSiteHit(int siteId, uint64_t us) {
+        if (!isEnabled() || siteId < 0 || siteId >= 3) return;
+        s_sleepSites[siteId].hits.fetch_add(1, std::memory_order_relaxed);
+        s_sleepSites[siteId].totalUs.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onBhIteration() {
+        if (!isEnabled()) return;
+        s_bhIters.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void bhTickCheckPerSec(const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        if (rdram) setRdram(rdram);
+        bhInitStartup();
+
+        auto now = std::chrono::steady_clock::now();
+        double elapsedSec = std::chrono::duration<double>(now - s_bhLastSec).count();
+        if (elapsedSec < 1.0) return;
+
+        bool movieActive = isMovieActive(rdram ? rdram : s_cachedRdram);
+        if (!movieActive) {
+            // Keep resetting if movie is not active yet so timers don't accumulate
+            s_bhVif1Us.store(0, std::memory_order_relaxed);
+            s_bhGifUs.store(0, std::memory_order_relaxed);
+            s_bhGsBlockUs.store(0, std::memory_order_relaxed);
+            s_bhGsBlockCnt.store(0, std::memory_order_relaxed);
+            s_bhRaw8FeedUs.store(0, std::memory_order_relaxed);
+            s_bhRaw8DecUs.store(0, std::memory_order_relaxed);
+            s_bhRaw8YccUs.store(0, std::memory_order_relaxed);
+            s_bhRaw8Calls.store(0, std::memory_order_relaxed);
+            s_bhMovieHleUs.store(0, std::memory_order_relaxed);
+            s_bhSchedWaitUs.store(0, std::memory_order_relaxed);
+            s_bhSchedWaitCnt.store(0, std::memory_order_relaxed);
+            s_bhDmaPollUs.store(0, std::memory_order_relaxed);
+            s_bhCid1Us.store(0, std::memory_order_relaxed);
+            s_bhIntcUs.store(0, std::memory_order_relaxed);
+            s_bhIntcCnt.store(0, std::memory_order_relaxed);
+            for (int i = 0; i < 32; ++i) {
+                s_bhIntcCauseUs[i].store(0, std::memory_order_relaxed);
+                s_bhIntcCauseCnt[i].store(0, std::memory_order_relaxed);
+            }
+            s_bhIters.store(0, std::memory_order_relaxed);
+            s_bhGsBusyUs.store(0, std::memory_order_relaxed);
+            s_bhQueueDepthMax.store(0, std::memory_order_relaxed);
+            s_bhQueueDepthSum.store(0, std::memory_order_relaxed);
+            s_bhQueueDepthSamples.store(0, std::memory_order_relaxed);
+            for (auto &site : s_sleepSites) {
+                site.hits.store(0, std::memory_order_relaxed);
+                site.totalUs.store(0, std::memory_order_relaxed);
+            }
+            {
+                std::lock_guard<std::mutex> lock(s_slowPktsMutex);
+                s_slowPkts.clear();
+            }
+            s_bhLastSec = now;
+            return;
+        }
+
+        // Snapshots and exchanges
+        double scale = 1.0 / (elapsedSec * 1000.0); // convert us to ms/s
+        double vif1Ms = s_bhVif1Us.exchange(0, std::memory_order_relaxed) * scale;
+        double gifMs = s_bhGifUs.exchange(0, std::memory_order_relaxed) * scale;
+        double gsBlockMs = s_bhGsBlockUs.exchange(0, std::memory_order_relaxed) * scale;
+        uint32_t gsBlockCnt = static_cast<uint32_t>(s_bhGsBlockCnt.exchange(0, std::memory_order_relaxed) / elapsedSec);
+
+        double raw8FeedMs = s_bhRaw8FeedUs.exchange(0, std::memory_order_relaxed) * scale;
+        double raw8DecMs = s_bhRaw8DecUs.exchange(0, std::memory_order_relaxed) * scale;
+        double raw8YccMs = s_bhRaw8YccUs.exchange(0, std::memory_order_relaxed) * scale;
+        double raw8TotalMs = raw8FeedMs + raw8DecMs + raw8YccMs;
+        uint32_t raw8Calls = static_cast<uint32_t>(s_bhRaw8Calls.exchange(0, std::memory_order_relaxed) / elapsedSec);
+
+        double hleMs = s_bhMovieHleUs.exchange(0, std::memory_order_relaxed) * scale;
+        double schedWaitMs = s_bhSchedWaitUs.exchange(0, std::memory_order_relaxed) * scale;
+        uint32_t schedWaitCnt = static_cast<uint32_t>(s_bhSchedWaitCnt.exchange(0, std::memory_order_relaxed) / elapsedSec);
+
+        double dmaPollMs = s_bhDmaPollUs.exchange(0, std::memory_order_relaxed) * scale;
+        double cid1Ms = s_bhCid1Us.exchange(0, std::memory_order_relaxed) * scale;
+
+        double intcMs = s_bhIntcUs.exchange(0, std::memory_order_relaxed) * scale;
+        uint32_t intcCnt = static_cast<uint32_t>(s_bhIntcCnt.exchange(0, std::memory_order_relaxed) / elapsedSec);
+
+        std::string intcCausesStr;
+        for (int i = 0; i < 32; ++i) {
+            uint32_t cCnt = s_bhIntcCauseCnt[i].exchange(0, std::memory_order_relaxed);
+            uint64_t cUs = s_bhIntcCauseUs[i].exchange(0, std::memory_order_relaxed);
+            if (cCnt > 0) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "c%d:%.1fms(%u) ", i, cUs * scale, static_cast<uint32_t>(cCnt / elapsedSec));
+                intcCausesStr += buf;
+            }
+        }
+        if (intcCausesStr.empty()) intcCausesStr = "none";
+
+        double accountedMs = vif1Ms + gifMs + gsBlockMs + raw8TotalMs + hleMs + schedWaitMs + dmaPollMs + cid1Ms + intcMs;
+        double otherMs = (1000.0 > accountedMs) ? (1000.0 - accountedMs) : 0.0;
+
+        // GS Metrics
+        double gsBusyMs = s_bhGsBusyUs.exchange(0, std::memory_order_relaxed) * scale;
+        double gsIdleMs = (1000.0 > gsBusyMs) ? (1000.0 - gsBusyMs) : 0.0;
+        uint32_t qMax = s_bhQueueDepthMax.exchange(0, std::memory_order_relaxed);
+        uint64_t qSum = s_bhQueueDepthSum.exchange(0, std::memory_order_relaxed);
+        uint32_t qSamples = s_bhQueueDepthSamples.exchange(0, std::memory_order_relaxed);
+        double qAvg = qSamples > 0 ? (static_cast<double>(qSum) / qSamples) : 0.0;
+
+        uint64_t primsSec = static_cast<uint64_t>(::g_profPrims.exchange(0, std::memory_order_relaxed) / elapsedSec);
+        uint64_t pixelsSec = static_cast<uint64_t>(::g_profPixels.exchange(0, std::memory_order_relaxed) / elapsedSec);
+
+        std::vector<SlowPacketInfo> slowPktsCopy;
+        {
+            std::lock_guard<std::mutex> lock(s_slowPktsMutex);
+            slowPktsCopy = s_slowPkts;
+            s_slowPkts.clear();
+        }
+        std::string slowPktsStr;
+        for (size_t i = 0; i < slowPktsCopy.size(); ++i) {
+            const auto &sp = slowPktsCopy[i];
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "[#%zu:%.1fms,prim=%u,px=%u,tex=%d,blend=%d,sz=%ux%u]",
+                          i + 1, sp.ms, sp.primType, sp.pixelCount, sp.texOn ? 1 : 0, sp.blendOn ? 1 : 0, sp.tw, sp.th);
+            if (!slowPktsStr.empty()) slowPktsStr += ",";
+            slowPktsStr += buf;
+        }
+        if (slowPktsStr.empty()) slowPktsStr = "none";
+
+        // Iteration metrics
+        uint32_t iters = static_cast<uint32_t>(s_bhIters.exchange(0, std::memory_order_relaxed) / elapsedSec);
+        double avgIterMs = iters > 0 ? (1000.0 / iters) : 0.0;
+
+        uint32_t ringHead = 0, ringTail = 0;
+        const uint8_t *activeRdram = rdram ? rdram : s_cachedRdram;
+        if (activeRdram) {
+            std::memcpy(&ringTail, activeRdram + (0x696E88u & PS2_RAM_MASK), 4);
+            std::memcpy(&ringHead, activeRdram + (0x696E8Cu & PS2_RAM_MASK), 4);
+            ringTail &= 31u;
+            ringHead &= 31u;
+        }
+
+        // Sleep sites
+        std::string sleepHitsStr;
+        for (int i = 0; i < 3; ++i) {
+            uint32_t hits = static_cast<uint32_t>(s_sleepSites[i].hits.exchange(0, std::memory_order_relaxed) / elapsedSec);
+            double sleptMs = s_sleepSites[i].totalUs.exchange(0, std::memory_order_relaxed) * scale;
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "site%d(%s)=%u(%.1fms) ", i + 1, s_sleepSites[i].desc, hits, sleptMs);
+            sleepHitsStr += buf;
+        }
+
+        // Output formatting
+        std::printf("[probe] bh ee vif1=%.1f gif=%.1f gs_block=%.1f(%u) raw8=%.1f(feed=%.1f,dec=%.1f,ycc=%.1f,calls=%u) hle=%.1f sched_wait=%.1f(%u) dma_poll=%.1f cid1=%.1f intc=%.1f(%u)[%s] other=%.1f\n",
+                    vif1Ms, gifMs, gsBlockMs, gsBlockCnt, raw8TotalMs, raw8FeedMs, raw8DecMs, raw8YccMs, raw8Calls,
+                    hleMs, schedWaitMs, schedWaitCnt, dmaPollMs, cid1Ms, intcMs, intcCnt, intcCausesStr.c_str(), otherMs);
+
+        std::printf("[probe] bh gs busy=%.1f idle=%.1f q_max=%u q_avg=%.1f px/s=%llu prims/s=%llu slow_pkts=<%s>\n",
+                    gsBusyMs, gsIdleMs, qMax, qAvg, (unsigned long long)pixelsSec, (unsigned long long)primsSec, slowPktsStr.c_str());
+
+        std::printf("[probe] bh iter iters/s=%u avg_ms=%.1f ring_head=%u ring_tail=%u\n",
+                    iters, avgIterMs, ringHead, ringTail);
+
+        std::printf("[probe] bh sleep hits: %s\n", sleepHitsStr.c_str());
+        std::fflush(stdout);
+
+        s_bhLastSec = now;
     }
 }

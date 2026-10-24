@@ -419,6 +419,7 @@ void EeScheduler::run()
             }
 
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
+            const uint32_t irqCause = m_insideInterrupt ? getRegU32(&context, 4) : 0u;
             m_guestExecuting.store(true, std::memory_order_release);
             const uint32_t entryPc = context.pc;
             if (m_insideInterrupt || (!running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::SifCommand)) {
@@ -431,11 +432,18 @@ void EeScheduler::run()
             {
                 probe_ae::recordMainThreadDispatch(entryPc);
             }
+            auto tFunc0 = std::chrono::steady_clock::now();
             function(m_rdram, &context, &m_runtime);
-            if (m_insideInterrupt && probe_ae::isEnabled())
+            auto tFunc1 = std::chrono::steady_clock::now();
+            if (m_insideInterrupt)
             {
-                uint32_t ret = getRegU32(&context, 2);
-                probe_ae::logIntcHandlerReturn(entryPc, ret);
+                uint64_t irqUs = std::chrono::duration_cast<std::chrono::microseconds>(tFunc1 - tFunc0).count();
+                probe_ae::onBhIntcHandler(irqCause, irqUs);
+                if (probe_ae::isEnabled())
+                {
+                    uint32_t ret = getRegU32(&context, 2);
+                    probe_ae::logIntcHandlerReturn(entryPc, ret);
+                }
             }
             g_currentExecutingFunction = prevExecutingFunction;
             m_guestExecuting.store(false, std::memory_order_release);
@@ -2369,8 +2377,13 @@ void EeScheduler::waitForEvent()
     const bool hasTimerDeadline = timerCycles != std::numeric_limits<uint64_t>::max();
     if (m_deadlines.empty() && !hasTimerDeadline)
     {
+        auto tWait0 = std::chrono::steady_clock::now();
         m_eventCv.wait(lock, [this]()
                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+        auto tWait1 = std::chrono::steady_clock::now();
+        uint64_t wUs = std::chrono::duration_cast<std::chrono::microseconds>(tWait1 - tWait0).count();
+        probe_ae::onBhSchedWait(wUs);
+        probe_ae::onBhSleepSiteHit(1, wUs);
         return;
     }
 
@@ -2400,9 +2413,14 @@ void EeScheduler::waitForEvent()
         }
     }
 
+    auto tWaitUntil0 = std::chrono::steady_clock::now();
     const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
                                                { return !m_events.empty() ||
                                                         m_stopRequested.load(std::memory_order_acquire); });
+    auto tWaitUntil1 = std::chrono::steady_clock::now();
+    uint64_t wUntilUs = std::chrono::duration_cast<std::chrono::microseconds>(tWaitUntil1 - tWaitUntil0).count();
+    probe_ae::onBhSchedWait(wUntilUs);
+    probe_ae::onBhSleepSiteHit(2, wUntilUs);
     if (!signaled)
     {
         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;

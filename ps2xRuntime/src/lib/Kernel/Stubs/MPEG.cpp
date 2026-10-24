@@ -2461,6 +2461,7 @@ struct MpegCallLogger {
 
     void sceMpegGetPictureRAW8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        probe_ae::onBhRaw8Call();
         MpegCallLogger logger("sceMpegGetPictureRAW8", ctx);
         g_movieGetPictureCount.fetch_add(1, std::memory_order_relaxed);
         const uint32_t mpegAddr = getRegU32(ctx, 4);
@@ -2478,6 +2479,7 @@ struct MpegCallLogger {
 
             // Task AZ: Pop chunks from guest IPU ring (what Nodata callback 0x319E0C does)
             int popsThisCall = 0;
+            auto tFeedStart = std::chrono::steady_clock::now();
             while (playback.decodedFrames.empty() && popsThisCall < 4)
             {
                 uint32_t curTail = mpegGuestRead32(rdram, 0x696E88u) & 31u;
@@ -2505,7 +2507,10 @@ struct MpegCallLogger {
                     {
                         playback.decoder = std::make_unique<MpegFfmpegDecoder>();
                     }
+                    auto tFeed0 = std::chrono::steady_clock::now();
                     playback.decoder->feed(packetSrc, entrySize, playback.decodedFrames);
+                    auto tFeed1 = std::chrono::steady_clock::now();
+                    probe_ae::onBhRaw8DecTime(std::chrono::duration_cast<std::chrono::microseconds>(tFeed1 - tFeed0).count());
                 }
                 size_t newFrames = playback.decodedFrames.size() - framesBefore;
                 if (newFrames > 0)
@@ -2518,6 +2523,9 @@ struct MpegCallLogger {
                     probe_ae::onAzPop(curHead, curTail, entryAddr, entrySize, packetSrc, static_cast<uint32_t>(playback.decodedFrames.size()));
                 }
             }
+
+            auto tFeedEnd = std::chrono::steady_clock::now();
+            probe_ae::onBhRaw8FeedTime(std::chrono::duration_cast<std::chrono::microseconds>(tFeedEnd - tFeedStart).count());
 
             // Task AZ: Skip pts/vsync waitVSync path for ring-fed frames; take decodedFrames.front() immediately
             if (!playback.decodedFrames.empty())
@@ -2578,6 +2586,7 @@ struct MpegCallLogger {
 
         const bool validFrame = haveFrame && (!frame.yPlane.empty() || !frame.rgba.empty()) && frame.width > 0 && frame.height > 0;
 
+        auto tYcc0 = std::chrono::steady_clock::now();
         for (uint32_t mbIndex = 0u; mbIndex < numMbs; ++mbIndex)
         {
             uint8_t *mbPtr = getMemPtr(rdram, dst + mbIndex * 384u);
@@ -2682,6 +2691,9 @@ struct MpegCallLogger {
                 }
             }
         }
+
+        auto tYcc1 = std::chrono::steady_clock::now();
+        probe_ae::onBhRaw8YccTime(std::chrono::duration_cast<std::chrono::microseconds>(tYcc1 - tYcc0).count());
 
         static std::atomic<uint32_t> s_raw8CallCount{0};
         const uint32_t n = s_raw8CallCount.fetch_add(1, std::memory_order_relaxed);

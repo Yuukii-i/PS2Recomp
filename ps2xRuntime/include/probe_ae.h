@@ -657,4 +657,28 @@ namespace probe_ae {
     bool isMovieHleActive();
     bool isMovieHleVerify();
     bool handleMovieHleMscal(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize, class GS &gs, class PS2Memory *memory);
+
+    // Task BH Probes
+    bool isMovieActivePublic();
+    void bhInitStartup();
+    void onBhVif1Start();
+    void onBhVif1End();
+    void onBhSubmitGifStart();
+    void onBhSubmitGifEnd();
+    void onBhGsBlockWait(uint64_t waitUs);
+    void onBhRaw8FeedTime(uint64_t us);
+    void onBhRaw8DecTime(uint64_t us);
+    void onBhRaw8YccTime(uint64_t us);
+    void onBhRaw8Call();
+    void onBhMovieHleTime(uint64_t us);
+    void onBhSchedWait(uint64_t waitUs);
+    void onBhDmaPollTime(uint64_t us);
+    void onBhCid1Time(uint64_t us);
+    void onBhIntcHandler(uint32_t cause, uint64_t execUs);
+    void onBhGsPacket(uint64_t packetUs, uint32_t primType, uint32_t pixelCount, bool texOn, bool blendOn, uint32_t tw, uint32_t th);
+    void onBhGsRasterTime(uint64_t us);
+    void onBhRecordQueueDepth(uint32_t depth);
+    void onBhSleepSiteHit(int siteId, uint64_t us);
+    void onBhIteration();
+    void bhTickCheckPerSec(const uint8_t *rdram);
 }

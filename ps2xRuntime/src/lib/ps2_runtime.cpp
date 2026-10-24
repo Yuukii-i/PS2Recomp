@@ -4381,6 +4381,7 @@ void PS2Runtime::run()
             fflush(stderr);
         }
 
+        probe_ae::bhTickCheckPerSec(m_memory.getRDRAM());
         if (isVerboseLog() && ((tick % 60) == 0))
         {
             extern std::string ps2xGetIntcSummary();
@@ -4609,7 +4610,10 @@ void PS2Runtime::run()
         else
         {
             PollInputEvents();
+            auto tYield0 = std::chrono::steady_clock::now();
             std::this_thread::yield();
+            auto tYield1 = std::chrono::steady_clock::now();
+            probe_ae::onBhSleepSiteHit(0, std::chrono::duration_cast<std::chrono::microseconds>(tYield1 - tYield0).count());
         }
 
         const auto timeSinceLastFpsLog = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastFpsLogTime).count();

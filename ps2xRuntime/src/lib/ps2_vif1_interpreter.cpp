@@ -305,6 +305,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     if (sizeBytes == 0u)
         return;
 
+    probe_ae::onBhVif1Start();
     auto tVif1Start = std::chrono::steady_clock::now();
 
 #if defined(PS2X_PROBE_AE) || 1
@@ -893,4 +894,5 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         probe_ae::onAyTimeVif1(std::chrono::duration_cast<std::chrono::microseconds>(tVif1End - tVif1Start).count());
     }
 #endif
+    probe_ae::onBhVif1End();
 }

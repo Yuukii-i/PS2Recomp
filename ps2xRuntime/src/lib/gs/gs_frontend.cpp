@@ -652,7 +652,22 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    const bool probeActive = probe_ae::isEnabled();
+    std::chrono::steady_clock::time_point tLockWaitStart;
+    if (probeActive) {
+        tLockWaitStart = std::chrono::steady_clock::now();
+    }
+
+    std::unique_lock<std::recursive_mutex> lock(m_stateMutex);
+
+    if (probeActive) {
+        auto tLockAcquired = std::chrono::steady_clock::now();
+        uint64_t waitUs = std::chrono::duration_cast<std::chrono::microseconds>(tLockAcquired - tLockWaitStart).count();
+        if (waitUs > 0) {
+            probe_ae::onBhGsBlockWait(waitUs);
+        }
+    }
+
     if (!data || sizeBytes < 16 || !m_backend)
         return;
 

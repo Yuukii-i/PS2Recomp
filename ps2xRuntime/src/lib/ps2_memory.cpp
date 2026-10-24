@@ -2091,6 +2091,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     if (!data || sizeBytes < 16)
         return;
 
+    probe_ae::onBhSubmitGifStart();
     auto tGifStart = std::chrono::steady_clock::now();
 
     if (pathId == GifPathId::Path3)
@@ -2098,6 +2099,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         if (m_path3Masked)
         {
             m_path3MaskedFifo.emplace_back(data, data + sizeBytes);
+            probe_ae::onBhSubmitGifEnd();
             return;
         }
         flushMaskedPath3Packets(false);
@@ -2117,6 +2119,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         probe_ae::onAyTimeGif(std::chrono::duration_cast<std::chrono::microseconds>(tGifEnd - tGifStart).count());
     }
 #endif
+    probe_ae::onBhSubmitGifEnd();
 }
 
 void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
@@ -2541,6 +2544,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         {
             if ((address & 0xFF) == 0x00)
             {
+                if (address == 0x10009000u) {
+                    probe_ae::onBhDmaPollTime(1);
+                }
                 uint32_t channelStatus = m_ioRegisters[address] & ~0x100u;
                 m_ioRegisters[address] = channelStatus;
                 return channelStatus;
