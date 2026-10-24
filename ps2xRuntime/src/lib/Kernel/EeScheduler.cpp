@@ -20,6 +20,7 @@ namespace ps2_syscalls {
     void ps2xUpdateDbcPadBuffers(uint8_t *rdram, PS2Runtime *runtime);
 }
 #include "runtime/ee_scheduler.h"
+#include "probe_ae.h"
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
@@ -409,6 +410,9 @@ void EeScheduler::run()
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
             m_guestExecuting.store(true, std::memory_order_release);
             const uint32_t entryPc = context.pc;
+            if (m_insideInterrupt || (!running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::SifCommand)) {
+                probe_ae::logIntcHandlerDispatch(entryPc);
+            }
             const uint32_t prevExecutingFunction = g_currentExecutingFunction;
             g_currentExecutingFunction = entryPc;
             s_lastDispatchedPc[s_lastDispatchIdx++ % 32] = entryPc;

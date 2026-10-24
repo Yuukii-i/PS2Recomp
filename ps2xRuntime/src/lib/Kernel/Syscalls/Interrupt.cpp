@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "probe_ae.h"
 #include "Interrupt.h"
 
 namespace ps2_syscalls
@@ -28,6 +29,7 @@ namespace ps2_syscalls
                         PS2Runtime *runtime,
                         bool dmac)
         {
+            probe_ae::logIntcRegister(dmac, getRegU32(ctx, 4), getRegU32(ctx, 5));
             const int id = scheduler(rdram, ctx, runtime)
                                .addIrqHandler(dmac,
                                               getRegU32(ctx, 4),

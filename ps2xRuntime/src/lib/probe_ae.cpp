@@ -85,6 +85,50 @@ namespace probe_ae {
     std::atomic<uint32_t> val_1dc650_slot8{0};
     std::atomic<int32_t> val_1dc578_ret{0};
 
+    // Task AH
+    std::atomic<uint32_t> cnt_438ea8{0};
+    std::atomic<uint32_t> cnt_1dcee0{0};
+    std::atomic<uint32_t> val_1dcf8c_t6{0};
+    std::atomic<uint32_t> val_1dcf8c_s1{0};
+    std::atomic<uint32_t> cnt_1dcc70{0};
+    std::atomic<int32_t>  val_1dcc70_v0{0};
+    std::atomic<uint32_t> val_1dc1ec_t7{0};
+    std::atomic<uint32_t> val_1dc1ec_s1{0};
+    std::atomic<uint32_t> cnt_intc_dispatch{0};
+    std::atomic<uint32_t> s_currentSec{0};
+
+    static std::mutex s_seenIntcMutex;
+    static std::vector<uint32_t> s_seenIntcHandlers;
+
+    void logIntcHandlerDispatch(uint32_t addr) {
+        if (!isEnabled()) return;
+        cnt_intc_dispatch.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(s_seenIntcMutex);
+        if (std::find(s_seenIntcHandlers.begin(), s_seenIntcHandlers.end(), addr) == s_seenIntcHandlers.end()) {
+            s_seenIntcHandlers.push_back(addr);
+            std::printf("[probe] intc_handler addr=0x%08X\n", addr);
+            std::fflush(stdout);
+        }
+    }
+
+    void logIntcRegister(bool dmac, uint32_t cause, uint32_t handler) {
+        if (!isEnabled()) return;
+        std::printf("[probe] intc_register dmac=%d cause=%u handler=0x%08X\n", dmac ? 1 : 0, cause, handler);
+        std::fflush(stdout);
+    }
+
+    void logSifSetCmdBuffer(uint32_t buf) {
+        if (!isEnabled()) return;
+        std::printf("[probe] sif_set_cmd_buffer ptr=0x%08X\n", buf);
+        std::fflush(stdout);
+    }
+
+    void logSifAddCmdHandler(uint32_t cid, uint32_t handler, uint32_t arg) {
+        if (!isEnabled()) return;
+        std::printf("[probe] sif_add_cmd_handler cid=%u handler=0x%08X arg=0x%08X\n", cid, handler, arg);
+        std::fflush(stdout);
+    }
+
     static std::mutex s_cd04Mutex;
     static std::map<uint32_t, uint32_t> s_cd04CmdCounts;
 
@@ -277,6 +321,26 @@ namespace probe_ae {
         std::string raList = getAndResetRa24c64c();
         std::string exitList = getAndResetExits();
 
+        s_currentSec.store(sec, std::memory_order_relaxed);
+
+        uint32_t c_438ea8 = cnt_438ea8.exchange(0, std::memory_order_relaxed);
+        uint32_t c_1dcee0 = cnt_1dcee0.exchange(0, std::memory_order_relaxed);
+        uint32_t c_1dcc70 = cnt_1dcc70.exchange(0, std::memory_order_relaxed);
+        uint32_t c_intc = cnt_intc_dispatch.exchange(0, std::memory_order_relaxed);
+
+        uint32_t w771bd4 = 0, w76a518 = 0, w77218c = 0, w771bc4 = 0;
+        uint32_t pkt[4] = {0, 0, 0, 0};
+        if (rdram) {
+            std::memcpy(&w771bd4, rdram + (0x771BD4u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&w76a518, rdram + (0x76A518u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&w77218c, rdram + (0x77218Cu & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&w771bc4, rdram + (0x771BC4u & PS2_RAM_MASK), sizeof(uint32_t));
+            uint32_t pktAddr = w76a518 & PS2_RAM_MASK;
+            if (pktAddr <= PS2_RAM_SIZE - 16) {
+                std::memcpy(pkt, rdram + pktAddr, sizeof(pkt));
+            }
+        }
+
         std::string cd04Cmds = getAndResetCd04Cmds();
         std::string a1_1dc = getAndReset1dcA1();
         uint32_t c_24cd04 = cnt_24cd04.exchange(0, std::memory_order_relaxed);
@@ -285,8 +349,8 @@ namespace probe_ae {
 
         flushFirstCallsIfDue(sec);
 
-        // Print unified [probe] line with old fields + Task AF + Task AG fields
-        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s c24CD04=%u cmds=%s last_a0=%X last_a2=%X last_a3=%X last_ra=%X t7_cd50=%X oob_cmd=%u v0_3f7=%d neg_v0=%u s1_3f7=%X head_3f7=%u tail_3f7=%u slot8_1dc=%X ret_1dc578=%d a1_1dc=%s\n",
+        // Print unified [probe] line with old fields + Task AF + Task AG + Task AH fields
+        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s c24CD04=%u cmds=%s last_a0=%X last_a2=%X last_a3=%X last_ra=%X t7_cd50=%X oob_cmd=%u v0_3f7=%d neg_v0=%u s1_3f7=%X head_3f7=%u tail_3f7=%u slot8_1dc=%X ret_1dc578=%d a1_1dc=%s c438EA8=%u c1DCEE0=%u t6_1dcf8c=%X s1_1dcf8c=%X w771bd4=%X w76a518=%X pkt=%X,%X,%X,%X w77218c=%X w771bc4=%X c1DCC70=%u v0_1dcc=%d t7_1dc1ec=%X s1_1dc1ec=%X c_intc=%u\n",
                     sec, f_cnt, val_state.load(), st_word, val_s0.load(), val_a1_s4.load(),
                     val_v0_1DA880.load(), val_v0_taken.load(),
                     val_f72C7A0.load(), val_f72D3A0.load(), val_w635480.load(),
@@ -299,7 +363,10 @@ namespace probe_ae {
                     raList.c_str(), exitList.empty() ? "none" : exitList.c_str(),
                     c_24cd04, cd04Cmds.c_str(), val_cd04_a0.load(), val_cd04_a2.load(), val_cd04_a3.load(), val_cd04_ra.load(),
                     val_cd50_t7.load(), c_oob, val_3f7a74_v0.load(), neg_v0, val_3f7a74_s1.load(), val_3f7a74_head.load(), val_3f7a74_tail.load(),
-                    val_1dc650_slot8.load(), val_1dc578_ret.load(), a1_1dc.c_str());
+                    val_1dc650_slot8.load(), val_1dc578_ret.load(), a1_1dc.c_str(),
+                    c_438ea8, c_1dcee0, val_1dcf8c_t6.load(), val_1dcf8c_s1.load(),
+                    w771bd4, w76a518, pkt[0], pkt[1], pkt[2], pkt[3], w77218c, w771bc4,
+                    c_1dcc70, val_1dcc70_v0.load(), val_1dc1ec_t7.load(), val_1dc1ec_s1.load(), c_intc);
         std::fflush(stdout);
     }
 }

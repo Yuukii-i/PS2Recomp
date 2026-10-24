@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "SIF.h"
+#include "probe_ae.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
 #include "runtime/ps2_address.h"
@@ -295,6 +296,7 @@ namespace ps2_stubs
         const uint32_t cid = getRegU32(ctx, 4);
         const uint32_t handler = getRegU32(ctx, 5);
         const uint32_t argument = getRegU32(ctx, 6);
+        probe_ae::logSifAddCmdHandler(cid, handler, argument);
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         g_sifCmdHandlers[cid] = SifCmdHandler{handler, argument};
         setReturnS32(ctx, 0);
@@ -606,6 +608,7 @@ namespace ps2_stubs
     void sceSifSetCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t newBuffer = getRegU32(ctx, 4);
+        probe_ae::logSifSetCmdBuffer(newBuffer);
         uint32_t prev = 0u;
         {
             std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);

@@ -110,6 +110,23 @@ namespace probe_ae {
     void record1dc650A1(uint32_t a1);
     std::string getAndReset1dcA1();
 
+    // Task AH Probes
+    extern std::atomic<uint32_t> cnt_438ea8;
+    extern std::atomic<uint32_t> cnt_1dcee0;
+    extern std::atomic<uint32_t> val_1dcf8c_t6;
+    extern std::atomic<uint32_t> val_1dcf8c_s1;
+    extern std::atomic<uint32_t> cnt_1dcc70;
+    extern std::atomic<int32_t>  val_1dcc70_v0;
+    extern std::atomic<uint32_t> val_1dc1ec_t7;
+    extern std::atomic<uint32_t> val_1dc1ec_s1;
+    extern std::atomic<uint32_t> cnt_intc_dispatch;
+    extern std::atomic<uint32_t> s_currentSec;
+
+    void logIntcHandlerDispatch(uint32_t addr);
+    void logIntcRegister(bool dmac, uint32_t cause, uint32_t handler);
+    void logSifSetCmdBuffer(uint32_t buf);
+    void logSifAddCmdHandler(uint32_t cid, uint32_t handler, uint32_t arg);
+
     void recordRa24c64c(uint32_t ra);
     std::string getAndResetRa24c64c();
 
@@ -385,5 +402,41 @@ namespace probe_ae {
         if (!isEnabled()) return;
         int32_t ret = (int32_t)getRegU32(ctx, 2);
         val_1dc578_ret.store(ret, std::memory_order_relaxed);
+    }
+
+    // Task AH inlines
+    inline void log438EA8Entry() {
+        if (!isEnabled()) return;
+        cnt_438ea8.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<uint32_t> s_sifFirstCount{0};
+        uint32_t n = s_sifFirstCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8) {
+            uint32_t sec = s_currentSec.load(std::memory_order_relaxed);
+            std::printf("[probe] sif_first t=%u n=%u\n", sec, n);
+            std::fflush(stdout);
+        }
+    }
+
+    inline void log1DCEE0Entry() {
+        if (!isEnabled()) return;
+        cnt_1dcee0.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void log1DCF8C(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        val_1dcf8c_t6.store(getRegU32(ctx, 14), std::memory_order_relaxed);
+        val_1dcf8c_s1.store(getRegU32(ctx, 17), std::memory_order_relaxed);
+    }
+
+    inline void log1DCC70(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        cnt_1dcc70.fetch_add(1, std::memory_order_relaxed);
+        val_1dcc70_v0.store((int32_t)getRegU32(ctx, 2), std::memory_order_relaxed);
+    }
+
+    inline void log1DC1EC(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        val_1dc1ec_t7.store(getRegU32(ctx, 15), std::memory_order_relaxed);
+        val_1dc1ec_s1.store(getRegU32(ctx, 17), std::memory_order_relaxed);
     }
 }
