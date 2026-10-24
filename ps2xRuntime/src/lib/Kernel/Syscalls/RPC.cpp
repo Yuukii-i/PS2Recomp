@@ -48,6 +48,13 @@ static std::mutex s_sg2ProfMutex;
 static std::unordered_map<uint32_t, uint32_t> s_sg2OpCounts;
 static std::set<Sg2PacketKey> s_sg2DistinctPackets;
 static auto s_lastSg2SecLog = std::chrono::steady_clock::now();
+struct Sg2VoiceState {
+    bool active = false;
+    std::chrono::steady_clock::time_point keyOn{};
+};
+static Sg2VoiceState s_sg2Voices[24] = {};
+static std::mutex s_sg2VoiceMutex;
+static uint64_t s_sg2CallCount = 0;
 
 std::atomic<uint32_t> g_diagSg2Fno0Calls{0};
 std::atomic<uint32_t> g_diagDbcBufferWrites{0};
@@ -495,6 +502,9 @@ namespace ps2_syscalls
                             uint32_t numPackets = call.sendSize / 16;
                             const uint32_t curVtable = ::g_trackedCurVtable.load(std::memory_order_relaxed);
                             bool voiceStatusSeen = false;
+                            bool hadKeyOn = false;
+                            uint32_t keyOnMask = 0;
+                            auto now = std::chrono::steady_clock::now();
                             {
                                 std::lock_guard<std::mutex> lock(s_sg2ProfMutex);
                                 for (uint32_t p = 0; p < numPackets; ++p)
@@ -504,6 +514,18 @@ namespace ps2_syscalls
                                     s_sg2OpCounts[op]++;
                                     if (op == 0x09) {
                                         voiceStatusSeen = true;
+                                    }
+                                    if (op == 0x1C) {
+                                        uint32_t mask = pkt[1];
+                                        keyOnMask |= mask;
+                                        hadKeyOn = true;
+                                        std::lock_guard<std::mutex> vlock(s_sg2VoiceMutex);
+                                        for (uint32_t v = 0; v < 24; ++v) {
+                                            if (mask & (1u << v)) {
+                                                s_sg2Voices[v].active = true;
+                                                s_sg2Voices[v].keyOn = now;
+                                            }
+                                        }
                                     }
                                     if (curVtable == 0x006ae410u && s_sg2DistinctPackets.size() < 60)
                                     {
@@ -515,6 +537,10 @@ namespace ps2_syscalls
                                         }
                                     }
                                 }
+                            }
+                            if (hadKeyOn) {
+                                ps2xSafeLog("[sg2] keyon mask=0x%x\n", keyOnMask);
+                                fflush(stderr);
                             }
                             if (voiceStatusSeen)
                             {
@@ -545,8 +571,49 @@ namespace ps2_syscalls
 
                     if (call.recvBuf && call.recvSize > 0)
                     {
-                        uint32_t zeroBytes = std::min(call.recvSize, 448u);
-                        rpcZeroRdram(call.rdram, call.recvBuf, zeroBytes);
+                        uint32_t copyBytes = std::min(call.recvSize, 448u);
+                        uint8_t statusBuf[448] = {};
+
+                        // u32 at +0x00 and +0x04 = 0x7FFF (as in pcsx2)
+                        if (copyBytes >= 8) {
+                            *reinterpret_cast<uint32_t *>(statusBuf + 0x00) = 0x7FFFu;
+                            *reinterpret_cast<uint32_t *>(statusBuf + 0x04) = 0x7FFFu;
+                        }
+
+                        auto now = std::chrono::steady_clock::now();
+                        {
+                            std::lock_guard<std::mutex> lock(s_sg2VoiceMutex);
+                            for (uint32_t v = 0; v < 24; ++v) {
+                                if (s_sg2Voices[v].active) {
+                                    double elapsed = std::chrono::duration<double>(now - s_sg2Voices[v].keyOn).count();
+                                    uint64_t pos = static_cast<uint64_t>(elapsed * 27428.0) % 0x10000u;
+                                    uint32_t wordVal = static_cast<uint32_t>((((pos >> 14) + 1) << 14) & 0xFFFFu);
+                                    uint32_t offset = 0xC0u + 4u * v;
+                                    if (offset + 4u <= copyBytes) {
+                                        *reinterpret_cast<uint32_t *>(statusBuf + offset) = wordVal;
+                                    }
+                                }
+                            }
+                        }
+
+                        uint8_t *dst = getMemPtr(call.rdram, call.recvBuf);
+                        if (dst)
+                        {
+                            std::memcpy(dst, statusBuf, copyBytes);
+                            ps2TraceGuestRangeWrite(call.rdram, call.recvBuf, copyBytes, "SG2_AUDIO_Status", nullptr);
+                        }
+                        if (call.recvSize > copyBytes)
+                        {
+                            rpcZeroRdram(call.rdram, call.recvBuf + copyBytes, call.recvSize - copyBytes);
+                        }
+
+                        uint64_t callIdx = ++s_sg2CallCount;
+                        if (callIdx % 60 == 0) {
+                            uint32_t v0 = (copyBytes >= 0xC4) ? *reinterpret_cast<const uint32_t *>(statusBuf + 0xC0) : 0;
+                            uint32_t v1 = (copyBytes >= 0xC8) ? *reinterpret_cast<const uint32_t *>(statusBuf + 0xC4) : 0;
+                            ps2xSafeLog("[sg2] status v0=0x%x v1=0x%x\n", v0, v1);
+                            fflush(stderr);
+                        }
                     }
                     dbcUpdatePadBuffers(call.rdram, call.runtime);
                     g_diagSg2Fno0Calls.fetch_add(1, std::memory_order_relaxed);
