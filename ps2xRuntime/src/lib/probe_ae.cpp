@@ -110,6 +110,14 @@ namespace probe_ae {
     std::atomic<uint32_t> val_3fbe78_voice{0};
     std::atomic<uint32_t> val_3fbeac_v0{0};
 
+    // Task AN
+    std::atomic<uint32_t> cnt_24c5a0{0};
+    std::atomic<uint32_t> cnt_24c5ac{0};
+    std::atomic<uint32_t> cnt_3f7e38{0};
+    std::atomic<uint32_t> cnt_31a240{0};
+    std::atomic<uint32_t> cnt_31a2c0{0};
+    std::atomic<uint32_t> val_s4C_refill{0};
+
     static std::mutex s_seenIntcMutex;
     static std::vector<uint32_t> s_seenIntcHandlers;
 
@@ -340,6 +348,12 @@ namespace probe_ae {
         uint32_t c_lt_c4e0 = cnt_c4e0_lt.exchange(0, std::memory_order_relaxed);
         uint32_t c_24c4f0 = cnt_24c4f0.exchange(0, std::memory_order_relaxed);
         uint32_t c_3fbe78 = cnt_3fbe78.exchange(0, std::memory_order_relaxed);
+        uint32_t c_24c5a0 = cnt_24c5a0.exchange(0, std::memory_order_relaxed);
+        uint32_t c_24c5ac = cnt_24c5ac.exchange(0, std::memory_order_relaxed);
+        uint32_t c_3f7e38 = cnt_3f7e38.exchange(0, std::memory_order_relaxed);
+        uint32_t c_31a240 = cnt_31a240.exchange(0, std::memory_order_relaxed);
+        uint32_t c_31a2c0 = cnt_31a2c0.exchange(0, std::memory_order_relaxed);
+        uint32_t s4c_refill = val_s4C_refill.load(std::memory_order_relaxed);
         uint32_t w74b140 = 0, w74b144 = 0, w74b148 = 0;
         uint64_t m1900ea0 = 0;
         uint32_t s0_84_mem = 0, s0_7c_mem = 0;
@@ -378,7 +392,7 @@ namespace probe_ae {
         flushFirstCallsIfDue(sec);
 
         // Print unified [probe] line with old fields + Task AF + Task AG + Task AH fields
-        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s c24CD04=%u cmds=%s last_a0=%X last_a2=%X last_a3=%X last_ra=%X t7_cd50=%X oob_cmd=%u v0_3f7=%d neg_v0=%u s1_3f7=%X head_3f7=%u tail_3f7=%u slot8_1dc=%X ret_1dc578=%d a1_1dc=%s c438EA8=%u c1DCEE0=%u t6_1dcf8c=%X s1_1dcf8c=%X w771bd4=%X w76a518=%X pkt=%X,%X,%X,%X w77218c=%X w771bc4=%X c1DCC70=%u v0_1dcc=%d t7_1dc1ec=%X s1_1dc1ec=%X c_intc=%u c24C4C0=%u v0_c4e0=%u s0_84=%X lt_c4e0=%u c24C4F0=%u a0_3f7780=%X a1_3f7780=%X mask_3f7780=%llX c3FBE78=%u v_3fbe78=%u v0_3fbe=%X w74B140=%X,%X,%X m1900EA0=%llX s0_84_mem=%X s0_7C_mem=%X\n",
+        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s c24CD04=%u cmds=%s last_a0=%X last_a2=%X last_a3=%X last_ra=%X t7_cd50=%X oob_cmd=%u v0_3f7=%d neg_v0=%u s1_3f7=%X head_3f7=%u tail_3f7=%u slot8_1dc=%X ret_1dc578=%d a1_1dc=%s c438EA8=%u c1DCEE0=%u t6_1dcf8c=%X s1_1dcf8c=%X w771bd4=%X w76a518=%X pkt=%X,%X,%X,%X w77218c=%X w771bc4=%X c1DCC70=%u v0_1dcc=%d t7_1dc1ec=%X s1_1dc1ec=%X c_intc=%u c24C4C0=%u v0_c4e0=%u s0_84=%X lt_c4e0=%u c24C4F0=%u a0_3f7780=%X a1_3f7780=%X mask_3f7780=%llX c3FBE78=%u v_3fbe78=%u v0_3fbe=%X w74B140=%X,%X,%X m1900EA0=%llX s0_84_mem=%X s0_7C_mem=%X c24C5A0=%u c24C5AC=%u c3F7E38=%u c31A240=%u c31A2C0=%u s4C_refill=%X\n",
                     sec, f_cnt, val_state.load(), st_word, val_s0.load(), val_a1_s4.load(),
                     val_v0_1DA880.load(), val_v0_taken.load(),
                     val_f72C7A0.load(), val_f72D3A0.load(), val_w635480.load(),
@@ -398,7 +412,168 @@ namespace probe_ae {
                     c_24c4c0, val_c4e0_v0.load(), val_c4e0_s0_84.load(), c_lt_c4e0, c_24c4f0,
                     val_3f7780_a0.load(), val_3f7780_a1.load(), (unsigned long long)val_3f7780_mask.load(),
                     c_3fbe78, val_3fbe78_voice.load(), val_3fbeac_v0.load(),
-                    w74b140, w74b144, w74b148, (unsigned long long)m1900ea0, s0_84_mem, s0_7c_mem);
+                    w74b140, w74b144, w74b148, (unsigned long long)m1900ea0, s0_84_mem, s0_7c_mem,
+                    c_24c5a0, c_24c5ac, c_3f7e38, c_31a240, c_31a2c0, s4c_refill);
         std::fflush(stdout);
+    }
+
+    void log24C5A0(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        cnt_24c5a0.fetch_add(1, std::memory_order_relaxed);
+        uint32_t t5 = getRegU32(ctx, 13);
+        uint32_t t7 = getRegU32(ctx, 15);
+        uint32_t s1 = getRegU32(ctx, 17);
+        uint32_t s3 = getRegU32(ctx, 19);
+        uint32_t s4 = getRegU32(ctx, 20);
+        uint32_t s0 = getRegU32(ctx, 16);
+
+        auto readWord = [rdram](uint32_t addr) -> uint32_t {
+            uint32_t w = 0;
+            if (rdram && (addr & PS2_RAM_MASK) <= PS2_RAM_SIZE - 4) {
+                std::memcpy(&w, rdram + (addr & PS2_RAM_MASK), sizeof(w));
+            }
+            return w;
+        };
+
+        uint32_t s48 = readWord(s0 + 0x48);
+        uint32_t s4C = readWord(s0 + 0x4C);
+        uint32_t s58 = readWord(s0 + 0x58);
+        uint32_t s5C = readWord(s0 + 0x5C);
+        uint32_t s60 = readWord(s0 + 0x60);
+        uint32_t s64 = readWord(s0 + 0x64);
+        uint32_t s68 = readWord(s0 + 0x68);
+        uint32_t s6C = readWord(s0 + 0x6C);
+        uint32_t s70 = readWord(s0 + 0x70);
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8) {
+            std::printf("[probe] f9 pc=0x24C5A0 n=%u t5=%u t7=%u s1=0x%X s3=0x%X s4=0x%X s48=0x%X s4C=0x%X s58=0x%X s5C=%u s60=%u s64=%u s68=0x%X s6C=0x%X s70=%u\n",
+                        n, t5, t7, s1, s3, s4, s48, s4C, s58, s5C, s60, s64, s68, s6C, s70);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24C5AC(R5900Context *ctx, const uint8_t *rdram, uint32_t pc) {
+        if (!isEnabled()) return;
+        cnt_24c5ac.fetch_add(1, std::memory_order_relaxed);
+        uint32_t t5 = getRegU32(ctx, 13);
+        uint32_t t7 = getRegU32(ctx, 15);
+        uint32_t s1 = getRegU32(ctx, 17);
+        uint32_t s3 = getRegU32(ctx, 19);
+        uint32_t s4 = getRegU32(ctx, 20);
+        uint32_t s0 = getRegU32(ctx, 16);
+
+        auto readWord = [rdram](uint32_t addr) -> uint32_t {
+            uint32_t w = 0;
+            if (rdram && (addr & PS2_RAM_MASK) <= PS2_RAM_SIZE - 4) {
+                std::memcpy(&w, rdram + (addr & PS2_RAM_MASK), sizeof(w));
+            }
+            return w;
+        };
+
+        uint32_t s48 = readWord(s0 + 0x48);
+        uint32_t s4C = readWord(s0 + 0x4C);
+        uint32_t s58 = readWord(s0 + 0x58);
+        uint32_t s5C = readWord(s0 + 0x5C);
+        uint32_t s60 = readWord(s0 + 0x60);
+        uint32_t s64 = readWord(s0 + 0x64);
+        uint32_t s68 = readWord(s0 + 0x68);
+        uint32_t s6C = readWord(s0 + 0x6C);
+        uint32_t s70 = readWord(s0 + 0x70);
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8) {
+            std::printf("[probe] f10 pc=0x%X n=%u t5=%u t7=%u s1=0x%X s3=0x%X s4=0x%X s48=0x%X s4C=0x%X s58=0x%X s5C=%u s60=%u s64=%u s68=0x%X s6C=0x%X s70=%u\n",
+                        pc, n, t5, t7, s1, s3, s4, s48, s4C, s58, s5C, s60, s64, s68, s6C, s70);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24C5E8(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        cnt_3f7e38.fetch_add(1, std::memory_order_relaxed);
+        uint32_t s0 = getRegU32(ctx, 16);
+        uint32_t s4C = 0;
+        if (rdram && ((s0 + 0x4C) & PS2_RAM_MASK) <= PS2_RAM_SIZE - 4) {
+            std::memcpy(&s4C, rdram + ((s0 + 0x4C) & PS2_RAM_MASK), sizeof(s4C));
+        }
+        uint32_t t7 = getRegU32(ctx, 15);
+        val_s4C_refill.store(s4C, std::memory_order_relaxed);
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8) {
+            std::printf("[probe] f9 pc=0x24C5E8 n=%u s0_4C=0x%X t7=0x%X\n", n, s4C, t7);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24C24C(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        uint32_t s0 = getRegU32(ctx, 16);
+        uint32_t hdr_ptr = 0;
+        if (rdram && ((s0 + 0x1C) & PS2_RAM_MASK) <= PS2_RAM_SIZE - 4) {
+            std::memcpy(&hdr_ptr, rdram + ((s0 + 0x1C) & PS2_RAM_MASK), sizeof(hdr_ptr));
+        }
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8) {
+            uint32_t hdr[16] = {0};
+            if (rdram && (hdr_ptr & PS2_RAM_MASK) <= PS2_RAM_SIZE - 0x40) {
+                std::memcpy(hdr, rdram + (hdr_ptr & PS2_RAM_MASK), sizeof(hdr));
+            }
+            char magicStr[5] = {0};
+            std::memcpy(magicStr, &hdr[0], 4);
+            std::printf("[probe] f9 pc=0x24C24C n=%u hdr_ptr=0x%08X magic=0x%08X('%s') frames=%u off18=0x%X off30=0x%X\n",
+                        n, hdr_ptr, hdr[0], magicStr, hdr[2], hdr[6], hdr[12]);
+            std::printf("[probe] f9 hdr hex: %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X\n",
+                        hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
+                        hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15]);
+            std::fflush(stdout);
+        }
+    }
+
+    void log31A240Entry(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        cnt_31a240.fetch_add(1, std::memory_order_relaxed);
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+
+        auto readWord = [rdram](uint32_t addr) -> uint32_t {
+            uint32_t w = 0;
+            if (rdram && (addr & PS2_RAM_MASK) <= PS2_RAM_SIZE - 4) {
+                std::memcpy(&w, rdram + (addr & PS2_RAM_MASK), sizeof(w));
+            }
+            return w;
+        };
+
+        uint32_t s1_1F0 = readWord(a0 + 0x1F0);
+        uint32_t s1_1F4 = readWord(a0 + 0x1F4);
+        uint32_t s1_1F8 = readWord(a0 + 0x1F8);
+        uint32_t s1_1FC = readWord(a0 + 0x1FC);
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8) {
+            std::printf("[probe] 31a240 entry n=%u a1=%u s1=0x%X s1_1F0=%u s1_1F4=%u s1_1F8=%u s1_1FC=%u\n",
+                        n, a1, a0, s1_1F0, s1_1F4, s1_1F8, s1_1FC);
+            std::fflush(stdout);
+        }
+    }
+
+    void log31A2C0Ret(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        cnt_31a2c0.fetch_add(1, std::memory_order_relaxed);
+        int32_t v0 = (int32_t)getRegU32(ctx, 2);
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8) {
+            std::printf("[probe] 31a2c0 ret n=%u v0=%d\n", n, v0);
+            std::fflush(stdout);
+        }
     }
 }

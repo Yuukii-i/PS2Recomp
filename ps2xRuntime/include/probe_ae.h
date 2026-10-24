@@ -502,4 +502,19 @@ namespace probe_ae {
         if (!isEnabled()) return;
         val_3fbeac_v0.store(getRegU32(ctx, 2), std::memory_order_relaxed);
     }
+
+    // Task AN Probes
+    extern std::atomic<uint32_t> cnt_24c5a0;
+    extern std::atomic<uint32_t> cnt_24c5ac;
+    extern std::atomic<uint32_t> cnt_3f7e38;
+    extern std::atomic<uint32_t> cnt_31a240;
+    extern std::atomic<uint32_t> cnt_31a2c0;
+    extern std::atomic<uint32_t> val_s4C_refill;
+
+    void log24C5A0(R5900Context *ctx, const uint8_t *rdram);
+    void log24C5AC(R5900Context *ctx, const uint8_t *rdram, uint32_t pc);
+    void log24C5E8(R5900Context *ctx, const uint8_t *rdram);
+    void log24C24C(R5900Context *ctx, const uint8_t *rdram);
+    void log31A240Entry(R5900Context *ctx, const uint8_t *rdram);
+    void log31A2C0Ret(R5900Context *ctx);
 }
