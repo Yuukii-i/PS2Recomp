@@ -1636,21 +1636,24 @@ namespace ps2_syscalls
 
             ps2x::vfi::VfiArchive::instance().initialize();
 
-            const uint8_t *src = (srcExtra != 0u) ? getConstMemPtr(rdram, srcExtra) : nullptr;
-            if (!src)
+            const uint8_t *baseSrc = (srcExtra != 0u) ? getConstMemPtr(rdram, srcExtra) : nullptr;
+            if (!baseSrc)
             {
                 ps2xSafeLog( "[CID1] ERROR: srcExtra 0x%08x is invalid\n", srcExtra);
                 std::fflush(stderr);
                 return;
             }
 
-            uint32_t cmdSize = *reinterpret_cast<const uint32_t *>(src + 0);
-            uint32_t opcode = *reinterpret_cast<const uint32_t *>(src + 4);
-            uint32_t slotPtr = *reinterpret_cast<const uint32_t *>(src + 8);
-            uint32_t seq = *reinterpret_cast<const uint32_t *>(src + 12);
+            auto handleOne = [&](const uint8_t *src, uint32_t off) -> uint32_t
+            {
+                uint32_t cmdSize = *reinterpret_cast<const uint32_t *>(src + 0);
+                uint32_t opcode = *reinterpret_cast<const uint32_t *>(src + 4);
+                uint32_t slotPtr = *reinterpret_cast<const uint32_t *>(src + 8);
+                uint32_t seq = *reinterpret_cast<const uint32_t *>(src + 12);
 
-            uint32_t alignedCmdSize = (cmdSize + 15u) & ~15u;
-            uint32_t ringTail = destExtra + alignedCmdSize;
+                uint32_t alignedCmdSize = (cmdSize + 15u) & ~15u;
+                if (alignedCmdSize == 0u) alignedCmdSize = 16u;
+                uint32_t ringTail = destExtra + off + alignedCmdSize;
             g_diagCid1Requests.fetch_add(1, std::memory_order_relaxed);
 
             const char *traceEnv = std::getenv("PS2X_CID1_TRACE");
@@ -2083,7 +2086,47 @@ namespace ps2_syscalls
             }
             std::fflush(stderr);
 
-            ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
+                ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
+                return alignedCmdSize;
+            };
+
+            uint32_t cmdSize0 = *reinterpret_cast<const uint32_t *>(baseSrc + 0);
+            if (cmdSize0 < 0x10u)
+            {
+                return;
+            }
+
+            uint32_t totalLimit = std::max(sizeExtra, cmdSize0);
+            uint32_t batchCount = 0;
+            for (uint32_t off = 0; off < totalLimit; )
+            {
+                if (batchCount >= 16)
+                    break;
+                if (sizeExtra != 0 && (off + 4u > sizeExtra))
+                    break;
+                uint32_t cmdSize_i = *reinterpret_cast<const uint32_t *>(baseSrc + off);
+                if (cmdSize_i < 0x10u)
+                    break;
+                if (sizeExtra != 0 && (off + cmdSize_i > sizeExtra))
+                    break;
+
+                uint32_t consumed = handleOne(baseSrc + off, off);
+                batchCount++;
+                if (consumed == 0)
+                    break;
+                off += consumed;
+            }
+
+            if (batchCount > 1)
+            {
+                static uint32_t s_batchLogCount = 0;
+                if (s_batchLogCount < 20)
+                {
+                    ps2xSafeLog("[CID1:batch] n=%u sizeExtra=%u\n", batchCount, sizeExtra);
+                    std::fflush(stderr);
+                    s_batchLogCount++;
+                }
+            }
         }
 
         // Handle SET_SREG command (0x80000001)
