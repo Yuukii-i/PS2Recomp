@@ -517,4 +517,24 @@ namespace probe_ae {
     void log24C24C(R5900Context *ctx, const uint8_t *rdram);
     void log31A240Entry(R5900Context *ctx, const uint8_t *rdram);
     void log31A2C0Ret(R5900Context *ctx);
+
+    // Task AO Probes
+    extern std::atomic<uint32_t> val_last_cmd;
+    extern std::atomic<uint32_t> cnt_c8_24cdcc;
+    extern std::atomic<uint32_t> cnt_c8_24cdfc;
+    extern std::atomic<uint32_t> cnt_c8_24c7dc;
+    extern std::atomic<uint32_t> cnt_c8_24c8b4;
+    extern std::atomic<uint32_t> cnt_c8_cmd8_ret;
+
+    void log24CD38(R5900Context *ctx);
+    void log24CDBC(R5900Context *ctx, const uint8_t *rdram);
+    void log24CDCC();
+    void log24CDFC();
+    void log24CD80(R5900Context *ctx);
+
+    void log24C7DCEntry(R5900Context *ctx);
+    void log24C828(R5900Context *ctx);
+    void log24C8B4();
+    void log24C900(R5900Context *ctx);
+    void log24C914(R5900Context *ctx);
 }

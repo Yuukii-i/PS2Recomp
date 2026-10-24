@@ -354,6 +354,24 @@ namespace probe_ae {
         uint32_t c_31a240 = cnt_31a240.exchange(0, std::memory_order_relaxed);
         uint32_t c_31a2c0 = cnt_31a2c0.exchange(0, std::memory_order_relaxed);
         uint32_t s4c_refill = val_s4C_refill.load(std::memory_order_relaxed);
+        uint32_t c8_cdcc = cnt_c8_24cdcc.exchange(0, std::memory_order_relaxed);
+        uint32_t c8_cdfc = cnt_c8_24cdfc.exchange(0, std::memory_order_relaxed);
+        uint32_t c8_24c7dc = cnt_c8_24c7dc.exchange(0, std::memory_order_relaxed);
+        uint32_t c8_24c8b4 = cnt_c8_24c8b4.exchange(0, std::memory_order_relaxed);
+        uint32_t c8_ret = cnt_c8_cmd8_ret.exchange(0, std::memory_order_relaxed);
+
+        uint32_t ctx_88 = 0, ctx_C8 = 0, ctx_CC = 0, ctx_D8 = 0;
+        uint32_t ctx_E0 = 0, ctx_E4 = 0, ctx_E8 = 0, ctx_EC = 0;
+        if (rdram) {
+            std::memcpy(&ctx_88, rdram + (0x772188u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&ctx_C8, rdram + (0x7721C8u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&ctx_CC, rdram + (0x7721CCu & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&ctx_D8, rdram + (0x7721D8u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&ctx_E0, rdram + (0x7721E0u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&ctx_E4, rdram + (0x7721E4u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&ctx_E8, rdram + (0x7721E8u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&ctx_EC, rdram + (0x7721ECu & PS2_RAM_MASK), sizeof(uint32_t));
+        }
         uint32_t w74b140 = 0, w74b144 = 0, w74b148 = 0;
         uint64_t m1900ea0 = 0;
         uint32_t s0_84_mem = 0, s0_7c_mem = 0;
@@ -392,7 +410,7 @@ namespace probe_ae {
         flushFirstCallsIfDue(sec);
 
         // Print unified [probe] line with old fields + Task AF + Task AG + Task AH fields
-        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s c24CD04=%u cmds=%s last_a0=%X last_a2=%X last_a3=%X last_ra=%X t7_cd50=%X oob_cmd=%u v0_3f7=%d neg_v0=%u s1_3f7=%X head_3f7=%u tail_3f7=%u slot8_1dc=%X ret_1dc578=%d a1_1dc=%s c438EA8=%u c1DCEE0=%u t6_1dcf8c=%X s1_1dcf8c=%X w771bd4=%X w76a518=%X pkt=%X,%X,%X,%X w77218c=%X w771bc4=%X c1DCC70=%u v0_1dcc=%d t7_1dc1ec=%X s1_1dc1ec=%X c_intc=%u c24C4C0=%u v0_c4e0=%u s0_84=%X lt_c4e0=%u c24C4F0=%u a0_3f7780=%X a1_3f7780=%X mask_3f7780=%llX c3FBE78=%u v_3fbe78=%u v0_3fbe=%X w74B140=%X,%X,%X m1900EA0=%llX s0_84_mem=%X s0_7C_mem=%X c24C5A0=%u c24C5AC=%u c3F7E38=%u c31A240=%u c31A2C0=%u s4C_refill=%X\n",
+        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s c24CD04=%u cmds=%s last_a0=%X last_a2=%X last_a3=%X last_ra=%X t7_cd50=%X oob_cmd=%u v0_3f7=%d neg_v0=%u s1_3f7=%X head_3f7=%u tail_3f7=%u slot8_1dc=%X ret_1dc578=%d a1_1dc=%s c438EA8=%u c1DCEE0=%u t6_1dcf8c=%X s1_1dcf8c=%X w771bd4=%X w76a518=%X pkt=%X,%X,%X,%X w77218c=%X w771bc4=%X c1DCC70=%u v0_1dcc=%d t7_1dc1ec=%X s1_1dc1ec=%X c_intc=%u c24C4C0=%u v0_c4e0=%u s0_84=%X lt_c4e0=%u c24C4F0=%u a0_3f7780=%X a1_3f7780=%X mask_3f7780=%llX c3FBE78=%u v_3fbe78=%u v0_3fbe=%X w74B140=%X,%X,%X m1900EA0=%llX s0_84_mem=%X s0_7C_mem=%X c24C5A0=%u c24C5AC=%u c3F7E38=%u c31A240=%u c31A2C0=%u s4C_refill=%X c8_cdcc=%u c8_cdfc=%u c8_7dc=%u c8_8b4=%u c8_ret=%u ctx_88=%X ctx_C8=%X ctx_CC=%X ctx_D8=%X ctx_E0=%X ctx_E4=%X ctx_E8=%X ctx_EC=%X\n",
                     sec, f_cnt, val_state.load(), st_word, val_s0.load(), val_a1_s4.load(),
                     val_v0_1DA880.load(), val_v0_taken.load(),
                     val_f72C7A0.load(), val_f72D3A0.load(), val_w635480.load(),
@@ -413,7 +431,7 @@ namespace probe_ae {
                     val_3f7780_a0.load(), val_3f7780_a1.load(), (unsigned long long)val_3f7780_mask.load(),
                     c_3fbe78, val_3fbe78_voice.load(), val_3fbeac_v0.load(),
                     w74b140, w74b144, w74b148, (unsigned long long)m1900ea0, s0_84_mem, s0_7c_mem,
-                    c_24c5a0, c_24c5ac, c_3f7e38, c_31a240, c_31a2c0, s4c_refill);
+                    c_24c5a0, c_24c5ac, c_3f7e38, c_31a240, c_31a2c0, s4c_refill, c8_cdcc, c8_cdfc, c8_24c7dc, c8_24c8b4, c8_ret, ctx_88, ctx_C8, ctx_CC, ctx_D8, ctx_E0, ctx_E4, ctx_E8, ctx_EC);
         std::fflush(stdout);
     }
 
@@ -573,6 +591,147 @@ namespace probe_ae {
         uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n <= 8) {
             std::printf("[probe] 31a2c0 ret n=%u v0=%d\n", n, v0);
+            std::fflush(stdout);
+        }
+    }
+
+    std::atomic<uint32_t> val_last_cmd{0};
+    std::atomic<uint32_t> cnt_c8_24cdcc{0};
+    std::atomic<uint32_t> cnt_c8_24cdfc{0};
+    std::atomic<uint32_t> cnt_c8_24c7dc{0};
+    std::atomic<uint32_t> cnt_c8_24c8b4{0};
+    std::atomic<uint32_t> cnt_c8_cmd8_ret{0};
+
+    void log24CD38(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        uint32_t a0 = val_cd04_a0.load(std::memory_order_relaxed);
+        uint32_t s1 = getRegU32(ctx, 17);
+        uint32_t cmd = getRegU32(ctx, 16) + 1;
+        val_last_cmd.store(cmd, std::memory_order_relaxed);
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 12) {
+            std::printf("[probe] c8 24cd38 n=%u a0=0x%X s1=0x%X cmd=%u\n", n, a0, s1, cmd);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24CDBC(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        uint32_t s1 = getRegU32(ctx, 17);
+        auto readWord = [rdram](uint32_t addr) -> uint32_t {
+            uint32_t w = 0;
+            if (rdram && (addr & PS2_RAM_MASK) <= PS2_RAM_SIZE - 4) {
+                std::memcpy(&w, rdram + (addr & PS2_RAM_MASK), sizeof(w));
+            }
+            return w;
+        };
+
+        uint32_t state = readWord(s1 + 8);
+        int32_t s64 = (int32_t)readWord(s1 + 0x64);
+        uint32_t s6C = readWord(s1 + 0x6C);
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 12) {
+            std::printf("[probe] c8 24cdbc n=%u s1=0x%X state=%u s64=%d s6C=0x%X\n", n, s1, state, s64, s6C);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24CDCC() {
+        if (!isEnabled()) return;
+        cnt_c8_24cdcc.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 12) {
+            std::printf("[probe] c8 24cdcc n=%u (state==8 abort)\n", n);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24CDFC() {
+        if (!isEnabled()) return;
+        cnt_c8_24cdfc.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 12) {
+            std::printf("[probe] c8 24cdfc n=%u (jal 24C7DC)\n", n);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24CD80(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        uint32_t cmd = val_last_cmd.load(std::memory_order_relaxed);
+        int32_t t5 = (int32_t)getRegU32(ctx, 13);
+        if (cmd == 8) {
+            cnt_c8_cmd8_ret.fetch_add(1, std::memory_order_relaxed);
+            static std::atomic<uint32_t> s_count{0};
+            uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 12) {
+                std::printf("[probe] c8 24cd80 ret cmd=8 n=%u t5=%d\n", n, t5);
+                std::fflush(stdout);
+            }
+        }
+    }
+
+    void log24C7DCEntry(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        cnt_c8_24c7dc.fetch_add(1, std::memory_order_relaxed);
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 12) {
+            std::printf("[probe] c8 24c7dc entry n=%u a0=0x%X a1=0x%X\n", n, a0, a1);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24C828(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        int32_t v0 = (int32_t)getRegU32(ctx, 2);
+
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 12) {
+            std::printf("[probe] c8 24c828 n=%u 24CBFC_v0=%d\n", n, v0);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24C8B4() {
+        if (!isEnabled()) return;
+        cnt_c8_24c8b4.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 12) {
+            std::printf("[probe] c8 24c8b4 entry n=%u\n", n);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24C900(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        uint32_t t7 = getRegU32(ctx, 15);
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 12) {
+            std::printf("[probe] c8 24c900 n=%u t7=0x%08X (ctx+0x48)\n", n, t7);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24C914(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        uint32_t t5 = getRegU32(ctx, 13);
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 12) {
+            std::printf("[probe] c8 24c914 n=%u t5=0x%08X (ctx+0x58)\n", n, t5);
             std::fflush(stdout);
         }
     }
