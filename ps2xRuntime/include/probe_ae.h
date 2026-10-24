@@ -592,4 +592,13 @@ namespace probe_ae {
     std::string getAndResetVifMarkHist();
     std::string getAndResetH2843D4Hist(uint32_t &outTotal);
     void dumpTaskAVInfo(uint32_t sec, const uint8_t *rdram);
+
+    // Task AW Probes
+    void onAwDma1KickStart(uint32_t tadr, uint32_t chcr);
+    void onAwDma1Tag(uint32_t addr, uint32_t id, uint32_t qwc, uint32_t next, uint32_t dataAddr, const uint32_t *words, uint32_t wordCount);
+    void onAwVifKickStart();
+    void onAwMark2000();
+    void onAwVifCode(uint32_t off, uint32_t cmd, uint8_t num, uint16_t imm, bool irq, uint32_t consumed);
+    void onAwUnpack(uint8_t fmt, uint8_t num, uint32_t cl, uint32_t wl, uint32_t usn, uint32_t flg, uint32_t addr, uint32_t words);
+    void onAwVifKickEnd(const uint8_t *rdram);
 }

@@ -2,6 +2,7 @@
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_log.h"
+#include "probe_ae.h"
 #include <atomic>
 #include <cstring>
 #include <limits>
@@ -1347,6 +1348,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 else if (mode == 1)
                 {
                     uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
+                    if (channelBase == 0x10009000u) {
+#if defined(PS2X_PROBE_AE) || 1
+                        if (probe_ae::isEnabled()) {
+                            probe_ae::onAwDma1KickStart(tagAddr, chcr);
+                        }
+#endif
+                    }
                     uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
                     uint32_t asp = (chcr >> 4) & 0x3u;
@@ -1522,6 +1530,28 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                         if (hasPayload)
                             appendData(dataAddr, tagQwc);
+
+                        if (channelBase == 0x10009000u)
+                        {
+#if defined(PS2X_PROBE_AE) || 1
+                            if (probe_ae::isEnabled()) {
+                                uint32_t sampleWords[8] = {0};
+                                uint32_t numWords = 0;
+                                if (hasPayload && tagQwc > 0) {
+                                    uint32_t dp = 0;
+                                    try { dp = translateAddress(dataAddr); } catch(...) {}
+                                    const uint8_t *db = isScratchpad(dataAddr) ? m_scratchpad : m_rdram;
+                                    const uint32_t dm = isScratchpad(dataAddr) ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                    uint32_t maxBytes = std::min<uint32_t>(32u, static_cast<uint32_t>(tagQwc) * 16u);
+                                    if (dp + maxBytes <= dm) {
+                                        std::memcpy(sampleWords, db + dp, maxBytes);
+                                        numWords = maxBytes / 4;
+                                    }
+                                }
+                                probe_ae::onAwDma1Tag(currentTagAddr, id, tagQwc, tagAddr, dataAddr, sampleWords, numWords);
+                            }
+#endif
+                        }
 
                         if (channelBase == 0x10009000u && (tagQwc == 512 || tagQwc == 64 || (tagQwc > 0 && tagsProcessed <= 6)))
                         {

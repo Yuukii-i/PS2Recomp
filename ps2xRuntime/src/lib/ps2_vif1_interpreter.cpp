@@ -307,6 +307,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 #if defined(PS2X_PROBE_AE) || 1
     if (probe_ae::isEnabled()) {
         probe_ae::onVif1DmaStart(sizeBytes);
+        probe_ae::onAwVifKickStart();
     }
 #endif
 
@@ -315,14 +316,34 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     while (pos + 4 <= sizeBytes)
     {
 
+        uint32_t pos_cmd = pos;
         uint32_t cmd;
         memcpy(&cmd, data + pos, 4);
         pos += 4;
+        uint32_t pos_payload = pos;
 
         uint8_t opcode = (cmd >> 24) & 0x7F;
         uint16_t imm = cmd & 0xFFFF;
         uint8_t num = (cmd >> 16) & 0xFF;
         const bool irq = (cmd & 0x80000000u) != 0u;
+
+        struct VcScopeGuard {
+            uint32_t pos_cmd;
+            uint32_t cmd;
+            uint8_t num;
+            uint16_t imm;
+            bool irq;
+            uint32_t pos_payload;
+            const uint32_t &pos;
+            ~VcScopeGuard() {
+#if defined(PS2X_PROBE_AE) || 1
+                if (probe_ae::isEnabled()) {
+                    uint32_t consumed = (pos > pos_payload) ? (pos - pos_payload) : 0u;
+                    probe_ae::onAwVifCode(pos_cmd, cmd, num, imm, irq, consumed);
+                }
+#endif
+            }
+        } vcGuard{pos_cmd, cmd, num, imm, irq, pos_payload, pos};
 
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
@@ -403,6 +424,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (probe_ae::isEnabled()) {
                 probe_ae::onVif1Mark(imm);
                 probe_ae::onCause5Raise();
+                if (imm == 0x2000u) {
+                    probe_ae::onAwMark2000();
+                }
             }
 #endif
             std::fprintf(stderr, "[vif1:mark] imm=0x%04x irq=%d\n", imm, irq ? 1 : 0);
@@ -604,6 +628,16 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
+#if defined(PS2X_PROBE_AE) || 1
+            if (probe_ae::isEnabled()) {
+                uint8_t fmt = opcode & 0x0Fu;
+                uint32_t usn = (imm & 0x4000u) != 0u ? 1u : 0u;
+                uint32_t flg = (imm & 0x8000u) != 0u ? 1u : 0u;
+                uint32_t addr = imm & 0x3FFu;
+                uint32_t computed_words = totalBytes / 4u;
+                probe_ae::onAwUnpack(fmt, num, cl, wl, usn, flg, addr, computed_words);
+            }
+#endif
 
             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
@@ -822,6 +856,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 #if defined(PS2X_PROBE_AE) || 1
     if (probe_ae::isEnabled()) {
         probe_ae::onVif1DmaEnd();
+        probe_ae::onAwVifKickEnd(m_rdram);
     }
 #endif
 }

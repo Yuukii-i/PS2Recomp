@@ -1232,4 +1232,171 @@ namespace probe_ae {
         s_h2843d4Counts.clear();
         return s;
     }
+
+    // Task AW Probes
+    struct AwPkt {
+        uint32_t addr;
+        uint32_t words[8];
+        uint32_t numWords;
+    };
+
+    static std::mutex s_awMutex;
+    static uint32_t s_awTotalKicks = 0;
+    static uint32_t s_awNoMarkCount = 0;
+    static bool s_awDumpedCmp = false;
+
+    // Current kick
+    static uint32_t s_currKickNum = 0;
+    static bool s_currKickHadMark2000 = false;
+    static std::vector<std::string> s_currKickTrace;
+    static std::vector<AwPkt> s_currKickPackets;
+    static std::vector<std::string> s_currKickUnpacks;
+
+    // Previous normal kick (with MARK 0x2000)
+    static bool s_hasPrevNormalKick = false;
+    static uint32_t s_prevKickNum = 0;
+    static std::vector<std::string> s_prevKickTrace;
+    static std::vector<AwPkt> s_prevKickPackets;
+    static std::vector<std::string> s_prevKickUnpacks;
+
+    void onAwDma1KickStart(uint32_t tadr, uint32_t chcr) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_awMutex);
+        s_currKickNum = ++s_awTotalKicks;
+        s_currKickHadMark2000 = false;
+        s_currKickTrace.clear();
+        s_currKickPackets.clear();
+        s_currKickUnpacks.clear();
+
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "[probe] aw kick# %u tadr=0x%08X chcr=0x%08X", s_currKickNum, tadr, chcr);
+        s_currKickTrace.push_back(buf);
+    }
+
+    void onAwDma1Tag(uint32_t addr, uint32_t id, uint32_t qwc, uint32_t next, uint32_t dataAddr, const uint32_t *words, uint32_t wordCount) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_awMutex);
+        if (s_currKickTrace.size() < 96) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "[probe] aw tag addr=0x%08X id=%u qwc=0x%X next=0x%08X", addr, id, qwc, next);
+            s_currKickTrace.push_back(buf);
+        }
+        if (wordCount > 0 && s_currKickPackets.size() < 30) {
+            AwPkt pkt{};
+            pkt.addr = dataAddr;
+            pkt.numWords = std::min<uint32_t>(8u, wordCount);
+            for (uint32_t i = 0; i < pkt.numWords; ++i) {
+                pkt.words[i] = words[i];
+            }
+            s_currKickPackets.push_back(pkt);
+        }
+    }
+
+    void onAwVifKickStart() {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_awMutex);
+        if (s_currKickTrace.empty()) {
+            s_currKickNum = ++s_awTotalKicks;
+            s_currKickHadMark2000 = false;
+            s_currKickTrace.clear();
+            s_currKickPackets.clear();
+            s_currKickUnpacks.clear();
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "[probe] aw kick# %u tadr=0x00000000 chcr=0x00000000", s_currKickNum);
+            s_currKickTrace.push_back(buf);
+        }
+    }
+
+    void onAwMark2000() {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_awMutex);
+        s_currKickHadMark2000 = true;
+    }
+
+    void onAwVifCode(uint32_t off, uint32_t cmd, uint8_t num, uint16_t imm, bool irq, uint32_t consumed) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_awMutex);
+        if (s_currKickTrace.size() < 96) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "[probe] aw vc off=0x%X cmd=0x%08X num=0x%02X imm=0x%04X irq=%d consumed_bytes=%u",
+                          off, cmd, (uint32_t)num, (uint32_t)imm, irq ? 1 : 0, consumed);
+            s_currKickTrace.push_back(buf);
+        }
+    }
+
+    void onAwUnpack(uint8_t fmt, uint8_t num, uint32_t cl, uint32_t wl, uint32_t usn, uint32_t flg, uint32_t addr, uint32_t words) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_awMutex);
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "[probe] aw unpack fmt=0x%X num=%u cl=%u wl=%u usn=%u flg=%u addr=0x%03X words=%u",
+                      (uint32_t)fmt, (uint32_t)num, cl, wl, usn, flg, addr, words);
+        s_currKickUnpacks.push_back(buf);
+    }
+
+    void onAwVifKickEnd(const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_awMutex);
+
+        uint32_t f_state = 0;
+        if (rdram && (0x772188u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+            std::memcpy(&f_state, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        }
+
+        if (!s_currKickHadMark2000 && f_state == 9) {
+            if (s_awNoMarkCount < 3) {
+                s_awNoMarkCount++;
+
+                // First time: dump previous normal kick for comparison
+                if (!s_awDumpedCmp && s_hasPrevNormalKick) {
+                    s_awDumpedCmp = true;
+                    for (const auto &line : s_prevKickTrace) {
+                        if (line.rfind("[probe] aw ", 0) == 0) {
+                            std::printf("[probe] aw cmp %s\n", line.c_str() + 11);
+                        } else {
+                            std::printf("[probe] aw cmp %s\n", line.c_str());
+                        }
+                    }
+                    for (const auto &pkt : s_prevKickPackets) {
+                        char hexBuf[256];
+                        int n = std::snprintf(hexBuf, sizeof(hexBuf), "[probe] aw cmp pkt addr=0x%08X:", pkt.addr);
+                        for (uint32_t i = 0; i < pkt.numWords; ++i) {
+                            n += std::snprintf(hexBuf + n, sizeof(hexBuf) - n, " %08X", pkt.words[i]);
+                        }
+                        std::printf("%s\n", hexBuf);
+                    }
+                    for (const auto &upk : s_prevKickUnpacks) {
+                        if (upk.rfind("[probe] aw ", 0) == 0) {
+                            std::printf("[probe] aw cmp %s\n", upk.c_str() + 11);
+                        } else {
+                            std::printf("[probe] aw cmp %s\n", upk.c_str());
+                        }
+                    }
+                }
+
+                // Dump this no-MARK kick
+                for (const auto &line : s_currKickTrace) {
+                    std::printf("%s\n", line.c_str());
+                }
+                for (const auto &pkt : s_currKickPackets) {
+                    char hexBuf[256];
+                    int n = std::snprintf(hexBuf, sizeof(hexBuf), "[probe] aw pkt addr=0x%08X:", pkt.addr);
+                    for (uint32_t i = 0; i < pkt.numWords; ++i) {
+                        n += std::snprintf(hexBuf + n, sizeof(hexBuf) - n, " %08X", pkt.words[i]);
+                    }
+                    std::printf("%s\n", hexBuf);
+                }
+                for (const auto &upk : s_currKickUnpacks) {
+                    std::printf("%s\n", upk.c_str());
+                }
+                std::fflush(stdout);
+            }
+        } else if (s_currKickHadMark2000) {
+            // Normal kick with MARK 0x2000
+            s_prevKickNum = s_currKickNum;
+            s_prevKickTrace = s_currKickTrace;
+            s_prevKickPackets = s_currKickPackets;
+            s_prevKickUnpacks = s_currKickUnpacks;
+            s_hasPrevNormalKick = true;
+        }
+    }
 }
