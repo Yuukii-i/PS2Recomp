@@ -1634,6 +1634,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         auto tChainEnd = std::chrono::steady_clock::now();
                         probe_ae::onAyTimeChain(std::chrono::duration_cast<std::chrono::microseconds>(tChainEnd - tChainStart).count());
                         probe_ae::onAyKick();
+                        probe_ae::setRdram(m_rdram);
                         probe_ae::onAyChainStart(tagsProcessed, aySpans);
                         probe_ae::onBbChainStart(initialTagAddr, tagsProcessed, aySpans);
                     }

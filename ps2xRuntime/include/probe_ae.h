@@ -651,4 +651,5 @@ namespace probe_ae {
     void onGsWriteRegister(uint8_t regAddr, uint64_t value);
     void onGsPrivRegister(uint32_t addr, uint64_t value);
     void onBbCheckRaw8(bool validFrame, uint32_t numMbs, uint32_t dst, const uint8_t *rdram);
+    void setRdram(const uint8_t *rdram);
 }

@@ -39,6 +39,13 @@ namespace probe_ae {
     std::atomic<uint32_t> val_t7_jalr{0};
     std::atomic<uint32_t> val_s1{0}, val_s2_680{0}, val_s3_680{0};
 
+    static std::atomic<bool> s_hasSeenFState9{false};
+    static const uint8_t *s_cachedRdram = nullptr;
+
+    void setRdram(const uint8_t *rdram) {
+        if (rdram) s_cachedRdram = rdram;
+    }
+
     std::atomic<uint32_t> reg_F_a0{0};
     std::atomic<uint32_t> reg_F_a1{0};
     std::atomic<uint32_t> reg_F_a2{0};
@@ -357,7 +364,11 @@ namespace probe_ae {
 
         uint32_t st_word = 0;
         if (rdram) {
+            s_cachedRdram = rdram;
             std::memcpy(&st_word, rdram + (0x772188u & PS2_RAM_MASK), sizeof(st_word));
+            if (st_word == 9) {
+                s_hasSeenFState9.store(true, std::memory_order_relaxed);
+            }
         }
 
         std::string raList = getAndResetRa24c64c();
@@ -1014,10 +1025,10 @@ namespace probe_ae {
 
     static std::atomic<uint32_t> s_count3D7C08_ever{0};
     static std::atomic<uint32_t> s_count3D7C08_st9{0};
-    static std::atomic<bool> s_hasSeenFState9{false};
 
     void on3D7C08(R5900Context *ctx, const uint8_t *rdram) {
         if (!isEnabled()) return;
+        if (rdram) s_cachedRdram = rdram;
         cnt_au_3d7c08.fetch_add(1, std::memory_order_relaxed);
 
         uint32_t f_state = 0;
@@ -1097,7 +1108,11 @@ namespace probe_ae {
             uint32_t sp = getRegU32(ctx, 29);
             uint32_t f_state = 0;
             if (rdram && (0x772188u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                s_cachedRdram = rdram;
                 std::memcpy(&f_state, rdram + (0x772188u & PS2_RAM_MASK), 4);
+                if (f_state == 9) {
+                    s_hasSeenFState9.store(true, std::memory_order_relaxed);
+                }
             }
             uint32_t cnt4E = cnt_ar_4e914c_total.load(std::memory_order_relaxed);
             std::printf("[probe] au 36c3b4 n=%u f_state=%u cnt4E=%u ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X\n",
@@ -1125,7 +1140,11 @@ namespace probe_ae {
             uint32_t sp = getRegU32(ctx, 29);
             uint32_t f_state = 0;
             if (rdram && (0x772188u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                s_cachedRdram = rdram;
                 std::memcpy(&f_state, rdram + (0x772188u & PS2_RAM_MASK), 4);
+                if (f_state == 9) {
+                    s_hasSeenFState9.store(true, std::memory_order_relaxed);
+                }
             }
             uint32_t cnt4E = cnt_ar_4e914c_total.load(std::memory_order_relaxed);
             std::printf("[probe] au 165efc n=%u f_state=%u cnt4E=%u ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X\n",
@@ -1345,7 +1364,11 @@ namespace probe_ae {
 
         uint32_t f_state = 0;
         if (rdram && (0x772188u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+            s_cachedRdram = rdram;
             std::memcpy(&f_state, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        }
+        if (f_state == 9) {
+            s_hasSeenFState9.store(true, std::memory_order_relaxed);
         }
 
         if (!s_currKickHadMark2000 && f_state == 9) {
@@ -1628,6 +1651,9 @@ namespace probe_ae {
 
     void onAzRaw8Call(bool haveFrame, uint32_t width, uint32_t height, const uint8_t *mb0) {
         if (!isEnabled()) return;
+        if (haveFrame) {
+            s_hasSeenFState9.store(true, std::memory_order_relaxed);
+        }
         s_azRaw8Calls.fetch_add(1, std::memory_order_relaxed);
         if (haveFrame) {
             s_azRaw8Have.fetch_add(1, std::memory_order_relaxed);
@@ -1667,7 +1693,12 @@ namespace probe_ae {
 
     // Task BA Probes
     void onBaRows(bool haveFrame, uint32_t mbCols, uint32_t mbRows, uint32_t dst, const uint8_t *rdram) {
-        if (!isEnabled() || !haveFrame || !rdram || mbCols == 0 || mbRows == 0) return;
+        if (!isEnabled()) return;
+        if (rdram) s_cachedRdram = rdram;
+        if (haveFrame) {
+            s_hasSeenFState9.store(true, std::memory_order_relaxed);
+        }
+        if (!haveFrame || !rdram || mbCols == 0 || mbRows == 0) return;
         static std::atomic<uint32_t> s_baRowsCount{0};
         uint32_t n = s_baRowsCount.fetch_add(1, std::memory_order_relaxed);
         if (n < 3) {
@@ -1725,7 +1756,7 @@ namespace probe_ae {
             s_baPcHistogram[startPC]++;
         }
 
-        if (!s_baFirstDumpComplete && (val_state.load(std::memory_order_relaxed) == 9 || s_ayChainCountAfterF9 > 0)) {
+        if (!s_baFirstDumpComplete && (val_state.load(std::memory_order_relaxed) == 9 || s_hasSeenFState9.load(std::memory_order_relaxed) || s_ayChainCountAfterF9 > 0)) {
             std::lock_guard<std::mutex> lock(s_baFirstDumpMutex);
             if (!s_baFirstDumpComplete && !s_baRecordingFirstDump) {
                 s_baRecordingFirstDump = true;
@@ -1924,6 +1955,13 @@ namespace probe_ae {
         s_bbCurrentTadr = tadr;
         s_bbCurrentKickTagCount = tagCount;
         s_bbSpans = spans;
+        if (!s_hasSeenFState9.load(std::memory_order_relaxed) && s_cachedRdram) {
+            uint32_t st = 0;
+            std::memcpy(&st, s_cachedRdram + (0x772188u & PS2_RAM_MASK), 4);
+            if (st == 9) {
+                s_hasSeenFState9.store(true, std::memory_order_relaxed);
+            }
+        }
         s_bbIsMovieKick = (s_hasSeenFState9.load(std::memory_order_relaxed) && tagCount > 2000);
     }
 
@@ -1931,6 +1969,13 @@ namespace probe_ae {
                        uint32_t base, uint32_t ofst, uint32_t cl, uint32_t wl, uint32_t mode) {
         if (!isEnabled()) return;
         std::lock_guard<std::mutex> lock(s_bbMutex);
+        if (!s_hasSeenFState9.load(std::memory_order_relaxed) && s_cachedRdram) {
+            uint32_t st = 0;
+            std::memcpy(&st, s_cachedRdram + (0x772188u & PS2_RAM_MASK), 4);
+            if (st == 9) {
+                s_hasSeenFState9.store(true, std::memory_order_relaxed);
+            }
+        }
         if (s_hasSeenFState9.load(std::memory_order_relaxed)) {
             s_bbMscalCountAfterF9++;
         }
@@ -1958,6 +2003,14 @@ namespace probe_ae {
         if (!isEnabled()) return;
         ensureDumpDir();
         std::lock_guard<std::mutex> lock(s_bbMutex);
+
+        if (!s_hasSeenFState9.load(std::memory_order_relaxed) && s_cachedRdram) {
+            uint32_t st = 0;
+            std::memcpy(&st, s_cachedRdram + (0x772188u & PS2_RAM_MASK), 4);
+            if (st == 9) {
+                s_hasSeenFState9.store(true, std::memory_order_relaxed);
+            }
+        }
 
         const bool f9 = s_hasSeenFState9.load(std::memory_order_relaxed);
         const bool movieKick = s_bbIsMovieKick;
@@ -2176,6 +2229,10 @@ namespace probe_ae {
 
     void onBbCheckRaw8(bool validFrame, uint32_t numMbs, uint32_t dst, const uint8_t *rdram) {
         if (!isEnabled()) return;
+        if (rdram) s_cachedRdram = rdram;
+        if (validFrame) {
+            s_hasSeenFState9.store(true, std::memory_order_relaxed);
+        }
         std::lock_guard<std::mutex> lock(s_bbMutex);
         s_bbLastRaw8Dst = dst;
         if (!validFrame || s_bbDumpedFrame0Ycc || !rdram) return;
