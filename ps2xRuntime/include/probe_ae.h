@@ -537,4 +537,9 @@ namespace probe_ae {
     void log24C8B4();
     void log24C900(R5900Context *ctx);
     void log24C914(R5900Context *ctx);
+
+    // Task AP Probes
+    void log24C8BC(R5900Context *ctx, const uint8_t *rdram);
+    void log24C8E4(R5900Context *ctx, const uint8_t *rdram);
+    void log24C8F4(R5900Context *ctx);
 }

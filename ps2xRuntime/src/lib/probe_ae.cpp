@@ -735,4 +735,59 @@ namespace probe_ae {
             std::fflush(stdout);
         }
     }
+
+    void log24C8BC(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 4) {
+            int32_t t6 = (int32_t)getRegU32(ctx, 14);
+            int32_t t7 = (int32_t)getRegU32(ctx, 15);
+            uint32_t s0 = getRegU32(ctx, 16);
+            uint32_t s0_74 = 0;
+            if (rdram && (s0 + 0x74u) < PS2_RAM_SIZE - 4) {
+                std::memcpy(&s0_74, rdram + ((s0 + 0x74u) & PS2_RAM_MASK), sizeof(s0_74));
+            }
+            std::printf("[probe] 24c8bc n=%u t6=%d t7=%d s0_74=%u slt=%d\n",
+                        n, t6, t7, s0_74, (t6 < t7) ? 1 : 0);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24C8E4(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 4) {
+            uint32_t t4 = getRegU32(ctx, 12);
+            uint32_t s0 = getRegU32(ctx, 16);
+            uint32_t s0_50 = 0;
+            if (rdram && (s0 + 0x50u) < PS2_RAM_SIZE - 4) {
+                std::memcpy(&s0_50, rdram + ((s0 + 0x50u) & PS2_RAM_MASK), sizeof(s0_50));
+            }
+            char hexBytes[33] = {0};
+            if (rdram && t4 < PS2_RAM_SIZE - 16) {
+                const uint8_t *p = rdram + (t4 & PS2_RAM_MASK);
+                for (int i = 0; i < 16; ++i) {
+                    std::snprintf(hexBytes + i * 2, 3, "%02x", p[i]);
+                }
+            } else {
+                std::snprintf(hexBytes, sizeof(hexBytes), "OOB");
+            }
+            std::printf("[probe] 24c8e4 n=%u t4=0x%08X s0_50=%u bytes=%s\n",
+                        n, t4, s0_50, hexBytes);
+            std::fflush(stdout);
+        }
+    }
+
+    void log24C8F4(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 4) {
+            uint32_t t7 = getRegU32(ctx, 15);
+            std::printf("[probe] 24c8f4 n=%u t7_cmp=%u (1=equal)\n", n, t7);
+            std::fflush(stdout);
+        }
+    }
 }

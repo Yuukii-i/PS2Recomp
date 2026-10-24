@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "RPC.h"
+#include "../../../../include/probe_ae.h"
 #include "../Stubs/SIF.h"
 #include "../Stubs/Pad.h"
 #include "../Stubs/VfiArchive.h"
@@ -1877,6 +1878,46 @@ namespace ps2_syscalls
             }
             case 0x07: // Stream read / Seek+Read (file3.irx:0x1290 worker)
             {
+                auto probeScanMovieFile = [](const ps2x::vfi::VfiEntry &entry) {
+                    if (entry.fileSize == 0) return;
+                    std::vector<uint8_t> fileBuf(static_cast<size_t>(entry.fileSize));
+                    bool ok = ps2x::vfi::VfiArchive::instance().readFileData(entry, 0, entry.fileSize, fileBuf.data());
+                    if (!ok) {
+                        std::printf("[probe] scan ERROR reading whole file <%s>\n", entry.fullPath.c_str());
+                        std::fflush(stdout);
+                        return;
+                    }
+                    std::printf("[probe] scan size=%llu file='%s'\n", (unsigned long long)entry.fileSize, entry.fullPath.c_str());
+                    static const uint8_t patA[16] = {'G','r','o','u','p','O','f','D','a','t','a','I','n','f','o','\0'};
+                    static const uint8_t patB[16] = {0x54, 0x00, 0x0f, 0xae, 0x82, 0x73, 0x00, 0x46, 0x02, 0x00, 0x0f, 0x24, 0xf8, 0x01, 0xcd, 0xc5};
+                    std::vector<uint64_t> offsA;
+                    std::vector<uint64_t> offsB;
+                    for (size_t i = 0; i + 16 <= fileBuf.size(); ++i) {
+                        if (offsA.size() < 5 && std::memcmp(fileBuf.data() + i, patA, 16) == 0) offsA.push_back(i);
+                        if (offsB.size() < 5 && std::memcmp(fileBuf.data() + i, patB, 16) == 0) offsB.push_back(i);
+                    }
+                    std::string strA;
+                    for (auto o : offsA) {
+                        char b[32]; std::snprintf(b, sizeof(b), "0x%llX ", (unsigned long long)o); strA += b;
+                    }
+                    std::printf("[probe] scan pat_a(GroupOfDataInfo) offsets: %s\n", strA.empty() ? "NONE" : strA.c_str());
+                    std::string strB;
+                    for (auto o : offsB) {
+                        char b[32]; std::snprintf(b, sizeof(b), "0x%llX ", (unsigned long long)o); strB += b;
+                    }
+                    std::printf("[probe] scan pat_b offsets: %s\n", strB.empty() ? "NONE" : strB.c_str());
+                    const uint64_t probeOffs[] = {0x0, 0x800, 0x10000, 0x2C800, 0x31800, 0x36000};
+                    for (uint64_t poff : probeOffs) {
+                        char hexStr[33] = {0};
+                        if (poff + 16 <= fileBuf.size()) {
+                            for (int k = 0; k < 16; ++k) std::snprintf(hexStr + k * 2, 3, "%02x", fileBuf[poff + k]);
+                        } else {
+                            std::snprintf(hexStr, sizeof(hexStr), "OOB");
+                        }
+                        std::printf("[probe] scan off=0x%llX first16=%s\n", (unsigned long long)poff, hexStr);
+                    }
+                    std::fflush(stdout);
+                };
                 constexpr int kCid1FdBase = 3;
                 uint32_t fd = *reinterpret_cast<const uint32_t *>(src + 0x10);
                 uint32_t dstAddr = *reinterpret_cast<const uint32_t *>(src + 0x14);
@@ -1904,11 +1945,43 @@ namespace ps2_syscalls
                     const uint64_t remaining = (slot.offset < slot.entry.fileSize) ? (slot.entry.fileSize - slot.offset) : 0;
                     const uint64_t toRead = std::min(static_cast<uint64_t>(reqSize), remaining);
 
+                    if (probe_ae::isEnabled()) {
+                        static bool s_movieScanned = false;
+                        if (!s_movieScanned && slot.entry.fullPath.find("new_dolby_pl2.str") != std::string::npos) {
+                            s_movieScanned = true;
+                            probeScanMovieFile(slot.entry);
+                        }
+                    }
+                    uint64_t startFileOff = slot.offset;
                     if (toRead > 0 && dstAddr != 0u && dstAddr < 0x02000000u && (dstAddr + toRead) <= 0x02000000u)
                     {
                         ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + dstAddr);
                     }
                     slot.offset += toRead;
+                    if (probe_ae::isEnabled()) {
+                        static std::atomic<uint32_t> s_seekCount{0};
+                        uint32_t n = s_seekCount.fetch_add(1, std::memory_order_relaxed);
+                        if (n < 8) {
+                            char first16[33] = {0};
+                            char last16[33] = {0};
+                            if (rdram && dstAddr < 0x02000000u && (dstAddr + toRead) <= 0x02000000u) {
+                                const uint8_t *ptr = rdram + dstAddr;
+                                if (toRead >= 16) {
+                                    for (int i = 0; i < 16; ++i) {
+                                        std::snprintf(first16 + i * 2, 3, "%02x", ptr[i]);
+                                        std::snprintf(last16 + i * 2, 3, "%02x", ptr[toRead - 16 + i]);
+                                    }
+                                } else {
+                                    for (size_t i = 0; i < toRead; ++i) {
+                                        std::snprintf(first16 + i * 2, 3, "%02x", ptr[i]);
+                                    }
+                                }
+                            }
+                            std::printf("[probe] seek n=%u slot=0x%x seq=0x%x dst=0x%x size=%u fileOff=%llu first16=%s last16=%s\n",
+                                        n, slotPtr, seq, dstAddr, static_cast<uint32_t>(toRead), (unsigned long long)startFileOff, first16, last16);
+                            std::fflush(stdout);
+                        }
+                    }
                     reply.result = static_cast<uint32_t>(toRead);
                     reply.isDone = 1;
 
