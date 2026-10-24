@@ -122,6 +122,19 @@ namespace probe_ae {
     extern std::atomic<uint32_t> cnt_intc_dispatch;
     extern std::atomic<uint32_t> s_currentSec;
 
+    // Task AJ Probes
+    extern std::atomic<uint32_t> cnt_24c4c0;
+    extern std::atomic<uint32_t> val_c4e0_v0;
+    extern std::atomic<uint32_t> val_c4e0_s0_84;
+    extern std::atomic<uint32_t> cnt_c4e0_lt;
+    extern std::atomic<uint32_t> cnt_24c4f0;
+    extern std::atomic<uint32_t> val_3f7780_a0;
+    extern std::atomic<uint32_t> val_3f7780_a1;
+    extern std::atomic<uint64_t> val_3f7780_mask;
+    extern std::atomic<uint32_t> cnt_3fbe78;
+    extern std::atomic<uint32_t> val_3fbe78_voice;
+    extern std::atomic<uint32_t> val_3fbeac_v0;
+
     void logIntcHandlerDispatch(uint32_t addr);
     void logIntcRegister(bool dmac, uint32_t cause, uint32_t handler);
     void logSifSetCmdBuffer(uint32_t buf);
@@ -438,5 +451,55 @@ namespace probe_ae {
         if (!isEnabled()) return;
         val_1dc1ec_t7.store(getRegU32(ctx, 15), std::memory_order_relaxed);
         val_1dc1ec_s1.store(getRegU32(ctx, 17), std::memory_order_relaxed);
+    }
+
+    // Task AJ inlines
+    inline void log24C4C0() {
+        if (!isEnabled()) return;
+        cnt_24c4c0.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void log24C4E0(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        uint32_t v0 = getRegU32(ctx, 2);
+        uint32_t s0 = getRegU32(ctx, 16);
+        uint32_t s0_84 = 0;
+        if (rdram && s0 < PS2_RAM_SIZE - 0x90) {
+            std::memcpy(&s0_84, rdram + ((s0 + 0x84u) & PS2_RAM_MASK), sizeof(s0_84));
+        }
+        val_c4e0_v0.store(v0, std::memory_order_relaxed);
+        val_c4e0_s0_84.store(s0_84, std::memory_order_relaxed);
+        if (v0 < s0_84) {
+            cnt_c4e0_lt.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    inline void log24C4F0() {
+        if (!isEnabled()) return;
+        cnt_24c4f0.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void log3F7780Entry(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint64_t mask = 0;
+        if (rdram && a0 < PS2_RAM_SIZE - 0xA8) {
+            std::memcpy(&mask, rdram + ((a0 + 0xA0u) & PS2_RAM_MASK), sizeof(mask));
+        }
+        val_3f7780_a0.store(a0, std::memory_order_relaxed);
+        val_3f7780_a1.store(a1, std::memory_order_relaxed);
+        val_3f7780_mask.store(mask, std::memory_order_relaxed);
+    }
+
+    inline void log3FBE78(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        cnt_3fbe78.fetch_add(1, std::memory_order_relaxed);
+        val_3fbe78_voice.store(getRegU32(ctx, 4), std::memory_order_relaxed);
+    }
+
+    inline void log3FBEAC(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        val_3fbeac_v0.store(getRegU32(ctx, 2), std::memory_order_relaxed);
     }
 }

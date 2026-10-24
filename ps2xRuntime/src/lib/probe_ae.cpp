@@ -97,6 +97,19 @@ namespace probe_ae {
     std::atomic<uint32_t> cnt_intc_dispatch{0};
     std::atomic<uint32_t> s_currentSec{0};
 
+    // Task AJ
+    std::atomic<uint32_t> cnt_24c4c0{0};
+    std::atomic<uint32_t> val_c4e0_v0{0};
+    std::atomic<uint32_t> val_c4e0_s0_84{0};
+    std::atomic<uint32_t> cnt_c4e0_lt{0};
+    std::atomic<uint32_t> cnt_24c4f0{0};
+    std::atomic<uint32_t> val_3f7780_a0{0};
+    std::atomic<uint32_t> val_3f7780_a1{0};
+    std::atomic<uint64_t> val_3f7780_mask{0};
+    std::atomic<uint32_t> cnt_3fbe78{0};
+    std::atomic<uint32_t> val_3fbe78_voice{0};
+    std::atomic<uint32_t> val_3fbeac_v0{0};
+
     static std::mutex s_seenIntcMutex;
     static std::vector<uint32_t> s_seenIntcHandlers;
 
@@ -323,6 +336,21 @@ namespace probe_ae {
 
         s_currentSec.store(sec, std::memory_order_relaxed);
 
+        uint32_t c_24c4c0 = cnt_24c4c0.exchange(0, std::memory_order_relaxed);
+        uint32_t c_lt_c4e0 = cnt_c4e0_lt.exchange(0, std::memory_order_relaxed);
+        uint32_t c_24c4f0 = cnt_24c4f0.exchange(0, std::memory_order_relaxed);
+        uint32_t c_3fbe78 = cnt_3fbe78.exchange(0, std::memory_order_relaxed);
+        uint32_t w74b140 = 0, w74b144 = 0, w74b148 = 0;
+        uint64_t m1900ea0 = 0;
+        uint32_t s0_84_mem = 0, s0_7c_mem = 0;
+        if (rdram) {
+            std::memcpy(&w74b140, rdram + (0x74B140u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&w74b144, rdram + (0x74B144u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&w74b148, rdram + (0x74B148u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&m1900ea0, rdram + (0x1900EA0u & PS2_RAM_MASK), sizeof(uint64_t));
+            std::memcpy(&s0_84_mem, rdram + (0x772204u & PS2_RAM_MASK), sizeof(uint32_t));
+            s0_7c_mem = rdram[0x7721FCu & PS2_RAM_MASK];
+        }
         uint32_t c_438ea8 = cnt_438ea8.exchange(0, std::memory_order_relaxed);
         uint32_t c_1dcee0 = cnt_1dcee0.exchange(0, std::memory_order_relaxed);
         uint32_t c_1dcc70 = cnt_1dcc70.exchange(0, std::memory_order_relaxed);
@@ -350,7 +378,7 @@ namespace probe_ae {
         flushFirstCallsIfDue(sec);
 
         // Print unified [probe] line with old fields + Task AF + Task AG + Task AH fields
-        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s c24CD04=%u cmds=%s last_a0=%X last_a2=%X last_a3=%X last_ra=%X t7_cd50=%X oob_cmd=%u v0_3f7=%d neg_v0=%u s1_3f7=%X head_3f7=%u tail_3f7=%u slot8_1dc=%X ret_1dc578=%d a1_1dc=%s c438EA8=%u c1DCEE0=%u t6_1dcf8c=%X s1_1dcf8c=%X w771bd4=%X w76a518=%X pkt=%X,%X,%X,%X w77218c=%X w771bc4=%X c1DCC70=%u v0_1dcc=%d t7_1dc1ec=%X s1_1dc1ec=%X c_intc=%u\n",
+        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s c24CD04=%u cmds=%s last_a0=%X last_a2=%X last_a3=%X last_ra=%X t7_cd50=%X oob_cmd=%u v0_3f7=%d neg_v0=%u s1_3f7=%X head_3f7=%u tail_3f7=%u slot8_1dc=%X ret_1dc578=%d a1_1dc=%s c438EA8=%u c1DCEE0=%u t6_1dcf8c=%X s1_1dcf8c=%X w771bd4=%X w76a518=%X pkt=%X,%X,%X,%X w77218c=%X w771bc4=%X c1DCC70=%u v0_1dcc=%d t7_1dc1ec=%X s1_1dc1ec=%X c_intc=%u c24C4C0=%u v0_c4e0=%u s0_84=%X lt_c4e0=%u c24C4F0=%u a0_3f7780=%X a1_3f7780=%X mask_3f7780=%llX c3FBE78=%u v_3fbe78=%u v0_3fbe=%X w74B140=%X,%X,%X m1900EA0=%llX s0_84_mem=%X s0_7C_mem=%X\n",
                     sec, f_cnt, val_state.load(), st_word, val_s0.load(), val_a1_s4.load(),
                     val_v0_1DA880.load(), val_v0_taken.load(),
                     val_f72C7A0.load(), val_f72D3A0.load(), val_w635480.load(),
@@ -366,7 +394,11 @@ namespace probe_ae {
                     val_1dc650_slot8.load(), val_1dc578_ret.load(), a1_1dc.c_str(),
                     c_438ea8, c_1dcee0, val_1dcf8c_t6.load(), val_1dcf8c_s1.load(),
                     w771bd4, w76a518, pkt[0], pkt[1], pkt[2], pkt[3], w77218c, w771bc4,
-                    c_1dcc70, val_1dcc70_v0.load(), val_1dc1ec_t7.load(), val_1dc1ec_s1.load(), c_intc);
+                    c_1dcc70, val_1dcc70_v0.load(), val_1dc1ec_t7.load(), val_1dc1ec_s1.load(), c_intc,
+                    c_24c4c0, val_c4e0_v0.load(), val_c4e0_s0_84.load(), c_lt_c4e0, c_24c4f0,
+                    val_3f7780_a0.load(), val_3f7780_a1.load(), (unsigned long long)val_3f7780_mask.load(),
+                    c_3fbe78, val_3fbe78_voice.load(), val_3fbeac_v0.load(),
+                    w74b140, w74b144, w74b148, (unsigned long long)m1900ea0, s0_84_mem, s0_7c_mem);
         std::fflush(stdout);
     }
 }

@@ -246,13 +246,20 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
                                const R5900Context *ctx)
 {
     (void)rdram;
-    (void)guestAddr;
     (void)size;
-    (void)valueLo;
     (void)valueHi;
-    (void)op;
-    (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
+    uint32_t phys = guestAddr & 0x01FFFFFFu;
+    if (phys >= 0x74B140u && phys <= 0x74B17Fu) {
+        static std::atomic<uint32_t> s_vtWriteCount{0};
+        uint32_t cnt = s_vtWriteCount.fetch_add(1, std::memory_order_relaxed);
+        if (cnt < 10) {
+            uint32_t pc = ctx ? ctx->pc : 0;
+            uint32_t ra = ctx ? getRegU32(const_cast<R5900Context*>(ctx), 31) : 0;
+            std::printf("[probe] vt_write pc=0x%08X ra=0x%08X addr=0x%08X val=0x%llX op=%s\n",
+                        pc, ra, guestAddr, (unsigned long long)valueLo, op ? op : "");
+            std::fflush(stdout);
+        }
+    }
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -262,11 +269,19 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
                                     const R5900Context *ctx)
 {
     (void)rdram;
-    (void)guestAddr;
-    (void)size;
-    (void)op;
-    (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
+    uint32_t start = guestAddr & 0x01FFFFFFu;
+    uint32_t end = start + size;
+    if (end > 0x74B140u && start <= 0x74B17Fu) {
+        static std::atomic<uint32_t> s_vtRangeCount{0};
+        uint32_t cnt = s_vtRangeCount.fetch_add(1, std::memory_order_relaxed);
+        if (cnt < 10) {
+            uint32_t pc = ctx ? ctx->pc : 0;
+            uint32_t ra = ctx ? getRegU32(const_cast<R5900Context*>(ctx), 31) : 0;
+            std::printf("[probe] vt_write pc=0x%08X ra=0x%08X addr=0x%08X size=%u op=%s\n",
+                        pc, ra, guestAddr, size, op ? op : "");
+            std::fflush(stdout);
+        }
+    }
 }
 
 class PS2Runtime
