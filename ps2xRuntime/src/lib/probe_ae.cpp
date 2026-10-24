@@ -67,6 +67,116 @@ namespace probe_ae {
     std::atomic<uint32_t> val_s4a4_7c{0};
     std::atomic<uint32_t> val_s4a4_30{0};
 
+    // Task AG
+    std::atomic<uint32_t> cnt_24cd04{0};
+    std::atomic<uint32_t> val_cd04_a0{0};
+    std::atomic<uint32_t> val_cd04_a2{0};
+    std::atomic<uint32_t> val_cd04_a3{0};
+    std::atomic<uint32_t> val_cd04_ra{0};
+    std::atomic<uint32_t> val_cd50_t7{0};
+    std::atomic<uint32_t> cnt_cd34_oob{0};
+
+    std::atomic<int32_t> val_3f7a74_v0{0};
+    std::atomic<uint32_t> cnt_3f7a74_v0_neg{0};
+    std::atomic<uint32_t> val_3f7a74_s1{0};
+    std::atomic<uint32_t> val_3f7a74_head{0};
+    std::atomic<uint32_t> val_3f7a74_tail{0};
+
+    std::atomic<uint32_t> val_1dc650_slot8{0};
+    std::atomic<int32_t> val_1dc578_ret{0};
+
+    static std::mutex s_cd04Mutex;
+    static std::map<uint32_t, uint32_t> s_cd04CmdCounts;
+
+    void recordCd04Cmd(uint32_t cmd) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_cd04Mutex);
+        s_cd04CmdCounts[cmd]++;
+    }
+
+    std::string getAndResetCd04Cmds() {
+        std::lock_guard<std::mutex> lock(s_cd04Mutex);
+        if (s_cd04CmdCounts.empty()) return "none";
+        std::string res;
+        for (auto const & [cmd, count] : s_cd04CmdCounts) {
+            if (!res.empty()) res += ",";
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%u:%u", cmd, count);
+            res += buf;
+        }
+        s_cd04CmdCounts.clear();
+        return res;
+    }
+
+    static std::mutex s_firstCallsMutex;
+    static std::vector<std::pair<uint32_t, uint32_t>> s_firstCalls;
+    static bool s_firstCallsPrinted = false;
+
+    void recordCd04Call(uint32_t cmd, uint32_t ra) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_firstCallsMutex);
+        if (s_firstCallsPrinted) return;
+        if (s_firstCalls.size() < 40) {
+            s_firstCalls.push_back({cmd, ra});
+        }
+        if (s_firstCalls.size() == 40) {
+            std::string line = "[probe] first_calls ";
+            for (size_t i = 0; i < s_firstCalls.size(); ++i) {
+                if (i > 0) line += ",";
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%u@%X", s_firstCalls[i].first, s_firstCalls[i].second);
+                line += buf;
+            }
+            std::printf("%s\n", line.c_str());
+            std::fflush(stdout);
+            s_firstCallsPrinted = true;
+        }
+    }
+
+    void flushFirstCallsIfDue(uint32_t sec) {
+        if (!isEnabled()) return;
+        if (sec < 30) return;
+        std::lock_guard<std::mutex> lock(s_firstCallsMutex);
+        if (s_firstCallsPrinted) return;
+        std::string line = "[probe] first_calls ";
+        if (s_firstCalls.empty()) {
+            line += "none";
+        } else {
+            for (size_t i = 0; i < s_firstCalls.size(); ++i) {
+                if (i > 0) line += ",";
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%u@%X", s_firstCalls[i].first, s_firstCalls[i].second);
+                line += buf;
+            }
+        }
+        std::printf("%s\n", line.c_str());
+        std::fflush(stdout);
+        s_firstCallsPrinted = true;
+    }
+
+    static std::mutex s_1dcMutex;
+    static std::map<uint32_t, uint32_t> s_1dcA1Counts;
+
+    void record1dc650A1(uint32_t a1) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_1dcMutex);
+        s_1dcA1Counts[a1]++;
+    }
+
+    std::string getAndReset1dcA1() {
+        std::lock_guard<std::mutex> lock(s_1dcMutex);
+        if (s_1dcA1Counts.empty()) return "none";
+        std::string res;
+        for (auto const & [a1, count] : s_1dcA1Counts) {
+            if (!res.empty()) res += ",";
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%u:%u", a1, count);
+            res += buf;
+        }
+        s_1dcA1Counts.clear();
+        return res;
+    }
+
     static std::mutex s_raMutex;
     static std::deque<uint32_t> s_lastRa;
 
@@ -167,8 +277,16 @@ namespace probe_ae {
         std::string raList = getAndResetRa24c64c();
         std::string exitList = getAndResetExits();
 
-        // Print unified [probe] line with old fields + Task AF fields
-        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s\n",
+        std::string cd04Cmds = getAndResetCd04Cmds();
+        std::string a1_1dc = getAndReset1dcA1();
+        uint32_t c_24cd04 = cnt_24cd04.exchange(0, std::memory_order_relaxed);
+        uint32_t c_oob = cnt_cd34_oob.exchange(0, std::memory_order_relaxed);
+        uint32_t neg_v0 = cnt_3f7a74_v0_neg.exchange(0, std::memory_order_relaxed);
+
+        flushFirstCallsIfDue(sec);
+
+        // Print unified [probe] line with old fields + Task AF + Task AG fields
+        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s c24CD04=%u cmds=%s last_a0=%X last_a2=%X last_a3=%X last_ra=%X t7_cd50=%X oob_cmd=%u v0_3f7=%d neg_v0=%u s1_3f7=%X head_3f7=%u tail_3f7=%u slot8_1dc=%X ret_1dc578=%d a1_1dc=%s\n",
                     sec, f_cnt, val_state.load(), st_word, val_s0.load(), val_a1_s4.load(),
                     val_v0_1DA880.load(), val_v0_taken.load(),
                     val_f72C7A0.load(), val_f72D3A0.load(), val_w635480.load(),
@@ -178,7 +296,10 @@ namespace probe_ae {
                     c_24ce0c, val_v24cbfc.load(), c_24ce14_tk, c_24cbfc, val_cbfc_a0.load(), val_cbfc_10.load(), val_cbfc_0c.load(),
                     val_1da880_1.load(), val_1da880_2.load(), c_24ce24, c_24cb38, val_cb38_a0.load(), val_cb38_8.load(), val_cb58_7c.load(),
                     c_24cb64, val_v3f75e8.load(), c_24cbb8, val_cbb8_t6.load(), val_s4a4_7c.load(), val_s4a4_30.load(),
-                    raList.c_str(), exitList.empty() ? "none" : exitList.c_str());
+                    raList.c_str(), exitList.empty() ? "none" : exitList.c_str(),
+                    c_24cd04, cd04Cmds.c_str(), val_cd04_a0.load(), val_cd04_a2.load(), val_cd04_a3.load(), val_cd04_ra.load(),
+                    val_cd50_t7.load(), c_oob, val_3f7a74_v0.load(), neg_v0, val_3f7a74_s1.load(), val_3f7a74_head.load(), val_3f7a74_tail.load(),
+                    val_1dc650_slot8.load(), val_1dc578_ret.load(), a1_1dc.c_str());
         std::fflush(stdout);
     }
 }

@@ -83,6 +83,33 @@ namespace probe_ae {
     extern std::atomic<uint32_t> val_s4a4_7c;
     extern std::atomic<uint32_t> val_s4a4_30;
 
+    // Task AG Probes
+    extern std::atomic<uint32_t> cnt_24cd04;
+    extern std::atomic<uint32_t> val_cd04_a0;
+    extern std::atomic<uint32_t> val_cd04_a2;
+    extern std::atomic<uint32_t> val_cd04_a3;
+    extern std::atomic<uint32_t> val_cd04_ra;
+    extern std::atomic<uint32_t> val_cd50_t7;
+    extern std::atomic<uint32_t> cnt_cd34_oob;
+
+    extern std::atomic<int32_t> val_3f7a74_v0;
+    extern std::atomic<uint32_t> cnt_3f7a74_v0_neg;
+    extern std::atomic<uint32_t> val_3f7a74_s1;
+    extern std::atomic<uint32_t> val_3f7a74_head;
+    extern std::atomic<uint32_t> val_3f7a74_tail;
+
+    extern std::atomic<uint32_t> val_1dc650_slot8;
+    extern std::atomic<int32_t> val_1dc578_ret;
+
+    void recordCd04Cmd(uint32_t cmd);
+    std::string getAndResetCd04Cmds();
+
+    void recordCd04Call(uint32_t cmd, uint32_t ra);
+    void flushFirstCallsIfDue(uint32_t sec);
+
+    void record1dc650A1(uint32_t a1);
+    std::string getAndReset1dcA1();
+
     void recordRa24c64c(uint32_t ra);
     std::string getAndResetRa24c64c();
 
@@ -292,5 +319,71 @@ namespace probe_ae {
         }
         val_s4a4_7c.store(b7c, std::memory_order_relaxed);
         val_s4a4_30.store(w30, std::memory_order_relaxed);
+    }
+
+    // Task AG inlines
+    inline void log24CD04Entry(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        cnt_24cd04.fetch_add(1, std::memory_order_relaxed);
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t a3 = getRegU32(ctx, 7);
+        uint32_t ra = getRegU32(ctx, 31);
+        val_cd04_a0.store(a0, std::memory_order_relaxed);
+        val_cd04_a2.store(a2, std::memory_order_relaxed);
+        val_cd04_a3.store(a3, std::memory_order_relaxed);
+        val_cd04_ra.store(ra, std::memory_order_relaxed);
+        recordCd04Cmd(a1);
+        recordCd04Call(a1, ra);
+    }
+
+    inline void log24CD34Oob() {
+        if (!isEnabled()) return;
+        cnt_cd34_oob.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void log24CD50(uint32_t jumpTarget) {
+        if (!isEnabled()) return;
+        val_cd50_t7.store(jumpTarget, std::memory_order_relaxed);
+    }
+
+    inline void log3F7A74(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        int32_t v0 = (int32_t)getRegU32(ctx, 2);
+        val_3f7a74_v0.store(v0, std::memory_order_relaxed);
+        if (v0 < 0) {
+            cnt_3f7a74_v0_neg.fetch_add(1, std::memory_order_relaxed);
+        }
+        uint32_t s1 = getRegU32(ctx, 17);
+        val_3f7a74_s1.store(s1, std::memory_order_relaxed);
+        uint32_t head = 0, tail = 0;
+        if (rdram && s1 < PS2_RAM_SIZE - 0x230) {
+            std::memcpy(&head, rdram + ((s1 + 0x228u) & PS2_RAM_MASK), sizeof(head));
+            std::memcpy(&tail, rdram + ((s1 + 0x22Cu) & PS2_RAM_MASK), sizeof(tail));
+        }
+        val_3f7a74_head.store(head, std::memory_order_relaxed);
+        val_3f7a74_tail.store(tail, std::memory_order_relaxed);
+    }
+
+    inline void log1DC650Entry(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        record1dc650A1(a1);
+        if (a1 == 1) {
+            uint32_t addr = a0 + (1u << 4) + 0x3Cu;
+            uint32_t w = 0;
+            if (rdram && addr < PS2_RAM_SIZE - 4) {
+                std::memcpy(&w, rdram + (addr & PS2_RAM_MASK), sizeof(w));
+            }
+            val_1dc650_slot8.store(w, std::memory_order_relaxed);
+        }
+    }
+
+    inline void log1DC670Ret(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        int32_t ret = (int32_t)getRegU32(ctx, 2);
+        val_1dc578_ret.store(ret, std::memory_order_relaxed);
     }
 }
