@@ -652,4 +652,9 @@ namespace probe_ae {
     void onGsPrivRegister(uint32_t addr, uint64_t value);
     void onBbCheckRaw8(bool validFrame, uint32_t numMbs, uint32_t dst, const uint8_t *rdram);
     void setRdram(const uint8_t *rdram);
+
+    // Task BF Probes & Movie HLE
+    bool isMovieHleActive();
+    bool isMovieHleVerify();
+    bool handleMovieHleMscal(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize, class GS &gs, class PS2Memory *memory);
 }

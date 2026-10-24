@@ -1,4 +1,7 @@
 #include "probe_ae.h"
+#include "runtime/gs/ps2_gs_memory.h"
+#include "runtime/gs/gs_frontend.h"
+#include "runtime/ps2_memory.h"
 #include <mutex>
 #include <map>
 #include <deque>
@@ -8,6 +11,9 @@
 #include <fstream>
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
+#include <chrono>
+#include <unordered_set>
 
 namespace probe_ae {
     // Task AE
@@ -1951,9 +1957,13 @@ namespace probe_ae {
     static ProbeInitDirs s_probeInitDirs;
 
     static std::atomic<uint32_t> s_bbGateDiagCount{0};
+    static std::atomic<uint32_t> s_movieKickMscalIndex{0};
+    static std::atomic<uint32_t> s_movieKickFirstUnpackSrc{0};
 
     void onBbChainStart(uint32_t tadr, uint32_t tagCount, const std::vector<AySpan> &spans) {
-        if (!isEnabled()) return;
+        s_movieKickMscalIndex.store(0, std::memory_order_relaxed);
+        s_movieKickFirstUnpackSrc.store(0, std::memory_order_relaxed);
+        if (!isEnabled() && !isMovieHleActive() && !isMovieHleVerify()) return;
         ensureDumpDir();
         std::lock_guard<std::mutex> lock(s_bbMutex);
         s_bbCurrentKickIndex++;
@@ -1988,7 +1998,7 @@ namespace probe_ae {
     }
 
     void onBbRecordUnpack(uint32_t posPayload, uint32_t totalBytes, uint32_t vuAddr, uint8_t fmt, uint8_t num) {
-        if (!isEnabled()) return;
+        if (!isEnabled() && !isMovieHleActive() && !isMovieHleVerify()) return;
         std::lock_guard<std::mutex> lock(s_bbMutex);
         uint32_t srcGuest = 0;
         const auto &spans = !s_bbSpans.empty() ? s_bbSpans : s_aySpans;
@@ -1998,14 +2008,40 @@ namespace probe_ae {
                 break;
             }
         }
-        s_bbUnpacksSinceLastMscal.push_back({srcGuest, totalBytes, vuAddr, fmt, num});
+        if (fmt == 2 && num == 0 && totalBytes == 256) {
+            uint32_t expected = 0;
+            s_movieKickFirstUnpackSrc.compare_exchange_strong(expected, srcGuest);
+        }
+        if (isEnabled()) {
+            s_bbUnpacksSinceLastMscal.push_back({srcGuest, totalBytes, vuAddr, fmt, num});
+        }
     }
+
+    struct VerifyWorstPoint {
+        int px = 0, py = 0;
+        uint8_t Y = 0, Cb = 0, Cr = 0;
+        uint8_t outR = 0, outG = 0, outB = 0;
+        uint8_t natR = 0, natG = 0, natB = 0;
+        int err = 0;
+    };
+
+    static uint32_t s_verifyRunsCount = 0;
+    static uint64_t s_verifyPointsCount = 0;
+    static uint64_t s_verifyTotalDiffR = 0;
+    static uint64_t s_verifyTotalDiffG = 0;
+    static uint64_t s_verifyTotalDiffB = 0;
+    static int s_verifyMaxR = 0;
+    static int s_verifyMaxG = 0;
+    static int s_verifyMaxB = 0;
+    static int s_numWorstPoints = 0;
+    static VerifyWorstPoint s_worstPoints[3]{};
+    static auto s_verifyLastSecTime = std::chrono::steady_clock::now();
 
     void onBbRunStart(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize,
                       const uint8_t *vuData, uint32_t dataSize,
                       const float vf[32][4], const int32_t vi[16],
                       const float acc[4], float q, float p, float i) {
-        if (!isEnabled()) return;
+        if (!isEnabled() && !isMovieHleVerify()) return;
         ensureDumpDir();
         std::lock_guard<std::mutex> lock(s_bbMutex);
 
@@ -2020,7 +2056,7 @@ namespace probe_ae {
         const bool f9 = s_hasSeenFState9.load(std::memory_order_relaxed);
         const bool movieKick = s_bbIsMovieKick;
 
-        if (f9) {
+        if (f9 && isEnabled()) {
             uint32_t n = s_bbGateDiagCount.fetch_add(1, std::memory_order_relaxed);
             if (n < 6) {
                 std::printf("[probe] bb gate n=%u startPC=0x%03X f9=%d movieKick=%d dumped=%d\n",
@@ -2029,7 +2065,7 @@ namespace probe_ae {
             }
         }
 
-        const bool gate = f9 && (startPC == 0x048) && (s_brightDumpedCount < 8);
+        const bool gate = (isMovieHleVerify() && startPC == 0x048) || (isEnabled() && f9 && (startPC == 0x048) && (s_brightDumpedCount < 8));
         if (gate) {
             s_bbActiveRecordingRun = true;
 
@@ -2069,7 +2105,7 @@ namespace probe_ae {
     }
 
     void onBbXgkickPacket(const uint8_t *data, uint32_t byteCount) {
-        if (!isEnabled()) return;
+        if (!isEnabled() && !isMovieHleVerify()) return;
         std::lock_guard<std::mutex> lock(s_bbMutex);
         if (s_bbActiveRecordingRun && data && byteCount > 0) {
             s_bbRunXgkickPackets.emplace_back(data, data + byteCount);
@@ -2077,7 +2113,7 @@ namespace probe_ae {
     }
 
     void onBbRunEnd(const uint8_t *vuData, uint32_t dataSize) {
-        if (!isEnabled()) return;
+        if (!isEnabled() && !isMovieHleVerify()) return;
         std::lock_guard<std::mutex> lock(s_bbMutex);
 
         const bool wasRecording = s_bbActiveRecordingRun;
@@ -2086,6 +2122,126 @@ namespace probe_ae {
         s_bbPrevMscalUnpacks = s_bbRunUnpacks;
         s_bbUnpacksSinceLastMscal.clear();
 
+        if (isMovieHleVerify() && s_cachedRdram && wasRecording) {
+            int vx0 = -1, vy0 = -1;
+            for (const auto &pkt : s_bbRunXgkickPackets) {
+                if (pkt.size() < 48) continue;
+                size_t numVerts = (pkt.size() - 16) / 32;
+                for (size_t v = 0; v < numVerts; ++v) {
+                    size_t xyzOff = 16 + v * 32 + 16;
+                    if (xyzOff + 4 <= pkt.size()) {
+                        uint16_t x_raw = static_cast<uint16_t>(pkt[xyzOff]) | (static_cast<uint16_t>(pkt[xyzOff + 1]) << 8);
+                        uint16_t y_raw = static_cast<uint16_t>(pkt[xyzOff + 2]) | (static_cast<uint16_t>(pkt[xyzOff + 3]) << 8);
+                        vx0 = static_cast<int>(x_raw >> 4);
+                        vy0 = static_cast<int>(y_raw >> 4);
+                        break;
+                    }
+                }
+                if (vx0 >= 0) break;
+            }
+
+            if (vx0 >= 0 && vy0 >= 0) {
+                int mbx = vx0 / 16;
+                int mby = vy0 / 16;
+                uint32_t idx = static_cast<uint32_t>(mbx * 24 + mby);
+                uint32_t base = s_movieKickFirstUnpackSrc.load(std::memory_order_relaxed);
+                if (base == 0) base = s_bbLastRaw8Dst;
+                uint32_t mb_base = (base + idx * 384u) & PS2_RAM_MASK;
+
+                if (mb_base + 384u <= PS2_RAM_SIZE) {
+                    const uint8_t *mbY = s_cachedRdram + mb_base;
+                    const uint8_t *mbCb = s_cachedRdram + mb_base + 256u;
+                    const uint8_t *mbCr = s_cachedRdram + mb_base + 320u;
+
+                    for (const auto &pkt : s_bbRunXgkickPackets) {
+                        if (pkt.size() < 48) continue;
+                        size_t numVerts = (pkt.size() - 16) / 32;
+                        for (size_t v = 0; v < numVerts; ++v) {
+                            size_t rgbaOff = 16 + v * 32;
+                            size_t xyzOff = rgbaOff + 16;
+                            uint8_t outR = pkt[rgbaOff + 0];
+                            uint8_t outG = pkt[rgbaOff + 1];
+                            uint8_t outB = pkt[rgbaOff + 2];
+                            uint16_t x_raw = static_cast<uint16_t>(pkt[xyzOff]) | (static_cast<uint16_t>(pkt[xyzOff + 1]) << 8);
+                            uint16_t y_raw = static_cast<uint16_t>(pkt[xyzOff + 2]) | (static_cast<uint16_t>(pkt[xyzOff + 3]) << 8);
+                            int px = (static_cast<int>(x_raw >> 4)) - vx0;
+                            int py = (static_cast<int>(y_raw >> 4)) - vy0;
+                            if (px >= 0 && px < 16 && py >= 0 && py < 16) {
+                                uint8_t Y = mbY[py * 16 + px];
+                                uint32_t ch_idx = (py / 2) * 8 + (px / 2);
+                                uint8_t Cb = mbCb[ch_idx];
+                                uint8_t Cr = mbCr[ch_idx];
+
+                                float y_f = static_cast<float>(Y);
+                                float cb_f = static_cast<float>(static_cast<int>(Cb) - 128);
+                                float cr_f = static_cast<float>(static_cast<int>(Cr) - 128);
+
+                                float r_f = y_f + 1.402f * cr_f;
+                                float g_f = y_f - 0.344136f * cb_f - 0.714136f * cr_f;
+                                float b_f = y_f + 1.772f * cb_f;
+
+                                uint8_t natR = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(r_f)), 0, 255));
+                                uint8_t natG = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(g_f)), 0, 255));
+                                uint8_t natB = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(b_f)), 0, 255));
+
+                                int diffR = std::abs((int)outR - (int)natR);
+                                int diffG = std::abs((int)outG - (int)natG);
+                                int diffB = std::abs((int)outB - (int)natB);
+
+                                s_verifyPointsCount++;
+                                s_verifyTotalDiffR += diffR;
+                                s_verifyTotalDiffG += diffG;
+                                s_verifyTotalDiffB += diffB;
+                                if (diffR > s_verifyMaxR) s_verifyMaxR = diffR;
+                                if (diffG > s_verifyMaxG) s_verifyMaxG = diffG;
+                                if (diffB > s_verifyMaxB) s_verifyMaxB = diffB;
+
+                                int totalErr = diffR + diffG + diffB;
+                                if (s_numWorstPoints < 3 || totalErr > s_worstPoints[2].err) {
+                                    VerifyWorstPoint wp{px, py, Y, Cb, Cr, outR, outG, outB, natR, natG, natB, totalErr};
+                                    int insertPos = std::min(s_numWorstPoints, 2);
+                                    while (insertPos > 0 && totalErr > s_worstPoints[insertPos - 1].err) {
+                                        if (insertPos < 3) s_worstPoints[insertPos] = s_worstPoints[insertPos - 1];
+                                        insertPos--;
+                                    }
+                                    s_worstPoints[insertPos] = wp;
+                                    if (s_numWorstPoints < 3) s_numWorstPoints++;
+                                }
+                            }
+                        }
+                    }
+                    s_verifyRunsCount++;
+                }
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            double secDiff = std::chrono::duration<double>(now - s_verifyLastSecTime).count();
+            if (secDiff >= 1.0 && s_verifyPointsCount > 0) {
+                double meanR = (double)s_verifyTotalDiffR / s_verifyPointsCount;
+                double meanG = (double)s_verifyTotalDiffG / s_verifyPointsCount;
+                double meanB = (double)s_verifyTotalDiffB / s_verifyPointsCount;
+                std::printf("[probe] bf verify runs=%u meanabs=%.2f,%.2f,%.2f max=%d,%d,%d over %llu\n",
+                            s_verifyRunsCount, meanR, meanG, meanB,
+                            s_verifyMaxR, s_verifyMaxG, s_verifyMaxB,
+                            (unsigned long long)s_verifyPointsCount);
+                for (int i = 0; i < s_numWorstPoints; ++i) {
+                    const auto &w = s_worstPoints[i];
+                    std::printf("  worst#%d: px=%d py=%d Y=%u Cb=%u Cr=%u out=(%u,%u,%u) native=(%u,%u,%u)\n",
+                                i + 1, w.px, w.py, w.Y, w.Cb, w.Cr,
+                                w.outR, w.outG, w.outB, w.natR, w.natG, w.natB);
+                }
+                std::fflush(stdout);
+
+                s_verifyRunsCount = 0;
+                s_verifyPointsCount = 0;
+                s_verifyTotalDiffR = s_verifyTotalDiffG = s_verifyTotalDiffB = 0;
+                s_verifyMaxR = s_verifyMaxG = s_verifyMaxB = 0;
+                s_numWorstPoints = 0;
+                s_verifyLastSecTime = now;
+            }
+        }
+
+        if (!isEnabled()) return;
         if (!wasRecording) return;
 
         // Compute max(R,G,B) over the 256 emitted points and find (x0, y0)
@@ -2367,5 +2523,189 @@ namespace probe_ae {
                 }
             }
         }
+    }
+
+    // Task BF: Movie YCbCr->RGB VU1 Native HLE
+    bool isMovieHleActive() {
+        static int s_envHle = -1;
+        if (s_envHle == -1) {
+            const char *env = std::getenv("PS2X_MOVIE_HLE");
+            s_envHle = (env && env[0] == '0') ? 0 : 1; // default ON (1)
+        }
+        return s_envHle == 1;
+    }
+
+    bool isMovieHleVerify() {
+        static int s_envVerify = -1;
+        if (s_envVerify == -1) {
+            const char *env = std::getenv("PS2X_MOVIE_HLE_VERIFY");
+            s_envVerify = (env && (env[0] == '1' || env[0] == 't')) ? 1 : 0; // default OFF (0)
+        }
+        return s_envVerify == 1;
+    }
+
+    static void doMovieFrameConversion(GS &gs, PS2Memory *memory, uint32_t base) {
+        if (!memory) return;
+        uint8_t *vram = memory->getGSVRAM();
+        const uint8_t *rdram = memory->getRDRAM();
+        if (!vram || !rdram) return;
+
+        auto tStart = std::chrono::steady_clock::now();
+
+        GSDebugSnapshot snap = gs.getDebugSnapshot();
+        const auto &ctx = snap.ctx[1]; // Context 2
+        const uint32_t fbp = ctx.frame.fbp << 5u;
+        const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+        const uint32_t fbmsk = ctx.frame.fbmsk;
+        const uint16_t sc_x0 = ctx.scissor.x0;
+        const uint16_t sc_x1 = ctx.scissor.x1;
+        const uint16_t sc_y0 = ctx.scissor.y0;
+        const uint16_t sc_y1 = ctx.scissor.y1;
+
+        // 768 macroblocks, column-major: 32 columns x 24 rows
+        for (uint32_t k = 0; k < 768u; ++k) {
+            const uint32_t mbx = k / 24u;
+            const uint32_t mby = k % 24u;
+            const uint32_t mb_base = (base + k * 384u) & PS2_RAM_MASK;
+            if (mb_base + 384u > PS2_RAM_SIZE) continue;
+
+            const uint8_t *mbY = rdram + mb_base;
+            const uint8_t *mbCb = rdram + mb_base + 256u;
+            const uint8_t *mbCr = rdram + mb_base + 320u;
+
+            const uint32_t startX = mbx * 16u;
+            const uint32_t startY = mby * 16u;
+
+            for (uint32_t py = 0; py < 16u; ++py) {
+                const uint32_t y = startY + py;
+                if (y < sc_y0 || y > sc_y1) continue;
+
+                const uint32_t py_chroma = (py >> 1u) * 8u;
+
+                for (uint32_t px = 0; px < 16u; ++px) {
+                    const uint32_t x = startX + px;
+                    if (x < sc_x0 || x > sc_x1) continue;
+
+                    const uint8_t y_val = mbY[py * 16u + px];
+                    const uint32_t ch_idx = py_chroma + (px >> 1u);
+                    const int cb_val = static_cast<int>(mbCb[ch_idx]) - 128;
+                    const int cr_val = static_cast<int>(mbCr[ch_idx]) - 128;
+
+                    const float y_f = static_cast<float>(y_val);
+                    const float cb_f = static_cast<float>(cb_val);
+                    const float cr_f = static_cast<float>(cr_val);
+
+                    const float r_f = y_f + 1.402f * cr_f;
+                    const float g_f = y_f - 0.344136f * cb_f - 0.714136f * cr_f;
+                    const float b_f = y_f + 1.772f * cb_f;
+
+                    const int r_i = static_cast<int>(std::round(r_f));
+                    const int g_i = static_cast<int>(std::round(g_f));
+                    const int b_i = static_cast<int>(std::round(b_f));
+
+                    const uint32_t r = static_cast<uint32_t>(std::clamp(r_i, 0, 255));
+                    const uint32_t g = static_cast<uint32_t>(std::clamp(g_i, 0, 255));
+                    const uint32_t b = static_cast<uint32_t>(std::clamp(b_i, 0, 255));
+                    const uint32_t a = 0u;
+
+                    uint32_t pixel = r | (g << 8u) | (b << 16u) | (a << 24u);
+                    if (fbmsk != 0u) {
+                        uint32_t existing = GSMem::ReadCT32(vram, fbp, fbw, x, y);
+                        pixel = (pixel & ~fbmsk) | (existing & fbmsk);
+                    }
+
+                    GSMem::WriteCT32(vram, fbp, fbw, x, y, pixel);
+                }
+            }
+        }
+
+        auto tEnd = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+
+        static uint32_t s_frameCounter = 0;
+        static uint32_t s_secFrameCount = 0;
+        static double s_secTotalMs = 0.0;
+        static auto s_lastSecLog = std::chrono::steady_clock::now();
+
+        uint32_t frameNum = s_frameCounter++;
+        s_secFrameCount++;
+        s_secTotalMs += ms;
+
+        if (frameNum < 5u) {
+            std::printf("[hle] movie conversion native base=0x%08X frame#=%u ms=%.2f\n",
+                        base, frameNum, ms);
+            std::fflush(stdout);
+        } else {
+            auto now = std::chrono::steady_clock::now();
+            double secDiff = std::chrono::duration<double>(now - s_lastSecLog).count();
+            if (secDiff >= 1.0) {
+                double avgMs = s_secFrameCount > 0 ? (s_secTotalMs / s_secFrameCount) : 0.0;
+                std::printf("[hle] movie conversion native frames=%u avg_ms=%.2f\n",
+                            s_secFrameCount, avgMs);
+                std::fflush(stdout);
+                s_secFrameCount = 0;
+                s_secTotalMs = 0.0;
+                s_lastSecLog = now;
+            }
+        }
+    }
+
+    bool handleMovieHleMscal(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize, GS &gs, PS2Memory *memory) {
+        if (!vuCode || codeSize < 0xE00u) {
+            return false;
+        }
+
+        uint64_t hash = 0xCBF29CE484222325ULL;
+        for (uint32_t i = 0; i < 0xE00u; ++i) {
+            hash ^= vuCode[i];
+            hash *= 0x100000001B3ULL;
+        }
+
+        bool match = (hash == 0xF72A6639E95D7AC8ULL);
+
+        static std::mutex s_sigMutex;
+        static std::vector<uint64_t> s_loggedSignatures;
+        {
+            std::lock_guard<std::mutex> lock(s_sigMutex);
+            if (std::find(s_loggedSignatures.begin(), s_loggedSignatures.end(), hash) == s_loggedSignatures.end()) {
+                s_loggedSignatures.push_back(hash);
+                std::printf("[hle] sig=0x%016llX match=%d\n", (unsigned long long)hash, match ? 1 : 0);
+                std::fflush(stdout);
+            }
+        }
+
+        if (!match || startPC != 0x048) {
+            s_movieKickMscalIndex.store(0, std::memory_order_relaxed);
+            return false;
+        }
+
+        if (!isMovieHleActive()) {
+            return false;
+        }
+
+        if (isMovieHleVerify()) {
+            return false;
+        }
+
+        uint32_t curIdx = s_movieKickMscalIndex.fetch_add(1, std::memory_order_relaxed);
+        if (curIdx == 0) {
+            uint32_t base = s_movieKickFirstUnpackSrc.load(std::memory_order_relaxed);
+            if (base == 0) {
+                base = s_bbLastRaw8Dst;
+            }
+            if (base == 0 || (base + 768u * 384u > PS2_RAM_SIZE)) {
+                static int s_badBaseLog = 0;
+                if (s_badBaseLog++ < 5) {
+                    std::printf("[hle] movie conversion base=0x%08X invalid or unavailable; falling back to interpreter\n", base);
+                    std::fflush(stdout);
+                }
+                s_movieKickMscalIndex.store(0, std::memory_order_relaxed);
+                return false;
+            }
+
+            doMovieFrameConversion(gs, memory, base);
+        }
+
+        return true;
     }
 }

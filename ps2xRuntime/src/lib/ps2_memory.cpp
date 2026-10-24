@@ -1623,19 +1623,23 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     }
 
 #if defined(PS2X_PROBE_AE) || 1
-                    if (probe_ae::isEnabled() && channelBase == 0x10009000u)
+                    if ((probe_ae::isEnabled() || probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify()) && channelBase == 0x10009000u)
                     {
-                        static int s_over2kCount = 0;
-                        if ((tagsProcessed > 2000 && s_over2kCount++ < 5) || (tagsProcessed > 4096))
+                        if (probe_ae::isEnabled())
                         {
-                            std::printf("[probe] ax chain tags=%d bytes=%zu end=%u\n", tagsProcessed, chainBuf.size(), lastTagId);
-                            std::fflush(stdout);
+                            static int s_over2kCount = 0;
+                            if ((tagsProcessed > 2000 && s_over2kCount++ < 5) || (tagsProcessed > 4096))
+                            {
+                                std::printf("[probe] ax chain tags=%d bytes=%zu end=%u\n", tagsProcessed, chainBuf.size(), lastTagId);
+                                std::fflush(stdout);
+                            }
+                            auto tChainEnd = std::chrono::steady_clock::now();
+                            probe_ae::onAyTimeChain(std::chrono::duration_cast<std::chrono::microseconds>(tChainEnd - tChainStart).count());
+                            probe_ae::onAyKick();
+                            probe_ae::setRdram(m_rdram);
+                            probe_ae::onAyChainStart(tagsProcessed, aySpans);
                         }
-                        auto tChainEnd = std::chrono::steady_clock::now();
-                        probe_ae::onAyTimeChain(std::chrono::duration_cast<std::chrono::microseconds>(tChainEnd - tChainStart).count());
-                        probe_ae::onAyKick();
                         probe_ae::setRdram(m_rdram);
-                        probe_ae::onAyChainStart(tagsProcessed, aySpans);
                         probe_ae::onBbChainStart(initialTagAddr, tagsProcessed, aySpans);
                     }
 #endif

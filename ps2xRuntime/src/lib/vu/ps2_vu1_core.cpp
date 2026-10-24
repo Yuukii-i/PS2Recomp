@@ -978,7 +978,7 @@ void VU1Interpreter::finishXgkick()
     if (!m_xgkick.active)
         return;
 
-    if (probe_ae::isEnabled())
+    if (probe_ae::isEnabled() || probe_ae::isMovieHleVerify())
     {
         probe_ae::onBbXgkickPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
     }
@@ -1664,9 +1664,14 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint32_t startPC, uint32_t top, uint32_t itop,
                              uint32_t maxCycles)
 {
+    if (probe_ae::handleMovieHleMscal(startPC, vuCode, codeSize, gs, memory))
+    {
+        return;
+    }
+
     resetScheduler();
     m_state.pc = startPC & microAddressMask();
-    if (probe_ae::isEnabled())
+    if (probe_ae::isEnabled() || probe_ae::isMovieHleVerify())
     {
         probe_ae::onBaMscalStart(startPC, m_state.vi);
         probe_ae::onBbRunStart(startPC, vuCode, codeSize, vuData, dataSize,
@@ -1933,7 +1938,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);
 
-    if (probe_ae::isEnabled())
+    if (probe_ae::isEnabled() || probe_ae::isMovieHleVerify())
     {
         const auto tRunEnd = std::chrono::steady_clock::now();
         uint64_t totalRunNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tRunEnd - tRunStart).count());

@@ -657,14 +657,16 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
 #if defined(PS2X_PROBE_AE) || 1
-            if (probe_ae::isEnabled()) {
+            if (probe_ae::isEnabled() || probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify()) {
                 uint8_t fmt = opcode & 0x0Fu;
                 uint32_t usn = (imm & 0x4000u) != 0u ? 1u : 0u;
                 uint32_t flg = (imm & 0x8000u) != 0u ? 1u : 0u;
                 uint32_t addr = imm & 0x3FFu;
                 uint32_t computed_words = totalBytes / 4u;
-                probe_ae::onAwUnpack(fmt, num, cl, wl, usn, flg, addr, computed_words);
-                probe_ae::onAyUnpackCheck(fmt, addr, num, pos_payload, data + pos_payload, sizeBytes);
+                if (probe_ae::isEnabled()) {
+                    probe_ae::onAwUnpack(fmt, num, cl, wl, usn, flg, addr, computed_words);
+                    probe_ae::onAyUnpackCheck(fmt, addr, num, pos_payload, data + pos_payload, sizeBytes);
+                }
                 probe_ae::onBbRecordUnpack(pos_payload, totalBytes, vuAddr, fmt, num);
             }
 #endif
