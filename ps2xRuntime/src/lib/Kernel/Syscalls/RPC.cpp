@@ -1801,7 +1801,27 @@ namespace ps2_syscalls
                     {
                         s_vfiDescriptors[allocSlot].open = true;
                         s_vfiDescriptors[allocSlot].entry = *entry;
-                        s_vfiDescriptors[allocSlot].offset = 0;
+                        bool isMovieStr = false;
+                        if (path.size() >= 4)
+                        {
+                            std::string ext = path.substr(path.size() - 4);
+                            for (char &ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                            if (ext == ".str")
+                            {
+                                isMovieStr = true;
+                            }
+                        }
+                        if (isMovieStr)
+                        {
+                            s_vfiDescriptors[allocSlot].offset = 0x800;
+                            ps2xSafeLog("[CID1:Open] stream start offset=0x800 for '%s'\n", path.c_str());
+                            std::printf("[CID1:Open] stream start offset=0x800 for '%s'\n", path.c_str());
+                            std::fflush(stdout);
+                        }
+                        else
+                        {
+                            s_vfiDescriptors[allocSlot].offset = 0;
+                        }
                         int allocFd = allocSlot + kCid1FdBase;
                         reply.result = static_cast<uint32_t>(allocFd);
                         ps2xSafeLog( "[CID1:Open] fd=%d (slot=%d) -> '%s' (size=%llu, LSN=%u)\n",
