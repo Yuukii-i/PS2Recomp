@@ -149,11 +149,15 @@ std::string ps2xGetIntcSummary()
     }
 
 static EeScheduler *s_activeScheduler = nullptr;
+static PS2Runtime *s_activeRuntime = nullptr;
+static std::atomic<uint32_t> s_diagEnabledIntcMask{0xFFFFFFFFu};
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
     : m_runtime(runtime)
 {
     s_activeScheduler = this;
+    s_activeRuntime = &m_runtime;
+    s_diagEnabledIntcMask.store(0xFFFFFFFFu, std::memory_order_relaxed);
 }
 
 EeScheduler::~EeScheduler()
@@ -165,6 +169,8 @@ EeScheduler::~EeScheduler()
 void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
 {
     s_activeScheduler = this;
+    s_activeRuntime = &m_runtime;
+    s_diagEnabledIntcMask.store(0xFFFFFFFFu, std::memory_order_relaxed);
     m_executorThread = std::this_thread::get_id();
     m_rdram = rdram;
     m_readyQueues = {};
@@ -1524,6 +1530,9 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
         {
             mask &= ~(1u << cause);
         }
+        if (!dmac) {
+            s_diagEnabledIntcMask.store(mask, std::memory_order_relaxed);
+        }
     }
     return KE_OK;
 }
@@ -2823,5 +2832,100 @@ namespace probe_ae {
         }
         std::printf("[probe] at jt 0x725968: %s\n", jtStr.c_str());
         std::fflush(stdout);
+    }
+
+    void dumpTaskAVInfo(uint32_t sec, const uint8_t *rdram) {
+        if (!isEnabled() || !s_activeScheduler || !s_activeRuntime) return;
+        if (!rdram) rdram = s_activeScheduler->rdram();
+        if (!rdram) return;
+
+        uint32_t val_649de4 = 0;
+        int32_t val_649de0 = 0;
+        if ((0x649DE4u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+            std::memcpy(&val_649de4, rdram + (0x649DE4u & PS2_RAM_MASK), 4);
+        }
+        if ((0x649DE0u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+            std::memcpy(&val_649de0, rdram + (0x649DE0u & PS2_RAM_MASK), 4);
+        }
+
+        uint32_t f_state = 0;
+        if ((0x772188u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+            std::memcpy(&f_state, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        }
+
+        static bool s_seenFState9 = false;
+        static uint32_t s_seenFState9Sec = 0;
+        if (f_state == 9 && !s_seenFState9) {
+            s_seenFState9 = true;
+            s_seenFState9Sec = sec;
+        }
+
+        static uint32_t s_last649de4 = 0xFFFFFFFFu;
+        static uint32_t s_unchangedStreak = 0;
+        if (val_649de4 == s_last649de4) {
+            s_unchangedStreak++;
+        } else {
+            s_last649de4 = val_649de4;
+            s_unchangedStreak = 0;
+        }
+
+        bool afterState9 = s_seenFState9 && (sec >= s_seenFState9Sec);
+        bool unchanged2s = (s_unchangedStreak >= 2);
+
+        PS2Memory &mem = s_activeRuntime->memory();
+        auto readIO = [&](uint32_t regAddr) -> uint32_t {
+            auto it = mem.m_ioRegisters.find(regAddr);
+            return (it != mem.m_ioRegisters.end()) ? it->second : 0u;
+        };
+
+        uint32_t chcr = readIO(0x10009000u);
+        uint32_t tadr = readIO(0x10009030u);
+        uint32_t qwc  = readIO(0x10009020u);
+        uint32_t asr0 = readIO(0x10009040u);
+        uint32_t str_bit = (chcr & 0x100u) != 0 ? 1 : 0;
+        uint32_t tagid = (chcr >> 28) & 0x7u;
+
+        static bool s_dma1StallReported = false;
+        static uint32_t s_prevChcr = 0;
+        if (str_bit != 0 && (s_prevChcr & 0x100u) != 0) {
+            if (!s_dma1StallReported) {
+                s_dma1StallReported = true;
+                std::printf("[probe] av dma1_stall tadr=0x%08X qwc=0x%X tagid=%u\n", tadr, qwc, tagid);
+                std::fflush(stdout);
+            }
+        }
+        s_prevChcr = chcr;
+
+        uint32_t kicks_start = cnt_vif1_kicks_started.exchange(0, std::memory_order_relaxed);
+        uint32_t kicks_end   = cnt_vif1_kicks_finished.exchange(0, std::memory_order_relaxed);
+        uint32_t vif_irq     = cnt_vif1_irq.exchange(0, std::memory_order_relaxed);
+        uint32_t cause5      = cnt_cause5_raises.exchange(0, std::memory_order_relaxed);
+        uint32_t loop_404230 = cnt_404230_loop.exchange(0, std::memory_order_relaxed);
+
+        uint32_t h2843d4_total = 0;
+        std::string markHist = getAndResetVifMarkHist();
+        std::string h2843d4Hist = getAndResetH2843D4Hist(h2843d4_total);
+
+        if (afterState9 || unchanged2s) {
+            uint32_t stat = mem.vif1_regs.stat;
+            uint32_t mark = mem.vif1_regs.mark;
+            uint32_t code = mem.vif1_regs.code;
+            uint32_t imr = readIO(0x1000F010u);
+            uint32_t intc_mask = s_diagEnabledIntcMask.load(std::memory_order_relaxed);
+
+            std::printf("[probe] av sec=%u f_state=%u flag_649de4=%u sema_649de0=%d "
+                        "kicks_start=%u kicks_end=%u vif_irq=%u cause5=%u h2843d4=%u loop_404230=%u "
+                        "mark_hist=[%s] h2843d4_hist=[%s] "
+                        "stat=0x%08X mark=0x%04X code=0x%08X "
+                        "chcr=0x%08X tadr=0x%08X qwc=0x%X asr0=0x%08X str=%u "
+                        "imr=0x%08X intc_mask=0x%08X\n",
+                        sec, f_state, val_649de4, val_649de0,
+                        kicks_start, kicks_end, vif_irq, cause5, h2843d4_total, loop_404230,
+                        markHist.c_str(), h2843d4Hist.c_str(),
+                        stat, mark, code,
+                        chcr, tadr, qwc, asr0, str_bit,
+                        imr, intc_mask);
+            std::fflush(stdout);
+        }
     }
 }

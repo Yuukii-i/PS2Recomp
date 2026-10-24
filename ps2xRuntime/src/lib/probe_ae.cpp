@@ -503,6 +503,8 @@ namespace probe_ae {
         if (s_stuckStreak == 3 || s_stuckStreak == 6) {
             dumpTaskATInfo(sec, rdram);
         }
+
+        dumpTaskAVInfo(sec, rdram);
     }
 
     void log24C5A0(R5900Context *ctx, const uint8_t *rdram) {
@@ -1129,5 +1131,105 @@ namespace probe_ae {
             }
             std::fflush(stdout);
         }
+    }
+
+    // Task AV Probes
+    std::atomic<uint32_t> cnt_vif1_kicks_started{0};
+    std::atomic<uint32_t> cnt_vif1_kicks_finished{0};
+    std::atomic<uint32_t> cnt_vif1_irq{0};
+    std::atomic<uint32_t> cnt_cause5_raises{0};
+    std::atomic<uint32_t> cnt_404230_loop{0};
+
+    static std::mutex s_vifMarkMutex;
+    static std::unordered_map<uint16_t, uint32_t> s_vifMarkCounts;
+
+    static std::mutex s_h2843d4Mutex;
+    static std::unordered_map<uint32_t, uint32_t> s_h2843d4Counts;
+    static std::atomic<uint32_t> s_h2843d4Total{0};
+
+    void onVif1DmaStart(uint32_t sizeBytes) {
+        if (!isEnabled()) return;
+        (void)sizeBytes;
+        cnt_vif1_kicks_started.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void onVif1DmaEnd() {
+        if (!isEnabled()) return;
+        cnt_vif1_kicks_finished.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void onVif1Irq() {
+        if (!isEnabled()) return;
+        cnt_vif1_irq.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void onVif1Mark(uint16_t imm) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_vifMarkMutex);
+        s_vifMarkCounts[imm]++;
+    }
+
+    void onCause5Raise() {
+        if (!isEnabled()) return;
+        cnt_cause5_raises.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void on2843D4MarkRead(uint32_t markVal) {
+        if (!isEnabled()) return;
+        s_h2843d4Total.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(s_h2843d4Mutex);
+        s_h2843d4Counts[markVal]++;
+    }
+
+    void on404230LoopEntry() {
+        if (!isEnabled()) return;
+        cnt_404230_loop.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void onVifUnknown(uint8_t opcode, uint16_t imm) {
+        if (!isEnabled()) return;
+        static std::atomic<uint32_t> s_unknownCount{0};
+        uint32_t n = s_unknownCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 10) {
+            std::printf("[probe] av vif_unknown op=0x%02X imm=0x%04X\n", opcode, imm);
+            std::fflush(stdout);
+        }
+    }
+
+    std::string getAndResetVifMarkHist() {
+        std::lock_guard<std::mutex> lock(s_vifMarkMutex);
+        if (s_vifMarkCounts.empty()) return "none";
+        std::vector<std::pair<uint16_t, uint32_t>> vec(s_vifMarkCounts.begin(), s_vifMarkCounts.end());
+        std::sort(vec.begin(), vec.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
+        std::string s;
+        size_t count = std::min<size_t>(vec.size(), 6);
+        for (size_t i = 0; i < count; ++i) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%s0x%04X:%u", (i > 0 ? "," : ""), vec[i].first, vec[i].second);
+            s += buf;
+        }
+        s_vifMarkCounts.clear();
+        return s;
+    }
+
+    std::string getAndResetH2843D4Hist(uint32_t &outTotal) {
+        outTotal = s_h2843d4Total.exchange(0, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(s_h2843d4Mutex);
+        if (s_h2843d4Counts.empty()) return "none";
+        std::vector<std::pair<uint32_t, uint32_t>> vec(s_h2843d4Counts.begin(), s_h2843d4Counts.end());
+        std::sort(vec.begin(), vec.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
+        std::string s;
+        size_t count = std::min<size_t>(vec.size(), 6);
+        for (size_t i = 0; i < count; ++i) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%s0x%04X:%u", (i > 0 ? "," : ""), vec[i].first, vec[i].second);
+            s += buf;
+        }
+        s_h2843d4Counts.clear();
+        return s;
     }
 }

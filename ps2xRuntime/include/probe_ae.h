@@ -572,4 +572,24 @@ namespace probe_ae {
     void on3D7C08(R5900Context *ctx, const uint8_t *rdram);
     void on36C3B4(R5900Context *ctx, const uint8_t *rdram);
     void on165EFC(R5900Context *ctx, const uint8_t *rdram);
+
+    // Task AV Probes
+    extern std::atomic<uint32_t> cnt_vif1_kicks_started;
+    extern std::atomic<uint32_t> cnt_vif1_kicks_finished;
+    extern std::atomic<uint32_t> cnt_vif1_irq;
+    extern std::atomic<uint32_t> cnt_cause5_raises;
+    extern std::atomic<uint32_t> cnt_404230_loop;
+
+    void onVif1DmaStart(uint32_t sizeBytes);
+    void onVif1DmaEnd();
+    void onVif1Irq();
+    void onVif1Mark(uint16_t imm);
+    void onCause5Raise();
+    void on2843D4MarkRead(uint32_t markVal);
+    void on404230LoopEntry();
+    void onVifUnknown(uint8_t opcode, uint16_t imm);
+
+    std::string getAndResetVifMarkHist();
+    std::string getAndResetH2843D4Hist(uint32_t &outTotal);
+    void dumpTaskAVInfo(uint32_t sec, const uint8_t *rdram);
 }

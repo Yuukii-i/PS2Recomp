@@ -1,5 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
+#include "probe_ae.h"
 #include <cstring>
 #include <cstdio>
 
@@ -303,6 +304,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     if (sizeBytes == 0u)
         return;
 
+#if defined(PS2X_PROBE_AE) || 1
+    if (probe_ae::isEnabled()) {
+        probe_ae::onVif1DmaStart(sizeBytes);
+    }
+#endif
+
     uint32_t pos = 0;
 
     while (pos + 4 <= sizeBytes)
@@ -325,6 +332,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.stat |= (1u << 10); // VIS
             vif1_regs.stat |= (1u << 11); // INT
             recordCompletedIntcCause(5u);
+#if defined(PS2X_PROBE_AE) || 1
+            if (probe_ae::isEnabled()) {
+                probe_ae::onVif1Irq();
+                probe_ae::onCause5Raise();
+            }
+#endif
             static int s_traceVif = -1;
             if (s_traceVif == -1) {
                 const char *env = std::getenv("PS2X_TRACE_VIF");
@@ -386,6 +399,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.stat |= (1u << 6); // MRK
             m_ioRegisters[0x10003C30u] = imm;
             recordCompletedIntcCause(5u);
+#if defined(PS2X_PROBE_AE) || 1
+            if (probe_ae::isEnabled()) {
+                probe_ae::onVif1Mark(imm);
+                probe_ae::onCause5Raise();
+            }
+#endif
             std::fprintf(stderr, "[vif1:mark] imm=0x%04x irq=%d\n", imm, irq ? 1 : 0);
             std::fflush(stderr);
             continue;
@@ -791,7 +810,18 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else
         {
+#if defined(PS2X_PROBE_AE) || 1
+            if (probe_ae::isEnabled()) {
+                probe_ae::onVifUnknown(opcode, imm);
+            }
+#endif
             continue;
         }
     }
+
+#if defined(PS2X_PROBE_AE) || 1
+    if (probe_ae::isEnabled()) {
+        probe_ae::onVif1DmaEnd();
+    }
+#endif
 }
