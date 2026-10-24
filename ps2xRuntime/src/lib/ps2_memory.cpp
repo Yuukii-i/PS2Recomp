@@ -1359,7 +1359,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
-                    const int kMaxChainTags = 4096;
+                    const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf;
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
@@ -1419,6 +1419,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     int tagsProcessed = 0;
                     uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
+                    uint32_t lastTagId = 0;
 
                     while (tagsProcessed < kMaxChainTags)
                     {
@@ -1452,6 +1453,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "dma chain tag", tagAddr);
                         uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
+                        lastTagId = id;
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
@@ -1586,6 +1588,31 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (endChain)
                             break;
                     }
+
+                    if (tagsProcessed >= kMaxChainTags)
+                    {
+                        static bool s_capHitReported = false;
+                        if (!s_capHitReported)
+                        {
+                            s_capHitReported = true;
+                            std::fprintf(stderr, "[DMA] chain truncated at kMaxChainTags ch=0x%X tag=0x%08X\n", channelBase, tagAddr);
+                            std::fflush(stderr);
+                            std::printf("[probe] ax cap_hit ch=0x%X tag=0x%08X\n", channelBase, tagAddr);
+                            std::fflush(stdout);
+                        }
+                    }
+
+#if defined(PS2X_PROBE_AE) || 1
+                    if (probe_ae::isEnabled() && channelBase == 0x10009000u)
+                    {
+                        static int s_over2kCount = 0;
+                        if ((tagsProcessed > 2000 && s_over2kCount++ < 5) || (tagsProcessed > 4096))
+                        {
+                            std::printf("[probe] ax chain tags=%d bytes=%zu end=%u\n", tagsProcessed, chainBuf.size(), lastTagId);
+                            std::fflush(stdout);
+                        }
+                    }
+#endif
 
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
                     m_ioRegisters[channelBase + 0x40] = asr0;
