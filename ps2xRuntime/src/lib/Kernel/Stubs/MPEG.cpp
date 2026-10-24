@@ -2424,7 +2424,207 @@ struct MpegCallLogger {
     void sceMpegGetPictureRAW8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         MpegCallLogger logger("sceMpegGetPictureRAW8", ctx);
-        TODO_NAMED("sceMpegGetPictureRAW8", rdram, ctx, runtime);
+        g_movieGetPictureCount.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t mpegAddr = getRegU32(ctx, 4);
+        const uint32_t dst = getRegU32(ctx, 5);
+        const uint32_t mbCapacity = getRegU32(ctx, 6);
+
+        uint32_t width = kStubMovieWidth;
+        uint32_t height = kStubMovieHeight;
+        uint32_t frameCount = 0u;
+        bool haveFrame = false;
+        MpegDecodedFrame frame;
+        {
+            std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
+            MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            if (playback.decodedFrames.empty() &&
+                !g_mpeg_stub_state.currentCdStreamEofSeen &&
+                !playback.streamEnded &&
+                !playback.decoderFailed)
+            {
+                playback.streamEnded = true;
+            }
+
+            if (!playback.decodedFrames.empty())
+            {
+                const uint64_t currentTick = runtime->eeScheduler().currentVSyncTick();
+                const uint64_t currentTickQ32 = currentTick << 32u;
+                const MpegDecodedFrame &nextFrame = playback.decodedFrames.front();
+                const uint64_t frameIntervalQ32 = decodedFrameIntervalQ32(playback, nextFrame);
+                uint64_t presentationTargetQ32 = presentationTickForFrame(playback, nextFrame, currentTickQ32);
+
+                if (currentTickQ32 > presentationTargetQ32 && currentTickQ32 - presentationTargetQ32 >= frameIntervalQ32)
+                {
+                    const uint64_t correction = currentTickQ32 - presentationTargetQ32;
+                    presentationTargetQ32 = currentTickQ32;
+                    if (nextFrame.pts90k >= 0 && playback.firstPresentedPts90k >= 0)
+                    {
+                        playback.ptsPresentationBaseTickQ32 += correction;
+                    }
+                    playback.nextPictureTickQ32 = currentTickQ32;
+                }
+
+                if (currentTickQ32 < presentationTargetQ32)
+                {
+                    const uint64_t eligibleTick = (presentationTargetQ32 + kPictureClockOne - 1u) >> 32u;
+                    lock.unlock();
+                    runtime->eeScheduler().waitVSync(
+                        eligibleTick - 1u,
+                        -1,
+                        [rdram, runtime](R5900Context &resumeContext)
+                        {
+                            if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
+                            {
+                                return;
+                            }
+                            sceMpegGetPictureRAW8(rdram, &resumeContext, runtime);
+                        });
+                }
+
+                frame = std::move(playback.decodedFrames.front());
+                playback.decodedFrames.pop_front();
+                playback.width = static_cast<uint32_t>(frame.width);
+                playback.height = static_cast<uint32_t>(frame.height);
+                width = playback.width;
+                height = playback.height;
+                frameCount = playback.picturesServed;
+                playback.picturesServed += 1u;
+                playback.nextPictureTickQ32 = presentationTargetQ32 + frameIntervalQ32;
+                playback.presentationEndTickQ32 = playback.nextPictureTickQ32;
+                haveFrame = true;
+                if (g_mpeg_stub_state.pictureTraceCount < 32u)
+                {
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[MPEG:GetPictureRAW8:FRAME] mpeg=0x" << std::hex << mpegAddr
+                                  << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
+                                  << " frame=" << frameCount
+                                  << " queued=" << playback.decodedFrames.size()
+                                  << " size=" << width << "x" << height << std::endl;
+                    });
+                    ++g_mpeg_stub_state.pictureTraceCount;
+                }
+            }
+            else
+            {
+                width = playback.width;
+                height = playback.height;
+                frameCount = playback.picturesServed;
+            }
+        }
+
+        mpegGuestWrite32(rdram, mpegAddr + 0x00u, width);
+        mpegGuestWrite32(rdram, mpegAddr + 0x04u, height);
+        mpegGuestWrite32(rdram, mpegAddr + 0x08u, frameCount);
+
+        if (uint8_t *base = getMemPtr(rdram, mpegAddr))
+        {
+            const uint32_t iVar1 = *reinterpret_cast<uint32_t *>(base + 0x40);
+            if (uint8_t *inner = getMemPtr(rdram, iVar1))
+            {
+                *reinterpret_cast<uint32_t *>(inner + 0xF8) = mbCapacity;
+                *reinterpret_cast<uint32_t *>(inner + 0xEC) = (dst & 0x0FFFFFFFu) | 0x20000000u;
+                *reinterpret_cast<uint32_t *>(inner + 0xF0) = 0;
+                *reinterpret_cast<uint32_t *>(inner + 0xF4) = 0;
+                *reinterpret_cast<uint32_t *>(inner + 0xC4) = 0;
+            }
+        }
+
+        const uint32_t picWidth = (width == 0u) ? kStubMovieWidth : width;
+        const uint32_t picHeight = (height == 0u) ? kStubMovieHeight : height;
+        const uint32_t mbCols = (picWidth + 15u) / 16u;
+        const uint32_t mbRows = (picHeight + 15u) / 16u;
+        const uint32_t totalMbs = mbCols * mbRows;
+        const uint32_t numMbs = std::min(mbCapacity, totalMbs);
+
+        const bool validFrame = haveFrame && !frame.rgba.empty() && frame.width > 0 && frame.height > 0;
+
+        for (uint32_t mbIndex = 0u; mbIndex < numMbs; ++mbIndex)
+        {
+            uint8_t *mbPtr = getMemPtr(rdram, dst + mbIndex * 384u);
+            if (!mbPtr)
+            {
+                continue;
+            }
+
+            if (!validFrame)
+            {
+                std::memset(mbPtr, 0x00, 256);
+                std::memset(mbPtr + 256, 0x80, 64);
+                std::memset(mbPtr + 320, 0x80, 64);
+            }
+            else
+            {
+                const uint32_t mbx = mbIndex / mbRows;
+                const uint32_t mby = mbIndex % mbRows;
+
+                // 1) 16x16 Y plane
+                for (uint32_t ly = 0u; ly < 16u; ++ly)
+                {
+                    const uint32_t py = std::min(mby * 16u + ly, static_cast<uint32_t>(frame.height - 1));
+                    for (uint32_t lx = 0u; lx < 16u; ++lx)
+                    {
+                        const uint32_t px = std::min(mbx * 16u + lx, static_cast<uint32_t>(frame.width - 1));
+                        const size_t pixelIdx = (static_cast<size_t>(py) * static_cast<size_t>(frame.width) + px) * 4u;
+                        const int r = frame.rgba[pixelIdx + 0u];
+                        const int g = frame.rgba[pixelIdx + 1u];
+                        const int b = frame.rgba[pixelIdx + 2u];
+                        const int yVal = 16 + ((66 * r + 129 * g + 25 * b + 128) >> 8);
+                        mbPtr[ly * 16u + lx] = static_cast<uint8_t>(std::clamp(yVal, 0, 255));
+                    }
+                }
+
+                // 2) 8x8 Cb and Cr planes (subsampled 2x2 average)
+                for (uint32_t cy = 0u; cy < 8u; ++cy)
+                {
+                    for (uint32_t cx = 0u; cx < 8u; ++cx)
+                    {
+                        int sumR = 0, sumG = 0, sumB = 0;
+                        for (uint32_t dy = 0u; dy < 2u; ++dy)
+                        {
+                            const uint32_t py = std::min(mby * 16u + cy * 2u + dy, static_cast<uint32_t>(frame.height - 1));
+                            for (uint32_t dx = 0u; dx < 2u; ++dx)
+                            {
+                                const uint32_t px = std::min(mbx * 16u + cx * 2u + dx, static_cast<uint32_t>(frame.width - 1));
+                                const size_t pixelIdx = (static_cast<size_t>(py) * static_cast<size_t>(frame.width) + px) * 4u;
+                                sumR += frame.rgba[pixelIdx + 0u];
+                                sumG += frame.rgba[pixelIdx + 1u];
+                                sumB += frame.rgba[pixelIdx + 2u];
+                            }
+                        }
+                        const int avgR = (sumR + 2) / 4;
+                        const int avgG = (sumG + 2) / 4;
+                        const int avgB = (sumB + 2) / 4;
+
+                        const int cbVal = 128 + ((-38 * avgR - 74 * avgG + 112 * avgB + 128) >> 8);
+                        const int crVal = 128 + ((112 * avgR - 94 * avgG - 18 * avgB + 128) >> 8);
+
+                        mbPtr[256u + cy * 8u + cx] = static_cast<uint8_t>(std::clamp(cbVal, 0, 255));
+                        mbPtr[320u + cy * 8u + cx] = static_cast<uint8_t>(std::clamp(crVal, 0, 255));
+                    }
+                }
+            }
+        }
+
+        static std::atomic<uint32_t> s_raw8CallCount{0};
+        const uint32_t n = s_raw8CallCount.fetch_add(1, std::memory_order_relaxed);
+        if (n < 3u || (n % 100u == 0u))
+        {
+            uint8_t y0 = 0x00, cb0 = 0x80, cr0 = 0x80;
+            if (numMbs > 0u)
+            {
+                if (uint8_t *mb0 = getMemPtr(rdram, dst))
+                {
+                    y0 = mb0[0];
+                    cb0 = mb0[256];
+                    cr0 = mb0[320];
+                }
+            }
+            ::ps2xSafeLog("[mpeg:raw8] n=%u w=%d h=%d mbs=%u have=%d Y0=%02x Cb0=%02x Cr0=%02x\n",
+                          n, static_cast<int>(width), static_cast<int>(height), numMbs,
+                          validFrame ? 1 : 0, y0, cb0, cr0);
+        }
+
+        setReturnS32(ctx, 1);
     }
 
     void sceMpegGetPictureRAW8xy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
