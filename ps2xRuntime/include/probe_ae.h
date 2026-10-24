@@ -564,4 +564,7 @@ namespace probe_ae {
     void recordMainThreadDispatch(uint32_t pc);
     std::string getRecentMainDispatches();
     void dumpTaskASInfo(uint32_t sec, bool isFirstStuckSec);
+
+    // Task AT Probes
+    void dumpTaskATInfo(uint32_t sec, const uint8_t *rdram);
 }

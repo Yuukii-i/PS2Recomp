@@ -2679,4 +2679,149 @@ namespace probe_ae {
         }
         std::fflush(stdout);
     }
+
+    void dumpTaskATInfo(uint32_t sec, const uint8_t *rdram) {
+        if (!isEnabled() || !s_activeScheduler) return;
+        if (!rdram) rdram = s_activeScheduler->rdram();
+        if (!rdram) return;
+
+        const GuestThread *th = s_activeScheduler->thread(1); // main thread
+        if (!th) return;
+        const R5900Context &ctx = th->activeContext();
+
+        uint32_t sp = getRegU32(&ctx, 29);
+        uint32_t pc = ctx.pc;
+        uint32_t ra = getRegU32(&ctx, 31);
+        uint32_t gp = getRegU32(&ctx, 28);
+        uint32_t fp = getRegU32(&ctx, 30);
+        uint32_t v0 = getRegU32(&ctx, 2);
+        uint32_t v1 = getRegU32(&ctx, 3);
+        uint32_t a0 = getRegU32(&ctx, 4);
+        uint32_t a1 = getRegU32(&ctx, 5);
+        uint32_t a2 = getRegU32(&ctx, 6);
+        uint32_t a3 = getRegU32(&ctx, 7);
+        uint32_t t0 = getRegU32(&ctx, 8);
+        uint32_t t1 = getRegU32(&ctx, 9);
+        uint32_t t2 = getRegU32(&ctx, 10);
+        uint32_t t3 = getRegU32(&ctx, 11);
+        uint32_t t4 = getRegU32(&ctx, 12);
+        uint32_t t5 = getRegU32(&ctx, 13);
+        uint32_t t6 = getRegU32(&ctx, 14);
+        uint32_t t7 = getRegU32(&ctx, 15);
+        uint32_t s0 = getRegU32(&ctx, 16);
+        uint32_t s1 = getRegU32(&ctx, 17);
+        uint32_t s2 = getRegU32(&ctx, 18);
+        uint32_t s3 = getRegU32(&ctx, 19);
+        uint32_t s4 = getRegU32(&ctx, 20);
+        uint32_t s5 = getRegU32(&ctx, 21);
+        uint32_t s6 = getRegU32(&ctx, 22);
+        uint32_t s7 = getRegU32(&ctx, 23);
+
+        std::printf("[probe] at trigger t=%u stuck_main pc=0x%08X sp=0x%08X\n", sec, pc, sp);
+
+        // 1. Stack walk (scan 0x600 bytes upward, cap 30 lines)
+        uint32_t retLinesPrinted = 0;
+        for (uint32_t off = 0; off <= 0x600; off += 4) {
+            if (retLinesPrinted >= 30) break;
+            uint32_t currAddr = sp + off;
+            if ((currAddr & PS2_RAM_MASK) + 4 > PS2_RAM_SIZE) continue;
+            uint32_t w = 0;
+            std::memcpy(&w, rdram + (currAddr & PS2_RAM_MASK), 4);
+
+            if (w >= 0x00100000u && w < 0x00600000u) {
+                uint32_t insnAddr = w - 8;
+                if (insnAddr >= 0x00100000u && (insnAddr & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                    uint32_t insn = 0;
+                    std::memcpy(&insn, rdram + (insnAddr & PS2_RAM_MASK), 4);
+
+                    if ((insn & 0xFC000000u) == 0x0C000000u) {
+                        // JAL target
+                        uint32_t callee = ((w - 4) & 0xF0000000u) | ((insn & 0x03FFFFFFu) << 2);
+                        std::printf("[probe] at ret w=0x%08X at sp+0x%X callee=0x%08X\n", w, off, callee);
+                        retLinesPrinted++;
+                    } else if ((insn & 0xFC00003Fu) == 0x00000009u) {
+                        // JALR
+                        std::printf("[probe] at ret w=0x%08X at sp+0x%X callee=jalr\n", w, off);
+                        retLinesPrinted++;
+                    }
+                }
+            }
+        }
+
+        // 2. Dump registers
+        std::printf("[probe] at regs pc=0x%08X ra=0x%08X sp=0x%08X gp=0x%08X fp=0x%08X "
+                    "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+                    "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X t6=0x%08X t7=0x%08X "
+                    "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X\n",
+                    pc, ra, sp, gp, fp,
+                    v0, v1, a0, a1, a2, a3,
+                    t0, t1, t2, t3, t4, t5, t6, t7,
+                    s0, s1, s2, s3, s4, s5, s6, s7);
+
+        // 3. Hexdump 64 bytes at s1, s3, s5, a0
+        auto dumpMem = [&](const char *name, uint32_t addr) {
+            if (addr < 0x00100000u || addr >= 0x02000000u) return;
+            if ((addr & PS2_RAM_MASK) + 64 > PS2_RAM_SIZE) return;
+            const uint8_t *p = rdram + (addr & PS2_RAM_MASK);
+
+            char hexBuf[129] = {0};
+            for (int i = 0; i < 64; ++i) {
+                std::snprintf(hexBuf + i * 2, 3, "%02x", p[i]);
+            }
+            std::printf("[probe] at mem %s=0x%08X : %s\n", name, addr, hexBuf);
+
+            int printableCount = 0;
+            std::string asciiStr;
+            for (int i = 0; i < 64; ++i) {
+                uint8_t c = p[i];
+                if (c >= 32 && c <= 126) {
+                    asciiStr += static_cast<char>(c);
+                    printableCount++;
+                } else if (c == 0) {
+                    asciiStr += "\\0";
+                } else {
+                    asciiStr += '.';
+                }
+            }
+            if (printableCount >= 8) {
+                std::printf("[probe] at str %s=0x%08X : '%s'\n", name, addr, asciiStr.c_str());
+            }
+        };
+
+        dumpMem("s1", s1);
+        dumpMem("s3", s3);
+        dumpMem("s5", s5);
+        dumpMem("a0", a0);
+
+        // 4. Words at s1, s3, and 0x725968
+        auto readWord = [&](uint32_t a) -> uint32_t {
+            if ((a & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                uint32_t val = 0;
+                std::memcpy(&val, rdram + (a & PS2_RAM_MASK), 4);
+                return val;
+            }
+            return 0;
+        };
+
+        uint32_t w_s1_148 = readWord(s1 + 0x148);
+        uint32_t w_s1_130 = readWord(s1 + 0x130);
+        uint32_t w_s1_134 = readWord(s1 + 0x134);
+        uint32_t w_s1_138 = readWord(s1 + 0x138);
+        uint32_t w_s1_13c = readWord(s1 + 0x13C);
+        uint32_t w_s3_130 = readWord(s3 + 0x130);
+        uint32_t w_s3_40  = readWord(s3 + 0x40);
+
+        std::printf("[probe] at words s1_148=0x%08X s1_130=0x%08X s1_134=0x%08X s1_138=0x%08X s1_13c=0x%08X s3_130=0x%08X s3_40=0x%08X\n",
+                    w_s1_148, w_s1_130, w_s1_134, w_s1_138, w_s1_13c, w_s3_130, w_s3_40);
+
+        std::string jtStr;
+        for (int i = 0; i < 16; ++i) {
+            uint32_t entry = readWord(0x725968u + i * 4);
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%s[#%d]=0x%08X", (i > 0 ? " " : ""), i, entry);
+            jtStr += buf;
+        }
+        std::printf("[probe] at jt 0x725968: %s\n", jtStr.c_str());
+        std::fflush(stdout);
+    }
 }

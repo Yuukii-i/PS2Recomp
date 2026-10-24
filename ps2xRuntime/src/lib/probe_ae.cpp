@@ -487,6 +487,10 @@ namespace probe_ae {
                 dumpTaskASInfo(sec, s_stuckReportCount == 1);
             }
         }
+
+        if (s_stuckStreak == 3 || s_stuckStreak == 6) {
+            dumpTaskATInfo(sec, rdram);
+        }
     }
 
     void log24C5A0(R5900Context *ctx, const uint8_t *rdram) {
