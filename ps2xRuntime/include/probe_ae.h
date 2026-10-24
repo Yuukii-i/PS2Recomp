@@ -627,4 +627,13 @@ namespace probe_ae {
     void onAzRecordFramesOut(uint32_t count);
     void onAzRaw8Call(bool haveFrame, uint32_t width, uint32_t height, const uint8_t *mb0);
     void dumpAzRingIfDue(uint32_t sec, const uint8_t *rdram);
+
+    // Task BA Probes
+    void onBaRows(bool haveFrame, uint32_t mbCols, uint32_t mbRows, uint32_t dst, const uint8_t *rdram);
+    void onBaMscalStart(uint32_t startPC, const int32_t *vi);
+    void onBaMscntStart(const int32_t *vi);
+    void onBaInstruction(uint32_t pc, uint32_t upper, uint32_t lower);
+    void onBaXgkick(uint32_t qwords, uint64_t xgkickNs, uint32_t prims);
+    void onBaRunEnd(uint32_t instructionsExecuted, uint64_t loopNs);
+    void dumpBaVu1IfDue(uint32_t sec);
 }

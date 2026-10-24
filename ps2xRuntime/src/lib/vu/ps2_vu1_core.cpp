@@ -3,7 +3,9 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_vu1_detail.h"
+#include "probe_ae.h"
 
+#include <chrono>
 #include <algorithm>
 #include <cfenv>
 #include <cmath>
@@ -914,15 +916,82 @@ void VU1Interpreter::progressXgkick()
     }
 }
 
+thread_local uint64_t s_currentRunXgkickNs = 0;
+
+static uint32_t countPrimsInXgkickPacket(const uint8_t *data, uint32_t size)
+{
+    uint32_t totalPrims = 0;
+    uint32_t offset = 0;
+    while (offset + 16u <= size)
+    {
+        uint64_t tagLo = 0;
+        std::memcpy(&tagLo, data + offset, sizeof(tagLo));
+        uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+        uint32_t format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
+        uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
+        if (nreg == 0u) nreg = 16u;
+        bool pre = ((tagLo >> 46) & 1u) != 0u;
+        uint32_t primType = static_cast<uint32_t>((tagLo >> 47) & 0x7u);
+
+        uint32_t tagBytes = 16u;
+        if (format == 0u)
+        {
+            tagBytes += nloop * nreg * 16u;
+            if (pre)
+            {
+                if (primType == 6u) // SPRITE
+                    totalPrims += (nloop / 2u);
+                else if (primType == 3u || primType == 4u || primType == 5u)
+                    totalPrims += (nloop >= 3 ? nloop - 2 : 0);
+                else
+                    totalPrims += nloop;
+            }
+            else
+            {
+                totalPrims += nloop;
+            }
+        }
+        else if (format == 1u)
+        {
+            tagBytes += ((nloop * nreg + 1u) & ~1u) * 8u;
+            totalPrims += nloop;
+        }
+        else if (format == 2u)
+        {
+            tagBytes += nloop * 16u;
+        }
+        else
+        {
+            break;
+        }
+        if (tagBytes < 16u || offset + tagBytes > size)
+            break;
+        offset += tagBytes;
+        if (((tagLo >> 15) & 1u) != 0u) // EOP
+            break;
+    }
+    return totalPrims;
+}
+
 void VU1Interpreter::finishXgkick()
 {
     if (!m_xgkick.active)
         return;
 
+    const auto tXgkickStart = std::chrono::steady_clock::now();
     if (m_activeMemory)
         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
     else if (m_activeGs)
         m_activeGs->processGIFPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
+    const auto tXgkickEnd = std::chrono::steady_clock::now();
+
+    if (probe_ae::isEnabled())
+    {
+        uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tXgkickEnd - tXgkickStart).count());
+        s_currentRunXgkickNs += ns;
+        uint32_t prims = countPrimsInXgkickPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
+        probe_ae::onBaXgkick(m_xgkick.totalBytes / 16u, ns, prims);
+    }
     m_xgkick.active = false;
 }
 
@@ -1592,6 +1661,10 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
 {
     resetScheduler();
     m_state.pc = startPC & microAddressMask();
+    if (probe_ae::isEnabled())
+    {
+        probe_ae::onBaMscalStart(startPC, m_state.vi);
+    }
     m_state.ebit = false;
     m_state.haltAfterDelaySlot = false;
     m_state.stoppedByD = false;
@@ -1613,6 +1686,10 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
                             GS &gs, PS2Memory *memory,
                             uint32_t top, uint32_t itop, uint32_t maxCycles)
 {
+    if (probe_ae::isEnabled())
+    {
+        probe_ae::onBaMscntStart(m_state.vi);
+    }
     m_state.top = top;
     m_state.itop = itop;
     m_state.stoppedByD = false;
@@ -1629,6 +1706,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     m_activeGs = &gs;
     m_activeMemory = memory;
 
+    s_currentRunXgkickNs = 0;
+    const auto tRunStart = std::chrono::steady_clock::now();
+    uint32_t instrsThisRun = 0;
+
     const int previousRoundingMode = std::fegetround();
     const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
     const uint64_t budgetEnd = m_cycle + maxCycles;
@@ -1640,6 +1721,11 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             break;
 
         const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
+        instrsThisRun++;
+        if (probe_ae::isEnabled())
+        {
+            probe_ae::onBaInstruction(m_state.pc, decoded.upper, decoded.lower);
+        }
         if (decoded.upperUsage.reserved || decoded.lowerUsage.reserved)
         {
             reportReservedInstruction(decoded.upperUsage.reserved, decoded.upperUsage.reserved ? decoded.upper : decoded.lower);
@@ -1835,4 +1921,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     m_state.cycles = m_cycle;
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);
+
+    if (probe_ae::isEnabled())
+    {
+        const auto tRunEnd = std::chrono::steady_clock::now();
+        uint64_t totalRunNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tRunEnd - tRunStart).count());
+        uint64_t loopNs = (totalRunNs > s_currentRunXgkickNs) ? (totalRunNs - s_currentRunXgkickNs) : 0;
+        probe_ae::onBaRunEnd(instrsThisRun, loopNs);
+    }
 }

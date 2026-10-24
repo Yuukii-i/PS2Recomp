@@ -2559,10 +2559,22 @@ struct MpegCallLogger {
 
         const uint32_t picWidth = (width == 0u) ? kStubMovieWidth : width;
         const uint32_t picHeight = (height == 0u) ? kStubMovieHeight : height;
-        const uint32_t mbCols = (picWidth + 15u) / 16u;
-        const uint32_t mbRows = (picHeight + 15u) / 16u;
+        const uint32_t mbCols = picWidth / 16u;
+        uint32_t mbRows = (picHeight + 15u) / 16u;
+
+        static int s_raw8RowsEnv = -1;
+        if (s_raw8RowsEnv == -1)
+        {
+            const char *env = std::getenv("PS2X_RAW8_ROWS");
+            s_raw8RowsEnv = env ? std::atoi(env) : 0;
+        }
+        if (s_raw8RowsEnv > 0)
+        {
+            mbRows = static_cast<uint32_t>(s_raw8RowsEnv);
+        }
+
         const uint32_t totalMbs = mbCols * mbRows;
-        const uint32_t numMbs = std::min(mbCapacity, std::min(totalMbs, 640u));
+        const uint32_t numMbs = std::min(mbCapacity, totalMbs);
 
         const bool validFrame = haveFrame && (!frame.yPlane.empty() || !frame.rgba.empty()) && frame.width > 0 && frame.height > 0;
 
@@ -2677,6 +2689,7 @@ struct MpegCallLogger {
         if (probe_ae::isEnabled()) {
             probe_ae::onAyRaw8(n, dst, mbCapacity, getMemPtr(rdram, dst));
             probe_ae::onAzRaw8Call(validFrame, width, height, getMemPtr(rdram, dst));
+            probe_ae::onBaRows(validFrame, mbCols, mbRows, dst, rdram);
         }
 #endif
         if (n < 3u || (n % 100u == 0u))
@@ -2691,8 +2704,8 @@ struct MpegCallLogger {
                     cr0 = mb0[320];
                 }
             }
-            ::ps2xSafeLog("[mpeg:raw8] n=%u w=%d h=%d mbs=%u have=%d Y0=%02x Cb0=%02x Cr0=%02x\n",
-                          n, static_cast<int>(width), static_cast<int>(height), numMbs,
+            ::ps2xSafeLog("[mpeg:raw8] n=%u w=%d h=%d mbs=%u rows=%u have=%d Y0=%02x Cb0=%02x Cr0=%02x\n",
+                          n, static_cast<int>(width), static_cast<int>(height), numMbs, mbRows,
                           validFrame ? 1 : 0, y0, cb0, cr0);
         }
 

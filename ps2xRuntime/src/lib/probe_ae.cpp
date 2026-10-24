@@ -507,6 +507,7 @@ namespace probe_ae {
         dumpTaskAVInfo(sec, rdram);
         dumpAyTimeIfDue(sec);
         dumpAzRingIfDue(sec, rdram);
+        dumpBaVu1IfDue(sec);
     }
 
     void log24C5A0(R5900Context *ctx, const uint8_t *rdram) {
@@ -1658,6 +1659,176 @@ namespace probe_ae {
 
         std::printf("[probe] az ring head=%u tail=%u pops=%u frames_out=%u raw8_calls=%u raw8_have=%u\n",
                     head, tail, pops, framesOut, raw8Calls, raw8Have);
+        std::fflush(stdout);
+    }
+
+    // Task BA Probes
+    void onBaRows(bool haveFrame, uint32_t mbCols, uint32_t mbRows, uint32_t dst, const uint8_t *rdram) {
+        if (!isEnabled() || !haveFrame || !rdram || mbCols == 0 || mbRows == 0) return;
+        static std::atomic<uint32_t> s_baRowsCount{0};
+        uint32_t n = s_baRowsCount.fetch_add(1, std::memory_order_relaxed);
+        if (n < 3) {
+            std::string line = "[probe] ba rows frame=" + std::to_string(n) + " means=";
+            for (uint32_t r = 0; r < mbRows; ++r) {
+                uint64_t sumY = 0;
+                uint32_t count = 0;
+                for (uint32_t c = 0; c < mbCols; ++c) {
+                    uint32_t mbIdx = c * mbRows + r;
+                    const uint8_t *mb = rdram + ((dst + mbIdx * 384u) & PS2_RAM_MASK);
+                    for (uint32_t i = 0; i < 256u; ++i) {
+                        sumY += mb[i];
+                        count++;
+                    }
+                }
+                double mean = count > 0 ? (double)sumY / count : 0.0;
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%.1f%s", mean, (r + 1 < mbRows) ? " " : "");
+                line += buf;
+            }
+            std::printf("%s\n", line.c_str());
+            std::fflush(stdout);
+        }
+    }
+
+    static std::atomic<uint32_t> s_baRuns{0};
+    static std::atomic<uint64_t> s_baInstrs{0};
+    static std::atomic<uint32_t> s_baXgkick{0};
+    static std::atomic<uint32_t> s_baGifQw{0};
+    static std::atomic<uint32_t> s_baPrims{0};
+    static std::atomic<uint64_t> s_baLoopNs{0};
+    static std::atomic<uint64_t> s_baXgkickNs{0};
+    static std::atomic<uint32_t> s_baMaxInst{0};
+
+    static std::mutex s_baPcMutex;
+    static std::map<uint32_t, uint32_t> s_baPcHistogram;
+
+    // First 40 instructions of first movie kick
+    struct BaInstDump {
+        uint32_t pc;
+        uint32_t upper;
+        uint32_t lower;
+    };
+    static std::mutex s_baFirstDumpMutex;
+    static bool s_baRecordingFirstDump = false;
+    static bool s_baFirstDumpComplete = false;
+    static int32_t s_baFirstVi[16]{};
+    static std::vector<BaInstDump> s_baFirst40Inst;
+
+    void onBaMscalStart(uint32_t startPC, const int32_t *vi) {
+        if (!isEnabled()) return;
+        s_baRuns.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(s_baPcMutex);
+            s_baPcHistogram[startPC]++;
+        }
+
+        if (!s_baFirstDumpComplete && (val_state.load(std::memory_order_relaxed) == 9 || s_ayChainCountAfterF9 > 0)) {
+            std::lock_guard<std::mutex> lock(s_baFirstDumpMutex);
+            if (!s_baFirstDumpComplete && !s_baRecordingFirstDump) {
+                s_baRecordingFirstDump = true;
+                if (vi) {
+                    for (int i = 0; i < 16; ++i) s_baFirstVi[i] = vi[i];
+                }
+            }
+        }
+    }
+
+    void onBaMscntStart(const int32_t *vi) {
+        if (!isEnabled()) return;
+        s_baRuns.fetch_add(1, std::memory_order_relaxed);
+        (void)vi;
+    }
+
+    void onBaInstruction(uint32_t pc, uint32_t upper, uint32_t lower) {
+        if (!isEnabled()) return;
+        if (s_baRecordingFirstDump) {
+            std::lock_guard<std::mutex> lock(s_baFirstDumpMutex);
+            if (s_baRecordingFirstDump && s_baFirst40Inst.size() < 40) {
+                s_baFirst40Inst.push_back({pc, upper, lower});
+            }
+        }
+    }
+
+    void onBaXgkick(uint32_t qwords, uint64_t xgkickNs, uint32_t prims) {
+        if (!isEnabled()) return;
+        s_baXgkick.fetch_add(1, std::memory_order_relaxed);
+        s_baGifQw.fetch_add(qwords, std::memory_order_relaxed);
+        s_baPrims.fetch_add(prims, std::memory_order_relaxed);
+        s_baXgkickNs.fetch_add(xgkickNs, std::memory_order_relaxed);
+    }
+
+    void onBaRunEnd(uint32_t instructionsExecuted, uint64_t loopNs) {
+        if (!isEnabled()) return;
+        s_baInstrs.fetch_add(instructionsExecuted, std::memory_order_relaxed);
+        s_baLoopNs.fetch_add(loopNs, std::memory_order_relaxed);
+
+        uint32_t currentMax = s_baMaxInst.load(std::memory_order_relaxed);
+        while (instructionsExecuted > currentMax &&
+               !s_baMaxInst.compare_exchange_weak(currentMax, instructionsExecuted, std::memory_order_relaxed)) {}
+
+        if (s_baRecordingFirstDump) {
+            std::lock_guard<std::mutex> lock(s_baFirstDumpMutex);
+            if (s_baRecordingFirstDump && !s_baFirstDumpComplete) {
+                s_baRecordingFirstDump = false;
+                s_baFirstDumpComplete = true;
+
+                std::printf("[probe] ba first40 vi:");
+                for (int i = 0; i < 16; ++i) {
+                    std::printf(" VI%02d=0x%04X", i, static_cast<uint16_t>(s_baFirstVi[i]));
+                }
+                std::printf("\n");
+
+                for (size_t i = 0; i < s_baFirst40Inst.size(); ++i) {
+                    std::printf("[probe] ba first40 #%02u pc=0x%03X %08X:%08X\n",
+                                static_cast<unsigned>(i),
+                                s_baFirst40Inst[i].pc,
+                                s_baFirst40Inst[i].upper,
+                                s_baFirst40Inst[i].lower);
+                }
+                std::fflush(stdout);
+            }
+        }
+    }
+
+    void dumpBaVu1IfDue(uint32_t sec) {
+        if (!isEnabled()) return;
+        (void)sec;
+
+        uint32_t runs = s_baRuns.exchange(0, std::memory_order_relaxed);
+        uint64_t instrs = s_baInstrs.exchange(0, std::memory_order_relaxed);
+        uint32_t xgkick = s_baXgkick.exchange(0, std::memory_order_relaxed);
+        uint32_t gifQw = s_baGifQw.exchange(0, std::memory_order_relaxed);
+        uint32_t prims = s_baPrims.exchange(0, std::memory_order_relaxed);
+        uint64_t loopNs = s_baLoopNs.exchange(0, std::memory_order_relaxed);
+        uint64_t xgkickNs = s_baXgkickNs.exchange(0, std::memory_order_relaxed);
+        uint32_t maxInst = s_baMaxInst.exchange(0, std::memory_order_relaxed);
+
+        std::vector<std::pair<uint32_t, uint32_t>> topPcs;
+        {
+            std::lock_guard<std::mutex> lock(s_baPcMutex);
+            for (auto const & [pc, count] : s_baPcHistogram) {
+                topPcs.push_back({count, pc});
+            }
+            s_baPcHistogram.clear();
+        }
+        std::sort(topPcs.rbegin(), topPcs.rend());
+        std::string pcHist;
+        size_t nTop = std::min<size_t>(topPcs.size(), 8u);
+        for (size_t i = 0; i < nTop; ++i) {
+            if (!pcHist.empty()) pcHist += " ";
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "0x%03X=%u", topPcs[i].second, topPcs[i].first);
+            pcHist += buf;
+        }
+        if (pcHist.empty()) pcHist = "none";
+
+        double loopMs = loopNs / 1000000.0;
+        double xgkickMs = xgkickNs / 1000000.0;
+
+        std::printf("[probe] ba vu1 runs=%u instrs=%llu xgkick=%u gif_qw=%u prims=%u loop_ms=%.2f xgkick_ms=%.2f (loop_ns=%llu xgkick_ns=%llu) max_inst=%u top_pc=%s\n",
+                    runs, (unsigned long long)instrs, xgkick, gifQw, prims,
+                    loopMs, xgkickMs, (unsigned long long)loopNs, (unsigned long long)xgkickNs,
+                    maxInst, pcHist.c_str());
         std::fflush(stdout);
     }
 }
