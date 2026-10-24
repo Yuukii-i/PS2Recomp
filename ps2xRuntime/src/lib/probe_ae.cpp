@@ -471,6 +471,22 @@ namespace probe_ae {
                     ar_c3, ar_31a3e8, ar_ret_31a, ar_35f4c4, ar_ret_35f,
                     ar_15b750, ar_31a52c, ar_4e2730, ar_G, ar_4e914c);
         std::fflush(stdout);
+
+        static uint32_t s_stuckStreak = 0;
+        static uint32_t s_stuckReportCount = 0;
+
+        if (ar_4e914c == 0) {
+            s_stuckStreak++;
+        } else {
+            s_stuckStreak = 0;
+        }
+
+        if (s_stuckStreak >= 2) {
+            if (s_stuckReportCount < 3) {
+                s_stuckReportCount++;
+                dumpTaskASInfo(sec, s_stuckReportCount == 1);
+            }
+        }
     }
 
     void log24C5A0(R5900Context *ctx, const uint8_t *rdram) {
@@ -889,5 +905,67 @@ namespace probe_ae {
         if (!isEnabled()) return;
         std::printf("[probe] ar rmintc op=%s cause=%u ra=0x%08X\n", op, cause, ra);
         std::fflush(stdout);
+    }
+
+    // Task AS Probes
+    struct SemaProbeInfo {
+        uint32_t lastSignalRa = 0;
+        uint32_t lastWaitRa = 0;
+    };
+    static std::mutex s_semaMutex;
+    static std::unordered_map<int, SemaProbeInfo> s_semaInfo;
+
+    void recordSemaSignal(int semaId, uint32_t ra) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_semaMutex);
+        s_semaInfo[semaId].lastSignalRa = ra;
+    }
+
+    void recordSemaWait(int semaId, uint32_t ra) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_semaMutex);
+        s_semaInfo[semaId].lastWaitRa = ra;
+    }
+
+    void recordSemaPoll(int semaId, uint32_t ra) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_semaMutex);
+        s_semaInfo[semaId].lastWaitRa = ra;
+    }
+
+    void getSemaLastRas(int semaId, uint32_t *lastSignalRa, uint32_t *lastWaitRa) {
+        std::lock_guard<std::mutex> lock(s_semaMutex);
+        auto it = s_semaInfo.find(semaId);
+        if (it != s_semaInfo.end()) {
+            if (lastSignalRa) *lastSignalRa = it->second.lastSignalRa;
+            if (lastWaitRa) *lastWaitRa = it->second.lastWaitRa;
+        } else {
+            if (lastSignalRa) *lastSignalRa = 0;
+            if (lastWaitRa) *lastWaitRa = 0;
+        }
+    }
+
+    static std::mutex s_ringMutex;
+    static uint32_t s_mainRing[16] = {0};
+    static uint32_t s_mainRingIdx = 0;
+
+    void recordMainThreadDispatch(uint32_t pc) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_ringMutex);
+        s_mainRing[s_mainRingIdx++ % 16] = pc;
+    }
+
+    std::string getRecentMainDispatches() {
+        std::lock_guard<std::mutex> lock(s_ringMutex);
+        std::string s;
+        uint32_t count = std::min(s_mainRingIdx, 12u);
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t idx = (s_mainRingIdx >= 12) ? (s_mainRingIdx - 12 + i) : i;
+            uint32_t pc = s_mainRing[idx % 16];
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%s0x%08X", (i > 0 ? " " : ""), pc);
+            s += buf;
+        }
+        return s;
     }
 }

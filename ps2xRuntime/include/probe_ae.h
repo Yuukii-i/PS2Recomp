@@ -555,4 +555,13 @@ namespace probe_ae {
     void logCause3Dispatch(const std::vector<uint32_t> &handlers);
     void logIntcHandlerReturn(uint32_t addr, uint32_t ret);
     void logRmIntc(const char *op, uint32_t cause, uint32_t ra);
+
+    // Task AS Probes
+    void recordSemaSignal(int semaId, uint32_t ra);
+    void recordSemaWait(int semaId, uint32_t ra);
+    void recordSemaPoll(int semaId, uint32_t ra);
+    void getSemaLastRas(int semaId, uint32_t *lastSignalRa, uint32_t *lastWaitRa);
+    void recordMainThreadDispatch(uint32_t pc);
+    std::string getRecentMainDispatches();
+    void dumpTaskASInfo(uint32_t sec, bool isFirstStuckSec);
 }

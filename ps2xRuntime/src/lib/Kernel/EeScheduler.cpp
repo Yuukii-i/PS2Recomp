@@ -148,18 +148,23 @@ std::string ps2xGetIntcSummary()
         return s;
     }
 
+static EeScheduler *s_activeScheduler = nullptr;
+
 EeScheduler::EeScheduler(PS2Runtime &runtime)
     : m_runtime(runtime)
 {
+    s_activeScheduler = this;
 }
 
 EeScheduler::~EeScheduler()
 {
+    if (s_activeScheduler == this) s_activeScheduler = nullptr;
     requestStop();
 }
 
 void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
 {
+    s_activeScheduler = this;
     m_executorThread = std::this_thread::get_id();
     m_rdram = rdram;
     m_readyQueues = {};
@@ -416,6 +421,10 @@ void EeScheduler::run()
             const uint32_t prevExecutingFunction = g_currentExecutingFunction;
             g_currentExecutingFunction = entryPc;
             s_lastDispatchedPc[s_lastDispatchIdx++ % 32] = entryPc;
+            if (running && running->id == 1 && probe_ae::isEnabled())
+            {
+                probe_ae::recordMainThreadDispatch(entryPc);
+            }
             function(m_rdram, &context, &m_runtime);
             if (m_insideInterrupt && probe_ae::isEnabled())
             {
@@ -2581,4 +2590,93 @@ void dumpEeDiagnostics(const EeScheduler *scheduler, uint32_t stuckPc)
     }
     std::fprintf(stderr, "===============================================\n\n");
     std::fflush(stderr);
+}
+
+namespace probe_ae {
+    void dumpTaskASInfo(uint32_t sec, bool isFirstStuckSec) {
+        if (!isEnabled() || !s_activeScheduler) return;
+
+        EeKernelSnapshot snap = s_activeScheduler->snapshot();
+
+        // 1. Thread state dump (cap 12 threads)
+        uint32_t threadLinesPrinted = 0;
+        for (const auto &thSnap : snap.threads) {
+            if (threadLinesPrinted >= 12) break;
+            const GuestThread *th = s_activeScheduler->thread(thSnap.id);
+
+            const char *stateStr = "unknown";
+            switch (thSnap.status) {
+                case EeThreadStatus::Running: stateStr = "run"; break;
+                case EeThreadStatus::Ready: stateStr = "ready"; break;
+                case EeThreadStatus::Waiting: stateStr = "wait"; break;
+                case EeThreadStatus::Suspended: stateStr = "suspend"; break;
+                case EeThreadStatus::WaitingSuspended: stateStr = "waitsuspend"; break;
+                case EeThreadStatus::Dormant: stateStr = "dormant"; break;
+            }
+
+            const char *waitTypeStr = "none";
+            int waitVal = 0;
+            switch (thSnap.waitReason) {
+                case EeWaitReason::None: waitTypeStr = "none"; break;
+                case EeWaitReason::Sleep: waitTypeStr = "sleep"; break;
+                case EeWaitReason::Semaphore: {
+                    waitTypeStr = "sema";
+                    const EeSemaphore *sem = s_activeScheduler->semaphore(thSnap.waitId);
+                    if (sem) waitVal = sem->count;
+                    break;
+                }
+                case EeWaitReason::EventFlag: {
+                    waitTypeStr = "event";
+                    const EeEventFlag *evf = s_activeScheduler->eventFlag(thSnap.waitId);
+                    if (evf) waitVal = static_cast<int>(evf->bits);
+                    break;
+                }
+                case EeWaitReason::VSync: waitTypeStr = "vsync"; break;
+                case EeWaitReason::External: waitTypeStr = "ext"; break;
+                case EeWaitReason::Mpeg: waitTypeStr = "mpeg"; break;
+            }
+
+            uint32_t a0 = 0, v0 = 0;
+            if (th) {
+                const R5900Context &ctx = th->activeContext();
+                a0 = getRegU32(&ctx, 4);
+                v0 = getRegU32(&ctx, 2);
+            }
+
+            std::printf("[probe] as stuck t=%u thread=%d state=%s waitType=%s waitId=%d waitVal=%d prio=%d entry=0x%08X pc=0x%08X ra=0x%08X sp=0x%08X a0=0x%08X v0=0x%08X\n",
+                        sec, thSnap.id, stateStr, waitTypeStr, thSnap.waitId, waitVal, thSnap.currentPriority, thSnap.entry, thSnap.pc, thSnap.ra, thSnap.sp, a0, v0);
+            threadLinesPrinted++;
+        }
+
+        // 2. Main thread function ring
+        std::string ringStr = getRecentMainDispatches();
+        std::printf("[probe] as ring main=[%s]\n", ringStr.c_str());
+
+        // 3. One-time semaphore dump if first stuck sec (cap 10 semas)
+        if (isFirstStuckSec) {
+            uint32_t semLinesPrinted = 0;
+            for (const auto &semSnap : snap.semaphores) {
+                if (semLinesPrinted >= 10) break;
+                if (semSnap.waiters == 0) continue;
+                const EeSemaphore *sem = s_activeScheduler->semaphore(semSnap.id);
+
+                std::string waitersStr;
+                if (sem) {
+                    for (size_t i = 0; i < sem->waiters.size(); ++i) {
+                        char wb[16];
+                        std::snprintf(wb, sizeof(wb), "%s%d", (i > 0 ? "," : ""), sem->waiters[i]);
+                        waitersStr += wb;
+                    }
+                }
+
+                uint32_t sigRa = 0, waitRa = 0;
+                getSemaLastRas(semSnap.id, &sigRa, &waitRa);
+
+                std::printf("[probe] as sema id=%d count=%d max=%d waiters=[%s] lastSignalRa=0x%08X lastWaitRa=0x%08X\n",
+                            semSnap.id, semSnap.count, semSnap.maxCount, waitersStr.c_str(), sigRa, waitRa);
+                semLinesPrinted++;
+            }
+        }
+        std::fflush(stdout);
+    }
 }

@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "Sync.h"
 #include "runtime/ee_scheduler.h"
+#include "probe_ae.h"
 
 namespace ps2_syscalls
 {
@@ -35,6 +36,8 @@ namespace ps2_syscalls
                                  PS2Runtime *runtime,
                                  bool interruptSafe)
         {
+            int semaId = static_cast<int>(getRegU32(ctx, 4));
+            probe_ae::recordSemaSignal(semaId, getRegU32(ctx, 31));
             EeScheduler &ee = scheduler(rdram, ctx, runtime);
             const int result = ee.signalSemaphore(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
             setReturnS32(ctx, result);
@@ -108,13 +111,17 @@ namespace ps2_syscalls
 
     void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        scheduler(rdram, ctx, runtime).waitSemaphore(static_cast<int>(getRegU32(ctx, 4)));
+        int semaId = static_cast<int>(getRegU32(ctx, 4));
+        probe_ae::recordSemaWait(semaId, getRegU32(ctx, 31));
+        scheduler(rdram, ctx, runtime).waitSemaphore(semaId);
     }
 
     void PollSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        int semaId = static_cast<int>(getRegU32(ctx, 4));
+        probe_ae::recordSemaPoll(semaId, getRegU32(ctx, 31));
         setReturnS32(ctx,
-                     scheduler(rdram, ctx, runtime).pollSemaphore(static_cast<int>(getRegU32(ctx, 4))));
+                     scheduler(rdram, ctx, runtime).pollSemaphore(semaId));
     }
 
     void iPollSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
