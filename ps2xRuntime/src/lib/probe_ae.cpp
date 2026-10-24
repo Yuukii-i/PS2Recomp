@@ -1895,6 +1895,11 @@ namespace probe_ae {
     static uint32_t s_bbMscalCountAfterF9 = 0;
     static int s_bbDumpedRunsCount = 0;
     static int s_bbActiveRecordingRunIndex = -1;
+    static int s_brightDumpedCount = 0;
+    static uint32_t s_lastBrightMscal = 0;
+    static bool s_vu1CodeDumped = false;
+    static bool s_bbActiveRecordingRun = false;
+    static std::vector<BbUnpackInfo> s_bbPrevMscalUnpacks;
     static uint32_t s_bbLastRaw8Dst = 0;
     static bool s_bbDumpedFrame0Ycc = false;
     static BbVif1Regs s_bbLastVif1Regs{};
@@ -2024,9 +2029,9 @@ namespace probe_ae {
             }
         }
 
-        const bool gate = f9 && (startPC == 0x048) && (s_bbDumpedRunsCount < 4);
+        const bool gate = f9 && (startPC == 0x048) && (s_brightDumpedCount < 8);
         if (gate) {
-            s_bbActiveRecordingRunIndex = s_bbDumpedRunsCount;
+            s_bbActiveRecordingRun = true;
 
             if (vuData && dataSize >= 16384) {
                 std::memcpy(s_bbRunDataStart.data(), vuData, 16384);
@@ -2041,7 +2046,7 @@ namespace probe_ae {
             s_bbRunP = p;
             s_bbRunI = i;
 
-            if (s_bbActiveRecordingRunIndex == 0 && vuCode && codeSize >= 16384) {
+            if (!s_vu1CodeDumped && vuCode && codeSize >= 16384) {
                 std::memcpy(s_bbVuCode.data(), vuCode, 16384);
             }
 
@@ -2059,14 +2064,14 @@ namespace probe_ae {
 
             s_bbRunXgkickPackets.clear();
         } else {
-            s_bbActiveRecordingRunIndex = -1;
+            s_bbActiveRecordingRun = false;
         }
     }
 
     void onBbXgkickPacket(const uint8_t *data, uint32_t byteCount) {
         if (!isEnabled()) return;
         std::lock_guard<std::mutex> lock(s_bbMutex);
-        if (s_bbActiveRecordingRunIndex >= 0 && data && byteCount > 0) {
+        if (s_bbActiveRecordingRun && data && byteCount > 0) {
             s_bbRunXgkickPackets.emplace_back(data, data + byteCount);
         }
     }
@@ -2074,135 +2079,229 @@ namespace probe_ae {
     void onBbRunEnd(const uint8_t *vuData, uint32_t dataSize) {
         if (!isEnabled()) return;
         std::lock_guard<std::mutex> lock(s_bbMutex);
+
+        const bool wasRecording = s_bbActiveRecordingRun;
+        s_bbActiveRecordingRun = false;
+
+        s_bbPrevMscalUnpacks = s_bbRunUnpacks;
         s_bbUnpacksSinceLastMscal.clear();
 
-        if (s_bbActiveRecordingRunIndex < 0) return;
+        if (!wasRecording) return;
 
-        int k = s_bbActiveRecordingRunIndex;
-        s_bbActiveRecordingRunIndex = -1;
-        s_bbDumpedRunsCount++;
-
-        std::vector<uint8_t> runDataEnd(16384, 0);
-        if (vuData && dataSize >= 16384) {
-            std::memcpy(runDataEnd.data(), vuData, 16384);
-        }
-
-        std::error_code ec;
-        std::filesystem::create_directories("logs/vu1dump", ec);
-
-        if (k == 0) {
-            std::ofstream codeOut("logs/vu1dump/vu1code.bin", std::ios::binary);
-            if (codeOut) {
-                codeOut.write(reinterpret_cast<const char*>(s_bbVuCode.data()), 16384);
-                codeOut.flush();
-                codeOut.close();
+        // Compute max(R,G,B) over the 256 emitted points and find (x0, y0)
+        uint8_t maxColor = 0;
+        int x0 = -1, y0 = -1;
+        for (const auto &pkt : s_bbRunXgkickPackets) {
+            if (pkt.size() < 48) continue;
+            size_t numVerts = (pkt.size() - 16) / 32;
+            for (size_t v = 0; v < numVerts; ++v) {
+                size_t rgbaOff = 16 + v * 32;
+                size_t xyzOff = rgbaOff + 16;
+                uint8_t r = pkt[rgbaOff + 0];
+                uint8_t g = pkt[rgbaOff + 1];
+                uint8_t b = pkt[rgbaOff + 2];
+                if (r > maxColor) maxColor = r;
+                if (g > maxColor) maxColor = g;
+                if (b > maxColor) maxColor = b;
+                if (x0 < 0 && xyzOff + 4 <= pkt.size()) {
+                    uint16_t x_raw = static_cast<uint16_t>(pkt[xyzOff]) | (static_cast<uint16_t>(pkt[xyzOff + 1]) << 8);
+                    uint16_t y_raw = static_cast<uint16_t>(pkt[xyzOff + 2]) | (static_cast<uint16_t>(pkt[xyzOff + 3]) << 8);
+                    x0 = static_cast<int>(x_raw >> 4);
+                    y0 = static_cast<int>(y_raw >> 4);
+                }
             }
         }
 
-        size_t binTotalBytes = 0;
-        char binPath[64];
-        std::snprintf(binPath, sizeof(binPath), "logs/vu1dump/run%d.bin", k);
-        {
-            std::ofstream binOut(binPath, std::ios::binary);
-            if (binOut) {
-                binOut.write(reinterpret_cast<const char*>(s_bbRunDataStart.data()), 16384);
-                binOut.write(reinterpret_cast<const char*>(runDataEnd.data()), 16384);
-                binOut.write(reinterpret_cast<const char*>(s_bbRunVf.data()), 512);
-                binOut.write(reinterpret_cast<const char*>(s_bbRunVi.data()), 64);
-                binOut.write(reinterpret_cast<const char*>(s_bbRunAcc.data()), 16);
-                binOut.write(reinterpret_cast<const char*>(&s_bbRunQ), 4);
-                binOut.write(reinterpret_cast<const char*>(&s_bbRunP), 4);
-                binOut.write(reinterpret_cast<const char*>(&s_bbRunI), 4);
-                binTotalBytes = 16384 + 16384 + 512 + 64 + 16 + 4 + 4 + 4;
-                for (const auto &pkt : s_bbRunXgkickPackets) {
-                    uint32_t count = static_cast<uint32_t>(pkt.size());
-                    binOut.write(reinterpret_cast<const char*>(&count), sizeof(uint32_t));
-                    binTotalBytes += sizeof(uint32_t);
-                    if (count > 0) {
-                        binOut.write(reinterpret_cast<const char*>(pkt.data()), count);
-                        binTotalBytes += count;
+        const bool canDump = (s_brightDumpedCount < 8) &&
+                             (s_brightDumpedCount == 0 || s_bbRunMscalCount >= s_lastBrightMscal + 25);
+
+        if (maxColor >= 64 && canDump) {
+            int k = s_brightDumpedCount++;
+            s_lastBrightMscal = s_bbRunMscalCount;
+
+            std::printf("[probe] bb bright k=%d mscal#=%u max=%u x0=%d y0=%d\n",
+                        k, s_bbRunMscalCount, (unsigned)maxColor, x0, y0);
+            std::fflush(stdout);
+
+            std::vector<uint8_t> runDataEnd(16384, 0);
+            if (vuData && dataSize >= 16384) {
+                std::memcpy(runDataEnd.data(), vuData, 16384);
+            }
+
+            std::error_code ec;
+            std::filesystem::create_directories("logs/vu1dump", ec);
+
+            if (!s_vu1CodeDumped) {
+                std::ofstream codeOut("logs/vu1dump/vu1code.bin", std::ios::binary);
+                if (codeOut) {
+                    codeOut.write(reinterpret_cast<const char*>(s_bbVuCode.data()), 16384);
+                    codeOut.flush();
+                    codeOut.close();
+                    s_vu1CodeDumped = true;
+                }
+            }
+
+            size_t binTotalBytes = 0;
+            char binPath[64];
+            std::snprintf(binPath, sizeof(binPath), "logs/vu1dump/bright%d.bin", k);
+            {
+                std::ofstream binOut(binPath, std::ios::binary);
+                if (binOut) {
+                    binOut.write(reinterpret_cast<const char*>(s_bbRunDataStart.data()), 16384);
+                    binOut.write(reinterpret_cast<const char*>(runDataEnd.data()), 16384);
+                    binOut.write(reinterpret_cast<const char*>(s_bbRunVf.data()), 512);
+                    binOut.write(reinterpret_cast<const char*>(s_bbRunVi.data()), 64);
+                    binOut.write(reinterpret_cast<const char*>(s_bbRunAcc.data()), 16);
+                    binOut.write(reinterpret_cast<const char*>(&s_bbRunQ), 4);
+                    binOut.write(reinterpret_cast<const char*>(&s_bbRunP), 4);
+                    binOut.write(reinterpret_cast<const char*>(&s_bbRunI), 4);
+                    binTotalBytes = 16384 + 16384 + 512 + 64 + 16 + 4 + 4 + 4;
+                    for (const auto &pkt : s_bbRunXgkickPackets) {
+                        uint32_t count = static_cast<uint32_t>(pkt.size());
+                        binOut.write(reinterpret_cast<const char*>(&count), sizeof(uint32_t));
+                        binTotalBytes += sizeof(uint32_t);
+                        if (count > 0) {
+                            binOut.write(reinterpret_cast<const char*>(pkt.data()), count);
+                            binTotalBytes += count;
+                        }
                     }
+                    binOut.flush();
+                    binOut.close();
                 }
-                binOut.flush();
-                binOut.close();
             }
-        }
 
-        char txtPath[64];
-        std::snprintf(txtPath, sizeof(txtPath), "logs/vu1dump/run%d.txt", k);
-        {
-            std::ofstream txtOut(txtPath);
-            if (txtOut) {
-                txtOut << "=== Run " << k << " Header ===\n";
-                txtOut << "MSCAL count since F state 9: " << s_bbRunMscalCount << "\n";
-                txtOut << "Kick index: " << s_bbRunKickIndex << "\n";
-                char buf[128];
-                std::snprintf(buf, sizeof(buf), "0x%08X", s_bbRunTadr);
-                txtOut << "tadr: " << buf << "\n";
-                txtOut << "VIF1 regs:\n";
-                std::snprintf(buf, sizeof(buf), "  ITOP=0x%03X TOP=0x%03X TOPS=0x%03X BASE=0x%03X OFST=0x%03X CL=%u WL=%u mode=%u\n",
-                              s_bbRunVif1.itop, s_bbRunVif1.top, s_bbRunVif1.tops,
-                              s_bbRunVif1.base, s_bbRunVif1.ofst,
-                              s_bbRunVif1.cl, s_bbRunVif1.wl, s_bbRunVif1.mode);
-                txtOut << buf;
-
-                std::snprintf(buf, sizeof(buf), "First RAW8 destination buffer address (last a1): 0x%08X\n", s_bbRunRaw8Dst);
-                txtOut << buf;
-
-                txtOut << "UNPACKs since previous MSCAL (count=" << s_bbRunUnpacks.size() << "):\n";
-                for (const auto &up : s_bbRunUnpacks) {
-                    std::snprintf(buf, sizeof(buf), "  src=0x%08X len=%u vuaddr=0x%03X fmt=%u num=%u\n",
-                                  up.srcGuest, up.len, up.vuAddr, (unsigned)up.fmt, (unsigned)up.num);
+            char txtPath[64];
+            std::snprintf(txtPath, sizeof(txtPath), "logs/vu1dump/bright%d.txt", k);
+            {
+                std::ofstream txtOut(txtPath);
+                if (txtOut) {
+                    txtOut << "=== Bright Run " << k << " Header ===\n";
+                    txtOut << "MSCAL count since F state 9: " << s_bbRunMscalCount << "\n";
+                    txtOut << "Kick index: " << s_bbRunKickIndex << "\n";
+                    char buf[128];
+                    std::snprintf(buf, sizeof(buf), "0x%08X", s_bbRunTadr);
+                    txtOut << "tadr: " << buf << "\n";
+                    txtOut << "VIF1 regs:\n";
+                    std::snprintf(buf, sizeof(buf), "  ITOP=0x%03X TOP=0x%03X TOPS=0x%03X BASE=0x%03X OFST=0x%03X CL=%u WL=%u mode=%u\n",
+                                  s_bbRunVif1.itop, s_bbRunVif1.top, s_bbRunVif1.tops,
+                                  s_bbRunVif1.base, s_bbRunVif1.ofst,
+                                  s_bbRunVif1.cl, s_bbRunVif1.wl, s_bbRunVif1.mode);
                     txtOut << buf;
+
+                    std::snprintf(buf, sizeof(buf), "First RAW8 destination buffer address (last a1): 0x%08X\n", s_bbRunRaw8Dst);
+                    txtOut << buf;
+
+                    int mbCol = (x0 >= 0) ? (x0 / 16) : -1;
+                    int mbRow = (y0 >= 0) ? (y0 / 16) : -1;
+                    txtOut << "MB: col=" << mbCol << " row=" << mbRow << " (x0=" << x0 << " y0=" << y0 << ") maxRGB=" << (unsigned)maxColor << "\n";
+
+                    auto findYCbCr = [](const std::vector<BbUnpackInfo> &list, uint32_t &y, uint32_t &cb, uint32_t &cr) {
+                        y = 0; cb = 0; cr = 0;
+                        for (const auto &up : list) {
+                            if (up.len == 256 && y == 0) y = up.srcGuest;
+                            else if (up.len == 64 && cb == 0) cb = up.srcGuest;
+                            else if (up.len == 64 && cr == 0) cr = up.srcGuest;
+                        }
+                    };
+
+                    uint32_t curY = 0, curCb = 0, curCr = 0;
+                    findYCbCr(s_bbRunUnpacks, curY, curCb, curCr);
+
+                    uint32_t prevY = 0, prevCb = 0, prevCr = 0;
+                    findYCbCr(s_bbPrevMscalUnpacks, prevY, prevCb, prevCr);
+
+                    auto hexDump = [&](uint32_t guestAddr, size_t count) -> std::string {
+                        std::string h;
+                        if (!s_cachedRdram || (guestAddr & PS2_RAM_MASK) + count > PS2_RAM_SIZE || guestAddr == 0) {
+                            return "<invalid or unmapped>";
+                        }
+                        const uint8_t *ptr = s_cachedRdram + (guestAddr & PS2_RAM_MASK);
+                        char hbuf[4];
+                        for (size_t i = 0; i < count; ++i) {
+                            std::snprintf(hbuf, sizeof(hbuf), "%02x", ptr[i]);
+                            h += hbuf;
+                        }
+                        return h;
+                    };
+
+                    txtOut << "Consumed YCbCr MB (current MSCAL UNPACKs):\n";
+                    std::snprintf(buf, sizeof(buf), "  srcY=0x%08X (256 B), srcCb=0x%08X (64 B), srcCr=0x%08X (64 B)\n", curY, curCb, curCr);
+                    txtOut << buf;
+                    txtOut << "Raw Y (256 B hex):\n  " << hexDump(curY, 256) << "\n";
+                    txtOut << "Raw Cb (64 B hex):\n  " << hexDump(curCb, 64) << "\n";
+                    txtOut << "Raw Cr (64 B hex):\n  " << hexDump(curCr, 64) << "\n";
+
+                    if (prevY != 0 || prevCb != 0 || prevCr != 0) {
+                        txtOut << "Consumed YCbCr MB (previous MSCAL UNPACKs, if double-buffered):\n";
+                        std::snprintf(buf, sizeof(buf), "  srcY=0x%08X (256 B), srcCb=0x%08X (64 B), srcCr=0x%08X (64 B)\n", prevY, prevCb, prevCr);
+                        txtOut << buf;
+                        txtOut << "Raw Y (256 B hex):\n  " << hexDump(prevY, 256) << "\n";
+                        txtOut << "Raw Cb (64 B hex):\n  " << hexDump(prevCb, 64) << "\n";
+                        txtOut << "Raw Cr (64 B hex):\n  " << hexDump(prevCr, 64) << "\n";
+                    }
+
+                    txtOut << "UNPACKs for this MSCAL (count=" << s_bbRunUnpacks.size() << "):\n";
+                    for (const auto &up : s_bbRunUnpacks) {
+                        std::snprintf(buf, sizeof(buf), "  src=0x%08X len=%u vuaddr=0x%03X fmt=%u num=%u\n",
+                                      up.srcGuest, up.len, up.vuAddr, (unsigned)up.fmt, (unsigned)up.num);
+                        txtOut << buf;
+                    }
+
+                    txtOut << "UNPACKs for previous MSCAL (count=" << s_bbPrevMscalUnpacks.size() << "):\n";
+                    for (const auto &up : s_bbPrevMscalUnpacks) {
+                        std::snprintf(buf, sizeof(buf), "  src=0x%08X len=%u vuaddr=0x%03X fmt=%u num=%u\n",
+                                      up.srcGuest, up.len, up.vuAddr, (unsigned)up.fmt, (unsigned)up.num);
+                        txtOut << buf;
+                    }
+
+                    txtOut << "GS Registers:\n";
+                    auto printGs = [&](const char *name, uint64_t val) {
+                        char gbuf[128];
+                        std::snprintf(gbuf, sizeof(gbuf), "  %-12s: 0x%016llX\n", name, (unsigned long long)val);
+                        txtOut << gbuf;
+                    };
+                    auto printGsPsm = [&](const char *name, uint64_t val) {
+                        char gbuf[128];
+                        uint32_t psm = static_cast<uint32_t>((val >> 24) & 0x3F);
+                        std::snprintf(gbuf, sizeof(gbuf), "  %-12s: 0x%016llX (PSM=0x%02X)\n", name, (unsigned long long)val, psm);
+                        txtOut << gbuf;
+                    };
+
+                    printGsPsm("FRAME_1", s_bbRunGsRegs[0x4C]);
+                    printGsPsm("FRAME_2", s_bbRunGsRegs[0x4D]);
+                    printGs("ZBUF_1", s_bbRunGsRegs[0x4E]);
+                    printGs("ZBUF_2", s_bbRunGsRegs[0x4F]);
+                    printGs("XYOFFSET_1", s_bbRunGsRegs[0x18]);
+                    printGs("XYOFFSET_2", s_bbRunGsRegs[0x19]);
+                    printGs("SCISSOR_1", s_bbRunGsRegs[0x40]);
+                    printGs("SCISSOR_2", s_bbRunGsRegs[0x41]);
+                    printGs("TEST_1", s_bbRunGsRegs[0x47]);
+                    printGs("TEST_2", s_bbRunGsRegs[0x48]);
+                    printGs("ALPHA_1", s_bbRunGsRegs[0x42]);
+                    printGs("ALPHA_2", s_bbRunGsRegs[0x43]);
+                    printGs("PRIM", s_bbRunGsRegs[0x00]);
+                    printGs("PRMODECONT", s_bbRunGsRegs[0x1A]);
+                    printGs("COLCLAMP", s_bbRunGsRegs[0x46]);
+                    printGs("DTHE", s_bbRunGsRegs[0x45]);
+                    printGs("PABE", s_bbRunGsRegs[0x49]);
+                    printGs("FBA_1", s_bbRunGsRegs[0x4A]);
+                    printGs("FBA_2", s_bbRunGsRegs[0x4B]);
+                    printGs("TEX0_1", s_bbRunGsRegs[0x06]);
+                    printGs("TEX0_2", s_bbRunGsRegs[0x07]);
+                    printGs("TEXA", s_bbRunGsRegs[0x3B]);
+                    printGs("FOGCOL", s_bbRunGsRegs[0x3D]);
+                    printGs("DISPFB1", s_bbRunDispfb1);
+                    printGs("DISPLAY1", s_bbRunDisplay1);
+                    printGs("DISPFB2", s_bbRunDispfb2);
+                    printGs("DISPLAY2", s_bbRunDisplay2);
+                    txtOut.flush();
+                    txtOut.close();
                 }
-
-                txtOut << "GS Registers:\n";
-                auto printGs = [&](const char *name, uint64_t val) {
-                    char gbuf[128];
-                    std::snprintf(gbuf, sizeof(gbuf), "  %-12s: 0x%016llX\n", name, (unsigned long long)val);
-                    txtOut << gbuf;
-                };
-                auto printGsPsm = [&](const char *name, uint64_t val) {
-                    char gbuf[128];
-                    uint32_t psm = static_cast<uint32_t>((val >> 24) & 0x3F);
-                    std::snprintf(gbuf, sizeof(gbuf), "  %-12s: 0x%016llX (PSM=0x%02X)\n", name, (unsigned long long)val, psm);
-                    txtOut << gbuf;
-                };
-
-                printGsPsm("FRAME_1", s_bbRunGsRegs[0x4C]);
-                printGsPsm("FRAME_2", s_bbRunGsRegs[0x4D]);
-                printGs("ZBUF_1", s_bbRunGsRegs[0x4E]);
-                printGs("ZBUF_2", s_bbRunGsRegs[0x4F]);
-                printGs("XYOFFSET_1", s_bbRunGsRegs[0x18]);
-                printGs("XYOFFSET_2", s_bbRunGsRegs[0x19]);
-                printGs("SCISSOR_1", s_bbRunGsRegs[0x40]);
-                printGs("SCISSOR_2", s_bbRunGsRegs[0x41]);
-                printGs("TEST_1", s_bbRunGsRegs[0x47]);
-                printGs("TEST_2", s_bbRunGsRegs[0x48]);
-                printGs("ALPHA_1", s_bbRunGsRegs[0x42]);
-                printGs("ALPHA_2", s_bbRunGsRegs[0x43]);
-                printGs("PRIM", s_bbRunGsRegs[0x00]);
-                printGs("PRMODECONT", s_bbRunGsRegs[0x1A]);
-                printGs("COLCLAMP", s_bbRunGsRegs[0x46]);
-                printGs("DTHE", s_bbRunGsRegs[0x45]);
-                printGs("PABE", s_bbRunGsRegs[0x49]);
-                printGs("FBA_1", s_bbRunGsRegs[0x4A]);
-                printGs("FBA_2", s_bbRunGsRegs[0x4B]);
-                printGs("TEX0_1", s_bbRunGsRegs[0x06]);
-                printGs("TEX0_2", s_bbRunGsRegs[0x07]);
-                printGs("TEXA", s_bbRunGsRegs[0x3B]);
-                printGs("FOGCOL", s_bbRunGsRegs[0x3D]);
-                printGs("DISPFB1", s_bbRunDispfb1);
-                printGs("DISPLAY1", s_bbRunDisplay1);
-                printGs("DISPFB2", s_bbRunDispfb2);
-                printGs("DISPLAY2", s_bbRunDisplay2);
-                txtOut.flush();
-                txtOut.close();
             }
-        }
 
-        std::printf("[probe] bb dumped run%d bytes=%zu\n", k, binTotalBytes);
-        std::fflush(stdout);
+            std::printf("[probe] bb dumped bright%d bytes=%zu\n", k, binTotalBytes);
+            std::fflush(stdout);
+        }
     }
 
     void onGsWriteRegister(uint8_t regAddr, uint64_t value) {
