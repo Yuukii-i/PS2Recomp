@@ -38,6 +38,9 @@ namespace ps2_stubs
             int repeatPict = 0;
             int64_t pts90k = -1;
             std::vector<uint8_t> rgba;
+            std::vector<uint8_t> yPlane;
+            std::vector<uint8_t> cbPlane;
+            std::vector<uint8_t> crPlane;
         };
 
 #if PS2X_HAS_FFMPEG
@@ -277,6 +280,7 @@ namespace ps2_stubs
                 // movies finish early once the EE is fast enough to drain them.
                 m_codecCtx->skip_frame = AVDISCARD_DEFAULT;
                 m_codecCtx->err_recognition = 0;
+                m_codecCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;
                 const int ret = avcodec_open2(m_codecCtx, codec, nullptr);
                 if (ret < 0)
                 {
@@ -416,6 +420,32 @@ namespace ps2_stubs
                 decoded.pts90k = m_frame->best_effort_timestamp != AV_NOPTS_VALUE
                                      ? m_frame->best_effort_timestamp
                                      : -1;
+
+                if (srcFormat == AV_PIX_FMT_YUV420P || srcFormat == AV_PIX_FMT_YUVJ420P)
+                {
+                    decoded.yPlane.resize(static_cast<size_t>(width) * height);
+                    for (int y = 0; y < height; ++y)
+                    {
+                        std::memcpy(decoded.yPlane.data() + y * width,
+                                    m_frame->data[0] + y * m_frame->linesize[0],
+                                    width);
+                    }
+
+                    const int chromaW = width / 2;
+                    const int chromaH = height / 2;
+                    decoded.cbPlane.resize(static_cast<size_t>(chromaW) * chromaH);
+                    decoded.crPlane.resize(static_cast<size_t>(chromaW) * chromaH);
+                    for (int y = 0; y < chromaH; ++y)
+                    {
+                        std::memcpy(decoded.cbPlane.data() + y * chromaW,
+                                    m_frame->data[1] + y * m_frame->linesize[1],
+                                    chromaW);
+                        std::memcpy(decoded.crPlane.data() + y * chromaW,
+                                    m_frame->data[2] + y * m_frame->linesize[2],
+                                    chromaW);
+                    }
+                }
+
                 decoded.rgba.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
 
                 uint8_t *dstData[4] = {decoded.rgba.data(), nullptr, nullptr, nullptr};
@@ -1991,6 +2021,13 @@ struct MpegCallLogger {
         setReturnU32(ctx, 1u);
     }
 
+    static uint32_t mpegGuestRead32(uint8_t *rdram, uint32_t addr)
+    {
+        if (uint8_t *p = getMemPtr(rdram, addr))
+            return *reinterpret_cast<uint32_t *>(p);
+        return 0u;
+    }
+
     static void mpegGuestWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
         if (uint8_t *p = getMemPtr(rdram, addr))
@@ -2438,50 +2475,53 @@ struct MpegCallLogger {
         {
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-            if (playback.decodedFrames.empty() &&
-                !g_mpeg_stub_state.currentCdStreamEofSeen &&
-                !playback.streamEnded &&
-                !playback.decoderFailed)
+
+            // Task AZ: Pop chunks from guest IPU ring (what Nodata callback 0x319E0C does)
+            int popsThisCall = 0;
+            while (playback.decodedFrames.empty() && popsThisCall < 4)
             {
-                playback.streamEnded = true;
+                uint32_t curTail = mpegGuestRead32(rdram, 0x696E88u) & 31u;
+                uint32_t curHead = mpegGuestRead32(rdram, 0x696E8Cu) & 31u;
+                if (curHead == curTail)
+                {
+                    break;
+                }
+
+                uint32_t entryAddr = mpegGuestRead32(rdram, 0x696D88u + curHead * 8u + 0u);
+                uint32_t entrySize = mpegGuestRead32(rdram, 0x696D88u + curHead * 8u + 4u);
+
+                uint32_t nextHead = (curHead + 1u) & 31u;
+                mpegGuestWrite32(rdram, 0x696E8Cu, nextHead);
+                mpegGuestWrite32(rdram, 0x696D54u, entryAddr);
+                mpegGuestWrite32(rdram, 0x696D58u, entrySize);
+
+                popsThisCall++;
+
+                uint8_t *packetSrc = getMemPtr(rdram, entryAddr);
+                size_t framesBefore = playback.decodedFrames.size();
+                if (packetSrc && entrySize > 0)
+                {
+                    if (!playback.decoder)
+                    {
+                        playback.decoder = std::make_unique<MpegFfmpegDecoder>();
+                    }
+                    playback.decoder->feed(packetSrc, entrySize, playback.decodedFrames);
+                }
+                size_t newFrames = playback.decodedFrames.size() - framesBefore;
+                if (newFrames > 0)
+                {
+                    probe_ae::onAzRecordFramesOut(static_cast<uint32_t>(newFrames));
+                }
+
+                if (probe_ae::isEnabled())
+                {
+                    probe_ae::onAzPop(curHead, curTail, entryAddr, entrySize, packetSrc, static_cast<uint32_t>(playback.decodedFrames.size()));
+                }
             }
 
+            // Task AZ: Skip pts/vsync waitVSync path for ring-fed frames; take decodedFrames.front() immediately
             if (!playback.decodedFrames.empty())
             {
-                const uint64_t currentTick = runtime->eeScheduler().currentVSyncTick();
-                const uint64_t currentTickQ32 = currentTick << 32u;
-                const MpegDecodedFrame &nextFrame = playback.decodedFrames.front();
-                const uint64_t frameIntervalQ32 = decodedFrameIntervalQ32(playback, nextFrame);
-                uint64_t presentationTargetQ32 = presentationTickForFrame(playback, nextFrame, currentTickQ32);
-
-                if (currentTickQ32 > presentationTargetQ32 && currentTickQ32 - presentationTargetQ32 >= frameIntervalQ32)
-                {
-                    const uint64_t correction = currentTickQ32 - presentationTargetQ32;
-                    presentationTargetQ32 = currentTickQ32;
-                    if (nextFrame.pts90k >= 0 && playback.firstPresentedPts90k >= 0)
-                    {
-                        playback.ptsPresentationBaseTickQ32 += correction;
-                    }
-                    playback.nextPictureTickQ32 = currentTickQ32;
-                }
-
-                if (currentTickQ32 < presentationTargetQ32)
-                {
-                    const uint64_t eligibleTick = (presentationTargetQ32 + kPictureClockOne - 1u) >> 32u;
-                    lock.unlock();
-                    runtime->eeScheduler().waitVSync(
-                        eligibleTick - 1u,
-                        -1,
-                        [rdram, runtime](R5900Context &resumeContext)
-                        {
-                            if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
-                            {
-                                return;
-                            }
-                            sceMpegGetPictureRAW8(rdram, &resumeContext, runtime);
-                        });
-                }
-
                 frame = std::move(playback.decodedFrames.front());
                 playback.decodedFrames.pop_front();
                 playback.width = static_cast<uint32_t>(frame.width);
@@ -2490,20 +2530,7 @@ struct MpegCallLogger {
                 height = playback.height;
                 frameCount = playback.picturesServed;
                 playback.picturesServed += 1u;
-                playback.nextPictureTickQ32 = presentationTargetQ32 + frameIntervalQ32;
-                playback.presentationEndTickQ32 = playback.nextPictureTickQ32;
                 haveFrame = true;
-                if (g_mpeg_stub_state.pictureTraceCount < 32u)
-                {
-                    PS2_IF_AGRESSIVE_LOGS({
-                        std::cerr << "[MPEG:GetPictureRAW8:FRAME] mpeg=0x" << std::hex << mpegAddr
-                                  << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
-                                  << " frame=" << frameCount
-                                  << " queued=" << playback.decodedFrames.size()
-                                  << " size=" << width << "x" << height << std::endl;
-                    });
-                    ++g_mpeg_stub_state.pictureTraceCount;
-                }
             }
             else
             {
@@ -2535,9 +2562,9 @@ struct MpegCallLogger {
         const uint32_t mbCols = (picWidth + 15u) / 16u;
         const uint32_t mbRows = (picHeight + 15u) / 16u;
         const uint32_t totalMbs = mbCols * mbRows;
-        const uint32_t numMbs = std::min(mbCapacity, totalMbs);
+        const uint32_t numMbs = std::min(mbCapacity, std::min(totalMbs, 640u));
 
-        const bool validFrame = haveFrame && !frame.rgba.empty() && frame.width > 0 && frame.height > 0;
+        const bool validFrame = haveFrame && (!frame.yPlane.empty() || !frame.rgba.empty()) && frame.width > 0 && frame.height > 0;
 
         for (uint32_t mbIndex = 0u; mbIndex < numMbs; ++mbIndex)
         {
@@ -2552,6 +2579,44 @@ struct MpegCallLogger {
                 std::memset(mbPtr, 0x00, 256);
                 std::memset(mbPtr + 256, 0x80, 64);
                 std::memset(mbPtr + 320, 0x80, 64);
+            }
+            else if (!frame.yPlane.empty())
+            {
+                const uint32_t mbx = mbIndex / mbRows;
+                const uint32_t mby = mbIndex % mbRows;
+
+                // 1) 16x16 Y plane
+                for (uint32_t ly = 0u; ly < 16u; ++ly)
+                {
+                    const uint32_t py = mby * 16u + ly;
+                    if (py < static_cast<uint32_t>(frame.height))
+                    {
+                        const uint32_t px = mbx * 16u;
+                        std::memcpy(mbPtr + ly * 16u, frame.yPlane.data() + py * frame.width + px, 16u);
+                    }
+                    else
+                    {
+                        std::memset(mbPtr + ly * 16u, 0x00, 16u);
+                    }
+                }
+
+                // 2) 8x8 Cb and Cr planes
+                const uint32_t chromaW = frame.width / 2;
+                for (uint32_t cy = 0u; cy < 8u; ++cy)
+                {
+                    const uint32_t py = mby * 8u + cy;
+                    if (py < static_cast<uint32_t>(frame.height / 2))
+                    {
+                        const uint32_t px = mbx * 8u;
+                        std::memcpy(mbPtr + 256u + cy * 8u, frame.cbPlane.data() + py * chromaW + px, 8u);
+                        std::memcpy(mbPtr + 320u + cy * 8u, frame.crPlane.data() + py * chromaW + px, 8u);
+                    }
+                    else
+                    {
+                        std::memset(mbPtr + 256u + cy * 8u, 0x80, 8u);
+                        std::memset(mbPtr + 320u + cy * 8u, 0x80, 8u);
+                    }
+                }
             }
             else
             {
@@ -2611,6 +2676,7 @@ struct MpegCallLogger {
 #if defined(PS2X_PROBE_AE) || 1
         if (probe_ae::isEnabled()) {
             probe_ae::onAyRaw8(n, dst, mbCapacity, getMemPtr(rdram, dst));
+            probe_ae::onAzRaw8Call(validFrame, width, height, getMemPtr(rdram, dst));
         }
 #endif
         if (n < 3u || (n % 100u == 0u))

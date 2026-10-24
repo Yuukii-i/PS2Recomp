@@ -506,6 +506,7 @@ namespace probe_ae {
 
         dumpTaskAVInfo(sec, rdram);
         dumpAyTimeIfDue(sec);
+        dumpAzRingIfDue(sec, rdram);
     }
 
     void log24C5A0(R5900Context *ctx, const uint8_t *rdram) {
@@ -1591,5 +1592,72 @@ namespace probe_ae {
                 std::fflush(stdout);
             }
         }
+    }
+
+    // Task AZ Probes
+    static std::atomic<uint32_t> s_azPops{0};
+    static std::atomic<uint32_t> s_azFramesOut{0};
+    static std::atomic<uint32_t> s_azRaw8Calls{0};
+    static std::atomic<uint32_t> s_azRaw8Have{0};
+
+    void onAzPop(uint32_t head, uint32_t tail, uint32_t addr, uint32_t size, const uint8_t *payload, uint32_t outFrames) {
+        if (!isEnabled()) return;
+        s_azPops.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<uint32_t> s_azPopCount{0};
+        uint32_t n = s_azPopCount.fetch_add(1, std::memory_order_relaxed);
+        if (n < 12) {
+            char hex[17] = {0};
+            for (int i = 0; i < 8; ++i) {
+                uint8_t b = (payload && (uint32_t)i < size) ? payload[i] : 0;
+                std::snprintf(hex + i * 2, 3, "%02x", b);
+            }
+            std::printf("[probe] az pop head=%u tail=%u addr=0x%08X size=0x%X first8=%s out_frames=%u\n",
+                        head, tail, addr, size, hex, outFrames);
+            std::fflush(stdout);
+        }
+    }
+
+    void onAzRecordFramesOut(uint32_t count) {
+        if (!isEnabled()) return;
+        s_azFramesOut.fetch_add(count, std::memory_order_relaxed);
+    }
+
+    void onAzRaw8Call(bool haveFrame, uint32_t width, uint32_t height, const uint8_t *mb0) {
+        if (!isEnabled()) return;
+        s_azRaw8Calls.fetch_add(1, std::memory_order_relaxed);
+        if (haveFrame) {
+            s_azRaw8Have.fetch_add(1, std::memory_order_relaxed);
+            static std::atomic<uint32_t> s_azRaw8FrameCount{0};
+            uint32_t n = s_azRaw8FrameCount.fetch_add(1, std::memory_order_relaxed);
+            if (n < 4 && mb0) {
+                char yHex[17] = {0}, cbHex[17] = {0}, crHex[17] = {0};
+                for (int i = 0; i < 8; ++i) {
+                    std::snprintf(yHex + i * 2, 3, "%02x", mb0[i]);
+                    std::snprintf(cbHex + i * 2, 3, "%02x", mb0[256 + i]);
+                    std::snprintf(crHex + i * 2, 3, "%02x", mb0[320 + i]);
+                }
+                std::printf("[probe] az raw8 mb0 Y[0..8]=%s Cb0=%s Cr0=%s w=%u h=%u\n",
+                            yHex, cbHex, crHex, width, height);
+                std::fflush(stdout);
+            }
+        }
+    }
+
+    void dumpAzRingIfDue(uint32_t sec, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        (void)sec;
+        uint32_t tail = 0, head = 0;
+        if (rdram) {
+            std::memcpy(&tail, rdram + (0x696E88u & PS2_RAM_MASK), sizeof(uint32_t));
+            std::memcpy(&head, rdram + (0x696E8Cu & PS2_RAM_MASK), sizeof(uint32_t));
+        }
+        uint32_t pops = s_azPops.exchange(0, std::memory_order_relaxed);
+        uint32_t framesOut = s_azFramesOut.exchange(0, std::memory_order_relaxed);
+        uint32_t raw8Calls = s_azRaw8Calls.exchange(0, std::memory_order_relaxed);
+        uint32_t raw8Have = s_azRaw8Have.exchange(0, std::memory_order_relaxed);
+
+        std::printf("[probe] az ring head=%u tail=%u pops=%u frames_out=%u raw8_calls=%u raw8_have=%u\n",
+                    head, tail, pops, framesOut, raw8Calls, raw8Have);
+        std::fflush(stdout);
     }
 }

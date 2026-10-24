@@ -621,4 +621,10 @@ namespace probe_ae {
 
     void onAyPrim(const char *type, int x0, int y0, int x1, int y1, uint32_t rgba, const char *tex, uint64_t alpha, uint64_t test, uint32_t fbp);
     void onAyCheckWhiteStrip(uint32_t frame, uint32_t fbp, uint32_t fbw, uint32_t psm, const uint8_t *pixels, uint32_t width, uint32_t height);
+
+    // Task AZ Probes
+    void onAzPop(uint32_t head, uint32_t tail, uint32_t addr, uint32_t size, const uint8_t *payload, uint32_t outFrames);
+    void onAzRecordFramesOut(uint32_t count);
+    void onAzRaw8Call(bool haveFrame, uint32_t width, uint32_t height, const uint8_t *mb0);
+    void dumpAzRingIfDue(uint32_t sec, const uint8_t *rdram);
 }
