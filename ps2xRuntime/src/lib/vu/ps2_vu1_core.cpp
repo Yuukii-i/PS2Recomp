@@ -1697,6 +1697,9 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
     if (probe_ae::isEnabled())
     {
         probe_ae::onBaMscntStart(m_state.vi);
+        probe_ae::onBbRunStart(m_state.pc, vuCode, codeSize, vuData, dataSize,
+                               m_state.vf, m_state.vi, m_state.acc,
+                               m_state.q, m_state.p, m_state.i);
     }
     m_state.top = top;
     m_state.itop = itop;

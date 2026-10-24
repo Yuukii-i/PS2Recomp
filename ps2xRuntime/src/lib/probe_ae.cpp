@@ -1897,8 +1897,28 @@ namespace probe_ae {
     static uint64_t s_bbRunDispfb2 = 0;
     static uint64_t s_bbRunDisplay2 = 0;
 
+    static void ensureDumpDir() {
+        static bool s_done = false;
+        if (!s_done) {
+            s_done = true;
+            std::error_code ec;
+            std::filesystem::create_directories("logs/vu1dump", ec);
+        }
+    }
+
+    struct ProbeInitDirs {
+        ProbeInitDirs() {
+            std::error_code ec;
+            std::filesystem::create_directories("logs/vu1dump", ec);
+        }
+    };
+    static ProbeInitDirs s_probeInitDirs;
+
+    static std::atomic<uint32_t> s_bbGateDiagCount{0};
+
     void onBbChainStart(uint32_t tadr, uint32_t tagCount, const std::vector<AySpan> &spans) {
         if (!isEnabled()) return;
+        ensureDumpDir();
         std::lock_guard<std::mutex> lock(s_bbMutex);
         s_bbCurrentKickIndex++;
         s_bbCurrentTadr = tadr;
@@ -1936,8 +1956,23 @@ namespace probe_ae {
                       const float vf[32][4], const int32_t vi[16],
                       const float acc[4], float q, float p, float i) {
         if (!isEnabled()) return;
+        ensureDumpDir();
         std::lock_guard<std::mutex> lock(s_bbMutex);
-        if (s_bbIsMovieKick && startPC == 0x048 && s_bbDumpedRunsCount < 4) {
+
+        const bool f9 = s_hasSeenFState9.load(std::memory_order_relaxed);
+        const bool movieKick = s_bbIsMovieKick;
+
+        if (f9) {
+            uint32_t n = s_bbGateDiagCount.fetch_add(1, std::memory_order_relaxed);
+            if (n < 6) {
+                std::printf("[probe] bb gate n=%u startPC=0x%03X f9=%d movieKick=%d dumped=%d\n",
+                            n, startPC, f9 ? 1 : 0, movieKick ? 1 : 0, s_bbDumpedRunsCount);
+                std::fflush(stdout);
+            }
+        }
+
+        const bool gate = f9 && (startPC == 0x048) && (s_bbDumpedRunsCount < 4);
+        if (gate) {
             s_bbActiveRecordingRunIndex = s_bbDumpedRunsCount;
 
             if (vuData && dataSize >= 16384) {
@@ -2006,100 +2041,114 @@ namespace probe_ae {
             std::ofstream codeOut("logs/vu1dump/vu1code.bin", std::ios::binary);
             if (codeOut) {
                 codeOut.write(reinterpret_cast<const char*>(s_bbVuCode.data()), 16384);
+                codeOut.flush();
+                codeOut.close();
             }
         }
 
+        size_t binTotalBytes = 0;
         char binPath[64];
         std::snprintf(binPath, sizeof(binPath), "logs/vu1dump/run%d.bin", k);
-        std::ofstream binOut(binPath, std::ios::binary);
-        if (binOut) {
-            binOut.write(reinterpret_cast<const char*>(s_bbRunDataStart.data()), 16384);
-            binOut.write(reinterpret_cast<const char*>(runDataEnd.data()), 16384);
-            binOut.write(reinterpret_cast<const char*>(s_bbRunVf.data()), 512);
-            binOut.write(reinterpret_cast<const char*>(s_bbRunVi.data()), 64);
-            binOut.write(reinterpret_cast<const char*>(s_bbRunAcc.data()), 16);
-            binOut.write(reinterpret_cast<const char*>(&s_bbRunQ), 4);
-            binOut.write(reinterpret_cast<const char*>(&s_bbRunP), 4);
-            binOut.write(reinterpret_cast<const char*>(&s_bbRunI), 4);
-            for (const auto &pkt : s_bbRunXgkickPackets) {
-                uint32_t count = static_cast<uint32_t>(pkt.size());
-                binOut.write(reinterpret_cast<const char*>(&count), sizeof(uint32_t));
-                if (count > 0) {
-                    binOut.write(reinterpret_cast<const char*>(pkt.data()), count);
+        {
+            std::ofstream binOut(binPath, std::ios::binary);
+            if (binOut) {
+                binOut.write(reinterpret_cast<const char*>(s_bbRunDataStart.data()), 16384);
+                binOut.write(reinterpret_cast<const char*>(runDataEnd.data()), 16384);
+                binOut.write(reinterpret_cast<const char*>(s_bbRunVf.data()), 512);
+                binOut.write(reinterpret_cast<const char*>(s_bbRunVi.data()), 64);
+                binOut.write(reinterpret_cast<const char*>(s_bbRunAcc.data()), 16);
+                binOut.write(reinterpret_cast<const char*>(&s_bbRunQ), 4);
+                binOut.write(reinterpret_cast<const char*>(&s_bbRunP), 4);
+                binOut.write(reinterpret_cast<const char*>(&s_bbRunI), 4);
+                binTotalBytes = 16384 + 16384 + 512 + 64 + 16 + 4 + 4 + 4;
+                for (const auto &pkt : s_bbRunXgkickPackets) {
+                    uint32_t count = static_cast<uint32_t>(pkt.size());
+                    binOut.write(reinterpret_cast<const char*>(&count), sizeof(uint32_t));
+                    binTotalBytes += sizeof(uint32_t);
+                    if (count > 0) {
+                        binOut.write(reinterpret_cast<const char*>(pkt.data()), count);
+                        binTotalBytes += count;
+                    }
                 }
+                binOut.flush();
+                binOut.close();
             }
         }
 
         char txtPath[64];
         std::snprintf(txtPath, sizeof(txtPath), "logs/vu1dump/run%d.txt", k);
-        std::ofstream txtOut(txtPath);
-        if (txtOut) {
-            txtOut << "=== Run " << k << " Header ===\n";
-            txtOut << "MSCAL count since F state 9: " << s_bbRunMscalCount << "\n";
-            txtOut << "Kick index: " << s_bbRunKickIndex << "\n";
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "0x%08X", s_bbRunTadr);
-            txtOut << "tadr: " << buf << "\n";
-            txtOut << "VIF1 regs:\n";
-            std::snprintf(buf, sizeof(buf), "  ITOP=0x%03X TOP=0x%03X TOPS=0x%03X BASE=0x%03X OFST=0x%03X CL=%u WL=%u mode=%u\n",
-                          s_bbRunVif1.itop, s_bbRunVif1.top, s_bbRunVif1.tops,
-                          s_bbRunVif1.base, s_bbRunVif1.ofst,
-                          s_bbRunVif1.cl, s_bbRunVif1.wl, s_bbRunVif1.mode);
-            txtOut << buf;
-
-            std::snprintf(buf, sizeof(buf), "First RAW8 destination buffer address (last a1): 0x%08X\n", s_bbRunRaw8Dst);
-            txtOut << buf;
-
-            txtOut << "UNPACKs since previous MSCAL (count=" << s_bbRunUnpacks.size() << "):\n";
-            for (const auto &up : s_bbRunUnpacks) {
-                std::snprintf(buf, sizeof(buf), "  src=0x%08X len=%u vuaddr=0x%03X fmt=%u num=%u\n",
-                              up.srcGuest, up.len, up.vuAddr, (unsigned)up.fmt, (unsigned)up.num);
+        {
+            std::ofstream txtOut(txtPath);
+            if (txtOut) {
+                txtOut << "=== Run " << k << " Header ===\n";
+                txtOut << "MSCAL count since F state 9: " << s_bbRunMscalCount << "\n";
+                txtOut << "Kick index: " << s_bbRunKickIndex << "\n";
+                char buf[128];
+                std::snprintf(buf, sizeof(buf), "0x%08X", s_bbRunTadr);
+                txtOut << "tadr: " << buf << "\n";
+                txtOut << "VIF1 regs:\n";
+                std::snprintf(buf, sizeof(buf), "  ITOP=0x%03X TOP=0x%03X TOPS=0x%03X BASE=0x%03X OFST=0x%03X CL=%u WL=%u mode=%u\n",
+                              s_bbRunVif1.itop, s_bbRunVif1.top, s_bbRunVif1.tops,
+                              s_bbRunVif1.base, s_bbRunVif1.ofst,
+                              s_bbRunVif1.cl, s_bbRunVif1.wl, s_bbRunVif1.mode);
                 txtOut << buf;
+
+                std::snprintf(buf, sizeof(buf), "First RAW8 destination buffer address (last a1): 0x%08X\n", s_bbRunRaw8Dst);
+                txtOut << buf;
+
+                txtOut << "UNPACKs since previous MSCAL (count=" << s_bbRunUnpacks.size() << "):\n";
+                for (const auto &up : s_bbRunUnpacks) {
+                    std::snprintf(buf, sizeof(buf), "  src=0x%08X len=%u vuaddr=0x%03X fmt=%u num=%u\n",
+                                  up.srcGuest, up.len, up.vuAddr, (unsigned)up.fmt, (unsigned)up.num);
+                    txtOut << buf;
+                }
+
+                txtOut << "GS Registers:\n";
+                auto printGs = [&](const char *name, uint64_t val) {
+                    char gbuf[128];
+                    std::snprintf(gbuf, sizeof(gbuf), "  %-12s: 0x%016llX\n", name, (unsigned long long)val);
+                    txtOut << gbuf;
+                };
+                auto printGsPsm = [&](const char *name, uint64_t val) {
+                    char gbuf[128];
+                    uint32_t psm = static_cast<uint32_t>((val >> 24) & 0x3F);
+                    std::snprintf(gbuf, sizeof(gbuf), "  %-12s: 0x%016llX (PSM=0x%02X)\n", name, (unsigned long long)val, psm);
+                    txtOut << gbuf;
+                };
+
+                printGsPsm("FRAME_1", s_bbRunGsRegs[0x4C]);
+                printGsPsm("FRAME_2", s_bbRunGsRegs[0x4D]);
+                printGs("ZBUF_1", s_bbRunGsRegs[0x4E]);
+                printGs("ZBUF_2", s_bbRunGsRegs[0x4F]);
+                printGs("XYOFFSET_1", s_bbRunGsRegs[0x18]);
+                printGs("XYOFFSET_2", s_bbRunGsRegs[0x19]);
+                printGs("SCISSOR_1", s_bbRunGsRegs[0x40]);
+                printGs("SCISSOR_2", s_bbRunGsRegs[0x41]);
+                printGs("TEST_1", s_bbRunGsRegs[0x47]);
+                printGs("TEST_2", s_bbRunGsRegs[0x48]);
+                printGs("ALPHA_1", s_bbRunGsRegs[0x42]);
+                printGs("ALPHA_2", s_bbRunGsRegs[0x43]);
+                printGs("PRIM", s_bbRunGsRegs[0x00]);
+                printGs("PRMODECONT", s_bbRunGsRegs[0x1A]);
+                printGs("COLCLAMP", s_bbRunGsRegs[0x46]);
+                printGs("DTHE", s_bbRunGsRegs[0x45]);
+                printGs("PABE", s_bbRunGsRegs[0x49]);
+                printGs("FBA_1", s_bbRunGsRegs[0x4A]);
+                printGs("FBA_2", s_bbRunGsRegs[0x4B]);
+                printGs("TEX0_1", s_bbRunGsRegs[0x06]);
+                printGs("TEX0_2", s_bbRunGsRegs[0x07]);
+                printGs("TEXA", s_bbRunGsRegs[0x3B]);
+                printGs("FOGCOL", s_bbRunGsRegs[0x3D]);
+                printGs("DISPFB1", s_bbRunDispfb1);
+                printGs("DISPLAY1", s_bbRunDisplay1);
+                printGs("DISPFB2", s_bbRunDispfb2);
+                printGs("DISPLAY2", s_bbRunDisplay2);
+                txtOut.flush();
+                txtOut.close();
             }
-
-            txtOut << "GS Registers:\n";
-            auto printGs = [&](const char *name, uint64_t val) {
-                char gbuf[128];
-                std::snprintf(gbuf, sizeof(gbuf), "  %-12s: 0x%016llX\n", name, (unsigned long long)val);
-                txtOut << gbuf;
-            };
-            auto printGsPsm = [&](const char *name, uint64_t val) {
-                char gbuf[128];
-                uint32_t psm = static_cast<uint32_t>((val >> 24) & 0x3F);
-                std::snprintf(gbuf, sizeof(gbuf), "  %-12s: 0x%016llX (PSM=0x%02X)\n", name, (unsigned long long)val, psm);
-                txtOut << gbuf;
-            };
-
-            printGsPsm("FRAME_1", s_bbRunGsRegs[0x4C]);
-            printGsPsm("FRAME_2", s_bbRunGsRegs[0x4D]);
-            printGs("ZBUF_1", s_bbRunGsRegs[0x4E]);
-            printGs("ZBUF_2", s_bbRunGsRegs[0x4F]);
-            printGs("XYOFFSET_1", s_bbRunGsRegs[0x18]);
-            printGs("XYOFFSET_2", s_bbRunGsRegs[0x19]);
-            printGs("SCISSOR_1", s_bbRunGsRegs[0x40]);
-            printGs("SCISSOR_2", s_bbRunGsRegs[0x41]);
-            printGs("TEST_1", s_bbRunGsRegs[0x47]);
-            printGs("TEST_2", s_bbRunGsRegs[0x48]);
-            printGs("ALPHA_1", s_bbRunGsRegs[0x42]);
-            printGs("ALPHA_2", s_bbRunGsRegs[0x43]);
-            printGs("PRIM", s_bbRunGsRegs[0x00]);
-            printGs("PRMODECONT", s_bbRunGsRegs[0x1A]);
-            printGs("COLCLAMP", s_bbRunGsRegs[0x46]);
-            printGs("DTHE", s_bbRunGsRegs[0x45]);
-            printGs("PABE", s_bbRunGsRegs[0x49]);
-            printGs("FBA_1", s_bbRunGsRegs[0x4A]);
-            printGs("FBA_2", s_bbRunGsRegs[0x4B]);
-            printGs("TEX0_1", s_bbRunGsRegs[0x06]);
-            printGs("TEX0_2", s_bbRunGsRegs[0x07]);
-            printGs("TEXA", s_bbRunGsRegs[0x3B]);
-            printGs("FOGCOL", s_bbRunGsRegs[0x3D]);
-            printGs("DISPFB1", s_bbRunDispfb1);
-            printGs("DISPLAY1", s_bbRunDisplay1);
-            printGs("DISPFB2", s_bbRunDispfb2);
-            printGs("DISPLAY2", s_bbRunDisplay2);
         }
 
-        std::printf("[probe] bb dumped run%d (bin and txt) xgkick_packets=%zu\n", k, s_bbRunXgkickPackets.size());
+        std::printf("[probe] bb dumped run%d bytes=%zu\n", k, binTotalBytes);
         std::fflush(stdout);
     }
 
