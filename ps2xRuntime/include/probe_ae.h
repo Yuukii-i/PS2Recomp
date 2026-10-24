@@ -567,4 +567,9 @@ namespace probe_ae {
 
     // Task AT Probes
     void dumpTaskATInfo(uint32_t sec, const uint8_t *rdram);
+
+    // Task AU Probes
+    void on3D7C08(R5900Context *ctx, const uint8_t *rdram);
+    void on36C3B4(R5900Context *ctx, const uint8_t *rdram);
+    void on165EFC(R5900Context *ctx, const uint8_t *rdram);
 }

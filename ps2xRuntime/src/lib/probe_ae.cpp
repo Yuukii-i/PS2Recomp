@@ -57,6 +57,12 @@ namespace probe_ae {
     std::atomic<uint32_t> val_ar_ret_31a3e8{0};
     std::atomic<uint32_t> val_ar_ret_35f4c4{0};
 
+    // Task AU
+    std::atomic<uint32_t> cnt_au_3d7c08{0};
+    std::atomic<uint32_t> cnt_au_36c3b4{0};
+    std::atomic<uint32_t> cnt_au_165efc{0};
+    std::atomic<uint32_t> cnt_ar_4e914c_total{0};
+
     // Task AF
     std::atomic<uint32_t> cnt_24ce0c{0};
     std::atomic<uint32_t> val_v24cbfc{0};
@@ -472,6 +478,12 @@ namespace probe_ae {
                     ar_15b750, ar_31a52c, ar_4e2730, ar_G, ar_4e914c);
         std::fflush(stdout);
 
+        uint32_t au_3d7c08 = cnt_au_3d7c08.exchange(0, std::memory_order_relaxed);
+        uint32_t au_36c3b4 = cnt_au_36c3b4.exchange(0, std::memory_order_relaxed);
+        uint32_t au_165efc = cnt_au_165efc.exchange(0, std::memory_order_relaxed);
+        std::printf("[probe] au cnt 3d7c08=%u 36c3b4=%u 165efc=%u\n", au_3d7c08, au_36c3b4, au_165efc);
+        std::fflush(stdout);
+
         static uint32_t s_stuckStreak = 0;
         static uint32_t s_stuckReportCount = 0;
 
@@ -873,6 +885,7 @@ namespace probe_ae {
     void on4E914C() {
         if (!isEnabled()) return;
         cnt_ar_4e914c.fetch_add(1, std::memory_order_relaxed);
+        cnt_ar_4e914c_total.fetch_add(1, std::memory_order_relaxed);
     }
 
     void logCause3Dispatch(const std::vector<uint32_t> &handlers) {
@@ -971,5 +984,150 @@ namespace probe_ae {
             s += buf;
         }
         return s;
+    }
+
+    // Task AU
+    static std::string getAsciiStrCap80(uint32_t addr, const uint8_t *rdram) {
+        if (!rdram || addr < 0x00100000u || addr >= 0x02000000u) return "<not-ram>";
+        std::string s;
+        for (uint32_t i = 0; i < 80; ++i) {
+            uint32_t curr = addr + i;
+            if ((curr & PS2_RAM_MASK) >= PS2_RAM_SIZE) break;
+            uint8_t c = rdram[curr & PS2_RAM_MASK];
+            if (c == 0) break;
+            if (c >= 32 && c <= 126) {
+                s += static_cast<char>(c);
+            } else {
+                s += '.';
+            }
+        }
+        return s.empty() ? "<empty>" : s;
+    }
+
+    static std::atomic<uint32_t> s_count3D7C08_ever{0};
+    static std::atomic<uint32_t> s_count3D7C08_st9{0};
+    static std::atomic<bool> s_hasSeenFState9{false};
+
+    void on3D7C08(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        cnt_au_3d7c08.fetch_add(1, std::memory_order_relaxed);
+
+        uint32_t f_state = 0;
+        if (rdram && (0x772188u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+            std::memcpy(&f_state, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        }
+        if (f_state == 9) {
+            s_hasSeenFState9.store(true, std::memory_order_relaxed);
+        }
+
+        uint32_t n_ever = s_count3D7C08_ever.fetch_add(1, std::memory_order_relaxed) + 1;
+        bool is_st9 = s_hasSeenFState9.load(std::memory_order_relaxed);
+        uint32_t n_st9 = is_st9 ? (s_count3D7C08_st9.fetch_add(1, std::memory_order_relaxed) + 1) : 0;
+
+        if (n_ever <= 3 || (is_st9 && n_st9 <= 3)) {
+            uint32_t a0 = getRegU32(ctx, 4);
+            uint32_t a1 = getRegU32(ctx, 5);
+            uint32_t a2 = getRegU32(ctx, 6);
+            uint32_t a3 = getRegU32(ctx, 7);
+            uint32_t ra = getRegU32(ctx, 31);
+            uint32_t sp = getRegU32(ctx, 29);
+            uint32_t s0 = getRegU32(ctx, 16);
+            uint32_t s1 = getRegU32(ctx, 17);
+            uint32_t s2 = getRegU32(ctx, 18);
+            uint32_t s3 = getRegU32(ctx, 19);
+            uint32_t cnt4E = cnt_ar_4e914c_total.load(std::memory_order_relaxed);
+
+            std::printf("[probe] au 3d7c08 n_ever=%u n_st9=%u f_state=%u cnt4E=%u ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X\n",
+                        n_ever, n_st9, f_state, cnt4E, ra, sp, a0, a1, a2, a3, s0, s1, s2, s3);
+            if (rdram) {
+                std::printf("[probe] au 3d7c08 str a0='%s' a1='%s' a2='%s' a3='%s'\n",
+                            getAsciiStrCap80(a0, rdram).c_str(), getAsciiStrCap80(a1, rdram).c_str(),
+                            getAsciiStrCap80(a2, rdram).c_str(), getAsciiStrCap80(a3, rdram).c_str());
+
+                // Stack walk of 0x1800 bytes upward (cap 60 lines)
+                uint32_t retLines = 0;
+                for (uint32_t off = 0; off <= 0x1800; off += 4) {
+                    if (retLines >= 60) break;
+                    uint32_t currAddr = sp + off;
+                    if ((currAddr & PS2_RAM_MASK) + 4 > PS2_RAM_SIZE) continue;
+                    uint32_t w = 0;
+                    std::memcpy(&w, rdram + (currAddr & PS2_RAM_MASK), 4);
+
+                    if (w >= 0x00100000u && w < 0x00600000u) {
+                        uint32_t insnAddr = w - 8;
+                        if (insnAddr >= 0x00100000u && (insnAddr & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                            uint32_t insn = 0;
+                            std::memcpy(&insn, rdram + (insnAddr & PS2_RAM_MASK), 4);
+
+                            if ((insn & 0xFC000000u) == 0x0C000000u) {
+                                uint32_t callee = ((w - 4) & 0xF0000000u) | ((insn & 0x03FFFFFFu) << 2);
+                                std::printf("[probe] au ret w=0x%08X at sp+0x%X callee=0x%08X\n", w, off, callee);
+                                retLines++;
+                            } else if ((insn & 0xFC00003Fu) == 0x00000009u) {
+                                std::printf("[probe] au ret w=0x%08X at sp+0x%X callee=jalr\n", w, off);
+                                retLines++;
+                            }
+                        }
+                    }
+                }
+            }
+            std::fflush(stdout);
+        }
+    }
+
+    void on36C3B4(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        cnt_au_36c3b4.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 3) {
+            uint32_t a0 = getRegU32(ctx, 4);
+            uint32_t a1 = getRegU32(ctx, 5);
+            uint32_t a2 = getRegU32(ctx, 6);
+            uint32_t a3 = getRegU32(ctx, 7);
+            uint32_t ra = getRegU32(ctx, 31);
+            uint32_t sp = getRegU32(ctx, 29);
+            uint32_t f_state = 0;
+            if (rdram && (0x772188u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                std::memcpy(&f_state, rdram + (0x772188u & PS2_RAM_MASK), 4);
+            }
+            uint32_t cnt4E = cnt_ar_4e914c_total.load(std::memory_order_relaxed);
+            std::printf("[probe] au 36c3b4 n=%u f_state=%u cnt4E=%u ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X\n",
+                        n, f_state, cnt4E, ra, sp, a0, a1, a2, a3);
+            if (rdram) {
+                std::printf("[probe] au 36c3b4 str a0='%s' a1='%s' a2='%s' a3='%s'\n",
+                            getAsciiStrCap80(a0, rdram).c_str(), getAsciiStrCap80(a1, rdram).c_str(),
+                            getAsciiStrCap80(a2, rdram).c_str(), getAsciiStrCap80(a3, rdram).c_str());
+            }
+            std::fflush(stdout);
+        }
+    }
+
+    void on165EFC(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        cnt_au_165efc.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<uint32_t> s_count{0};
+        uint32_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 3) {
+            uint32_t a0 = getRegU32(ctx, 4);
+            uint32_t a1 = getRegU32(ctx, 5);
+            uint32_t a2 = getRegU32(ctx, 6);
+            uint32_t a3 = getRegU32(ctx, 7);
+            uint32_t ra = getRegU32(ctx, 31);
+            uint32_t sp = getRegU32(ctx, 29);
+            uint32_t f_state = 0;
+            if (rdram && (0x772188u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                std::memcpy(&f_state, rdram + (0x772188u & PS2_RAM_MASK), 4);
+            }
+            uint32_t cnt4E = cnt_ar_4e914c_total.load(std::memory_order_relaxed);
+            std::printf("[probe] au 165efc n=%u f_state=%u cnt4E=%u ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X\n",
+                        n, f_state, cnt4E, ra, sp, a0, a1, a2, a3);
+            if (rdram) {
+                std::printf("[probe] au 165efc str a0='%s' a1='%s' a2='%s' a3='%s'\n",
+                            getAsciiStrCap80(a0, rdram).c_str(), getAsciiStrCap80(a1, rdram).c_str(),
+                            getAsciiStrCap80(a2, rdram).c_str(), getAsciiStrCap80(a3, rdram).c_str());
+            }
+            std::fflush(stdout);
+        }
     }
 }
