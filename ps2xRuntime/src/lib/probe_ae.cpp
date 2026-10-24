@@ -505,6 +505,7 @@ namespace probe_ae {
         }
 
         dumpTaskAVInfo(sec, rdram);
+        dumpAyTimeIfDue(sec);
     }
 
     void log24C5A0(R5900Context *ctx, const uint8_t *rdram) {
@@ -1397,6 +1398,198 @@ namespace probe_ae {
             s_prevKickPackets = s_currKickPackets;
             s_prevKickUnpacks = s_currKickUnpacks;
             s_hasPrevNormalKick = true;
+        }
+    }
+
+    // Task AY State
+    static std::mutex s_ayMutex;
+
+    // 1. GREEN
+    static uint32_t s_ayChainCountAfterF9 = 0;
+    static bool s_ayCurrentChainEligible = false;
+    static uint32_t s_ayUnpackPrintCountThisChain = 0;
+    static std::vector<AySpan> s_aySpans;
+
+    void onAyChainStart(uint32_t tagCount, const std::vector<AySpan> &spans) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_ayMutex);
+        s_aySpans = spans;
+        s_ayUnpackPrintCountThisChain = 0;
+
+        if (s_hasSeenFState9.load(std::memory_order_relaxed) && tagCount > 2000) {
+            s_ayChainCountAfterF9++;
+            s_ayCurrentChainEligible = (s_ayChainCountAfterF9 <= 2);
+        } else {
+            s_ayCurrentChainEligible = false;
+        }
+    }
+
+    void onAyUnpackCheck(uint8_t fmt, uint32_t vuAddr, uint8_t num, uint32_t posPayload, const uint8_t *payload, uint32_t sizeBytes) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_ayMutex);
+        if (!s_ayCurrentChainEligible || fmt != 2) return;
+        if (s_ayUnpackPrintCountThisChain >= 8) return;
+
+        uint32_t n = ++s_ayUnpackPrintCountThisChain;
+
+        uint32_t srcGuest = 0;
+        for (const auto &sp : s_aySpans) {
+            if (posPayload >= sp.bufOffset && posPayload < sp.bufOffset + sp.byteCount) {
+                srcGuest = sp.srcGuestAddr + (posPayload - sp.bufOffset);
+                break;
+            }
+        }
+
+        char hexBytes[33] = {0};
+        for (int i = 0; i < 16; ++i) {
+            if (posPayload + i < sizeBytes && payload) {
+                std::snprintf(hexBytes + i * 2, 3, "%02x", payload[i]);
+            } else {
+                std::snprintf(hexBytes + i * 2, 3, "00");
+            }
+        }
+
+        std::printf("[probe] ay unpack# %u addr=0x%03X num=%u src=0x%08X bytes=%s\n",
+                    n, vuAddr, (uint32_t)num, srcGuest, hexBytes);
+        std::fflush(stdout);
+    }
+
+    void onAyRaw8(uint32_t callNum, uint32_t dst, uint32_t a2, const uint8_t *pDst) {
+        if (!isEnabled()) return;
+        if (callNum >= 6) return;
+
+        char hexDst[33] = {0};
+        char hexDst100[33] = {0};
+        uint32_t nonzero1800 = 0;
+        if (pDst) {
+            for (int i = 0; i < 16; ++i) {
+                std::snprintf(hexDst + i * 2, 3, "%02x", pDst[i]);
+                std::snprintf(hexDst100 + i * 2, 3, "%02x", pDst[0x100 + i]);
+            }
+            for (int i = 0; i < 0x1800; ++i) {
+                if (pDst[i] != 0) nonzero1800++;
+            }
+        }
+        std::printf("[probe] ay raw8 n=%u a1(dst)=0x%08X a2=%u dst_16=%s dst_100_16=%s nonzero_1800=%u\n",
+                    callNum, dst, a2, hexDst, hexDst100, nonzero1800);
+        std::fflush(stdout);
+    }
+
+    // 2. TIME
+    static std::atomic<uint64_t> s_ayTimeVif1Us{0};
+    static std::atomic<uint64_t> s_ayTimeVu1Us{0};
+    static std::atomic<uint32_t> s_ayCountVu1{0};
+    static std::atomic<uint64_t> s_ayMaxVu1Us{0};
+    static std::atomic<uint64_t> s_ayTimeGifUs{0};
+    static std::atomic<uint64_t> s_ayTimeChainUs{0};
+    static std::atomic<uint32_t> s_ayKicks{0};
+
+    void onAyTimeVif1(uint64_t us) {
+        if (!isEnabled()) return;
+        s_ayTimeVif1Us.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onAyTimeVu1(uint64_t us) {
+        if (!isEnabled()) return;
+        s_ayTimeVu1Us.fetch_add(us, std::memory_order_relaxed);
+        s_ayCountVu1.fetch_add(1, std::memory_order_relaxed);
+        uint64_t curMax = s_ayMaxVu1Us.load(std::memory_order_relaxed);
+        while (us > curMax && !s_ayMaxVu1Us.compare_exchange_weak(curMax, us, std::memory_order_relaxed)) {}
+    }
+
+    void onAyTimeGif(uint64_t us) {
+        if (!isEnabled()) return;
+        s_ayTimeGifUs.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onAyTimeChain(uint64_t us) {
+        if (!isEnabled()) return;
+        s_ayTimeChainUs.fetch_add(us, std::memory_order_relaxed);
+    }
+
+    void onAyKick() {
+        if (!isEnabled()) return;
+        s_ayKicks.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void dumpAyTimeIfDue(uint32_t sec) {
+        if (!isEnabled()) return;
+        (void)sec;
+        double vif1Ms = s_ayTimeVif1Us.exchange(0, std::memory_order_relaxed) / 1000.0;
+        double vu1Ms = s_ayTimeVu1Us.exchange(0, std::memory_order_relaxed) / 1000.0;
+        uint32_t vu1N = s_ayCountVu1.exchange(0, std::memory_order_relaxed);
+        double vu1MaxMs = s_ayMaxVu1Us.exchange(0, std::memory_order_relaxed) / 1000.0;
+        double gifMs = s_ayTimeGifUs.exchange(0, std::memory_order_relaxed) / 1000.0;
+        double chainMs = s_ayTimeChainUs.exchange(0, std::memory_order_relaxed) / 1000.0;
+        uint32_t kicks = s_ayKicks.exchange(0, std::memory_order_relaxed);
+
+        std::printf("[probe] ay time vif1=%.2f vu1=%.2f(n=%u,max=%.2f) gif=%.2f chain=%.2f kicks=%u\n",
+                    vif1Ms, vu1Ms, vu1N, vu1MaxMs, gifMs, chainMs, kicks);
+        std::fflush(stdout);
+    }
+
+    // 3. WHITE STRIP
+    struct AyPrimHistory {
+        char type[16];
+        int x0, y0, x1, y1;
+        uint32_t rgba;
+        char tex[32];
+        uint64_t alpha;
+        uint64_t test;
+        uint32_t fbp;
+    };
+    static std::mutex s_ayWhiteMutex;
+    static AyPrimHistory s_ayPrimRing[16];
+    static uint32_t s_ayPrimRingCount = 0;
+    static uint32_t s_ayLastWhiteSec = 0xFFFFFFFFu;
+    static uint32_t s_ayWhiteReportsThisSec = 0;
+
+    void onAyPrim(const char *type, int x0, int y0, int x1, int y1, uint32_t rgba, const char *tex, uint64_t alpha, uint64_t test, uint32_t fbp) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_ayWhiteMutex);
+        uint32_t idx = (s_ayPrimRingCount++) % 16;
+        auto &p = s_ayPrimRing[idx];
+        std::strncpy(p.type, type ? type : "unknown", sizeof(p.type) - 1);
+        p.type[sizeof(p.type) - 1] = '\0';
+        p.x0 = x0; p.y0 = y0; p.x1 = x1; p.y1 = y1;
+        p.rgba = rgba;
+        std::strncpy(p.tex, tex ? tex : "none", sizeof(p.tex) - 1);
+        p.tex[sizeof(p.tex) - 1] = '\0';
+        p.alpha = alpha;
+        p.test = test;
+        p.fbp = fbp;
+    }
+
+    void onAyCheckWhiteStrip(uint32_t frame, uint32_t fbp, uint32_t fbw, uint32_t psm, const uint8_t *pixels, uint32_t width, uint32_t height) {
+        if (!isEnabled()) return;
+        if (!pixels || width < 321 || height < 441) return;
+
+        size_t idx = (440u * width + 320u) * 4u;
+        uint8_t r = pixels[idx + 0];
+        uint8_t g = pixels[idx + 1];
+        uint8_t b = pixels[idx + 2];
+
+        if (r == 255 && g == 255 && b == 255) {
+            std::lock_guard<std::mutex> lock(s_ayWhiteMutex);
+            uint32_t sec = s_currentSec.load(std::memory_order_relaxed);
+            if (sec != s_ayLastWhiteSec) {
+                s_ayLastWhiteSec = sec;
+                s_ayWhiteReportsThisSec = 0;
+            }
+            if (s_ayWhiteReportsThisSec < 5) {
+                s_ayWhiteReportsThisSec++;
+                std::printf("[probe] ay white frame=%u fbp=0x%X fbw=%u psm=0x%X\n", frame, fbp, fbw, psm);
+                uint32_t total = std::min<uint32_t>(s_ayPrimRingCount, 16u);
+                uint32_t toPrint = std::min<uint32_t>(total, 6u);
+                for (uint32_t i = 0; i < toPrint; ++i) {
+                    uint32_t pIdx = (s_ayPrimRingCount - toPrint + i) % 16;
+                    const auto &p = s_ayPrimRing[pIdx];
+                    std::printf("[probe] ay prim type=%s bbox=(%d,%d)-(%d,%d) rgbaq=0x%08X tex=%s alpha=0x%llX test=0x%llX fbp=0x%X\n",
+                                p.type, p.x0, p.y0, p.x1, p.y1, p.rgba, p.tex,
+                                (unsigned long long)p.alpha, (unsigned long long)p.test, p.fbp);
+                }
+                std::fflush(stdout);
+            }
         }
     }
 }

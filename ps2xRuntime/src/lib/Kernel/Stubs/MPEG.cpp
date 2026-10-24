@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
+#include "probe_ae.h"
 
 #if !defined(PS2X_HAS_FFMPEG)
 #define PS2X_HAS_FFMPEG 1
@@ -2607,6 +2608,11 @@ struct MpegCallLogger {
 
         static std::atomic<uint32_t> s_raw8CallCount{0};
         const uint32_t n = s_raw8CallCount.fetch_add(1, std::memory_order_relaxed);
+#if defined(PS2X_PROBE_AE) || 1
+        if (probe_ae::isEnabled()) {
+            probe_ae::onAyRaw8(n, dst, mbCapacity, getMemPtr(rdram, dst));
+        }
+#endif
         if (n < 3u || (n % 100u == 0u))
         {
             uint8_t y0 = 0x00, cb0 = 0x80, cr0 = 0x80;

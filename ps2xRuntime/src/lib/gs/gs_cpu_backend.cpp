@@ -6,6 +6,7 @@
 #include "runtime/gs/ps2_gs_psmt8.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "ps2_log.h"
+#include "probe_ae.h"
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -1188,6 +1189,59 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
         }
     }
 
+    if (probe_ae::isEnabled() && !batch.vertices.empty())
+    {
+        int ofx = ctx.xyoffset.ofx >> 4;
+        int ofy = ctx.xyoffset.ofy >> 4;
+        int minX = static_cast<int>(std::floor(batch.vertices[0].x - static_cast<float>(ofx)));
+        int maxX = static_cast<int>(std::ceil(batch.vertices[0].x - static_cast<float>(ofx)));
+        int minY = static_cast<int>(std::floor(batch.vertices[0].y - static_cast<float>(ofy)));
+        int maxY = static_cast<int>(std::ceil(batch.vertices[0].y - static_cast<float>(ofy)));
+        for (size_t i = 1; i < batch.vertices.size(); ++i)
+        {
+            int vx0 = static_cast<int>(std::floor(batch.vertices[i].x - static_cast<float>(ofx)));
+            int vx1 = static_cast<int>(std::ceil(batch.vertices[i].x - static_cast<float>(ofx)));
+            int vy0 = static_cast<int>(std::floor(batch.vertices[i].y - static_cast<float>(ofy)));
+            int vy1 = static_cast<int>(std::ceil(batch.vertices[i].y - static_cast<float>(ofy)));
+            if (vx0 < minX) minX = vx0;
+            if (vx1 > maxX) maxX = vx1;
+            if (vy0 < minY) minY = vy0;
+            if (vy1 > maxY) maxY = vy1;
+        }
+
+        if (maxY >= 416)
+        {
+            const char *primName = "UNKNOWN";
+            switch (state.prim.type)
+            {
+            case GS_PRIM_POINT: primName = "POINT"; break;
+            case GS_PRIM_LINE: primName = "LINE"; break;
+            case GS_PRIM_LINESTRIP: primName = "LINESTRIP"; break;
+            case GS_PRIM_TRIANGLE: primName = "TRIANGLE"; break;
+            case GS_PRIM_TRISTRIP: primName = "TRISTRIP"; break;
+            case GS_PRIM_TRIFAN: primName = "TRIFAN"; break;
+            case GS_PRIM_SPRITE: primName = "SPRITE"; break;
+            }
+            char texBuf[32];
+            if (state.prim.tme)
+            {
+                std::snprintf(texBuf, sizeof(texBuf), "%u/%u/%u/%u",
+                              ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.psm),
+                              static_cast<unsigned>(ctx.tex0.tw), static_cast<unsigned>(ctx.tex0.th));
+            }
+            else
+            {
+                std::strcpy(texBuf, "none");
+            }
+            const auto &v = batch.vertices.back();
+            uint32_t rgba = static_cast<uint32_t>(v.r) |
+                            (static_cast<uint32_t>(v.g) << 8u) |
+                            (static_cast<uint32_t>(v.b) << 16u) |
+                            (static_cast<uint32_t>(v.a) << 24u);
+            probe_ae::onAyPrim(primName, minX, minY, maxX, maxY, rgba, texBuf, ctx.alpha, ctx.test, ctx.frame.fbp);
+        }
+    }
+
     switch (state.prim.type)
     {
     case GS_PRIM_SPRITE:
@@ -2349,7 +2403,14 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
 
     thread_local GSCpuBackend snapshotBackend;
     snapshotBackend.Initialize(snapshot.data(), static_cast<uint32_t>(snapshot.size()));
-    return snapshotBackend.PresentFromLocalMemory(request);
+    PresentationFrame frame = snapshotBackend.PresentFromLocalMemory(request);
+    if (probe_ae::isEnabled())
+    {
+        static uint32_t s_frameCounter = 0;
+        GSFrameReg dispFrame = decodeDisplayFrame(request.dispfb1 ? request.dispfb1 : request.dispfb2);
+        probe_ae::onAyCheckWhiteStrip(++s_frameCounter, dispFrame.fbp, dispFrame.fbw, dispFrame.psm, frame.pixels.data(), kHostFrameWidth, frame.height);
+    }
+    return frame;
 }
 
 PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationRequest &request)

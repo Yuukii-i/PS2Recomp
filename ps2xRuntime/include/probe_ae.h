@@ -601,4 +601,24 @@ namespace probe_ae {
     void onAwVifCode(uint32_t off, uint32_t cmd, uint8_t num, uint16_t imm, bool irq, uint32_t consumed);
     void onAwUnpack(uint8_t fmt, uint8_t num, uint32_t cl, uint32_t wl, uint32_t usn, uint32_t flg, uint32_t addr, uint32_t words);
     void onAwVifKickEnd(const uint8_t *rdram);
+
+    // Task AY Probes
+    struct AySpan {
+        uint32_t bufOffset;
+        uint32_t byteCount;
+        uint32_t srcGuestAddr;
+    };
+    void onAyChainStart(uint32_t tagCount, const std::vector<AySpan> &spans);
+    void onAyUnpackCheck(uint8_t fmt, uint32_t vuAddr, uint8_t num, uint32_t posPayload, const uint8_t *payload, uint32_t sizeBytes);
+    void onAyRaw8(uint32_t callNum, uint32_t dst, uint32_t a2, const uint8_t *pDst);
+
+    void onAyTimeVif1(uint64_t us);
+    void onAyTimeVu1(uint64_t us);
+    void onAyTimeGif(uint64_t us);
+    void onAyTimeChain(uint64_t us);
+    void onAyKick();
+    void dumpAyTimeIfDue(uint32_t sec);
+
+    void onAyPrim(const char *type, int x0, int y0, int x1, int y1, uint32_t rgba, const char *tex, uint64_t alpha, uint64_t test, uint32_t fbp);
+    void onAyCheckWhiteStrip(uint32_t frame, uint32_t fbp, uint32_t fbw, uint32_t psm, const uint8_t *pixels, uint32_t width, uint32_t height);
 }

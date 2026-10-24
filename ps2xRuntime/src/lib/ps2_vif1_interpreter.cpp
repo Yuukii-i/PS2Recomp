@@ -3,6 +3,7 @@
 #include "probe_ae.h"
 #include <cstring>
 #include <cstdio>
+#include <chrono>
 
 extern void recordCompletedIntcCause(uint32_t cause);
 
@@ -304,6 +305,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     if (sizeBytes == 0u)
         return;
 
+    auto tVif1Start = std::chrono::steady_clock::now();
+
 #if defined(PS2X_PROBE_AE) || 1
     if (probe_ae::isEnabled()) {
         probe_ae::onVif1DmaStart(sizeBytes);
@@ -453,8 +456,16 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            if (m_vu1MscalCallback)
+            if (m_vu1MscalCallback) {
+                auto tVu1Start = std::chrono::steady_clock::now();
                 m_vu1MscalCallback(startPC, runTop, runItop);
+#if defined(PS2X_PROBE_AE) || 1
+                if (probe_ae::isEnabled()) {
+                    auto tVu1End = std::chrono::steady_clock::now();
+                    probe_ae::onAyTimeVu1(std::chrono::duration_cast<std::chrono::microseconds>(tVu1End - tVu1Start).count());
+                }
+#endif
+            }
             continue;
         }
         else if (opcode == VIF_MSCNT)
@@ -471,8 +482,16 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            if (m_vu1MscntCallback)
+            if (m_vu1MscntCallback) {
+                auto tVu1Start = std::chrono::steady_clock::now();
                 m_vu1MscntCallback(runTop, runItop);
+#if defined(PS2X_PROBE_AE) || 1
+                if (probe_ae::isEnabled()) {
+                    auto tVu1End = std::chrono::steady_clock::now();
+                    probe_ae::onAyTimeVu1(std::chrono::duration_cast<std::chrono::microseconds>(tVu1End - tVu1Start).count());
+                }
+#endif
+            }
             continue;
         }
         else if (opcode == VIF_STMASK)
@@ -636,6 +655,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 uint32_t addr = imm & 0x3FFu;
                 uint32_t computed_words = totalBytes / 4u;
                 probe_ae::onAwUnpack(fmt, num, cl, wl, usn, flg, addr, computed_words);
+                probe_ae::onAyUnpackCheck(fmt, addr, num, pos_payload, data + pos_payload, sizeBytes);
             }
 #endif
 
@@ -857,6 +877,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     if (probe_ae::isEnabled()) {
         probe_ae::onVif1DmaEnd();
         probe_ae::onAwVifKickEnd(m_rdram);
+        auto tVif1End = std::chrono::steady_clock::now();
+        probe_ae::onAyTimeVif1(std::chrono::duration_cast<std::chrono::microseconds>(tVif1End - tVif1Start).count());
     }
 #endif
 }

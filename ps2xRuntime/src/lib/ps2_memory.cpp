@@ -1361,11 +1361,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
                     const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf;
+                    std::vector<probe_ae::AySpan> aySpans;
+                    auto tChainStart = std::chrono::steady_clock::now();
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                        if (channelBase == 0x10009000u) {
+                            aySpans.push_back({ (uint32_t)chainBuf.size(), bytes, srcAddr });
+                        }
                         const bool scratch = isScratchpad(srcAddr);
                         uint32_t src = 0;
                         src = translateAddress(srcAddr);
@@ -1407,6 +1412,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         const uint32_t localMax = tagScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
                         if (tagPhys + 16u > localMax)
                             return;
+
+                        if (channelBase == 0x10009000u) {
+                            aySpans.push_back({ (uint32_t)chainBuf.size(), 8u, localTagAddr + 8u });
+                        }
 
                         // CHCR.TTE sends the DMAtag's upper 64 bits to the channel before
                         // the tag payload. VIF chains use those bytes for two VIFcodes.
@@ -1611,6 +1620,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             std::printf("[probe] ax chain tags=%d bytes=%zu end=%u\n", tagsProcessed, chainBuf.size(), lastTagId);
                             std::fflush(stdout);
                         }
+                        auto tChainEnd = std::chrono::steady_clock::now();
+                        probe_ae::onAyTimeChain(std::chrono::duration_cast<std::chrono::microseconds>(tChainEnd - tChainStart).count());
+                        probe_ae::onAyKick();
+                        probe_ae::onAyChainStart(tagsProcessed, aySpans);
                     }
 #endif
 
@@ -2061,6 +2074,8 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     if (!data || sizeBytes < 16)
         return;
 
+    auto tGifStart = std::chrono::steady_clock::now();
+
     if (pathId == GifPathId::Path3)
     {
         if (m_path3Masked)
@@ -2078,6 +2093,13 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
 
     if (m_gifArbiter && drainImmediately)
         m_gifArbiter->drain();
+
+#if defined(PS2X_PROBE_AE) || 1
+    if (probe_ae::isEnabled()) {
+        auto tGifEnd = std::chrono::steady_clock::now();
+        probe_ae::onAyTimeGif(std::chrono::duration_cast<std::chrono::microseconds>(tGifEnd - tGifStart).count());
+    }
+#endif
 }
 
 void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
