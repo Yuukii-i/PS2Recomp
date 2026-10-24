@@ -26,7 +26,7 @@ namespace probe_ae {
         return s_state == 1;
     }
 
-    // Counts
+    // Task AE Counts
     extern std::atomic<uint32_t> cnt_F;
     extern std::atomic<uint32_t> cnt_24c24c;
     extern std::atomic<uint32_t> cnt_24c4f8;
@@ -35,7 +35,7 @@ namespace probe_ae {
     extern std::atomic<uint32_t> cnt_24c650;
     extern std::atomic<uint32_t> cnt_24c680;
 
-    // Registers / state
+    // Task AE Registers / state
     extern std::atomic<uint32_t> val_state;
     extern std::atomic<uint32_t> val_s0;
     extern std::atomic<uint32_t> val_a1_s4;
@@ -61,6 +61,28 @@ namespace probe_ae {
     extern std::atomic<uint32_t> reg_G_a0, reg_G_a1;
     extern std::atomic<uint32_t> cnt_G_calls;
 
+    // Task AF Probes
+    extern std::atomic<uint32_t> cnt_24ce0c;
+    extern std::atomic<uint32_t> val_v24cbfc;
+    extern std::atomic<uint32_t> cnt_24ce14_tk;
+    extern std::atomic<uint32_t> cnt_24cbfc;
+    extern std::atomic<uint32_t> val_cbfc_a0;
+    extern std::atomic<uint32_t> val_cbfc_10;
+    extern std::atomic<uint32_t> val_cbfc_0c;
+    extern std::atomic<uint32_t> val_1da880_1;
+    extern std::atomic<uint32_t> val_1da880_2;
+    extern std::atomic<uint32_t> cnt_24ce24;
+    extern std::atomic<uint32_t> cnt_24cb38;
+    extern std::atomic<uint32_t> val_cb38_a0;
+    extern std::atomic<uint32_t> val_cb38_8;
+    extern std::atomic<uint32_t> val_cb58_7c;
+    extern std::atomic<uint32_t> cnt_24cb64;
+    extern std::atomic<uint32_t> val_v3f75e8;
+    extern std::atomic<uint32_t> cnt_24cbb8;
+    extern std::atomic<uint32_t> val_cbb8_t6;
+    extern std::atomic<uint32_t> val_s4a4_7c;
+    extern std::atomic<uint32_t> val_s4a4_30;
+
     void recordRa24c64c(uint32_t ra);
     std::string getAndResetRa24c64c();
 
@@ -70,7 +92,7 @@ namespace probe_ae {
     void recordTraceLabel(uint32_t labelAddr);
     void dumpTraceIfDue(uint32_t gCalls);
 
-    void printOncePerSec(uint32_t sec);
+    void printOncePerSec(uint32_t sec, const uint8_t *rdram);
 
     inline void onFEntry(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t s0, uint32_t s1) {
         if (!isEnabled()) return;
@@ -182,5 +204,93 @@ namespace probe_ae {
         val_s1.store(getRegU32(ctx, 17), std::memory_order_relaxed);
         val_s2_680.store(getRegU32(ctx, 18), std::memory_order_relaxed);
         val_s3_680.store(getRegU32(ctx, 19), std::memory_order_relaxed);
+    }
+
+    // Task AF inlines
+    inline void log24CE0C() {
+        if (!isEnabled()) return;
+        cnt_24ce0c.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void log24CE14(R5900Context *ctx, bool taken) {
+        if (!isEnabled()) return;
+        val_v24cbfc.store(getRegU32(ctx, 2), std::memory_order_relaxed);
+        if (taken) cnt_24ce14_tk.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void log24CBFC(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        cnt_24cbfc.fetch_add(1, std::memory_order_relaxed);
+        uint32_t a0 = getRegU32(ctx, 4);
+        val_cbfc_a0.store(a0, std::memory_order_relaxed);
+        uint32_t w10 = 0, w0c = 0;
+        if (rdram && a0 < PS2_RAM_SIZE - 0x20) {
+            std::memcpy(&w10, rdram + ((a0 + 0x10) & PS2_RAM_MASK), sizeof(w10));
+            std::memcpy(&w0c, rdram + ((a0 + 0xC) & PS2_RAM_MASK), sizeof(w0c));
+        }
+        val_cbfc_10.store(w10, std::memory_order_relaxed);
+        val_cbfc_0c.store(w0c, std::memory_order_relaxed);
+    }
+
+    inline void log1DA880_1(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        val_1da880_1.store(getRegU32(ctx, 2), std::memory_order_relaxed);
+    }
+
+    inline void log1DA880_2(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        val_1da880_2.store(getRegU32(ctx, 2), std::memory_order_relaxed);
+    }
+
+    inline void log24CE24() {
+        if (!isEnabled()) return;
+        cnt_24ce24.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void log24CB38(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        cnt_24cb38.fetch_add(1, std::memory_order_relaxed);
+        uint32_t a0 = getRegU32(ctx, 4);
+        val_cb38_a0.store(a0, std::memory_order_relaxed);
+        uint32_t w8 = 0;
+        if (rdram && a0 < PS2_RAM_SIZE - 0x10) {
+            std::memcpy(&w8, rdram + ((a0 + 8) & PS2_RAM_MASK), sizeof(w8));
+        }
+        val_cb38_8.store(w8, std::memory_order_relaxed);
+    }
+
+    inline void log24CB58(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t b7c = (rdram && a0 < PS2_RAM_SIZE - 0x80) ? rdram[(a0 + 0x7C) & PS2_RAM_MASK] : 0;
+        val_cb58_7c.store(b7c, std::memory_order_relaxed);
+    }
+
+    inline void log24CB64() {
+        if (!isEnabled()) return;
+        cnt_24cb64.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void log24CB6C(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        val_v3f75e8.store(getRegU32(ctx, 2), std::memory_order_relaxed);
+    }
+
+    inline void log24CBB8(R5900Context *ctx) {
+        if (!isEnabled()) return;
+        cnt_24cbb8.fetch_add(1, std::memory_order_relaxed);
+        val_cbb8_t6.store(getRegU32(ctx, 14), std::memory_order_relaxed);
+    }
+
+    inline void logState6(R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        uint32_t s0 = getRegU32(ctx, 16);
+        uint32_t b7c = 0, w30 = 0;
+        if (rdram && s0 < PS2_RAM_SIZE - 0x80) {
+            b7c = rdram[(s0 + 0x7C) & PS2_RAM_MASK];
+            std::memcpy(&w30, rdram + ((s0 + 0x30) & PS2_RAM_MASK), sizeof(w30));
+        }
+        val_s4a4_7c.store(b7c, std::memory_order_relaxed);
+        val_s4a4_30.store(w30, std::memory_order_relaxed);
     }
 }

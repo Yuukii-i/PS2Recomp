@@ -4690,7 +4690,7 @@ void PS2Runtime::run()
             
             const auto timeInScene = std::chrono::duration_cast<std::chrono::seconds>(now - g_lastSceneTransitionTime).count();
             if (probe_ae::isEnabled()) {
-                probe_ae::printOncePerSec(static_cast<uint32_t>(timeInScene));
+                probe_ae::printOncePerSec(static_cast<uint32_t>(timeInScene), m_memory.getRDRAM());
             }
             static long long s_lastStallReported10s = 0;
             if (timeInScene >= 10 && (timeInScene / 10 != s_lastStallReported10s))

@@ -7,6 +7,7 @@
 #include <cstdio>
 
 namespace probe_ae {
+    // Task AE
     std::atomic<uint32_t> cnt_F{0};
     std::atomic<uint32_t> cnt_24c24c{0};
     std::atomic<uint32_t> cnt_24c4f8{0};
@@ -43,6 +44,28 @@ namespace probe_ae {
     std::atomic<uint32_t> reg_G_a0{0};
     std::atomic<uint32_t> reg_G_a1{0};
     std::atomic<uint32_t> cnt_G_calls{0};
+
+    // Task AF
+    std::atomic<uint32_t> cnt_24ce0c{0};
+    std::atomic<uint32_t> val_v24cbfc{0};
+    std::atomic<uint32_t> cnt_24ce14_tk{0};
+    std::atomic<uint32_t> cnt_24cbfc{0};
+    std::atomic<uint32_t> val_cbfc_a0{0};
+    std::atomic<uint32_t> val_cbfc_10{0};
+    std::atomic<uint32_t> val_cbfc_0c{0};
+    std::atomic<uint32_t> val_1da880_1{0};
+    std::atomic<uint32_t> val_1da880_2{0};
+    std::atomic<uint32_t> cnt_24ce24{0};
+    std::atomic<uint32_t> cnt_24cb38{0};
+    std::atomic<uint32_t> val_cb38_a0{0};
+    std::atomic<uint32_t> val_cb38_8{0};
+    std::atomic<uint32_t> val_cb58_7c{0};
+    std::atomic<uint32_t> cnt_24cb64{0};
+    std::atomic<uint32_t> val_v3f75e8{0};
+    std::atomic<uint32_t> cnt_24cbb8{0};
+    std::atomic<uint32_t> val_cbb8_t6{0};
+    std::atomic<uint32_t> val_s4a4_7c{0};
+    std::atomic<uint32_t> val_s4a4_30{0};
 
     static std::mutex s_raMutex;
     static std::deque<uint32_t> s_lastRa;
@@ -118,7 +141,7 @@ namespace probe_ae {
         std::fflush(stdout);
     }
 
-    void printOncePerSec(uint32_t sec) {
+    void printOncePerSec(uint32_t sec, const uint8_t *rdram) {
         if (!isEnabled()) return;
         uint32_t f_cnt = cnt_F.exchange(0, std::memory_order_relaxed);
         uint32_t c_24c24c = cnt_24c24c.exchange(0, std::memory_order_relaxed);
@@ -127,17 +150,34 @@ namespace probe_ae {
         uint32_t c_24c64c = cnt_24c64c.exchange(0, std::memory_order_relaxed);
         uint32_t c_24c650 = cnt_24c650.exchange(0, std::memory_order_relaxed);
         uint32_t c_24c680 = cnt_24c680.exchange(0, std::memory_order_relaxed);
+
+        uint32_t c_24ce0c = cnt_24ce0c.exchange(0, std::memory_order_relaxed);
+        uint32_t c_24ce14_tk = cnt_24ce14_tk.exchange(0, std::memory_order_relaxed);
+        uint32_t c_24cbfc = cnt_24cbfc.exchange(0, std::memory_order_relaxed);
+        uint32_t c_24ce24 = cnt_24ce24.exchange(0, std::memory_order_relaxed);
+        uint32_t c_24cb38 = cnt_24cb38.exchange(0, std::memory_order_relaxed);
+        uint32_t c_24cb64 = cnt_24cb64.exchange(0, std::memory_order_relaxed);
+        uint32_t c_24cbb8 = cnt_24cbb8.exchange(0, std::memory_order_relaxed);
+
+        uint32_t st_word = 0;
+        if (rdram) {
+            std::memcpy(&st_word, rdram + (0x772188u & PS2_RAM_MASK), sizeof(st_word));
+        }
+
         std::string raList = getAndResetRa24c64c();
         std::string exitList = getAndResetExits();
 
-        // Print ONE [probe] t=N line matching task specification
-        std::printf("[probe] t=%u F=%u state=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u ra=[%s] exits=%s\n",
-                    sec, f_cnt, val_state.load(), val_s0.load(), val_a1_s4.load(),
+        // Print unified [probe] line with old fields + Task AF fields
+        std::printf("[probe] t=%u F=%u state=%u st=%u s0=%X a1=%X v0_1DA880=%u(tk=%u) f72C7A0=%u f72D3A0=%u w635480=%u s4C=%X s2=%X s4C10=%X s0_70=%X s484=%X tk558=%u v0_508684=%X w72D44C=%X s1_0C=%X t7=%X c24C24C=%u c24C4F8=%u c24C620=%u c24C64C=%u c24C650=%u c24C680=%u c24CE0C=%u v24CBFC=%u(tk=%u) c24CBFC=%u a0_cbfc=%X cbfc10=%X cbfc0C=%X a1DA880=%u,%u c24CE24=%u c24CB38=%u a0_cb38=%X cb38_8=%u b7C=%u c24CB64=%u v3F75E8=%u c24CBB8=%u t6_cbb8=%u s6_7C=%u s6_30=%X ra=[%s] exits=%s\n",
+                    sec, f_cnt, val_state.load(), st_word, val_s0.load(), val_a1_s4.load(),
                     val_v0_1DA880.load(), val_v0_taken.load(),
                     val_f72C7A0.load(), val_f72D3A0.load(), val_w635480.load(),
                     val_s4C.load(), val_s2.load(), val_s4C_10.load(), val_s0_70.load(), val_s48_4.load(), val_taken_558.load(),
                     val_v0_508684.load(), val_w72D44C.load(), val_s1_0C.load(), val_t7_jalr.load(),
                     c_24c24c, c_24c4f8, c_24c620, c_24c64c, c_24c650, c_24c680,
+                    c_24ce0c, val_v24cbfc.load(), c_24ce14_tk, c_24cbfc, val_cbfc_a0.load(), val_cbfc_10.load(), val_cbfc_0c.load(),
+                    val_1da880_1.load(), val_1da880_2.load(), c_24ce24, c_24cb38, val_cb38_a0.load(), val_cb38_8.load(), val_cb58_7c.load(),
+                    c_24cb64, val_v3f75e8.load(), c_24cbb8, val_cbb8_t6.load(), val_s4a4_7c.load(), val_s4a4_30.load(),
                     raList.c_str(), exitList.empty() ? "none" : exitList.c_str());
         std::fflush(stdout);
     }
