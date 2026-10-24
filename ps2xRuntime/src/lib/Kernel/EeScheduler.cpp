@@ -417,6 +417,11 @@ void EeScheduler::run()
             g_currentExecutingFunction = entryPc;
             s_lastDispatchedPc[s_lastDispatchIdx++ % 32] = entryPc;
             function(m_rdram, &context, &m_runtime);
+            if (m_insideInterrupt && probe_ae::isEnabled())
+            {
+                uint32_t ret = getRegU32(&context, 2);
+                probe_ae::logIntcHandlerReturn(entryPc, ret);
+            }
             g_currentExecutingFunction = prevExecutingFunction;
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
@@ -1536,6 +1541,12 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     }
     std::sort(matching.begin(), matching.end(), [](const EeIrqHandler &left, const EeIrqHandler &right)
               { return left.order < right.order; });
+    if (!dmac && cause == 3u && probe_ae::isEnabled())
+    {
+        std::vector<uint32_t> addrs;
+        for (const auto &h : matching) addrs.push_back(h.handler);
+        probe_ae::logCause3Dispatch(addrs);
+    }
     for (const EeIrqHandler &handler : matching)
     {
         GuestInvocation invocation{};

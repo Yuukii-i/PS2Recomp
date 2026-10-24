@@ -28,6 +28,7 @@ namespace probe_ae {
 
     // Task AE Counts
     extern std::atomic<uint32_t> cnt_F;
+    extern std::atomic<uint32_t> cnt_ar_G;
     extern std::atomic<uint32_t> cnt_24c24c;
     extern std::atomic<uint32_t> cnt_24c4f8;
     extern std::atomic<uint32_t> cnt_24c620;
@@ -166,6 +167,7 @@ namespace probe_ae {
         reg_G_a0.store(a0, std::memory_order_relaxed);
         reg_G_a1.store(a1, std::memory_order_relaxed);
         uint32_t callNum = cnt_G_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+        cnt_ar_G.fetch_add(1, std::memory_order_relaxed);
         dumpTraceIfDue(callNum);
     }
 
@@ -542,4 +544,15 @@ namespace probe_ae {
     void log24C8BC(R5900Context *ctx, const uint8_t *rdram);
     void log24C8E4(R5900Context *ctx, const uint8_t *rdram);
     void log24C8F4(R5900Context *ctx);
+
+    // Task AR Probes
+    void on31A3E8();
+    void on35F4C4();
+    void on15B750();
+    void on31A52C();
+    void on4E2730();
+    void on4E914C();
+    void logCause3Dispatch(const std::vector<uint32_t> &handlers);
+    void logIntcHandlerReturn(uint32_t addr, uint32_t ret);
+    void logRmIntc(const char *op, uint32_t cause, uint32_t ra);
 }

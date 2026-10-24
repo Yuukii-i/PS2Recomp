@@ -45,6 +45,18 @@ namespace probe_ae {
     std::atomic<uint32_t> reg_G_a1{0};
     std::atomic<uint32_t> cnt_G_calls{0};
 
+    // Task AR atomics
+    std::atomic<uint32_t> cnt_ar_31a3e8{0};
+    std::atomic<uint32_t> cnt_ar_35f4c4{0};
+    std::atomic<uint32_t> cnt_ar_15b750{0};
+    std::atomic<uint32_t> cnt_ar_31a52c{0};
+    std::atomic<uint32_t> cnt_ar_4e2730{0};
+    std::atomic<uint32_t> cnt_ar_4e914c{0};
+    std::atomic<uint32_t> cnt_ar_G{0};
+    std::atomic<uint32_t> cnt_ar_cause3_dispatches{0};
+    std::atomic<uint32_t> val_ar_ret_31a3e8{0};
+    std::atomic<uint32_t> val_ar_ret_35f4c4{0};
+
     // Task AF
     std::atomic<uint32_t> cnt_24ce0c{0};
     std::atomic<uint32_t> val_v24cbfc{0};
@@ -432,6 +444,32 @@ namespace probe_ae {
                     c_3fbe78, val_3fbe78_voice.load(), val_3fbeac_v0.load(),
                     w74b140, w74b144, w74b148, (unsigned long long)m1900ea0, s0_84_mem, s0_7c_mem,
                     c_24c5a0, c_24c5ac, c_3f7e38, c_31a240, c_31a2c0, s4c_refill, c8_cdcc, c8_cdfc, c8_24c7dc, c8_24c8b4, c8_ret, ctx_88, ctx_C8, ctx_CC, ctx_D8, ctx_E0, ctx_E4, ctx_E8, ctx_EC);
+
+        uint32_t ar_31a3e8 = cnt_ar_31a3e8.exchange(0, std::memory_order_relaxed);
+        uint32_t ar_35f4c4 = cnt_ar_35f4c4.exchange(0, std::memory_order_relaxed);
+        uint32_t ar_15b750 = cnt_ar_15b750.exchange(0, std::memory_order_relaxed);
+        uint32_t ar_31a52c = cnt_ar_31a52c.exchange(0, std::memory_order_relaxed);
+        uint32_t ar_4e2730 = cnt_ar_4e2730.exchange(0, std::memory_order_relaxed);
+        uint32_t ar_4e914c = cnt_ar_4e914c.exchange(0, std::memory_order_relaxed);
+        uint32_t ar_G = cnt_ar_G.exchange(0, std::memory_order_relaxed);
+        uint32_t ar_c3 = cnt_ar_cause3_dispatches.exchange(0, std::memory_order_relaxed);
+        uint32_t ar_ret_31a = val_ar_ret_31a3e8.load(std::memory_order_relaxed);
+        uint32_t ar_ret_35f = val_ar_ret_35f4c4.load(std::memory_order_relaxed);
+
+        uint64_t w696fd0 = 0, w696fd8 = 0, w686fd0 = 0, w686fd8 = 0;
+        if (rdram) {
+            std::memcpy(&w696fd0, rdram + (0x696FD0u & PS2_RAM_MASK), sizeof(uint64_t));
+            std::memcpy(&w696fd8, rdram + (0x696FD8u & PS2_RAM_MASK), sizeof(uint64_t));
+            std::memcpy(&w686fd0, rdram + (0x686FD0u & PS2_RAM_MASK), sizeof(uint64_t));
+            std::memcpy(&w686fd8, rdram + (0x686FD8u & PS2_RAM_MASK), sizeof(uint64_t));
+        }
+
+        std::printf("[probe] ar sec=%u 69fd0=0x%llX 69fd8=0x%llX (68fd0=0x%llX 68fd8=0x%llX) cause3_disp=%u 31a3e8=%u(ret=%u) 35f4c4=%u(ret=%u) 15b750=%u 31a52c=%u 4e2730=%u G_4e2df8=%u 4e914c=%u\n",
+                    sec,
+                    (unsigned long long)w696fd0, (unsigned long long)w696fd8,
+                    (unsigned long long)w686fd0, (unsigned long long)w686fd8,
+                    ar_c3, ar_31a3e8, ar_ret_31a, ar_35f4c4, ar_ret_35f,
+                    ar_15b750, ar_31a52c, ar_4e2730, ar_G, ar_4e914c);
         std::fflush(stdout);
     }
 
@@ -789,5 +827,67 @@ namespace probe_ae {
             std::printf("[probe] 24c8f4 n=%u t7_cmp=%u (1=equal)\n", n, t7);
             std::fflush(stdout);
         }
+    }
+
+    // Task AR
+    void on31A3E8() {
+        if (!isEnabled()) return;
+        cnt_ar_31a3e8.fetch_add(1, std::memory_order_relaxed);
+    }
+    void on35F4C4() {
+        if (!isEnabled()) return;
+        cnt_ar_35f4c4.fetch_add(1, std::memory_order_relaxed);
+    }
+    void on15B750() {
+        if (!isEnabled()) return;
+        cnt_ar_15b750.fetch_add(1, std::memory_order_relaxed);
+    }
+    void on31A52C() {
+        if (!isEnabled()) return;
+        cnt_ar_31a52c.fetch_add(1, std::memory_order_relaxed);
+    }
+    void on4E2730() {
+        if (!isEnabled()) return;
+        cnt_ar_4e2730.fetch_add(1, std::memory_order_relaxed);
+    }
+    void on4E914C() {
+        if (!isEnabled()) return;
+        cnt_ar_4e914c.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void logCause3Dispatch(const std::vector<uint32_t> &handlers) {
+        if (!isEnabled()) return;
+        cnt_ar_cause3_dispatches.fetch_add(1, std::memory_order_relaxed);
+        static std::mutex s_cause3Mutex;
+        static std::vector<uint32_t> s_lastCause3Handlers;
+        static bool s_cause3First = true;
+        std::lock_guard<std::mutex> lock(s_cause3Mutex);
+        if (s_cause3First || s_lastCause3Handlers != handlers) {
+            s_cause3First = false;
+            s_lastCause3Handlers = handlers;
+            std::string hList;
+            for (size_t i = 0; i < handlers.size(); ++i) {
+                char b[32];
+                std::snprintf(b, sizeof(b), "%s0x%08X", (i > 0 ? "," : ""), handlers[i]);
+                hList += b;
+            }
+            std::printf("[probe] ar intc cause=3 handlers=[%s]\n", hList.c_str());
+            std::fflush(stdout);
+        }
+    }
+
+    void logIntcHandlerReturn(uint32_t addr, uint32_t ret) {
+        if (!isEnabled()) return;
+        if (addr == 0x31A3E8u) {
+            val_ar_ret_31a3e8.store(ret, std::memory_order_relaxed);
+        } else if (addr == 0x35F4C4u) {
+            val_ar_ret_35f4c4.store(ret, std::memory_order_relaxed);
+        }
+    }
+
+    void logRmIntc(const char *op, uint32_t cause, uint32_t ra) {
+        if (!isEnabled()) return;
+        std::printf("[probe] ar rmintc op=%s cause=%u ra=0x%08X\n", op, cause, ra);
+        std::fflush(stdout);
     }
 }

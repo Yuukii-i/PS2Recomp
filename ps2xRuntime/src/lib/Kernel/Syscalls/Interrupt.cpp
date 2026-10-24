@@ -19,9 +19,13 @@ namespace ps2_syscalls
                              bool dmac,
                              bool enabled)
         {
+            uint32_t cause = getRegU32(ctx, 4);
+            if (!enabled && cause == 3u) {
+                probe_ae::logRmIntc(dmac ? "DisableDmac" : "DisableIntc", cause, getRegU32(ctx, 31));
+            }
             setReturnS32(ctx,
                          scheduler(rdram, ctx, runtime)
-                             .setIrqCauseEnabled(dmac, getRegU32(ctx, 4), enabled));
+                             .setIrqCauseEnabled(dmac, cause, enabled));
         }
 
         void addHandler(uint8_t *rdram,
@@ -46,10 +50,14 @@ namespace ps2_syscalls
                            PS2Runtime *runtime,
                            bool dmac)
         {
+            uint32_t cause = getRegU32(ctx, 4);
+            if (cause == 3u) {
+                probe_ae::logRmIntc(dmac ? "RemoveDmacHandler" : "RemoveIntcHandler", cause, getRegU32(ctx, 31));
+            }
             setReturnS32(ctx,
                          scheduler(rdram, ctx, runtime)
                              .removeIrqHandler(dmac,
-                                               getRegU32(ctx, 4),
+                                               cause,
                                                static_cast<int>(getRegU32(ctx, 5))));
         }
 
@@ -59,6 +67,10 @@ namespace ps2_syscalls
                                bool dmac,
                                bool enabled)
         {
+            if (!enabled) {
+                int handlerId = static_cast<int>(getRegU32(ctx, 5));
+                probe_ae::logRmIntc(dmac ? "DisableDmacHandler" : "DisableIntcHandler", static_cast<uint32_t>(handlerId), getRegU32(ctx, 31));
+            }
             setReturnS32(ctx,
                          scheduler(rdram, ctx, runtime)
                              .setIrqHandlerEnabled(dmac,
