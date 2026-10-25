@@ -3095,6 +3095,7 @@ namespace probe_ae {
         const int32_t mbY = rawY / 16;
 
         probe_ae::onBwMscalBlock(mbX, mbY);
+        probe_ae::onBxNativeMscal(mbX, mbY, top & 0x3FFu);
         // Log once per movie for the first MSCAL
         if (s_lastBsMovieInstance != s_movieInstance) {
             s_lastBsMovieInstance = s_movieInstance;
@@ -4997,6 +4998,7 @@ namespace probe_ae {
         onBuTickSec(rdram);
         onBvTickSec();
         onBwTickSec();
+        onBxTickSec(rdram);
         s_bqTotalSec++;
 
         uint32_t running = 0, blocked = 0;
@@ -5742,5 +5744,314 @@ namespace probe_ae {
               calls, ok, fail, pops, picI, picP, picB, bytesIn, underflow, w, h);
         ps2xSafeLog("[probe] bw dec calls=%u ok=%u fail=%u ring_pops=%u pic_types=I:%u,P:%u,B:%u bytes_in=%u ring_underflow=%u w=%u h=%u\n",
                     calls, ok, fail, pops, picI, picP, picB, bytesIn, underflow, w, h);
+    }
+
+    // =========================================================================
+    // Task BX: MSCAL path accounting, display pipeline, and screenshot dumps
+    // =========================================================================
+    static std::atomic<uint32_t> s_bxKicks{0};
+    static std::atomic<uint32_t> s_bxNativeMscals{0};
+    static std::atomic<uint32_t> s_bxOrigRunMscals{0};
+
+    static std::mutex s_bxHistMutex;
+    static uint32_t s_bxNativeRowHist[24] = {0};
+    static std::unordered_map<uint32_t, uint32_t> s_bxTopsHist;
+
+    struct BxOrigRunInfo {
+        uint32_t startPC;
+        uint32_t top;
+        int32_t qwTop[4];
+        int32_t qwTop1[4];
+        int32_t minX, minY, maxX, maxY;
+        bool hasVerts;
+    };
+    static std::vector<BxOrigRunInfo> s_bxSecOrigRuns;
+    static BxOrigRunInfo s_bxCurOrigRun;
+    static bool s_bxInOrigRun = false;
+
+    void onBxKick() {
+        if (!isEnabled()) return;
+        s_bxKicks.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void onBxNativeMscal(int32_t mbX, int32_t mbY, uint32_t top) {
+        if (!isEnabled()) return;
+        s_bxNativeMscals.fetch_add(1, std::memory_order_relaxed);
+        int row = mbY / 16;
+        if (row >= 0 && row < 24) {
+            std::lock_guard<std::mutex> lock(s_bxHistMutex);
+            s_bxNativeRowHist[row]++;
+            s_bxTopsHist[top]++;
+        }
+    }
+
+    void onBxOrigRunStart(uint32_t startPC, uint32_t top, const uint8_t *vuData, uint32_t dataSize) {
+        if (!isEnabled()) return;
+        s_bxOrigRunMscals.fetch_add(1, std::memory_order_relaxed);
+
+        std::lock_guard<std::mutex> lock(s_bxHistMutex);
+        s_bxTopsHist[top & 0x3FFu]++;
+
+        if (s_bxSecOrigRuns.size() < 3) {
+            s_bxInOrigRun = true;
+            s_bxCurOrigRun = {};
+            s_bxCurOrigRun.startPC = startPC;
+            s_bxCurOrigRun.top = top & 0x3FFu;
+            s_bxCurOrigRun.minX = 999999;
+            s_bxCurOrigRun.minY = 999999;
+            s_bxCurOrigRun.maxX = -999999;
+            s_bxCurOrigRun.maxY = -999999;
+            s_bxCurOrigRun.hasVerts = false;
+
+            if (vuData && dataSize >= 16) {
+                uint32_t off0 = ((top + 0u) & 0x3FFu) * 16u;
+                uint32_t off1 = ((top + 1u) & 0x3FFu) * 16u;
+                if (off0 + 16u <= dataSize) std::memcpy(s_bxCurOrigRun.qwTop, vuData + off0, 16);
+                if (off1 + 16u <= dataSize) std::memcpy(s_bxCurOrigRun.qwTop1, vuData + off1, 16);
+            }
+        }
+    }
+
+    void onBxOrigRunXgkick(const uint8_t *data, uint32_t byteCount) {
+        if (!isEnabled() || !s_bxInOrigRun || !data || byteCount < 32) return;
+        std::lock_guard<std::mutex> lock(s_bxHistMutex);
+        // Parse vertices from GIF packet (similar to verify path: 16-byte header then 32-byte verts)
+        size_t numVerts = (byteCount >= 16) ? (byteCount - 16) / 32 : 0;
+        for (size_t v = 0; v < numVerts; ++v) {
+            size_t xyzOff = 16 + v * 32 + 16;
+            if (xyzOff + 4 <= byteCount) {
+                uint16_t x_raw = static_cast<uint16_t>(data[xyzOff]) | (static_cast<uint16_t>(data[xyzOff + 1]) << 8);
+                uint16_t y_raw = static_cast<uint16_t>(data[xyzOff + 2]) | (static_cast<uint16_t>(data[xyzOff + 3]) << 8);
+                int px = static_cast<int>(x_raw >> 4);
+                int py = static_cast<int>(y_raw >> 4);
+                s_bxCurOrigRun.hasVerts = true;
+                if (px < s_bxCurOrigRun.minX) s_bxCurOrigRun.minX = px;
+                if (py < s_bxCurOrigRun.minY) s_bxCurOrigRun.minY = py;
+                if (px > s_bxCurOrigRun.maxX) s_bxCurOrigRun.maxX = px;
+                if (py > s_bxCurOrigRun.maxY) s_bxCurOrigRun.maxY = py;
+            }
+        }
+    }
+
+    void onBxOrigRunEnd() {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_bxHistMutex);
+        if (s_bxInOrigRun) {
+            s_bxInOrigRun = false;
+            if (s_bxSecOrigRuns.size() < 3) {
+                s_bxSecOrigRuns.push_back(s_bxCurOrigRun);
+            }
+        }
+    }
+
+    // Part B & C: Presentation & GS Prim
+    static uint32_t s_bxLastDispFbp = 0xFFFFFFFFu;
+    static uint32_t s_bxLastSrcFbp = 0xFFFFFFFFu;
+    static int s_bxLastPreferred = -1;
+    static uint32_t s_bxLastW = 0, s_bxLastH = 0;
+    static int s_bxLastX0 = -1, s_bxLastY0 = -1, s_bxLastX1 = -1, s_bxLastY1 = -1;
+    static uint32_t s_bxLastNonblack = 0xFFFFFFFFu;
+
+    static auto s_bxLastShotTime = std::chrono::steady_clock::time_point::min();
+    static uint32_t s_bxShotCount = 0;
+
+    void onBxPresentFrame(uint32_t frameNum, uint32_t displayFbp, uint32_t sourceFbp, bool preferred,
+                          uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t currentTick) {
+        if (!isEnabled() || !rgba || width == 0 || height == 0) return;
+        const uint8_t *rdram = s_cachedRdram;
+        if (!rdram) return;
+        uint32_t st = 0;
+        std::memcpy(&st, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        if (st != 9) return;
+
+        // Calculate bounding box and nonblack count
+        int x0 = 999999, y0 = 999999, x1 = -1, y1 = -1;
+        uint32_t nonblack = 0;
+        for (uint32_t y = 0; y < height; ++y) {
+            const uint32_t *row = reinterpret_cast<const uint32_t *>(rgba + y * width * 4u);
+            for (uint32_t x = 0; x < width; ++x) {
+                if ((row[x] & 0x00FFFFFFu) != 0) {
+                    nonblack++;
+                    if (static_cast<int>(x) < x0) x0 = static_cast<int>(x);
+                    if (static_cast<int>(y) < y0) y0 = static_cast<int>(y);
+                    if (static_cast<int>(x) > x1) x1 = static_cast<int>(x);
+                    if (static_cast<int>(y) > y1) y1 = static_cast<int>(y);
+                }
+            }
+        }
+        if (nonblack == 0) {
+            x0 = y0 = x1 = y1 = 0;
+        }
+
+        int prefInt = preferred ? 1 : 0;
+        if (displayFbp != s_bxLastDispFbp || sourceFbp != s_bxLastSrcFbp || prefInt != s_bxLastPreferred ||
+            width != s_bxLastW || height != s_bxLastH || x0 != s_bxLastX0 || y0 != s_bxLastY0 ||
+            x1 != s_bxLastX1 || y1 != s_bxLastY1 || nonblack != s_bxLastNonblack)
+        {
+            s_bxLastDispFbp = displayFbp;
+            s_bxLastSrcFbp = sourceFbp;
+            s_bxLastPreferred = prefInt;
+            s_bxLastW = width;
+            s_bxLastH = height;
+            s_bxLastX0 = x0; s_bxLastY0 = y0;
+            s_bxLastX1 = x1; s_bxLastY1 = y1;
+            s_bxLastNonblack = nonblack;
+
+            bhLog("[probe] bx present frame=%u display_fbp=%u source_fbp=%u preferred=%d w=%u h=%u bbox=(%d,%d,%d,%d) nonblack=%u\n",
+                  frameNum, displayFbp, sourceFbp, prefInt, width, height, x0, y0, x1, y1, nonblack);
+            ps2xSafeLog("[probe] bx present frame=%u display_fbp=%u source_fbp=%u preferred=%d w=%u h=%u bbox=(%d,%d,%d,%d) nonblack=%u\n",
+                        frameNum, displayFbp, sourceFbp, prefInt, width, height, x0, y0, x1, y1, nonblack);
+        }
+
+        // Part C: Dump frame every 2 seconds while movie state 9, max 40 files
+        auto now = std::chrono::steady_clock::now();
+        double elapsedSec = std::chrono::duration<double>(now - s_bxLastShotTime).count();
+        if (elapsedSec >= 2.0 && s_bxShotCount < 40) {
+            s_bxLastShotTime = now;
+            char filename[64];
+            std::snprintf(filename, sizeof(filename), "frames/bx_%02u.png", s_bxShotCount++);
+            std::filesystem::create_directories("frames");
+            ::writeUncompressedPng(width, height, rgba, filename);
+            double t_ms = std::chrono::duration<double, std::milli>(now.time_since_epoch()).count();
+            bhLog("[probe] bx shot %s t_ms=%.1f\n", filename, t_ms);
+            ps2xSafeLog("[probe] bx shot %s t_ms=%.1f\n", filename, t_ms);
+        }
+    }
+
+    struct BxGsPrimInfo {
+        const char *type;
+        uint32_t fbp;
+        uint32_t tbp0;
+        float x0, y0, x1, y1;
+        float u0, v0, u1, v1;
+        uint32_t tex_fbw;
+    };
+    static std::mutex s_bxPrimMutex;
+    static uint32_t s_bxSecGsPrimCount = 0;
+    static std::vector<BxGsPrimInfo> s_bxSecGsPrims;
+
+    void onBxDrawPrimitive(const struct GSPrimitiveBatch &batch) {
+        if (!isEnabled()) return;
+        const auto &ctx = batch.state.context;
+        // Check if destination FBP matches DISPFB2.dbp (112)
+        uint64_t dispfb2 = 0;
+        {
+            std::lock_guard<std::mutex> lock(s_bbMutex);
+            dispfb2 = s_bbDispfb2;
+        }
+        uint32_t dbp = static_cast<uint32_t>((dispfb2 >> 0) & 0x1FFu);
+        if (dbp == 0) dbp = 112; // fallback to known 112 if not yet set
+
+        if (ctx.frame.fbp == dbp) {
+            std::lock_guard<std::mutex> lock(s_bxPrimMutex);
+            s_bxSecGsPrimCount++;
+            if (s_bxSecGsPrims.size() < 4) {
+                BxGsPrimInfo info{};
+                info.type = (batch.state.prim.type == GS_PRIM_SPRITE) ? "sprite" :
+                            (batch.state.prim.type == GS_PRIM_TRIANGLE || batch.state.prim.type == GS_PRIM_TRISTRIP || batch.state.prim.type == GS_PRIM_TRIFAN) ? "tri" : "other";
+                info.fbp = ctx.frame.fbp;
+                info.tbp0 = ctx.tex0.tbp0;
+                info.tex_fbw = ctx.tex0.tbw;
+
+                if (batch.vertexCount >= 2) {
+                    info.x0 = batch.vertices[0].x;
+                    info.y0 = batch.vertices[0].y;
+                    info.x1 = batch.vertices[1].x;
+                    info.y1 = batch.vertices[1].y;
+
+                    info.u0 = batch.vertices[0].u;
+                    info.v0 = batch.vertices[0].v;
+                    info.u1 = batch.vertices[1].u;
+                    info.v1 = batch.vertices[1].v;
+                }
+                s_bxSecGsPrims.push_back(info);
+            }
+        }
+    }
+
+    void onBxTickSec(const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        uint32_t st = 0;
+        if (rdram) {
+            std::memcpy(&st, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        }
+        if (st != 9) return;
+
+        uint32_t kicks = s_bxKicks.exchange(0, std::memory_order_relaxed);
+        uint32_t native = s_bxNativeMscals.exchange(0, std::memory_order_relaxed);
+        uint32_t orig_run = s_bxOrigRunMscals.exchange(0, std::memory_order_relaxed);
+        uint32_t skipped = (kicks > 0 && kicks * 320u > (native + orig_run)) ? (kicks * 320u - (native + orig_run)) : 0;
+
+        bhLog("[probe] bx path native=%u orig_run=%u skipped_other=%u kicks=%u\n",
+              native, orig_run, skipped, kicks);
+        ps2xSafeLog("[probe] bx path native=%u orig_run=%u skipped_other=%u kicks=%u\n",
+                    native, orig_run, skipped, kicks);
+
+        // Row histogram & TOPs
+        char histStr[256];
+        int hpos = 0;
+        std::string topsStr;
+        std::vector<BxOrigRunInfo> origRuns;
+        {
+            std::lock_guard<std::mutex> lock(s_bxHistMutex);
+            for (int r = 0; r < 24; ++r) {
+                hpos += std::snprintf(histStr + hpos, sizeof(histStr) - hpos, "%u%s",
+                                      s_bxNativeRowHist[r], (r < 23 ? " " : ""));
+                s_bxNativeRowHist[r] = 0;
+            }
+
+            size_t tCount = 0;
+            for (const auto &pair : s_bxTopsHist) {
+                if (tCount > 0) topsStr += ",";
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "0x%03X:%u", pair.first, pair.second);
+                topsStr += buf;
+                tCount++;
+            }
+            s_bxTopsHist.clear();
+
+            origRuns = s_bxSecOrigRuns;
+            s_bxSecOrigRuns.clear();
+        }
+
+        bhLog("[probe] bx rows native_hist=[%s]\n", histStr);
+        ps2xSafeLog("[probe] bx rows native_hist=[%s]\n", histStr);
+
+        bhLog("[probe] bx tops tops=<%s>\n", topsStr.c_str());
+        ps2xSafeLog("[probe] bx tops tops=<%s>\n", topsStr.c_str());
+
+        // Orig runs
+        for (const auto &run : origRuns) {
+            bhLog("[probe] bx orig first3 pc=0x%03X top=0x%03X qwTop=[%d,%d,%d,%d] qwTop1=[%d,%d,%d,%d] bbox=(%d,%d)-(%d,%d)\n",
+                  run.startPC, run.top,
+                  run.qwTop[0], run.qwTop[1], run.qwTop[2], run.qwTop[3],
+                  run.qwTop1[0], run.qwTop1[1], run.qwTop1[2], run.qwTop1[3],
+                  run.hasVerts ? run.minX : 0, run.hasVerts ? run.minY : 0,
+                  run.hasVerts ? run.maxX : 0, run.hasVerts ? run.maxY : 0);
+            ps2xSafeLog("[probe] bx orig first3 pc=0x%03X top=0x%03X qwTop=[%d,%d,%d,%d] qwTop1=[%d,%d,%d,%d] bbox=(%d,%d)-(%d,%d)\n",
+                        run.startPC, run.top,
+                        run.qwTop[0], run.qwTop[1], run.qwTop[2], run.qwTop[3],
+                        run.qwTop1[0], run.qwTop1[1], run.qwTop1[2], run.qwTop1[3],
+                        run.hasVerts ? run.minX : 0, run.hasVerts ? run.minY : 0,
+                        run.hasVerts ? run.maxX : 0, run.hasVerts ? run.maxY : 0);
+        }
+
+        // GS Prims
+        uint32_t primCount = 0;
+        std::vector<BxGsPrimInfo> prims;
+        {
+            std::lock_guard<std::mutex> lock(s_bxPrimMutex);
+            primCount = s_bxSecGsPrimCount;
+            s_bxSecGsPrimCount = 0;
+            prims = s_bxSecGsPrims;
+            s_bxSecGsPrims.clear();
+        }
+
+        for (const auto &p : prims) {
+            bhLog("[probe] bx gsprim type=%s fbp=%u tbp0=%u xy=(%.1f,%.1f)-(%.1f,%.1f) uv=(%.1f,%.1f)-(%.1f,%.1f) tex_fbw=%u\n",
+                  p.type, p.fbp, p.tbp0, p.x0, p.y0, p.x1, p.y1, p.u0, p.v0, p.u1, p.v1, p.tex_fbw);
+            ps2xSafeLog("[probe] bx gsprim type=%s fbp=%u tbp0=%u xy=(%.1f,%.1f)-(%.1f,%.1f) uv=(%.1f,%.1f)-(%.1f,%.1f) tex_fbw=%u\n",
+                        p.type, p.fbp, p.tbp0, p.x0, p.y0, p.x1, p.y1, p.u0, p.v0, p.u1, p.v1, p.tex_fbw);
+        }
     }
 }

@@ -981,6 +981,7 @@ void VU1Interpreter::finishXgkick()
     if (probe_ae::isEnabled() || probe_ae::isMovieHleVerify())
     {
         probe_ae::onBbXgkickPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
+        probe_ae::onBxOrigRunXgkick(m_xgkick.packet.data(), m_xgkick.totalBytes);
     }
 
     const auto tXgkickStart = std::chrono::steady_clock::now();
@@ -1669,6 +1670,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         return;
     }
 
+    probe_ae::onBxOrigRunStart(startPC, top, vuData, dataSize);
+
     resetScheduler();
     m_state.pc = startPC & microAddressMask();
     if (probe_ae::isEnabled() || probe_ae::isMovieHleVerify())
@@ -1946,4 +1949,5 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         probe_ae::onBaRunEnd(instrsThisRun, loopNs);
         probe_ae::onBbRunEnd(vuData, dataSize);
     }
+    probe_ae::onBxOrigRunEnd();
 }

@@ -945,6 +945,7 @@ GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
 
 void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 {
+    probe_ae::onBxDrawPrimitive(batch);
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
     PS2_IF_AGRESSIVE_LOGS({

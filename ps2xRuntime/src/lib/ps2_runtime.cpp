@@ -862,6 +862,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
             std::fflush(stderr);
         }
     });
+    probe_ae::onBxPresentFrame(currentTick, displayFbp, sourceFbp, usedPreferredDisplaySource,
+                               width, height, s_scratch.data(), currentTick);
     s_lastDisplayFbp = displayFbp;
     s_lastSourceFbp = sourceFbp;
     s_lastPreferred = usedPreferredDisplaySource;

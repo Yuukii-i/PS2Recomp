@@ -839,4 +839,15 @@ namespace probe_ae {
     void onBwFeedChunk(const uint8_t *data, size_t size);
     void onBwRaw8End(bool ok, int pops, uint32_t bytesIn, uint32_t underflow);
     void onBwTickSec();
+
+    // Task BX Probes
+    void onBxKick();
+    void onBxNativeMscal(int32_t mbX, int32_t mbY, uint32_t top);
+    void onBxOrigRunStart(uint32_t startPC, uint32_t top, const uint8_t *vuData, uint32_t dataSize);
+    void onBxOrigRunXgkick(const uint8_t *data, uint32_t byteCount);
+    void onBxOrigRunEnd();
+    void onBxPresentFrame(uint32_t frameNum, uint32_t displayFbp, uint32_t sourceFbp, bool preferred,
+                          uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t currentTick);
+    void onBxDrawPrimitive(const struct GSPrimitiveBatch &batch);
+    void onBxTickSec(const uint8_t *rdram);
 }

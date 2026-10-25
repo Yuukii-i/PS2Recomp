@@ -376,6 +376,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         return;
 
     probe_ae::onBhVif1Start();
+    probe_ae::onBxKick();
     uint32_t mscal0x48Count = count0x48MscalsInKick(data, sizeBytes);
     probe_ae::onMovieKickMscalCount(mscal0x48Count);
     uint32_t kickUnpacksSkipped = 0;
