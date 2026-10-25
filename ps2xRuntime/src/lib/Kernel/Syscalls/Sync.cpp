@@ -38,6 +38,7 @@ namespace ps2_syscalls
         {
             int semaId = static_cast<int>(getRegU32(ctx, 4));
             probe_ae::recordSemaSignal(semaId, getRegU32(ctx, 31));
+            probe_ae::recordSemaSignalBQ(semaId, getRegU32(ctx, 31), runtime ? runtime->eeScheduler().currentThreadId() : 0);
             EeScheduler &ee = scheduler(rdram, ctx, runtime);
             const int result = ee.signalSemaphore(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
             setReturnS32(ctx, result);
@@ -113,6 +114,7 @@ namespace ps2_syscalls
     {
         int semaId = static_cast<int>(getRegU32(ctx, 4));
         probe_ae::recordSemaWait(semaId, getRegU32(ctx, 31));
+        probe_ae::recordSemaWaitBQ(semaId, getRegU32(ctx, 31), runtime ? runtime->eeScheduler().currentThreadId() : 0);
         scheduler(rdram, ctx, runtime).waitSemaphore(semaId);
     }
 

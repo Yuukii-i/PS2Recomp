@@ -4465,4 +4465,230 @@ namespace probe_ae {
         std::printf("[probe] bp dev30=%u\n", dev30);
         std::fflush(stdout);
     }
+
+    // Task BQ
+    struct SemaRecordBQ {
+        uint32_t lastSignalRa = 0;
+        int lastSignalThread = 0;
+        uint32_t lastWaitRa = 0;
+        int lastWaitThread = 0;
+    };
+    static std::mutex s_semaBqMutex;
+    static std::unordered_map<int, SemaRecordBQ> s_semaBqRecords;
+
+    void recordSemaSignalBQ(int semaId, uint32_t ra, int threadId) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_semaBqMutex);
+        auto &r = s_semaBqRecords[semaId];
+        r.lastSignalRa = ra;
+        r.lastSignalThread = threadId;
+    }
+
+    void recordSemaWaitBQ(int semaId, uint32_t ra, int threadId) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_semaBqMutex);
+        auto &r = s_semaBqRecords[semaId];
+        r.lastWaitRa = ra;
+        r.lastWaitThread = threadId;
+    }
+
+    static std::atomic<uint32_t> s_idleSecCount{0};
+    static std::atomic<uint32_t> s_lastDumpSec{0};
+    static uint32_t s_bqTotalSec = 0;
+
+    static const char *getThreadStatusStr(EeThreadStatus st) {
+        switch (st) {
+        case EeThreadStatus::Dormant: return "DORMANT";
+        case EeThreadStatus::Ready: return "READY";
+        case EeThreadStatus::Running: return "RUNNING";
+        case EeThreadStatus::Waiting: return "WAIT";
+        case EeThreadStatus::Suspended: return "SUSPEND";
+        case EeThreadStatus::WaitingSuspended: return "WAIT_SUSPEND";
+        default: return "UNKNOWN";
+        }
+    }
+
+    static const char *getWaitReasonStr(EeWaitReason r) {
+        switch (r) {
+        case EeWaitReason::None: return "NONE";
+        case EeWaitReason::Sleep: return "SLEEP";
+        case EeWaitReason::Semaphore: return "SEMA";
+        case EeWaitReason::EventFlag: return "EVENTFLAG";
+        case EeWaitReason::VSync: return "VSYNC";
+        case EeWaitReason::External: return "EXTERNAL";
+        case EeWaitReason::Mpeg: return "MPEG";
+        default: return "OTHER";
+        }
+    }
+
+    static void doBqStallDump(const uint8_t *rdram) {
+        bhLog("================ [probe] BQ EE IDLE STALL DUMP ================\n");
+        ps2xSafeLog("================ [probe] BQ EE IDLE STALL DUMP ================\n");
+
+        if (!s_bmScheduler) {
+            bhLog("[probe] bq scheduler not bound\n");
+            ps2xSafeLog("[probe] bq scheduler not bound\n");
+            return;
+        }
+
+        // a. Guest threads
+        bhLog("--- [probe] bq threads ---\n");
+        ps2xSafeLog("--- [probe] bq threads ---\n");
+        std::vector<int> blockedThreads;
+        for (int id = 1; id < 256; ++id) {
+            const GuestThread *th = s_bmScheduler->thread(id);
+            if (!th || th->status == EeThreadStatus::Dormant) continue;
+            const R5900Context &ctx = th->activeContext();
+            uint32_t pc = ctx.pc;
+            uint32_t ra = getRegU32(&ctx, 31);
+            uint32_t sp = getRegU32(&ctx, 29);
+            uint32_t a0 = getRegU32(&ctx, 4);
+            uint32_t a1 = getRegU32(&ctx, 5);
+            uint32_t a2 = getRegU32(&ctx, 6);
+            uint32_t a3 = getRegU32(&ctx, 7);
+
+            int waitPayloadId = 0;
+            if (std::holds_alternative<EeSemaphoreWait>(th->wait.payload)) {
+                waitPayloadId = std::get<EeSemaphoreWait>(th->wait.payload).id;
+            } else if (std::holds_alternative<EeEventFlagWait>(th->wait.payload)) {
+                waitPayloadId = std::get<EeEventFlagWait>(th->wait.payload).id;
+            }
+
+            bhLog("[probe] bq th id=%d entry=0x%08X prio=%d state=%s wait=%s(payload=%d) pc=0x%08X ra=0x%08X sp=0x%08X a0..a3=0x%08X,0x%08X,0x%08X,0x%08X\n",
+                  id, th->entry, th->currentPriority, getThreadStatusStr(th->status),
+                  getWaitReasonStr(th->wait.reason), waitPayloadId,
+                  pc, ra, sp, a0, a1, a2, a3);
+            ps2xSafeLog("[probe] bq th id=%d entry=0x%08X prio=%d state=%s wait=%s(payload=%d) pc=0x%08X ra=0x%08X sp=0x%08X a0..a3=0x%08X,0x%08X,0x%08X,0x%08X\n",
+                        id, th->entry, th->currentPriority, getThreadStatusStr(th->status),
+                        getWaitReasonStr(th->wait.reason), waitPayloadId,
+                        pc, ra, sp, a0, a1, a2, a3);
+
+            if (th->status == EeThreadStatus::Waiting || th->status == EeThreadStatus::WaitingSuspended) {
+                blockedThreads.push_back(id);
+            }
+        }
+
+        // b. Semaphores with waiters
+        bhLog("--- [probe] bq semaphores with waiters ---\n");
+        ps2xSafeLog("--- [probe] bq semaphores with waiters ---\n");
+        uint32_t semaWaitersCount = 0;
+        for (int id = 1; id < 256; ++id) {
+            const EeSemaphore *sem = s_bmScheduler->semaphore(id);
+            if (!sem || sem->waiters.empty()) continue;
+            semaWaitersCount++;
+            std::string waiterStr;
+            for (int w : sem->waiters) {
+                if (!waiterStr.empty()) waiterStr += ",";
+                waiterStr += std::to_string(w);
+            }
+            uint32_t sigRa = 0, waitRa = 0;
+            int sigTh = 0, waitTh = 0;
+            {
+                std::lock_guard<std::mutex> lock(s_semaBqMutex);
+                auto it = s_semaBqRecords.find(id);
+                if (it != s_semaBqRecords.end()) {
+                    sigRa = it->second.lastSignalRa;
+                    sigTh = it->second.lastSignalThread;
+                    waitRa = it->second.lastWaitRa;
+                    waitTh = it->second.lastWaitThread;
+                }
+            }
+            bhLog("[probe] bq sema id=%d count=%d max=%d waiters=[%s] last_sig=ra:0x%08X/th:%d last_wait=ra:0x%08X/th:%d\n",
+                  id, sem->count, sem->maxCount, waiterStr.c_str(), sigRa, sigTh, waitRa, waitTh);
+            ps2xSafeLog("[probe] bq sema id=%d count=%d max=%d waiters=[%s] last_sig=ra:0x%08X/th:%d last_wait=ra:0x%08X/th:%d\n",
+                        id, sem->count, sem->maxCount, waiterStr.c_str(), sigRa, sigTh, waitRa, waitTh);
+        }
+        if (semaWaitersCount == 0) {
+            bhLog("[probe] bq sema with waiters: none\n");
+            ps2xSafeLog("[probe] bq sema with waiters: none\n");
+        }
+
+        // c & d. Pending SIF RPC calls + SG2 dump
+        bhLog("--- [probe] bq rpc & sg2 ---\n");
+        ps2xSafeLog("--- [probe] bq rpc & sg2 ---\n");
+        onBqDumpRpcAndSg2(rdram);
+
+        // e. Stack walks of blocked threads (cap 20 lines each)
+        bhLog("--- [probe] bq stack walks ---\n");
+        ps2xSafeLog("--- [probe] bq stack walks ---\n");
+        if (rdram) {
+            for (int id : blockedThreads) {
+                const GuestThread *th = s_bmScheduler->thread(id);
+                if (!th) continue;
+                const R5900Context &ctx = th->activeContext();
+                uint32_t sp = getRegU32(&ctx, 29);
+                bhLog("[probe] bq stack walk th=%d sp=0x%08X:\n", id, sp);
+                ps2xSafeLog("[probe] bq stack walk th=%d sp=0x%08X:\n", id, sp);
+
+                uint32_t retLines = 0;
+                for (uint32_t off = 0; off <= 0x1800; off += 4) {
+                    if (retLines >= 20) break;
+                    uint32_t currAddr = sp + off;
+                    if ((currAddr & PS2_RAM_MASK) + 4 > PS2_RAM_SIZE) continue;
+                    uint32_t w = 0;
+                    std::memcpy(&w, rdram + (currAddr & PS2_RAM_MASK), 4);
+
+                    if (w >= 0x00100000u && w < 0x00600000u) {
+                        uint32_t insnAddr = w - 8;
+                        if (insnAddr >= 0x00100000u && (insnAddr & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                            uint32_t insn = 0;
+                            std::memcpy(&insn, rdram + (insnAddr & PS2_RAM_MASK), 4);
+                            if ((insn & 0xFC000000u) == 0x0C000000u) {
+                                uint32_t callee = ((w - 4) & 0xF0000000u) | ((insn & 0x03FFFFFFu) << 2);
+                                bhLog("  [th %d walk %u] w=0x%08X at sp+0x%X callee=0x%08X\n", id, retLines, w, off, callee);
+                                ps2xSafeLog("  [th %d walk %u] w=0x%08X at sp+0x%X callee=0x%08X\n", id, retLines, w, off, callee);
+                                retLines++;
+                            } else if ((insn & 0xFC00003Fu) == 0x00000009u) {
+                                bhLog("  [th %d walk %u] w=0x%08X at sp+0x%X callee=jalr\n", id, retLines, w, off);
+                                ps2xSafeLog("  [th %d walk %u] w=0x%08X at sp+0x%X callee=jalr\n", id, retLines, w, off);
+                                retLines++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        bhLog("================================================================\n");
+        ps2xSafeLog("================================================================\n");
+    }
+
+    void onBqTickSec(const uint8_t *rdram, double ee_ms) {
+        if (!isEnabled()) return;
+        s_bqTotalSec++;
+
+        uint32_t running = 0, blocked = 0;
+        if (s_bmScheduler) {
+            for (int id = 1; id < 256; ++id) {
+                const GuestThread *th = s_bmScheduler->thread(id);
+                if (!th || th->status == EeThreadStatus::Dormant) continue;
+                if (th->status == EeThreadStatus::Running || th->status == EeThreadStatus::Ready) {
+                    running++;
+                } else if (th->status == EeThreadStatus::Waiting || th->status == EeThreadStatus::WaitingSuspended) {
+                    blocked++;
+                }
+            }
+        }
+
+        uint32_t sif_pending = 0, sg2_polls = 0, cid1_req = 0;
+        onBqGetStats(sif_pending, sg2_polls, cid1_req);
+
+        bhLog("[probe] bq sec threads_running=%u blocked=%u sif_pending=%u sg2_polls=%u cid1_req=%u\n",
+              running, blocked, sif_pending, sg2_polls, cid1_req);
+        ps2xSafeLog("[probe] bq sec threads_running=%u blocked=%u sif_pending=%u sg2_polls=%u cid1_req=%u\n",
+                    running, blocked, sif_pending, sg2_polls, cid1_req);
+
+        // EE idle detector: ee_ms <= 0.05 consecutive seconds >= 3
+        if (ee_ms <= 0.05) {
+            uint32_t idle = s_idleSecCount.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (idle >= 3) {
+                uint32_t lastDump = s_lastDumpSec.load(std::memory_order_relaxed);
+                if (lastDump == 0 || (s_bqTotalSec - lastDump >= 10)) {
+                    s_lastDumpSec.store(s_bqTotalSec, std::memory_order_relaxed);
+                    doBqStallDump(rdram);
+                }
+            }
+        } else {
+            s_idleSecCount.store(0, std::memory_order_relaxed);
+        }
+    }
 }

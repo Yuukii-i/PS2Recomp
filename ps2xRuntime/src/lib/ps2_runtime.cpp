@@ -865,6 +865,47 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     s_lastWidth = width;
     s_lastHeight = height;
 
+    // Task BQ: Present crop / active DISPLAY area
+    uint64_t dispfb64 = rt->memory().read64(0x12001000u + 0x0070u);
+    uint64_t display64 = rt->memory().read64(0x12001000u + 0x0080u);
+    if (!dispfb64 && !display64)
+    {
+        dispfb64 = rt->memory().read64(0x12001000u + 0x0090u);
+        display64 = rt->memory().read64(0x12001000u + 0x00A0u);
+    }
+    uint32_t dw_bq = static_cast<uint32_t>((display64 >> 32) & 0x0FFFu);
+    uint32_t dh_bq = static_cast<uint32_t>((display64 >> 44) & 0x07FFu);
+    uint32_t magh_bq = static_cast<uint32_t>((display64 >> 23) & 0x0Fu);
+    uint32_t dispW_bq = (magh_bq + 1u > 0) ? (dw_bq + 1u) / (magh_bq + 1u) : 640u;
+    uint32_t dispH_bq = dh_bq + 1u;
+    if (dispH_bq > 448u && dispH_bq <= 896u) dispH_bq = (dispH_bq + 1u) / 2u;
+    if (dispW_bq < 64u || dispH_bq < 64u) { dispW_bq = 640u; dispH_bq = 448u; }
+    uint32_t fbw_bq = static_cast<uint32_t>((dispfb64 >> 9) & 0x3Fu);
+    uint32_t psm_bq = static_cast<uint32_t>((dispfb64 >> 15) & 0x1Fu);
+
+    static bool s_bqDisplayLogged = false;
+    if (!s_bqDisplayLogged && (dispfb64 != 0 || display64 != 0))
+    {
+        s_bqDisplayLogged = true;
+        ps2xSafeLog("[probe] bq display DISPFB=0x%016llX DISPLAY=0x%016llX -> w=%u h=%u fbw=%u psm=%u\n",
+                    (unsigned long long)dispfb64, (unsigned long long)display64, dispW_bq, dispH_bq, fbw_bq, psm_bq);
+    }
+
+    const char *cropEnv = std::getenv("PS2X_CROP_PRESENT");
+    const bool doCrop = (!cropEnv || std::strcmp(cropEnv, "0") != 0);
+    if (doCrop)
+    {
+        if (height > dispH_bq) height = dispH_bq;
+        if (!s_scratch.empty() && s_scratch.size() >= static_cast<size_t>(FB_WIDTH) * dispH_bq * 4u)
+        {
+            size_t validBytes = static_cast<size_t>(FB_WIDTH) * dispH_bq * 4u;
+            if (validBytes < s_scratch.size())
+            {
+                std::memset(s_scratch.data() + validBytes, 0, s_scratch.size() - validBytes);
+            }
+        }
+    }
+
     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
     if (!s_scratch.empty() && width != 0u && height != 0u)
     {
@@ -4642,6 +4683,7 @@ void PS2Runtime::run()
                         currentFps, ee_ms, gs_ms, xfer_ms, present_ms,
                         (unsigned long long)prims, (unsigned long long)pixels);
 
+            probe_ae::onBqTickSec(m_memory.getRDRAM(), ee_ms);
             probe_ae::bhTickCheckPerSec(m_memory.getRDRAM());
 
             if (g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u)

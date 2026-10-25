@@ -502,6 +502,10 @@ namespace
 
         outWidth = (dw + 1u) / (magh + 1u);
         outHeight = dh + 1u;
+        if (outHeight > 448u && outHeight <= 896u)
+        {
+            outHeight = (outHeight + 1u) / 2u;
+        }
         if (outWidth < 64u || outHeight < 64u)
         {
             outWidth = kDefaultDisplayWidth;

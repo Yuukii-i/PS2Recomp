@@ -794,4 +794,11 @@ namespace probe_ae {
     void on24CD58(R5900Context *ctx);
     void on24CDAC(R5900Context *ctx);
     void onBoCid1Req(uint32_t opcode, uint32_t fd, uint32_t slotPtr, uint32_t seq);
+
+    // Task BQ Probes
+    void onBqTickSec(const uint8_t *rdram, double ee_ms);
+    void onBqDumpRpcAndSg2(const uint8_t *rdram);
+    void onBqGetStats(uint32_t &sif_pending, uint32_t &sg2_polls, uint32_t &cid1_req);
+    void recordSemaSignalBQ(int semaId, uint32_t ra, int threadId);
+    void recordSemaWaitBQ(int semaId, uint32_t ra, int threadId);
 }

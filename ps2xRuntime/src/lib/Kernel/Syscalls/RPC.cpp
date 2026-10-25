@@ -65,6 +65,18 @@ static Sg2VoiceState s_sg2Voices[24] = {};
 static std::mutex s_sg2VoiceMutex;
 static uint64_t s_sg2CallCount = 0;
 
+struct Sg2OpRecord {
+    uint32_t op = 0;
+    uint32_t a1 = 0, a2 = 0, a3 = 0;
+    int32_t hleRet = 0;
+};
+static Sg2OpRecord s_sg2RecentOps[8] = {};
+static size_t s_sg2RecentOpsIdx = 0;
+static std::mutex s_sg2RecentMutex;
+static std::atomic<uint32_t> s_sg2PollsSec{0};
+static uint32_t s_lastSg2KeyOnMask = 0;
+static std::chrono::steady_clock::time_point s_lastSg2KeyOnTime{};
+
 std::atomic<uint32_t> g_diagSg2Fno0Calls{0};
 std::atomic<uint32_t> g_diagDbcBufferWrites{0};
 std::atomic<uint32_t> g_diagCid1Requests{0};
@@ -521,6 +533,14 @@ namespace ps2_syscalls
                                     const uint32_t *pkt = reinterpret_cast<const uint32_t *>(sgSrc + p * 16);
                                     uint32_t op = pkt[0];
                                     s_sg2OpCounts[op]++;
+                                    if (op == 0x1A) {
+                                        s_sg2PollsSec.fetch_add(1, std::memory_order_relaxed);
+                                    }
+                                    {
+                                        std::lock_guard<std::mutex> rlock(s_sg2RecentMutex);
+                                        s_sg2RecentOps[s_sg2RecentOpsIdx % 8] = {op, pkt[1], pkt[2], pkt[3], 0};
+                                        s_sg2RecentOpsIdx++;
+                                    }
                                     if (op == 0x09) {
                                         voiceStatusSeen = true;
                                     }
@@ -528,6 +548,8 @@ namespace ps2_syscalls
                                         uint32_t mask = pkt[1];
                                         keyOnMask |= mask;
                                         hadKeyOn = true;
+                                        s_lastSg2KeyOnMask = mask;
+                                        s_lastSg2KeyOnTime = now;
                                         std::lock_guard<std::mutex> vlock(s_sg2VoiceMutex);
                                         for (uint32_t v = 0; v < 24; ++v) {
                                             if (mask & (1u << v)) {
@@ -2453,5 +2475,87 @@ namespace ps2_syscalls
     {
         uint32_t queuePtr = getRegU32(ctx, 4);
         setReturnS32(ctx, static_cast<int32_t>(queuePtr));
+    }
+}
+
+namespace probe_ae {
+    void onBqGetStats(uint32_t &sif_pending, uint32_t &sg2_polls, uint32_t &cid1_req) {
+        sif_pending = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            for (const auto &pair : g_rpc_clients) {
+                if (pair.second.busy) {
+                    sif_pending++;
+                }
+            }
+        }
+        sg2_polls = s_sg2PollsSec.exchange(0, std::memory_order_relaxed);
+        cid1_req = g_diagCid1Requests.load(std::memory_order_relaxed);
+    }
+
+    void onBqDumpRpcAndSg2(const uint8_t *rdram) {
+        // Pending SIF RPC calls
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            uint32_t busyCount = 0;
+            for (const auto &pair : g_rpc_clients) {
+                const auto &client = pair.second;
+                if (client.busy) {
+                    busyCount++;
+                    const auto *cdata = (pair.first && rdram) ? reinterpret_cast<const t_SifRpcClientData *>(rdram + (pair.first & PS2_RAM_MASK)) : nullptr;
+                    uint32_t sid = client.sid ? client.sid : (cdata ? (uint32_t)cdata->command : 0);
+                    uint32_t rpcNum = client.last_rpc;
+                    uint32_t pktAddr = cdata ? cdata->hdr.pkt_addr : 0;
+                    uint32_t endFunc = cdata ? cdata->end_function : 0;
+                    ps2xSafeLog("[probe] bq rpc pending sid=0x%08X rpcNum=0x%X client=0x%08X endFunc=0x%08X pkt=0x%08X\n",
+                                sid, rpcNum, pair.first, endFunc, pktAddr);
+                }
+            }
+            if (busyCount == 0) {
+                ps2xSafeLog("[probe] bq rpc pending: none\n");
+            }
+        }
+
+        // SG2 voice status words at 0x74B140
+        if (rdram) {
+            uint32_t w[8] = {};
+            for (int v = 0; v < 8; ++v) {
+                uint32_t addr = 0x74B140u + 4u * v;
+                if (addr + 4 <= PS2_RAM_SIZE) {
+                    std::memcpy(&w[v], rdram + addr, sizeof(uint32_t));
+                }
+            }
+            ps2xSafeLog("[probe] bq sg2 status words: [0..3]=0x%08X 0x%08X 0x%08X 0x%08X [4..7]=0x%08X 0x%08X 0x%08X 0x%08X\n",
+                        w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+        }
+
+        // SG2 recent ops
+        {
+            std::lock_guard<std::mutex> rlock(s_sg2RecentMutex);
+            size_t total = s_sg2RecentOpsIdx;
+            size_t count = std::min<size_t>(total, 8);
+            ps2xSafeLog("[probe] bq sg2 recent ops (last %zu):\n", count);
+            for (size_t i = 0; i < count; ++i) {
+                size_t idx = (total >= 8) ? (total - count + i) : i;
+                const auto &rec = s_sg2RecentOps[idx % 8];
+                ps2xSafeLog("  [op %zu] op=0x%02X a1=0x%08X a2=0x%08X a3=0x%08X hleRet=%d\n",
+                            i, rec.op, rec.a1, rec.a2, rec.a3, rec.hleRet);
+            }
+        }
+
+        // SG2 active voice model & keyon
+        {
+            auto now = std::chrono::steady_clock::now();
+            double keyOnSec = s_lastSg2KeyOnMask ? std::chrono::duration<double>(now - s_lastSg2KeyOnTime).count() : 0.0;
+            ps2xSafeLog("[probe] bq sg2 keyon mask=0x%X (%.1fs ago)\n", s_lastSg2KeyOnMask, keyOnSec);
+            std::lock_guard<std::mutex> vlock(s_sg2VoiceMutex);
+            for (uint32_t v = 0; v < 24; ++v) {
+                if (s_sg2Voices[v].active) {
+                    double elapsed = std::chrono::duration<double>(now - s_sg2Voices[v].keyOn).count();
+                    uint64_t pos = static_cast<uint64_t>(elapsed * 27428.0) % 0x10000u;
+                    ps2xSafeLog("  [voice %u] active=1 elapsed=%.2fs pos=0x%04llX\n", v, elapsed, (unsigned long long)pos);
+                }
+            }
+        }
     }
 }
