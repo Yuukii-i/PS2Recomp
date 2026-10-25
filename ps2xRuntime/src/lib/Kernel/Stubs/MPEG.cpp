@@ -2580,7 +2580,8 @@ struct MpegCallLogger {
         const uint32_t picWidth = (width == 0u) ? kStubMovieWidth : width;
         const uint32_t picHeight = (height == 0u) ? kStubMovieHeight : height;
         const uint32_t mbCols = picWidth / 16u;
-        uint32_t mbRows = (picHeight + 15u) / 16u;
+        const uint32_t mbRows = (picHeight + 15u) / 16u;
+        uint32_t layoutRows = (mbCols > 0 && mbCapacity % mbCols == 0) ? mbCapacity / mbCols : mbRows;
 
         static int s_raw8RowsEnv = -1;
         if (s_raw8RowsEnv == -1)
@@ -2590,12 +2591,12 @@ struct MpegCallLogger {
         }
         if (s_raw8RowsEnv > 0)
         {
-            mbRows = static_cast<uint32_t>(s_raw8RowsEnv);
+            layoutRows = static_cast<uint32_t>(s_raw8RowsEnv);
         }
 
-        probe_ae::onMovieRaw8Geometry(picWidth, picHeight, mbCols, mbRows);
+        probe_ae::onMovieRaw8Geometry(picWidth, picHeight, mbCols, layoutRows);
 
-        const uint32_t totalMbs = mbCols * mbRows;
+        const uint32_t totalMbs = mbCols * layoutRows;
         const uint32_t numMbs = std::min(mbCapacity, totalMbs);
 
         const bool validFrame = haveFrame && (!frame.yPlane.empty() || !frame.rgba.empty()) && frame.width > 0 && frame.height > 0;
@@ -2609,17 +2610,23 @@ struct MpegCallLogger {
                 continue;
             }
 
+            const uint32_t mbx = mbIndex / layoutRows;
+            const uint32_t mby = mbIndex % layoutRows;
+
             if (!validFrame)
             {
                 std::memset(mbPtr, 0x00, 256);
                 std::memset(mbPtr + 256, 0x80, 64);
                 std::memset(mbPtr + 320, 0x80, 64);
             }
+            else if (mby * 16u >= static_cast<uint32_t>(frame.height))
+            {
+                std::memset(mbPtr, 0x10, 256);
+                std::memset(mbPtr + 256, 0x80, 64);
+                std::memset(mbPtr + 320, 0x80, 64);
+            }
             else if (!frame.yPlane.empty())
             {
-                const uint32_t mbx = mbIndex / mbRows;
-                const uint32_t mby = mbIndex % mbRows;
-
                 // 1) 16x16 Y plane
                 for (uint32_t ly = 0u; ly < 16u; ++ly)
                 {
@@ -2655,9 +2662,6 @@ struct MpegCallLogger {
             }
             else
             {
-                const uint32_t mbx = mbIndex / mbRows;
-                const uint32_t mby = mbIndex % mbRows;
-
                 // 1) 16x16 Y plane
                 for (uint32_t ly = 0u; ly < 16u; ++ly)
                 {
