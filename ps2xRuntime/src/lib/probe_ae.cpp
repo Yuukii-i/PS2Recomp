@@ -4447,4 +4447,22 @@ namespace probe_ae {
                       a0, a1, v0, dev30_in, dev30_out, ra1, ra2, cf.st, cf.c, cf.h10, cf.h14, cf.h18);
         }
     }
+
+    // Task BP
+    void onBpCloseLog(uint32_t fd, uint32_t freed_slots, uint32_t dev30_before, uint32_t dev30_after) {
+        bhLog("[hle] cid1 close fd=%u freed_slots=%u dev30_before=%u dev30_after=%u\n",
+              fd, freed_slots, dev30_before, dev30_after);
+        ps2xSafeLog("[hle] cid1 close fd=%u freed_slots=%u dev30_before=%u dev30_after=%u\n",
+                    fd, freed_slots, dev30_before, dev30_after);
+        std::printf("[hle] cid1 close fd=%u freed_slots=%u dev30_before=%u dev30_after=%u\n",
+                    fd, freed_slots, dev30_before, dev30_after);
+        std::fflush(stdout);
+    }
+
+    void onBpDev30Log(uint32_t dev30) {
+        bhLog("[probe] bp dev30=%u\n", dev30);
+        ps2xSafeLog("[probe] bp dev30=%u\n", dev30);
+        std::printf("[probe] bp dev30=%u\n", dev30);
+        std::fflush(stdout);
+    }
 }

@@ -18,9 +18,17 @@ extern std::atomic<uint32_t> g_trackedCurScene;
 #include <mutex>
 #include <cstring>
 #include <string>
+#include <vector>
+#include <thread>
+#include <algorithm>
 #include <set>
 #include <tuple>
 #include <chrono>
+
+namespace probe_ae {
+    void onBpCloseLog(uint32_t fd, uint32_t freed_slots, uint32_t dev30_before, uint32_t dev30_after);
+    void onBpDev30Log(uint32_t dev30);
+}
 
 struct DbcProfKey {
     uint32_t sid;
@@ -1703,6 +1711,15 @@ namespace ps2_syscalls
             };
             static VfiDescriptorSlot s_vfiDescriptors[16] = {};
 
+            struct Cid1StreamJob
+            {
+                uint32_t fd = 0;
+                uint32_t slotPtr = 0;
+                uint32_t seq = 0;
+            };
+            static std::mutex s_cid1JobsMutex;
+            static std::vector<Cid1StreamJob> s_cid1StreamJobs;
+
             ps2x::vfi::VfiArchive::instance().initialize();
 
             const uint8_t *baseSrc = (srcExtra != 0u) ? getConstMemPtr(rdram, srcExtra) : nullptr;
@@ -1857,6 +1874,69 @@ namespace ps2_syscalls
                     ps2xSafeLog( "[CID1:Close] fd=%u (slot=%d) INVALID\n", fd, fdSlot);
                     reply.result = static_cast<uint32_t>(-1);
                 }
+
+                // Task BP: Free stale CID1 stream job slots on Close
+                uint32_t dev30_before = (rdram && (0x00771BB8u & 0x01FFFFFFu) + 4 <= PS2_RAM_SIZE)
+                    ? *reinterpret_cast<const uint32_t *>(rdram + (0x00771BB8u & 0x01FFFFFFu)) : 0;
+                uint32_t freed_slots = 0;
+
+                const char *cleanEnv = std::getenv("PS2X_CID1_CLOSE_CLEAN");
+                bool doClean = !(cleanEnv && std::strcmp(cleanEnv, "0") == 0);
+
+                if (doClean && rdram)
+                {
+                    std::lock_guard<std::mutex> lock(s_cid1JobsMutex);
+                    uint32_t closeSlotPtr = slotPtr;
+                    for (const auto &job : s_cid1StreamJobs)
+                    {
+                        if (job.fd != fd) continue;
+                        if (job.slotPtr == 0 || job.slotPtr == closeSlotPtr) continue;
+
+                        uint32_t slotOff = job.slotPtr & 0x01FFFFFFu;
+                        if (slotOff >= 0x1000 && (slotOff & 3) == 0 && slotOff + 16 <= PS2_RAM_SIZE)
+                        {
+                            uint32_t *slotWords = reinterpret_cast<uint32_t *>(rdram + slotOff);
+                            uint32_t w1 = slotWords[1];
+                            uint32_t w2 = slotWords[2];
+                            if (w1 == job.seq && (w2 & 0x80000000u) != 0)
+                            {
+                                slotWords[0] = 0;
+                                slotWords[1] = 0;
+                                slotWords[2] = 0;
+                                slotWords[3] = 0;
+                                freed_slots++;
+
+                                uint32_t *dev30Ptr = reinterpret_cast<uint32_t *>(rdram + (0x00771BB8u & 0x01FFFFFFu));
+                                if (*dev30Ptr > 0)
+                                {
+                                    (*dev30Ptr)--;
+                                }
+                            }
+                        }
+                    }
+
+                    s_cid1StreamJobs.erase(
+                        std::remove_if(s_cid1StreamJobs.begin(), s_cid1StreamJobs.end(),
+                                       [fd](const Cid1StreamJob &j) { return j.fd == fd; }),
+                        s_cid1StreamJobs.end());
+                }
+
+                uint32_t dev30_after = (rdram && (0x00771BB8u & 0x01FFFFFFu) + 4 <= PS2_RAM_SIZE)
+                    ? *reinterpret_cast<const uint32_t *>(rdram + (0x00771BB8u & 0x01FFFFFFu)) : 0;
+
+                probe_ae::onBpCloseLog(fd, freed_slots, dev30_before, dev30_after);
+
+                if (rdram)
+                {
+                    std::thread([rdram]() {
+                        for (int sec = 1; sec <= 5; ++sec) {
+                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                            uint32_t d30 = *reinterpret_cast<const uint32_t *>(rdram + (0x00771BB8u & 0x01FFFFFFu));
+                            probe_ae::onBpDev30Log(d30);
+                        }
+                    }).detach();
+                }
+
                 break;
             }
             case 0x06: // Read fd
@@ -1954,6 +2034,26 @@ namespace ps2_syscalls
                 uint32_t dstAddr = *reinterpret_cast<const uint32_t *>(src + 0x14);
                 uint32_t reqSize = *reinterpret_cast<const uint32_t *>(src + 0x18);
                 uint32_t flags = *reinterpret_cast<const uint32_t *>(src + 0x1C);
+
+                // Task BP: Track stream read jobs for fd
+                if (slotPtr != 0u)
+                {
+                    std::lock_guard<std::mutex> lock(s_cid1JobsMutex);
+                    bool found = false;
+                    for (auto &job : s_cid1StreamJobs)
+                    {
+                        if (job.fd == fd && job.slotPtr == slotPtr)
+                        {
+                            job.seq = seq;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found)
+                    {
+                        s_cid1StreamJobs.push_back({fd, slotPtr, seq});
+                    }
+                }
 
                 // Requirement 1: Log all raw 32-bit words of the CID1:Seek request
                 {
