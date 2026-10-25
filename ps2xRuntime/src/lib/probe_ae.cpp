@@ -2965,7 +2965,24 @@ namespace probe_ae {
         }
     }
 
-    bool handleMovieHleMscal(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize, GS &gs, PS2Memory *memory) {
+    static bool isMovieHleFrameMode() {
+        static int s_envFrameMode = -1;
+        if (s_envFrameMode == -1) {
+            const char *env = std::getenv("PS2X_MOVIE_HLE_MODE");
+            s_envFrameMode = (env && std::strcmp(env, "frame") == 0) ? 1 : 0;
+        }
+        return s_envFrameMode == 1;
+    }
+
+    static std::atomic<uint32_t> s_secBsMscals{0};
+    static std::atomic<uint32_t> s_secBsBlocksClipped{0};
+    static std::atomic<uint64_t> s_secBsTimeUs{0};
+    static auto s_bsProbeLastSec = std::chrono::steady_clock::now();
+    static uint32_t s_lastBsMovieInstance = 0xFFFFFFFFu;
+
+    bool handleMovieHleMscal(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize,
+                             const uint8_t *vuData, uint32_t dataSize, uint32_t top,
+                             GS &gs, PS2Memory *memory) {
         if (!vuCode || codeSize < 0xE00u) {
             return false;
         }
@@ -3004,94 +3021,217 @@ namespace probe_ae {
             return false;
         }
 
-        uint32_t curIdx = s_movieKickMscalIndex.fetch_add(1, std::memory_order_relaxed);
-        if (curIdx == 0) {
-            const uint8_t *rdram = memory ? memory->getRDRAM() : s_cachedRdram;
-            const bool movieActive = isMovieActive(rdram);
-            uint32_t base = s_movieKickFirstUnpackSrc.load(std::memory_order_relaxed);
-            uint32_t mscalsInKick = s_kickMscalCount.load(std::memory_order_relaxed);
+        const uint8_t *rdram = memory ? memory->getRDRAM() : s_cachedRdram;
+        const bool movieActive = isMovieActive(rdram);
+        if (!movieActive) {
+            return false;
+        }
 
-            const char *failReason = nullptr;
-            if (!movieActive) {
-                failReason = "movie_not_active";
-            } else if (base == 0) {
-                failReason = "no_y_unpack";
-            } else if (base + s_movieTotalMbs * 384u > PS2_RAM_SIZE) {
-                failReason = "base_out_of_ram";
-            } else if (mscalsInKick != s_movieTotalMbs) {
-                failReason = "movie_geometry_mismatch";
-                static bool s_mismatchLogged = false;
-                if (!s_mismatchLogged) {
-                    s_mismatchLogged = true;
-                    bhLog("[hle] movie geometry mismatch mscals=%u expected=%u\n", mscalsInKick, s_movieTotalMbs);
-                    ps2xSafeLog("[hle] movie geometry mismatch mscals=%u expected=%u\n", mscalsInKick, s_movieTotalMbs);
-                }
-            } else if (isMovieHleStrict() && !match) {
-                failReason = "strict_sig_mismatch";
-            }
+        if (isMovieHleStrict() && !match) {
+            return false;
+        }
 
-            if (failReason != nullptr) {
-                s_kickDecision.store(KickDecision::Interpret, std::memory_order_relaxed);
-                s_secInterpretedKicks++;
-                if (movieActive) {
-                    if (s_reportedInterpretReasons.insert(failReason).second) {
-                        uint32_t st = 0;
-                        if (rdram) std::memcpy(&st, rdram + (0x772188u & PS2_RAM_MASK), 4);
-                        std::printf("[probe] bg kick interpreted reason=%s base=0x%08X st=%u sig=0x%016llX\n",
-                                    failReason, base, st, (unsigned long long)hash);
-                        std::fflush(stdout);
+        // =====================================================================
+        // Mode A: Legacy Frame Mode (PS2X_MOVIE_HLE_MODE=frame)
+        // =====================================================================
+        if (isMovieHleFrameMode()) {
+            uint32_t curIdx = s_movieKickMscalIndex.fetch_add(1, std::memory_order_relaxed);
+            if (curIdx == 0) {
+                uint32_t base = s_movieKickFirstUnpackSrc.load(std::memory_order_relaxed);
+                uint32_t mscalsInKick = s_kickMscalCount.load(std::memory_order_relaxed);
+
+                const char *failReason = nullptr;
+                if (base == 0) {
+                    failReason = "no_y_unpack";
+                } else if (base + s_movieTotalMbs * 384u > PS2_RAM_SIZE) {
+                    failReason = "base_out_of_ram";
+                } else if (mscalsInKick != s_movieTotalMbs) {
+                    failReason = "movie_geometry_mismatch";
+                    static bool s_mismatchLogged = false;
+                    if (!s_mismatchLogged) {
+                        s_mismatchLogged = true;
+                        bhLog("[hle] movie geometry mismatch mscals=%u expected=%u\n", mscalsInKick, s_movieTotalMbs);
+                        ps2xSafeLog("[hle] movie geometry mismatch mscals=%u expected=%u\n", mscalsInKick, s_movieTotalMbs);
                     }
                 }
-            } else {
-                s_kickDecision.store(KickDecision::Native, std::memory_order_relaxed);
-                s_secNativeKicks++;
 
-                double native_ms = 0.0, xfer_ms = 0.0;
-                doMovieFrameTransfer(gs, memory, base, native_ms, xfer_ms);
-                s_secNativeMsTotal += native_ms;
-                s_secXferMsTotal += xfer_ms;
-                onBhMovieHleTime(static_cast<uint64_t>((native_ms + xfer_ms) * 1000.0));
-            }
+                if (failReason != nullptr) {
+                    s_kickDecision.store(KickDecision::Interpret, std::memory_order_relaxed);
+                    s_secInterpretedKicks++;
+                    return false;
+                } else {
+                    s_kickDecision.store(KickDecision::Native, std::memory_order_relaxed);
+                    s_secNativeKicks++;
 
-            // Per-second probe dump
-            auto now = std::chrono::steady_clock::now();
-            double secDiff = std::chrono::duration<double>(now - s_bgProbeLastSec).count();
-            if (secDiff >= 1.0) {
-                double avg_native = s_secNativeKicks > 0 ? (s_secNativeMsTotal / s_secNativeKicks) : 0.0;
-                double avg_xfer = s_secNativeKicks > 0 ? (s_secXferMsTotal / s_secNativeKicks) : 0.0;
-
-                std::string sigStr;
-                for (const auto &pair : s_sigCountsThisSec) {
-                    if (!sigStr.empty()) sigStr += ",";
-                    char buf[32];
-                    std::snprintf(buf, sizeof(buf), "0x%llX:%u", (unsigned long long)pair.first, pair.second);
-                    sigStr += buf;
+                    double native_ms = 0.0, xfer_ms = 0.0;
+                    doMovieFrameTransfer(gs, memory, base, native_ms, xfer_ms);
+                    s_secNativeMsTotal += native_ms;
+                    s_secXferMsTotal += xfer_ms;
+                    onBhMovieHleTime(static_cast<uint64_t>((native_ms + xfer_ms) * 1000.0));
+                    return true;
                 }
-                if (sigStr.empty()) sigStr = "none";
-
-                std::printf("[probe] bg native_kicks=%u interpreted_kicks=%u mixed=%u sig_counts=<%s> native_ms=%.2f xfer_ms=%.2f\n",
-                            s_secNativeKicks, s_secInterpretedKicks, s_secMixedKicks,
-                            sigStr.c_str(), avg_native, avg_xfer);
-                std::fflush(stdout);
-
-                s_secNativeKicks = 0;
-                s_secInterpretedKicks = 0;
-                s_secMixedKicks = 0;
-                s_secNativeMsTotal = 0.0;
-                s_secXferMsTotal = 0.0;
-                s_sigCountsThisSec.clear();
-                s_bgProbeLastSec = now;
+            } else {
+                return (s_kickDecision.load(std::memory_order_relaxed) == KickDecision::Native);
             }
-
-            return (s_kickDecision.load(std::memory_order_relaxed) == KickDecision::Native);
         }
 
-        // LATER MSCALs of the same kick (1..767)
-        if (s_kickDecision.load(std::memory_order_relaxed) == KickDecision::Native) {
-            return true; // Skip
+        // =====================================================================
+        // Mode B: Task BS Native Movie Conversion PER MSCAL from VU1 data memory
+        // =====================================================================
+        if (!vuData || dataSize < 16384) {
+            return false;
+        }
+
+        auto t0 = std::chrono::steady_clock::now();
+
+        // 1. Read MB destination from qw[TOP+0] (12.4 fixed point)
+        const uint32_t posByteOff = ((top + 0u) & 0x3FFu) * 16u;
+        int32_t rawX = 0, rawY = 0;
+        std::memcpy(&rawX, vuData + posByteOff + 0, 4);
+        std::memcpy(&rawY, vuData + posByteOff + 4, 4);
+        const int32_t mbX = rawX / 16;
+        const int32_t mbY = rawY / 16;
+
+        // Log once per movie for the first MSCAL
+        if (s_lastBsMovieInstance != s_movieInstance) {
+            s_lastBsMovieInstance = s_movieInstance;
+            bhLog("[hle] movie mscal-native pos0=(%d,%d) top=0x%03X\n", mbX, mbY, top & 0x3FFu);
+            ps2xSafeLog("[hle] movie mscal-native pos0=(%d,%d) top=0x%03X\n", mbX, mbY, top & 0x3FFu);
+        }
+
+        // 2. Clip to SCISSOR_2
+        GSDebugSnapshot snap = gs.getDebugSnapshot();
+        const auto &ctx = snap.ctx[1]; // Context 2
+        const uint32_t scisX0 = ctx.scissor.x0;
+        const uint32_t scisX1 = ctx.scissor.x1;
+        const uint32_t scisY0 = ctx.scissor.y0;
+        const uint32_t scisY1 = ctx.scissor.y1;
+        bool isClipped = false;
+        if (scisX1 >= scisX0 && scisY1 >= scisY0) {
+            if (mbX >= static_cast<int32_t>(scisX1 + 1) || mbY >= static_cast<int32_t>(scisY1 + 1) ||
+                (mbX + 16) <= static_cast<int32_t>(scisX0) || (mbY + 16) <= static_cast<int32_t>(scisY0)) {
+                isClipped = true;
+            }
+        }
+
+        s_secBsMscals.fetch_add(1, std::memory_order_relaxed);
+
+        if (isClipped) {
+            s_secBsBlocksClipped.fetch_add(1, std::memory_order_relaxed);
+            auto t1 = std::chrono::steady_clock::now();
+            s_secBsTimeUs.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count(), std::memory_order_relaxed);
+            return true;
+        }
+
+        // 3. Prepare GIF image transfer packet for this 16x16 block
+        // 96 bytes setup header + 1024 bytes (256 RGBA pixels) = 1120 bytes
+        static std::vector<uint8_t> s_mbPkt(96 + 1024, 0);
+
+        const uint32_t fbp = ctx.frame.fbp << 5u; // DBP = FBP*32
+        const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+        const uint32_t dpsm = ctx.frame.psm & 0x3Fu;
+
+        const uint64_t bitbltbuf_val = (static_cast<uint64_t>(fbp & 0x3FFFu) << 32u) |
+                                       (static_cast<uint64_t>(fbw & 0x3Fu) << 48u) |
+                                       (static_cast<uint64_t>(dpsm & 0x3Fu) << 56u);
+        const uint64_t trxpos_val = (static_cast<uint64_t>(static_cast<uint32_t>(mbX) & 0x7FFu) << 32u) |
+                                    (static_cast<uint64_t>(static_cast<uint32_t>(mbY) & 0x7FFu) << 48u);
+        const uint64_t trxreg_val = (16ull) | (16ull << 32u);
+        const uint64_t trxdir_val = 0ull;
+
+        // Tag 1: A+D setup
+        uint64_t tagLo = 4ull | (0ull << 15u) | (0ull << 58u) | (1ull << 60u);
+        uint64_t tagHi = 0x0Eull;
+        std::memcpy(s_mbPkt.data(), &tagLo, 8);
+        std::memcpy(s_mbPkt.data() + 8, &tagHi, 8);
+
+        uint64_t regAddr = 0x50ull; // BITBLTBUF
+        std::memcpy(s_mbPkt.data() + 16, &bitbltbuf_val, 8);
+        std::memcpy(s_mbPkt.data() + 24, &regAddr, 8);
+
+        regAddr = 0x51ull; // TRXPOS
+        std::memcpy(s_mbPkt.data() + 32, &trxpos_val, 8);
+        std::memcpy(s_mbPkt.data() + 40, &regAddr, 8);
+
+        regAddr = 0x52ull; // TRXREG
+        std::memcpy(s_mbPkt.data() + 48, &trxreg_val, 8);
+        std::memcpy(s_mbPkt.data() + 56, &regAddr, 8);
+
+        regAddr = 0x53ull; // TRXDIR
+        std::memcpy(s_mbPkt.data() + 64, &trxdir_val, 8);
+        std::memcpy(s_mbPkt.data() + 72, &regAddr, 8);
+
+        // Tag 2: IMAGE transfer (256 pixels = 64 quadwords = 1024 bytes)
+        uint64_t imgLo = 64ull | (1ull << 15u /*EOP*/) | (2ull << 58u /*FLG=IMAGE*/);
+        uint64_t imgHi = 0ull;
+        std::memcpy(s_mbPkt.data() + 80, &imgLo, 8);
+        std::memcpy(s_mbPkt.data() + 88, &imgHi, 8);
+
+        uint32_t *dstPixels = reinterpret_cast<uint32_t*>(s_mbPkt.data() + 96);
+
+        // 4. Convert YCbCr to RGBA
+        for (uint32_t py = 0; py < 16u; ++py) {
+            const uint32_t py_chroma = (py >> 1u) * 8u;
+            uint32_t *rowDst = dstPixels + py * 16u;
+            for (uint32_t px = 0; px < 16u; ++px) {
+                const uint32_t p = py * 16u + px;
+                const uint32_t yByteOff = ((top + 0x20u + p) & 0x3FFu) * 16u;
+                const int32_t *yLane = reinterpret_cast<const int32_t*>(vuData + yByteOff);
+                const int32_t Y = yLane[0];
+
+                const uint32_t ch_idx = py_chroma + (px >> 1u);
+                const uint32_t chByteOff = ((top + 0x20u + ch_idx) & 0x3FFu) * 16u;
+                const int32_t *chLane = reinterpret_cast<const int32_t*>(vuData + chByteOff);
+                const int32_t Cb = chLane[1];
+                const int32_t Cr = chLane[2];
+
+                const float y_f = static_cast<float>(Y);
+                const float cb_f = static_cast<float>(Cb - 128);
+                const float cr_f = static_cast<float>(Cr - 128);
+
+                const float r_f = y_f + 1.402f * cr_f;
+                const float g_f = y_f - 0.344136f * cb_f - 0.714136f * cr_f;
+                const float b_f = y_f + 1.772f * cb_f;
+
+                const int r_i = static_cast<int>(std::round(r_f));
+                const int g_i = static_cast<int>(std::round(g_f));
+                const int b_i = static_cast<int>(std::round(b_f));
+
+                const uint32_t r = static_cast<uint32_t>(std::clamp(r_i, 0, 255));
+                const uint32_t g = static_cast<uint32_t>(std::clamp(g_i, 0, 255));
+                const uint32_t b = static_cast<uint32_t>(std::clamp(b_i, 0, 255));
+                const uint32_t a = 0u;
+
+                rowDst[px] = r | (g << 8u) | (b << 16u) | (a << 24u);
+            }
+        }
+
+        // 5. Submit GIF packet ordered through Path 1
+        if (memory) {
+            memory->submitGifPacket(GifPathId::Path1, s_mbPkt.data(), static_cast<uint32_t>(s_mbPkt.size()));
         } else {
-            return false; // Interpret
+            gs.processGIFPacket(s_mbPkt.data(), static_cast<uint32_t>(s_mbPkt.size()));
         }
+
+        auto t1 = std::chrono::steady_clock::now();
+        s_secBsTimeUs.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count(), std::memory_order_relaxed);
+
+        // 6. Per-second probe dump
+        auto now = std::chrono::steady_clock::now();
+        double secDiff = std::chrono::duration<double>(now - s_bsProbeLastSec).count();
+        if (secDiff >= 1.0) {
+            uint32_t mscals = s_secBsMscals.exchange(0, std::memory_order_relaxed);
+            uint32_t clipped = s_secBsBlocksClipped.exchange(0, std::memory_order_relaxed);
+            uint64_t totalUs = s_secBsTimeUs.exchange(0, std::memory_order_relaxed);
+            uint64_t avgUs = mscals > 0 ? (totalUs / mscals) : 0;
+            bhLog("[probe] bs mscals=%u blocks_clipped=%u avg_us=%llu\n",
+                  mscals, clipped, (unsigned long long)avgUs);
+            ps2xSafeLog("[probe] bs mscals=%u blocks_clipped=%u avg_us=%llu\n",
+                        mscals, clipped, (unsigned long long)avgUs);
+            s_bsProbeLastSec = now;
+        }
+
+        return true;
     }
 
     // =========================================================================

@@ -1664,7 +1664,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint32_t startPC, uint32_t top, uint32_t itop,
                              uint32_t maxCycles)
 {
-    if (probe_ae::handleMovieHleMscal(startPC, vuCode, codeSize, gs, memory))
+    if (probe_ae::handleMovieHleMscal(startPC, vuCode, codeSize, vuData, dataSize, top, gs, memory))
     {
         return;
     }
