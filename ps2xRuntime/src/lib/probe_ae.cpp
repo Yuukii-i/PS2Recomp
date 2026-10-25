@@ -4,6 +4,10 @@ extern std::atomic<uint64_t> g_profPrims;
 extern std::atomic<uint64_t> g_profPixels;
 extern void ps2xSafeLog(const char *fmt, ...);
 
+#ifdef _WIN32
+extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char*, char*, unsigned long);
+#endif
+
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
@@ -16,6 +20,7 @@ extern void ps2xSafeLog(const char *fmt, ...);
 #include <fstream>
 #include <algorithm>
 #include <cstdio>
+#include <cstdarg>
 #include <cmath>
 #include <chrono>
 #include <unordered_set>
@@ -2574,6 +2579,61 @@ namespace probe_ae {
         return s_envStrict == 1;
     }
 
+    // Task BJ file sink and logger
+    static std::mutex s_bhSinkMutex;
+    static FILE* bhSink() {
+        static FILE* s_file = nullptr;
+        static bool s_tried = false;
+        if (!s_tried) {
+            s_tried = true;
+            std::error_code ec;
+            std::filesystem::create_directories("logs", ec);
+            s_file = std::fopen("logs/probe_bh_sink.txt", "a");
+        }
+        return s_file;
+    }
+
+    static void bhLog(const char *fmt, ...) {
+        char buf[4096];
+        va_list args;
+        va_start(args, fmt);
+        int len = std::vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+
+        if (len > 0) {
+            size_t writeLen = (len < static_cast<int>(sizeof(buf))) ? static_cast<size_t>(len) : (sizeof(buf) - 1);
+            {
+                std::lock_guard<std::mutex> lock(s_bhSinkMutex);
+                FILE *f = bhSink();
+                if (f) {
+                    std::fwrite(buf, 1, writeLen, f);
+                    std::fflush(f);
+                }
+            }
+            ps2xSafeLog("%s", buf);
+        }
+    }
+
+    static inline bool isBhProbeEnabled() {
+        const char *env = std::getenv("PS2X_PROBE_AE");
+        if (env && (env[0] == '1' || env[0] == 't' || env[0] == 'y' || env[0] == 'T' || env[0] == 'Y')) {
+            return true;
+        }
+#ifdef _WIN32
+        char winBuf[16] = {0};
+        if (GetEnvironmentVariableA("PS2X_PROBE_AE", winBuf, sizeof(winBuf)) > 0) {
+            if (winBuf[0] == '1' || winBuf[0] == 't' || winBuf[0] == 'y' || winBuf[0] == 'T' || winBuf[0] == 'Y') {
+                return true;
+            }
+        }
+#endif
+        const char *envBh = std::getenv("PS2X_PROBE_BH");
+        if (envBh && (envBh[0] == '1' || envBh[0] == 't' || envBh[0] == 'y' || envBh[0] == 'T' || envBh[0] == 'Y')) {
+            return true;
+        }
+        return isEnabled();
+    }
+
     static std::atomic<bool> s_bhMovieActiveLogged{false};
 
     static bool isMovieActive(const uint8_t *rdram) {
@@ -2598,7 +2658,7 @@ namespace probe_ae {
         if (reason != nullptr) {
             bool expected = false;
             if (s_bhMovieActiveLogged.compare_exchange_strong(expected, true)) {
-                ps2xSafeLog("[probe] bh movie_active reason=%s\n", reason);
+                bhLog("[probe] bh movie_active reason=%s\n", reason);
             }
             return true;
         }
@@ -2962,13 +3022,20 @@ namespace probe_ae {
         {"Kernel/EeScheduler.cpp:2403", "timer_or_deadline"}
     };
 
+    static std::atomic<bool> s_bhInitLogged{false};
     static std::atomic<bool> s_bhStartupPrinted{false};
     void bhInitStartup() {
-        if (!isEnabled()) return;
+        bool expInit = false;
+        if (s_bhInitLogged.compare_exchange_strong(expInit, true)) {
+            const char *env = std::getenv("PS2X_PROBE_AE");
+            bool en = isBhProbeEnabled();
+            bhLog("[probe] bh init enabled=%d env=%s\n", en ? 1 : 0, env ? env : "null");
+        }
+        if (!isBhProbeEnabled()) return;
         bool expected = false;
         if (s_bhStartupPrinted.compare_exchange_strong(expected, true)) {
             for (const auto &site : s_sleepSites) {
-                ps2xSafeLog("[probe] bh sleepsite %s ms=%s\n", site.desc, site.durationConst);
+                bhLog("[probe] bh sleepsite %s ms=%s\n", site.desc, site.durationConst);
             }
         }
     }
@@ -3019,7 +3086,7 @@ namespace probe_ae {
     static auto s_bhLastSec = std::chrono::steady_clock::now();
 
     void onBhVif1Start() {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         if (tl_vif1Depth == 0) {
             tl_vif1Start = std::chrono::steady_clock::now();
             tl_vif1GifUs = 0;
@@ -3028,7 +3095,7 @@ namespace probe_ae {
     }
 
     void onBhVif1End() {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         tl_vif1Depth--;
         if (tl_vif1Depth == 0) {
             auto now = std::chrono::steady_clock::now();
@@ -3039,7 +3106,7 @@ namespace probe_ae {
     }
 
     void onBhSubmitGifStart() {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         if (tl_submitGifDepth == 0) {
             tl_submitGifStart = std::chrono::steady_clock::now();
         }
@@ -3047,7 +3114,7 @@ namespace probe_ae {
     }
 
     void onBhSubmitGifEnd() {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         tl_submitGifDepth--;
         if (tl_submitGifDepth == 0) {
             auto now = std::chrono::steady_clock::now();
@@ -3060,55 +3127,55 @@ namespace probe_ae {
     }
 
     void onBhGsBlockWait(uint64_t waitUs) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhGsBlockUs.fetch_add(waitUs, std::memory_order_relaxed);
         s_bhGsBlockCnt.fetch_add(1, std::memory_order_relaxed);
     }
 
     void onBhRaw8FeedTime(uint64_t us) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhRaw8FeedUs.fetch_add(us, std::memory_order_relaxed);
     }
 
     void onBhRaw8DecTime(uint64_t us) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhRaw8DecUs.fetch_add(us, std::memory_order_relaxed);
     }
 
     void onBhRaw8YccTime(uint64_t us) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhRaw8YccUs.fetch_add(us, std::memory_order_relaxed);
     }
 
     void onBhRaw8Call() {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhRaw8Calls.fetch_add(1, std::memory_order_relaxed);
         onBhIteration();
     }
 
     void onBhMovieHleTime(uint64_t us) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhMovieHleUs.fetch_add(us, std::memory_order_relaxed);
     }
 
     void onBhSchedWait(uint64_t waitUs) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhSchedWaitUs.fetch_add(waitUs, std::memory_order_relaxed);
         s_bhSchedWaitCnt.fetch_add(1, std::memory_order_relaxed);
     }
 
     void onBhDmaPollTime(uint64_t us) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhDmaPollUs.fetch_add(us, std::memory_order_relaxed);
     }
 
     void onBhCid1Time(uint64_t us) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhCid1Us.fetch_add(us, std::memory_order_relaxed);
     }
 
     void onBhIntcHandler(uint32_t cause, uint64_t execUs) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhIntcUs.fetch_add(execUs, std::memory_order_relaxed);
         s_bhIntcCnt.fetch_add(1, std::memory_order_relaxed);
         if (cause < 32) {
@@ -3118,7 +3185,7 @@ namespace probe_ae {
     }
 
     void onBhGsPacket(uint64_t packetUs, uint32_t primType, uint32_t pixelCount, bool texOn, bool blendOn, uint32_t tw, uint32_t th) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         SlowPacketInfo info;
         info.ms = static_cast<double>(packetUs) / 1000.0;
         info.primType = primType;
@@ -3139,12 +3206,12 @@ namespace probe_ae {
     }
 
     void onBhGsRasterTime(uint64_t us) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhGsBusyUs.fetch_add(us, std::memory_order_relaxed);
     }
 
     void onBhRecordQueueDepth(uint32_t depth) {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         uint32_t curMax = s_bhQueueDepthMax.load(std::memory_order_relaxed);
         while (depth > curMax && !s_bhQueueDepthMax.compare_exchange_weak(curMax, depth, std::memory_order_relaxed)) {}
         s_bhQueueDepthSum.fetch_add(depth, std::memory_order_relaxed);
@@ -3152,33 +3219,43 @@ namespace probe_ae {
     }
 
     void onBhSleepSiteHit(int siteId, uint64_t us) {
-        if (!isEnabled() || siteId < 0 || siteId >= 3) return;
+        if (!isBhProbeEnabled() || siteId < 0 || siteId >= 3) return;
         bhInitStartup();
         s_sleepSites[siteId].hits.fetch_add(1, std::memory_order_relaxed);
         s_sleepSites[siteId].totalUs.fetch_add(us, std::memory_order_relaxed);
     }
 
     void onBhIteration() {
-        if (!isEnabled()) return;
+        if (!isBhProbeEnabled()) return;
         s_bhIters.fetch_add(1, std::memory_order_relaxed);
     }
 
     static auto s_bhStartTime = std::chrono::steady_clock::now();
 
     void bhTickCheckPerSec(const uint8_t *rdram) {
-        if (!isEnabled()) return;
-        if (rdram) setRdram(rdram);
-        bhInitStartup();
+        static std::atomic<uint32_t> s_bhTickCount{0};
+        uint32_t n = s_bhTickCount.fetch_add(1, std::memory_order_relaxed) + 1;
 
         auto now = std::chrono::steady_clock::now();
         double elapsedSec = std::chrono::duration<double>(now - s_bhLastSec).count();
+        bool en = isBhProbeEnabled();
+        bool movie = isMovieActive(rdram ? rdram : s_cachedRdram);
+
+        if (n <= 5 || (n % 100 == 0)) {
+            bhLog("[probe] bh tick n=%u enabled=%d elapsed=%.3f movie=%d rdram=%s\n",
+                  n, en ? 1 : 0, elapsedSec, movie ? 1 : 0, rdram ? "non-null" : "null");
+        }
+
+        if (!en) return;
+        if (rdram) setRdram(rdram);
+        bhInitStartup();
+
         if (elapsedSec < 1.0) return;
 
-        bool movieActive = isMovieActive(rdram ? rdram : s_cachedRdram);
         uint32_t t = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::seconds>(now - s_bhStartTime).count());
-        ps2xSafeLog("[probe] bh alive movie=%d t=%u\n", movieActive ? 1 : 0, t);
+        bhLog("[probe] bh alive movie=%d t=%u\n", movie ? 1 : 0, t);
 
-        if (!movieActive) {
+        if (!movie) {
             // Keep resetting if movie is not active yet so timers don't accumulate
             s_bhVif1Us.store(0, std::memory_order_relaxed);
             s_bhGifUs.store(0, std::memory_order_relaxed);
@@ -3306,17 +3383,17 @@ namespace probe_ae {
         }
 
         // Output formatting
-        ps2xSafeLog("[probe] bh ee vif1=%.1f gif=%.1f gs_block=%.1f(%u) raw8=%.1f(feed=%.1f,dec=%.1f,ycc=%.1f,calls=%u) hle=%.1f sched_wait=%.1f(%u) dma_poll=%.1f cid1=%.1f intc=%.1f(%u)[%s] other=%.1f\n",
-                    vif1Ms, gifMs, gsBlockMs, gsBlockCnt, raw8TotalMs, raw8FeedMs, raw8DecMs, raw8YccMs, raw8Calls,
-                    hleMs, schedWaitMs, schedWaitCnt, dmaPollMs, cid1Ms, intcMs, intcCnt, intcCausesStr.c_str(), otherMs);
+        bhLog("[probe] bh ee vif1=%.1f gif=%.1f gs_block=%.1f(%u) raw8=%.1f(feed=%.1f,dec=%.1f,ycc=%.1f,calls=%u) hle=%.1f sched_wait=%.1f(%u) dma_poll=%.1f cid1=%.1f intc=%.1f(%u)[%s] other=%.1f\n",
+              vif1Ms, gifMs, gsBlockMs, gsBlockCnt, raw8TotalMs, raw8FeedMs, raw8DecMs, raw8YccMs, raw8Calls,
+              hleMs, schedWaitMs, schedWaitCnt, dmaPollMs, cid1Ms, intcMs, intcCnt, intcCausesStr.c_str(), otherMs);
 
-        ps2xSafeLog("[probe] bh gs busy=%.1f idle=%.1f q_max=%u q_avg=%.1f px/s=%llu prims/s=%llu slow_pkts=<%s>\n",
-                    gsBusyMs, gsIdleMs, qMax, qAvg, (unsigned long long)pixelsSec, (unsigned long long)primsSec, slowPktsStr.c_str());
+        bhLog("[probe] bh gs busy=%.1f idle=%.1f q_max=%u q_avg=%.1f px/s=%llu prims/s=%llu slow_pkts=<%s>\n",
+              gsBusyMs, gsIdleMs, qMax, qAvg, (unsigned long long)pixelsSec, (unsigned long long)primsSec, slowPktsStr.c_str());
 
-        ps2xSafeLog("[probe] bh iter iters/s=%u avg_ms=%.1f ring_head=%u ring_tail=%u\n",
-                    iters, avgIterMs, ringHead, ringTail);
+        bhLog("[probe] bh iter iters/s=%u avg_ms=%.1f ring_head=%u ring_tail=%u\n",
+              iters, avgIterMs, ringHead, ringTail);
 
-        ps2xSafeLog("[probe] bh sleep hits: %s\n", sleepHitsStr.c_str());
+        bhLog("[probe] bh sleep hits: %s\n", sleepHitsStr.c_str());
 
         s_bhLastSec = now;
     }
