@@ -11,6 +11,7 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ee_scheduler.h"
 #include <mutex>
 #include <map>
 #include <deque>
@@ -1976,17 +1977,93 @@ namespace probe_ae {
     static std::atomic<uint32_t> s_bbGateDiagCount{0};
     static std::atomic<uint32_t> s_movieKickMscalIndex{0};
     static std::atomic<uint32_t> s_movieKickFirstUnpackSrc{0};
+    // Task BJ file sink and logger
+    static std::mutex s_bhSinkMutex;
+    static FILE* bhSink() {
+        static FILE* s_file = nullptr;
+        static bool s_tried = false;
+        if (!s_tried) {
+            s_tried = true;
+            std::error_code ec;
+            std::filesystem::create_directories("logs", ec);
+            s_file = std::fopen("logs/probe_bh_sink.txt", "a");
+        }
+        return s_file;
+    }
+
+    static void bhLog(const char *fmt, ...) {
+        char buf[4096];
+        va_list args;
+        va_start(args, fmt);
+        int len = std::vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+
+        if (len > 0) {
+            size_t writeLen = (len < static_cast<int>(sizeof(buf))) ? static_cast<size_t>(len) : (sizeof(buf) - 1);
+            {
+                std::lock_guard<std::mutex> lock(s_bhSinkMutex);
+                FILE *f = bhSink();
+                if (f) {
+                    std::fwrite(buf, 1, writeLen, f);
+                    std::fflush(f);
+                }
+            }
+            ps2xSafeLog("%s", buf);
+        }
+    }
+
+    static inline bool isBhProbeEnabled() {
+        const char *env = std::getenv("PS2X_PROBE_AE");
+        if (env && (env[0] == '1' || env[0] == 't' || env[0] == 'y' || env[0] == 'T' || env[0] == 'Y')) {
+            return true;
+        }
+#ifdef _WIN32
+        char winBuf[16] = {0};
+        if (GetEnvironmentVariableA("PS2X_PROBE_AE", winBuf, sizeof(winBuf)) > 0) {
+            if (winBuf[0] == '1' || winBuf[0] == 't' || winBuf[0] == 'y' || winBuf[0] == 'T' || winBuf[0] == 'Y') {
+                return true;
+            }
+        }
+#endif
+        const char *envBh = std::getenv("PS2X_PROBE_BH");
+        if (envBh && (envBh[0] == '1' || envBh[0] == 't' || envBh[0] == 'y' || envBh[0] == 'T' || envBh[0] == 'Y')) {
+            return true;
+        }
+        return isEnabled();
+    }
+
     enum class KickDecision {
         Undecided,
         Native,
         Interpret
     };
-    static KickDecision s_kickDecision = KickDecision::Undecided;
+    static std::atomic<KickDecision> s_kickDecision{KickDecision::Undecided};
+
+    bool isMovieKickNative() {
+        return (s_kickDecision.load(std::memory_order_relaxed) == KickDecision::Native);
+    }
+
+    bool isMovieSkipUnpackEnabled() {
+        static int s_skip = -1;
+        if (s_skip == -1) {
+            const char *env = std::getenv("PS2X_MOVIE_SKIP_UNPACK");
+            s_skip = (env && env[0] == '0') ? 0 : 1; // default ON (1)
+        }
+        return s_skip == 1;
+    }
+
+    void recordBlSkipUnpack(uint32_t skippedCount, uint32_t skippedBytes) {
+        static std::atomic<uint32_t> s_blSkipKickCount{0};
+        uint32_t k = s_blSkipKickCount.fetch_add(1, std::memory_order_relaxed);
+        if (k < 3) {
+            bhLog("[hle] skip_unpack kick unpacks_skipped=%u bytes=%u\n", skippedCount, skippedBytes);
+        }
+    }
 
     void onBbChainStart(uint32_t tadr, uint32_t tagCount, const std::vector<AySpan> &spans) {
         s_movieKickMscalIndex.store(0, std::memory_order_relaxed);
         s_movieKickFirstUnpackSrc.store(0, std::memory_order_relaxed);
-        s_kickDecision = KickDecision::Undecided;
+        s_kickDecision.store(KickDecision::Undecided, std::memory_order_relaxed);
         if (!isEnabled() && !isMovieHleActive() && !isMovieHleVerify()) return;
         ensureDumpDir();
         std::lock_guard<std::mutex> lock(s_bbMutex);
@@ -2579,61 +2656,6 @@ namespace probe_ae {
         return s_envStrict == 1;
     }
 
-    // Task BJ file sink and logger
-    static std::mutex s_bhSinkMutex;
-    static FILE* bhSink() {
-        static FILE* s_file = nullptr;
-        static bool s_tried = false;
-        if (!s_tried) {
-            s_tried = true;
-            std::error_code ec;
-            std::filesystem::create_directories("logs", ec);
-            s_file = std::fopen("logs/probe_bh_sink.txt", "a");
-        }
-        return s_file;
-    }
-
-    static void bhLog(const char *fmt, ...) {
-        char buf[4096];
-        va_list args;
-        va_start(args, fmt);
-        int len = std::vsnprintf(buf, sizeof(buf), fmt, args);
-        va_end(args);
-
-        if (len > 0) {
-            size_t writeLen = (len < static_cast<int>(sizeof(buf))) ? static_cast<size_t>(len) : (sizeof(buf) - 1);
-            {
-                std::lock_guard<std::mutex> lock(s_bhSinkMutex);
-                FILE *f = bhSink();
-                if (f) {
-                    std::fwrite(buf, 1, writeLen, f);
-                    std::fflush(f);
-                }
-            }
-            ps2xSafeLog("%s", buf);
-        }
-    }
-
-    static inline bool isBhProbeEnabled() {
-        const char *env = std::getenv("PS2X_PROBE_AE");
-        if (env && (env[0] == '1' || env[0] == 't' || env[0] == 'y' || env[0] == 'T' || env[0] == 'Y')) {
-            return true;
-        }
-#ifdef _WIN32
-        char winBuf[16] = {0};
-        if (GetEnvironmentVariableA("PS2X_PROBE_AE", winBuf, sizeof(winBuf)) > 0) {
-            if (winBuf[0] == '1' || winBuf[0] == 't' || winBuf[0] == 'y' || winBuf[0] == 'T' || winBuf[0] == 'Y') {
-                return true;
-            }
-        }
-#endif
-        const char *envBh = std::getenv("PS2X_PROBE_BH");
-        if (envBh && (envBh[0] == '1' || envBh[0] == 't' || envBh[0] == 'y' || envBh[0] == 'T' || envBh[0] == 'Y')) {
-            return true;
-        }
-        return isEnabled();
-    }
-
     static std::atomic<bool> s_bhMovieActiveLogged{false};
 
     static bool isMovieActive(const uint8_t *rdram) {
@@ -2899,7 +2921,7 @@ namespace probe_ae {
 
         if (startPC != 0x048) {
             s_movieKickMscalIndex.store(0, std::memory_order_relaxed);
-            s_kickDecision = KickDecision::Undecided;
+            s_kickDecision.store(KickDecision::Undecided, std::memory_order_relaxed);
             return false;
         }
 
@@ -2929,7 +2951,7 @@ namespace probe_ae {
             }
 
             if (failReason != nullptr) {
-                s_kickDecision = KickDecision::Interpret;
+                s_kickDecision.store(KickDecision::Interpret, std::memory_order_relaxed);
                 s_secInterpretedKicks++;
                 if (movieActive) {
                     if (s_reportedInterpretReasons.insert(failReason).second) {
@@ -2941,7 +2963,7 @@ namespace probe_ae {
                     }
                 }
             } else {
-                s_kickDecision = KickDecision::Native;
+                s_kickDecision.store(KickDecision::Native, std::memory_order_relaxed);
                 s_secNativeKicks++;
 
                 double native_ms = 0.0, xfer_ms = 0.0;
@@ -2981,11 +3003,11 @@ namespace probe_ae {
                 s_bgProbeLastSec = now;
             }
 
-            return (s_kickDecision == KickDecision::Native);
+            return (s_kickDecision.load(std::memory_order_relaxed) == KickDecision::Native);
         }
 
         // LATER MSCALs of the same kick (1..767)
-        if (s_kickDecision == KickDecision::Native) {
+        if (s_kickDecision.load(std::memory_order_relaxed) == KickDecision::Native) {
             return true; // Skip
         } else {
             return false; // Interpret
@@ -3230,6 +3252,19 @@ namespace probe_ae {
         s_bhIters.fetch_add(1, std::memory_order_relaxed);
     }
 
+    // Task BL counters & CID1 state
+    std::atomic<uint32_t> cnt_bl_3cd320{0};
+    std::atomic<uint32_t> cnt_bl_3ca818{0};
+    std::atomic<uint32_t> cnt_bl_435a00{0};
+    std::atomic<uint32_t> cnt_bl_3cbfd0{0};
+    std::atomic<uint32_t> cnt_bl_3cd288{0};
+
+    static std::atomic<uint32_t> s_blCid1LineCount{0};
+    static std::atomic<uint32_t> s_blCid1TotalReq{0};
+    static std::atomic<uint32_t> s_blCid1TotalReply{0};
+    static std::atomic<uint32_t> s_blCid1SecReq{0};
+    static std::atomic<uint32_t> s_blCid1SecReply{0};
+
     static auto s_bhStartTime = std::chrono::steady_clock::now();
 
     void bhTickCheckPerSec(const uint8_t *rdram) {
@@ -3395,6 +3430,171 @@ namespace probe_ae {
 
         bhLog("[probe] bh sleep hits: %s\n", sleepHitsStr.c_str());
 
+        // Task BL: per-second VIF1 ms and CID1 counters if line cap hit
+        bhLog("[probe] bl vif1_ms=%.1f\n", vif1Ms);
+        if (s_blCid1LineCount.load(std::memory_order_relaxed) >= 400) {
+            uint32_t secReq = s_blCid1SecReq.exchange(0, std::memory_order_relaxed);
+            uint32_t secRep = s_blCid1SecReply.exchange(0, std::memory_order_relaxed);
+            int32_t pending = static_cast<int32_t>(s_blCid1TotalReq.load(std::memory_order_relaxed) - s_blCid1TotalReply.load(std::memory_order_relaxed));
+            bhLog("[probe] bl cid1 sec req=%u reply=%u pending=%d\n", secReq, secRep, pending);
+        }
+
         s_bhLastSec = now;
+    }
+
+    // =========================================================================
+    // Task BL Probes
+    // =========================================================================
+    void onBlCid1Req(uint32_t opcode, uint32_t slotPtr, uint32_t seq, uint32_t fd, uint32_t dst, uint32_t size, uint32_t flags, const char *path) {
+        if (!isBhProbeEnabled()) return;
+        s_blCid1TotalReq.fetch_add(1, std::memory_order_relaxed);
+        s_blCid1SecReq.fetch_add(1, std::memory_order_relaxed);
+        uint32_t line = s_blCid1LineCount.fetch_add(1, std::memory_order_relaxed);
+        if (line < 400) {
+            if (path && path[0]) {
+                bhLog("[probe] bl cid1 req op=%u fd=%u slot=0x%08X seq=%u dst=0x%08X size=0x%X flags=0x%X path='%s'\n",
+                      opcode, fd, slotPtr, seq, dst, size, flags, path);
+            } else {
+                bhLog("[probe] bl cid1 req op=%u fd=%u slot=0x%08X seq=%u dst=0x%08X size=0x%X flags=0x%X\n",
+                      opcode, fd, slotPtr, seq, dst, size, flags);
+            }
+        }
+    }
+
+    void onBlCid1Reply(uint32_t slotPtr, uint32_t seq, uint32_t result, uint32_t written) {
+        if (!isBhProbeEnabled()) return;
+        s_blCid1TotalReply.fetch_add(1, std::memory_order_relaxed);
+        s_blCid1SecReply.fetch_add(1, std::memory_order_relaxed);
+        uint32_t line = s_blCid1LineCount.fetch_add(1, std::memory_order_relaxed);
+        if (line < 400) {
+            bhLog("[probe] bl cid1 reply slot=0x%08X seq=%u status=0x%X written=%u\n",
+                  slotPtr, seq, result, written);
+        }
+    }
+
+    static std::atomic<bool> s_blStallDumped{false};
+
+    void onBlStallDiag(const uint8_t *rdram, const EeScheduler *scheduler, uint32_t sec, uint32_t curScene) {
+        if (!isBhProbeEnabled() || !rdram) return;
+        bool exp = false;
+        if (!s_blStallDumped.compare_exchange_strong(exp, true)) {
+            return;
+        }
+
+        const GuestThread *th = scheduler ? scheduler->thread(1) : nullptr;
+        if (th) {
+            const R5900Context &ctx = th->activeContext();
+            uint32_t sp = getRegU32(&ctx, 29);
+            uint32_t pc = ctx.pc;
+            uint32_t ra = getRegU32(&ctx, 31);
+            uint32_t gp = getRegU32(&ctx, 28);
+            uint32_t fp = getRegU32(&ctx, 30);
+            uint32_t v0 = getRegU32(&ctx, 2), v1 = getRegU32(&ctx, 3);
+            uint32_t a0 = getRegU32(&ctx, 4), a1 = getRegU32(&ctx, 5), a2 = getRegU32(&ctx, 6), a3 = getRegU32(&ctx, 7);
+            uint32_t t0 = getRegU32(&ctx, 8), t1 = getRegU32(&ctx, 9), t2 = getRegU32(&ctx, 10), t3 = getRegU32(&ctx, 11);
+            uint32_t t4 = getRegU32(&ctx, 12), t5 = getRegU32(&ctx, 13), t6 = getRegU32(&ctx, 14), t7 = getRegU32(&ctx, 15);
+            uint32_t s0 = getRegU32(&ctx, 16), s1 = getRegU32(&ctx, 17), s2 = getRegU32(&ctx, 18), s3 = getRegU32(&ctx, 19);
+            uint32_t s4 = getRegU32(&ctx, 20), s5 = getRegU32(&ctx, 21), s6 = getRegU32(&ctx, 22), s7 = getRegU32(&ctx, 23);
+
+            bhLog("[probe] bl trigger t=%u stuck_main pc=0x%08X sp=0x%08X ra=0x%08X\n", sec, pc, sp, ra);
+
+            // 1. Stack walk (scan 0x1800 bytes upward, cap 40 lines)
+            uint32_t retLines = 0;
+            for (uint32_t off = 0; off <= 0x1800 && retLines < 40; off += 4) {
+                uint32_t currAddr = sp + off;
+                if ((currAddr & PS2_RAM_MASK) + 4 > PS2_RAM_SIZE) continue;
+                uint32_t w = 0;
+                std::memcpy(&w, rdram + (currAddr & PS2_RAM_MASK), 4);
+                if (w >= 0x00100000u && w < 0x00600000u) {
+                    uint32_t insnAddr = w - 8;
+                    if (insnAddr >= 0x00100000u && (insnAddr & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                        uint32_t insn = 0;
+                        std::memcpy(&insn, rdram + (insnAddr & PS2_RAM_MASK), 4);
+                        if ((insn & 0xFC000000u) == 0x0C000000u) {
+                            uint32_t callee = ((w - 4) & 0xF0000000u) | ((insn & 0x03FFFFFFu) << 2);
+                            bhLog("[probe] bl ret w=0x%08X at sp+0x%X callee=0x%08X\n", w, off, callee);
+                            retLines++;
+                        } else if ((insn & 0xFC00003Fu) == 0x00000009u) {
+                            bhLog("[probe] bl ret w=0x%08X at sp+0x%X callee=jalr\n", w, off);
+                            retLines++;
+                        }
+                    }
+                }
+            }
+
+            // Regs
+            bhLog("[probe] bl regs pc=0x%08X ra=0x%08X sp=0x%08X gp=0x%08X fp=0x%08X "
+                  "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+                  "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X t6=0x%08X t7=0x%08X "
+                  "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X\n",
+                  pc, ra, sp, gp, fp,
+                  v0, v1, a0, a1, a2, a3,
+                  t0, t1, t2, t3, t4, t5, t6, t7,
+                  s0, s1, s2, s3, s4, s5, s6, s7);
+        }
+
+        auto read32 = [&](uint32_t addr) -> uint32_t {
+            if ((addr & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                uint32_t val = 0;
+                std::memcpy(&val, rdram + (addr & PS2_RAM_MASK), 4);
+                return val;
+            }
+            return 0;
+        };
+
+        // 2. File handle table (64 entries)
+        constexpr uint32_t kHandleTableBase = 0x00746218u;
+        for (int idx = 0; idx < 64; ++idx) {
+            uint32_t ptr = kHandleTableBase + idx * 0x2Cu;
+            uint32_t w0 = read32(ptr + 0), w1 = read32(ptr + 4), w2 = read32(ptr + 8), w3 = read32(ptr + 12);
+            uint32_t w4 = read32(ptr + 16), w5 = read32(ptr + 20), w6 = read32(ptr + 24), w7 = read32(ptr + 28);
+            bhLog("[probe] bl handle idx=%02d ptr=0x%08X w=[0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X]\n",
+                  idx, ptr, w0, w1, w2, w3, w4, w5, w6, w7);
+        }
+
+        // 3. Device 0x771B88 slots and header
+        constexpr uint32_t kDevBase = 0x00771B88u;
+        char devHdrBuf[256];
+        int devHdrLen = std::snprintf(devHdrBuf, sizeof(devHdrBuf), "[probe] bl dev 0x771B88 hdr:");
+        for (uint32_t o = 0; o < 0x34; o += 4) {
+            devHdrLen += std::snprintf(devHdrBuf + devHdrLen, sizeof(devHdrBuf) - devHdrLen, " +0x%02X:0x%08X", o, read32(kDevBase + o));
+        }
+        bhLog("%s\n", devHdrBuf);
+
+        for (int h = 0; h < 8; ++h) {
+            uint32_t slotAddr = kDevBase + 0x34u + 16u * h;
+            bhLog("[probe] bl dev slot h=%d addr=0x%08X: 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                  h, slotAddr, read32(slotAddr), read32(slotAddr + 4), read32(slotAddr + 8), read32(slotAddr + 12));
+        }
+
+        // 4. Exit condition words and context
+        bhLog("[probe] bl wait 0x649DE0: 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X\n",
+              read32(0x00649DE0u), read32(0x00649DE4u), read32(0x00649DE8u), read32(0x00649DECu), read32(0x00649DF0u));
+
+        char ctxBuf[512];
+        int ctxLen = std::snprintf(ctxBuf, sizeof(ctxBuf), "[probe] bl ctx 0x772180:");
+        for (int i = 0; i < 16; ++i) {
+            ctxLen += std::snprintf(ctxBuf + ctxLen, sizeof(ctxBuf) - ctxLen, " 0x%08X", read32(0x00772180u + i * 4));
+        }
+        bhLog("%s\n", ctxBuf);
+
+        uint32_t sceneAddr = (curScene != 0) ? curScene : 0x008566a0u;
+        for (uint32_t off = 0; off <= 0x120; off += 32) {
+            bhLog("[probe] bl s3 +0x%03X: 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                  off,
+                  read32(sceneAddr + off + 0), read32(sceneAddr + off + 4), read32(sceneAddr + off + 8), read32(sceneAddr + off + 12),
+                  read32(sceneAddr + off + 16), read32(sceneAddr + off + 20), read32(sceneAddr + off + 24), read32(sceneAddr + off + 28));
+        }
+    }
+
+    void onBlStuckSec(uint32_t sec, uint32_t mainPc, uint32_t mainRa) {
+        if (!isBhProbeEnabled()) return;
+        uint32_t c3cd320 = cnt_bl_3cd320.exchange(0, std::memory_order_relaxed);
+        uint32_t c3ca818 = cnt_bl_3ca818.exchange(0, std::memory_order_relaxed);
+        uint32_t c435a00 = cnt_bl_435a00.exchange(0, std::memory_order_relaxed);
+        uint32_t c3cbfd0 = cnt_bl_3cbfd0.exchange(0, std::memory_order_relaxed);
+        uint32_t c3cd288 = cnt_bl_3cd288.exchange(0, std::memory_order_relaxed);
+        bhLog("[probe] bl stuck t=%u main_pc=0x%08X main_ra=0x%08X 3CD320=%u 3CA818=%u 435A00=%u 3CBFD0=%u 3CD288=%u\n",
+              sec, mainPc, mainRa, c3cd320, c3ca818, c435a00, c3cbfd0, c3cd288);
     }
 }

@@ -1719,6 +1719,12 @@ namespace ps2_syscalls
                 uint32_t opcode = *reinterpret_cast<const uint32_t *>(src + 4);
                 uint32_t slotPtr = *reinterpret_cast<const uint32_t *>(src + 8);
                 uint32_t seq = *reinterpret_cast<const uint32_t *>(src + 12);
+                uint32_t req_fd = (cmdSize >= 0x14) ? *reinterpret_cast<const uint32_t *>(src + 0x10) : 0;
+                uint32_t req_dst = (cmdSize >= 0x18) ? *reinterpret_cast<const uint32_t *>(src + 0x14) : 0;
+                uint32_t req_size = (cmdSize >= 0x1C) ? *reinterpret_cast<const uint32_t *>(src + 0x18) : 0;
+                uint32_t req_flags = (cmdSize >= 0x20) ? *reinterpret_cast<const uint32_t *>(src + 0x1C) : 0;
+                const char *pathPtr = (cmdSize > 0x20 && (opcode == 0x03 || opcode == 0x08)) ? reinterpret_cast<const char *>(src + 0x20) : "";
+                probe_ae::onBlCid1Req(opcode, slotPtr, seq, req_fd, req_dst, req_size, req_flags, pathPtr);
 
                 uint32_t alignedCmdSize = (cmdSize + 15u) & ~15u;
                 if (alignedCmdSize == 0u) alignedCmdSize = 16u;
@@ -2247,6 +2253,7 @@ namespace ps2_syscalls
             }
             std::fflush(stderr);
 
+                probe_ae::onBlCid1Reply(reply.slotPtr, reply.seq, reply.result, (reply.cmd == 0x05) ? reply.result : 0);
                 ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
                 return alignedCmdSize;
             };

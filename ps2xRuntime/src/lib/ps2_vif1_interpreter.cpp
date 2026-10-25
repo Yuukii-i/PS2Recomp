@@ -306,6 +306,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         return;
 
     probe_ae::onBhVif1Start();
+    uint32_t kickUnpacksSkipped = 0;
+    uint32_t kickBytesSkipped = 0;
     auto tVif1Start = std::chrono::steady_clock::now();
 
 #if defined(PS2X_PROBE_AE) || 1
@@ -466,7 +468,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
 #endif
 
-            if (m_vu1MscalCallback) {
+            const bool skipMscal = probe_ae::isMovieSkipUnpackEnabled() && probe_ae::isMovieKickNative();
+            if (!skipMscal && m_vu1MscalCallback) {
                 auto tVu1Start = std::chrono::steady_clock::now();
                 m_vu1MscalCallback(startPC, runTop, runItop);
 #if defined(PS2X_PROBE_AE) || 1
@@ -672,7 +675,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
 #endif
 
-            if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
+            const bool skipUnpack = probe_ae::isMovieSkipUnpackEnabled() && probe_ae::isMovieKickNative();
+            if (skipUnpack)
+            {
+                kickUnpacksSkipped++;
+                kickBytesSkipped += totalBytes;
+            }
+            else if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
                 uint32_t srcIndex = 0u;
@@ -894,5 +903,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         probe_ae::onAyTimeVif1(std::chrono::duration_cast<std::chrono::microseconds>(tVif1End - tVif1Start).count());
     }
 #endif
+    if (kickUnpacksSkipped > 0) {
+        probe_ae::recordBlSkipUnpack(kickUnpacksSkipped, kickBytesSkipped);
+    }
     probe_ae::onBhVif1End();
 }

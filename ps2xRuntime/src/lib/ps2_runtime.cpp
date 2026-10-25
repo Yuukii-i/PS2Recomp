@@ -4707,6 +4707,18 @@ void PS2Runtime::run()
                 ps2xSafeLog("[stall:diag] Same scene for %llds: cur=0x%08x (vtable=0x%08x) FPS=%u. Last 5 distinct fns: 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x.\n",
                             (long long)timeInScene, g_trackedCurScene.load(), g_trackedCurVtable.load(), currentFps,
                             g_lastDistinctFns[0], g_lastDistinctFns[1], g_lastDistinctFns[2], g_lastDistinctFns[3], g_lastDistinctFns[4]);
+                probe_ae::onBlStallDiag(m_memory.getRDRAM(), m_eeScheduler.get(), static_cast<uint32_t>(timeInScene), g_trackedCurScene.load());
+            }
+            if (timeInScene >= 10)
+            {
+                uint32_t mainPc = 0, mainRa = 0;
+                const GuestThread *th1 = m_eeScheduler ? m_eeScheduler->thread(1) : nullptr;
+                if (th1) {
+                    const R5900Context &c1 = th1->activeContext();
+                    mainPc = c1.pc;
+                    mainRa = getRegU32(&c1, 31);
+                }
+                probe_ae::onBlStuckSec(static_cast<uint32_t>(timeInScene), mainPc, mainRa);
             }
             char titleBuf[128];
             std::snprintf(titleBuf, sizeof(titleBuf), "Ape Escape 3 Recomp - FPS: %u (GS %llu)", currentFps, (unsigned long long)currentGsKicks);

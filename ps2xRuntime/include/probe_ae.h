@@ -681,4 +681,20 @@ namespace probe_ae {
     void onBhSleepSiteHit(int siteId, uint64_t us);
     void onBhIteration();
     void bhTickCheckPerSec(const uint8_t *rdram);
+
+    // Task BL
+    extern std::atomic<uint32_t> cnt_bl_3cd320;
+    extern std::atomic<uint32_t> cnt_bl_3ca818;
+    extern std::atomic<uint32_t> cnt_bl_435a00;
+    extern std::atomic<uint32_t> cnt_bl_3cbfd0;
+    extern std::atomic<uint32_t> cnt_bl_3cd288;
+
+    void onBlCid1Req(uint32_t opcode, uint32_t slotPtr, uint32_t seq, uint32_t fd, uint32_t dst, uint32_t size, uint32_t flags, const char *path);
+    void onBlCid1Reply(uint32_t slotPtr, uint32_t seq, uint32_t result, uint32_t written);
+    void onBlStallDiag(const uint8_t *rdram, const class EeScheduler *scheduler, uint32_t sec, uint32_t curScene);
+    void onBlStuckSec(uint32_t sec, uint32_t mainPc, uint32_t mainRa);
+
+    bool isMovieKickNative();
+    bool isMovieSkipUnpackEnabled();
+    void recordBlSkipUnpack(uint32_t skippedCount, uint32_t skippedBytes);
 }
