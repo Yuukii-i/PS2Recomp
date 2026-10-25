@@ -1633,6 +1633,25 @@ static std::atomic<uint64_t> s_cmMismPx{0};
 static std::atomic<uint32_t> s_cmMismLogged{0};
 static auto s_cmLastSecLog = std::chrono::steady_clock::now();
 
+static std::atomic<uint64_t> s_cnBigSprites{0};
+static std::atomic<uint64_t> s_cnPass{0};
+static std::atomic<uint64_t> s_cnFailA{0};
+static std::atomic<uint64_t> s_cnFailB{0};
+static std::atomic<uint64_t> s_cnFailC{0};
+static std::atomic<uint64_t> s_cnFailD{0};
+static std::atomic<uint64_t> s_cnFailE{0};
+static std::atomic<uint64_t> s_cnFailF{0};
+static std::atomic<uint64_t> s_cnFailG{0};
+static std::atomic<uint64_t> s_cnFailH{0};
+static std::atomic<uint64_t> s_cnFailI{0};
+static std::atomic<uint64_t> s_cnFailJ{0};
+static std::atomic<uint64_t> s_cnFailK{0};
+static std::atomic<uint64_t> s_cnFailL{0};
+static std::atomic<uint64_t> s_cnFailM{0};
+static std::atomic<uint64_t> s_cnFailN{0};
+static std::atomic<uint32_t> s_cnLoggedThisSec{0};
+static auto s_cnLastSecLog = std::chrono::steady_clock::now();
+
 static inline bool isSpriteFastEnabled() {
     static int s_val = -1;
     if (s_val == -1) {
@@ -1766,6 +1785,93 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         const bool canFastPath = state.prim.fst && isUvAligned && isOneToOne && isUvInBounds &&
                                  isWrapSupported && isFormatSupported && isColorIdentity &&
                                  isWritePixelPlain;
+
+        if (spanX * spanY >= 20000)
+        {
+            s_cnBigSprites.fetch_add(1u, std::memory_order_relaxed);
+
+            uint32_t failmask = 0;
+            // a: 1:1 mapping
+            if (!isOneToOne) { failmask |= (1u << 0); s_cnFailA.fetch_add(1u, std::memory_order_relaxed); }
+            // b: u0/v0 integer
+            if (!isUvAligned) { failmask |= (1u << 1); s_cnFailB.fetch_add(1u, std::memory_order_relaxed); }
+            // c: source rect inside texture
+            if (!isUvInBounds) { failmask |= (1u << 2); s_cnFailC.fetch_add(1u, std::memory_order_relaxed); }
+            // d: wrap mode 0/1
+            if (!isWrapSupported) { failmask |= (1u << 3); s_cnFailD.fetch_add(1u, std::memory_order_relaxed); }
+            // e: tex psm CT32
+            if (tex.psm != GS_PSM_CT32) { failmask |= (1u << 4); s_cnFailE.fetch_add(1u, std::memory_order_relaxed); }
+            // f: dest psm CT32
+            if (fpsm != GS_PSM_CT32) { failmask |= (1u << 5); s_cnFailF.fetch_add(1u, std::memory_order_relaxed); }
+            // g: combine identity (tfx/colour)
+            if (!isColorIdentity) { failmask |= (1u << 6); s_cnFailG.fetch_add(1u, std::memory_order_relaxed); }
+            // h: abe off
+            if (state.prim.abe) { failmask |= (1u << 7); s_cnFailH.fetch_add(1u, std::memory_order_relaxed); }
+            // i: ate off
+            if (!alphaTestOff) { failmask |= (1u << 8); s_cnFailI.fetch_add(1u, std::memory_order_relaxed); }
+            // j: depth test
+            if (!depthPass) { failmask |= (1u << 9); s_cnFailJ.fetch_add(1u, std::memory_order_relaxed); }
+            // k: z write
+            // In CM, writeDepth is reproduced unconditionally, so depth write never fails fast path (always 0)
+            // But if we check if z write is disabled or not, depth write is handled. Failbit k is 0.
+            // l: fog off
+            if (state.prim.fge) { failmask |= (1u << 11); s_cnFailL.fetch_add(1u, std::memory_order_relaxed); }
+            // m: fbmsk
+            if (ctx.frame.fbmsk != 0u) { failmask |= (1u << 12); s_cnFailM.fetch_add(1u, std::memory_order_relaxed); }
+            // n: other conditions you added (!fst, destAlphaTest, fba, dthe)
+            if (!state.prim.fst || !destAlphaTestOff || ((ctx.fba & 1ull) != 0ull) || state.dthe)
+            {
+                failmask |= (1u << 13);
+                s_cnFailN.fetch_add(1u, std::memory_order_relaxed);
+            }
+
+            if (failmask == 0)
+            {
+                s_cnPass.fetch_add(1u, std::memory_order_relaxed);
+            }
+
+            auto nowCn = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(nowCn - s_cnLastSecLog).count() >= 1)
+            {
+                s_cnLastSecLog = nowCn;
+                s_cnLoggedThisSec.store(0, std::memory_order_relaxed);
+                probe_ae::bhLog("[probe] cn fail histogram big_sprites=%llu pass=%llu failbits{a=%llu b=%llu c=%llu d=%llu e=%llu f=%llu g=%llu h=%llu i=%llu j=%llu k=%llu l=%llu m=%llu n=%llu}\n",
+                                (unsigned long long)s_cnBigSprites.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnPass.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailA.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailB.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailC.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailD.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailE.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailF.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailG.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailH.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailI.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailJ.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailK.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailL.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailM.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cnFailN.load(std::memory_order_relaxed));
+            }
+
+            uint32_t loggedCount = s_cnLoggedThisSec.fetch_add(1u, std::memory_order_relaxed);
+            if (loggedCount < 3u)
+            {
+                uint32_t ate = ctx.test & 0x1u;
+                uint32_t zte = (ctx.test >> 16) & 0x1u;
+                uint32_t zmsk = ctx.zbuf.zmask ? 1u : 0u;
+                probe_ae::bhLog("[probe] cn spr x=(%d,%d)-(%d,%d) span=%dx%d fst=%u uv0=(%u,%u) uv1=(%u,%u) texW=%d texH=%d tex.psm=%u tbp0=0x%x tbw=%u lin=%u tfx=%u tcc=%u col=%u,%u,%u,%u abe=%u ate=%u zte=%u zmsk=%u fbmsk=0x%x frame.psm=%u fbp=0x%x wrapU/V=%u/%u clamp=0x%llx failmask=0x%x\n",
+                                x0, y0, x1, y1, spanX, spanY, state.prim.fst ? 1u : 0u,
+                                (unsigned)v0.u, (unsigned)v0.v, (unsigned)v1.u, (unsigned)v1.v,
+                                texW, texH, (unsigned)tex.psm, (unsigned)tex.tbp0, (unsigned)tex.tbw,
+                                state.linearFilter ? 1u : 0u, (unsigned)tex.tfx, (unsigned)tex.tcc,
+                                (unsigned)v1.r, (unsigned)v1.g, (unsigned)v1.b, (unsigned)v1.a,
+                                state.prim.abe ? 1u : 0u, ate, zte, zmsk,
+                                (unsigned)ctx.frame.fbmsk, (unsigned)fpsm, (unsigned)fbp,
+                                (unsigned)wrapU, (unsigned)wrapV, (unsigned long long)ctx.clamp,
+                                (unsigned)failmask);
+            }
+        }
 
         if (canFastPath && isSpriteFastEnabled() && !isSpriteVerifyEnabled())
         {
