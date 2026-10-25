@@ -808,4 +808,19 @@ namespace probe_ae {
     // Task BT Probes
     void onBtFunctionEntry(uint32_t addr, const struct R5900Context *ctx, const uint8_t *rdram);
     void onBtTickSec(const uint8_t *rdram);
+
+    // Task BU Probes
+    struct BuPreState {
+        uint32_t preState;
+        uint32_t a0;
+        uint32_t a1;
+        uint32_t ra;
+        int32_t slotC_id;
+        int32_t slot10_id;
+        uint32_t slotC_w[4];
+        uint32_t slot10_w[4];
+    };
+    void onBuPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram, BuPreState *pre);
+    void onBuPumpExit(const struct R5900Context *ctx, const uint8_t *rdram, const BuPreState *pre);
+    void onBuTickSec(const uint8_t *rdram);
 }

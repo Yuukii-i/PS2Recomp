@@ -179,6 +179,9 @@ static void initCoutFilter()
 
 // Global stall diagnostics tracking
 static std::array<uint32_t, 5> g_lastDistinctFns = {};
+extern "C" uint32_t probe_getNewestDistinctFn() {
+    return g_lastDistinctFns[0];
+}
 static std::atomic<bool> g_mpegFunctionCalled{false};
 std::atomic<uint32_t> g_trackedCurScene{0};
 std::atomic<uint32_t> g_trackedCurVtable{0};
@@ -1373,6 +1376,32 @@ static void installBtProbe(PS2Runtime *rt) {
 }
 
 template<uint32_t Addr>
+struct BuPumpWrapper {
+    static PS2Runtime::RecompiledFunction s_orig;
+    static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        probe_ae::BuPreState pre{};
+        probe_ae::onBuPumpEntry(ctx, rdram, &pre);
+        if (s_orig) {
+            s_orig(rdram, ctx, runtime);
+        }
+        probe_ae::onBuPumpExit(ctx, rdram, &pre);
+    }
+};
+template<uint32_t Addr>
+PS2Runtime::RecompiledFunction BuPumpWrapper<Addr>::s_orig = nullptr;
+
+template<uint32_t Addr>
+static void installBuPumpProbe(PS2Runtime *rt) {
+    if (Addr >= g_ps2RecompiledFunctionTableBase && Addr < g_ps2RecompiledFunctionTableEnd) {
+        const uint32_t slot = (Addr - g_ps2RecompiledFunctionTableBase) >> 2;
+        BuPumpWrapper<Addr>::s_orig = g_ps2RecompiledFunctionTable[slot];
+        if (BuPumpWrapper<Addr>::s_orig) {
+            rt->replaceFunction(Addr, &BuPumpWrapper<Addr>::thunk);
+        }
+    }
+}
+
+template<uint32_t Addr>
 struct BrProbeWrapper {
     static PS2Runtime::RecompiledFunction s_orig;
     static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
@@ -1938,6 +1967,9 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     installBtProbe<0x0024C164u>(this);
     installBtProbe<0x0024CE28u>(this);
     installBtProbe<0x0024C2D4u>(this);
+
+    // Task BU Probe
+    installBuPumpProbe<0x0024C7DCu>(this);
     installBtProbe<0x0024C690u>(this);
     installBtProbe<0x0024CE0Cu>(this);
     installBtProbe<0x0024CD58u>(this);

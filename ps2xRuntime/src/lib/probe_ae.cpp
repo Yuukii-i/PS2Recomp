@@ -4991,6 +4991,7 @@ namespace probe_ae {
         if (!isEnabled()) return;
         onBrTickSec(rdram);
         onBtTickSec(rdram);
+        onBuTickSec(rdram);
         s_bqTotalSec++;
 
         uint32_t running = 0, blocked = 0;
@@ -5166,5 +5167,197 @@ namespace probe_ae {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // Task BU: Movie group pump 0x24C7DC wrapper and EE hot-spot sampler
+    // =========================================================================
+    extern "C" uint32_t probe_getNewestDistinctFn();
+
+    static std::atomic<uint32_t> s_buPumpCalls{0};
+    static std::atomic<uint32_t> s_buLastCtx{0x772180u};
+    static std::atomic<bool> s_buEnd0Logged{false};
+
+    static std::atomic<bool> s_buSamplerRunning{false};
+    static std::thread s_buSamplerThread;
+    static std::mutex s_buHotMutex;
+    static std::unordered_map<uint32_t, uint32_t> s_buHotCounts;
+    static uint32_t s_buHotTotalSamples = 0;
+
+    static void buSamplerWorker() {
+        while (s_buSamplerRunning.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            uint32_t fn = probe_getNewestDistinctFn();
+            if (fn != 0) {
+                std::lock_guard<std::mutex> lock(s_buHotMutex);
+                s_buHotCounts[fn]++;
+                s_buHotTotalSamples++;
+            }
+        }
+    }
+
+    static void ensureBuSamplerStarted() {
+        if (!isEnabled()) return;
+        static std::once_flag flag;
+        std::call_once(flag, []() {
+            s_buSamplerRunning.store(true, std::memory_order_relaxed);
+            s_buSamplerThread = std::thread(buSamplerWorker);
+        });
+    }
+
+    void onBuPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram, BuPreState *pre) {
+        if (!isEnabled() || !ctx || !rdram || !pre) return;
+        ensureBuSamplerStarted();
+        s_buPumpCalls.fetch_add(1, std::memory_order_relaxed);
+
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t ra = getRegU32(ctx, 31);
+        pre->a0 = a0;
+        pre->a1 = a1;
+        pre->ra = ra;
+        s_buLastCtx.store(a0, std::memory_order_relaxed);
+
+        uint32_t preState = 0;
+        std::memcpy(&preState, rdram + ((a0 + 0x08u) & PS2_RAM_MASK), 4);
+        pre->preState = preState;
+
+        int32_t idC = -1, id10 = -1;
+        std::memcpy(&idC, rdram + ((a0 + 0x0Cu) & PS2_RAM_MASK), 4);
+        std::memcpy(&id10, rdram + ((a0 + 0x10u) & PS2_RAM_MASK), 4);
+        pre->slotC_id = idC;
+        pre->slot10_id = id10;
+
+        if (idC >= 0) {
+            uint32_t slotAddr = (0x771BBCu + 16u * (uint32_t)idC) & PS2_RAM_MASK;
+            std::memcpy(pre->slotC_w, rdram + slotAddr, 16);
+        } else {
+            std::memset(pre->slotC_w, 0, sizeof(pre->slotC_w));
+        }
+
+        if (id10 >= 0) {
+            uint32_t slotAddr = (0x771BBCu + 16u * (uint32_t)id10) & PS2_RAM_MASK;
+            std::memcpy(pre->slot10_w, rdram + slotAddr, 16);
+        } else {
+            std::memset(pre->slot10_w, 0, sizeof(pre->slot10_w));
+        }
+    }
+
+    void onBuPumpExit(const struct R5900Context *ctx, const uint8_t *rdram, const BuPreState *pre) {
+        if (!isEnabled() || !ctx || !rdram || !pre) return;
+
+        uint32_t a0 = pre->a0;
+        uint32_t postState = 0;
+        std::memcpy(&postState, rdram + ((a0 + 0x08u) & PS2_RAM_MASK), 4);
+
+        if (pre->preState != 10 && postState == 10) {
+            bool expected = false;
+            if (s_buEnd0Logged.compare_exchange_strong(expected, true)) {
+                // Read context words: [+0x08,0x0C,0x10,0x14,0x18,0x1C,0x48,0x4C,0x50,0x58,0x5C,0x60,0x64,0x68,0x6C,0x70,0x74,0x78,0x7C,0x84]
+                static const uint32_t offsets[] = {
+                    0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x48, 0x4C, 0x50, 0x58,
+                    0x5C, 0x60, 0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C, 0x84
+                };
+                char ctxWordsBuf[512];
+                int cpos = 0;
+                for (size_t i = 0; i < sizeof(offsets)/sizeof(offsets[0]); ++i) {
+                    uint32_t val = 0;
+                    std::memcpy(&val, rdram + ((a0 + offsets[i]) & PS2_RAM_MASK), 4);
+                    cpos += std::snprintf(ctxWordsBuf + cpos, sizeof(ctxWordsBuf) - cpos,
+                                         "+0x%02X=0x%08X%s", offsets[i], val,
+                                         (i + 1 < sizeof(offsets)/sizeof(offsets[0]) ? " " : ""));
+                }
+
+                bhLog("[probe] bu end0 pre=%u post=10 ra=0x%08X a0=0x%08X a1=0x%08X %s\n",
+                      pre->preState, pre->ra, a0, pre->a1, ctxWordsBuf);
+                ps2xSafeLog("[probe] bu end0 pre=%u post=10 ra=0x%08X a0=0x%08X a1=0x%08X %s\n",
+                            pre->preState, pre->ra, a0, pre->a1, ctxWordsBuf);
+
+                // Slot words
+                bhLog("[probe] bu slotw idC=%d w=[0x%08X 0x%08X 0x%08X 0x%08X] id10=%d w=[0x%08X 0x%08X 0x%08X 0x%08X]\n",
+                      pre->slotC_id, pre->slotC_w[0], pre->slotC_w[1], pre->slotC_w[2], pre->slotC_w[3],
+                      pre->slot10_id, pre->slot10_w[0], pre->slot10_w[1], pre->slot10_w[2], pre->slot10_w[3]);
+                ps2xSafeLog("[probe] bu slotw idC=%d w=[0x%08X 0x%08X 0x%08X 0x%08X] id10=%d w=[0x%08X 0x%08X 0x%08X 0x%08X]\n",
+                            pre->slotC_id, pre->slotC_w[0], pre->slotC_w[1], pre->slotC_w[2], pre->slotC_w[3],
+                            pre->slot10_id, pre->slot10_w[0], pre->slot10_w[1], pre->slot10_w[2], pre->slot10_w[3]);
+
+                // Header info
+                uint32_t idx = 0;
+                std::memcpy(&idx, rdram + ((a0 + 0x50u) & PS2_RAM_MASK), 4);
+
+                char bufHex[4][65];
+                for (int i = 0; i < 4; ++i) {
+                    uint32_t bufPtr = 0;
+                    std::memcpy(&bufPtr, rdram + ((a0 + 0x34u + 4u * i) & PS2_RAM_MASK), 4);
+                    int bpos = 0;
+                    if (bufPtr != 0) {
+                        for (int b = 0; b < 32; ++b) {
+                            uint8_t byteVal = rdram[(bufPtr + b) & PS2_RAM_MASK];
+                            bpos += std::snprintf(bufHex[i] + bpos, sizeof(bufHex[i]) - bpos, "%02x", byteVal);
+                        }
+                    } else {
+                        std::snprintf(bufHex[i], sizeof(bufHex[i]), "null");
+                    }
+                }
+
+                char magicHex[33];
+                int mpos = 0;
+                for (int b = 0; b < 16; ++b) {
+                    uint8_t byteVal = rdram[(0x6EAFF0u + b) & PS2_RAM_MASK];
+                    mpos += std::snprintf(magicHex + mpos, sizeof(magicHex) - mpos, "%02x", byteVal);
+                }
+
+                uint32_t p1C = 0, deref10 = 0;
+                std::memcpy(&p1C, rdram + ((a0 + 0x1Cu) & PS2_RAM_MASK), 4);
+                if (p1C != 0) {
+                    std::memcpy(&deref10, rdram + ((p1C + 0x10u) & PS2_RAM_MASK), 4);
+                }
+
+                bhLog("[probe] bu hdr idx=%u b0=%s b1=%s b2=%s b3=%s magic=%s p1C_10=0x%08X\n",
+                      idx, bufHex[0], bufHex[1], bufHex[2], bufHex[3], magicHex, deref10);
+                ps2xSafeLog("[probe] bu hdr idx=%u b0=%s b1=%s b2=%s b3=%s magic=%s p1C_10=0x%08X\n",
+                            idx, bufHex[0], bufHex[1], bufHex[2], bufHex[3], magicHex, deref10);
+            }
+        }
+    }
+
+    void onBuTickSec(const uint8_t *rdram) {
+        if (!isEnabled() || !rdram) return;
+        ensureBuSamplerStarted();
+
+        uint32_t calls = s_buPumpCalls.exchange(0, std::memory_order_relaxed);
+        uint32_t ctxAddr = s_buLastCtx.load(std::memory_order_relaxed);
+        uint32_t state = 0, f74 = 0;
+        std::memcpy(&state, rdram + ((ctxAddr + 0x08u) & PS2_RAM_MASK), 4);
+        std::memcpy(&f74, rdram + ((ctxAddr + 0x74u) & PS2_RAM_MASK), 4);
+
+        bhLog("[probe] bu sec pump_calls=%u state=%u f74=0x%X\n", calls, state, f74);
+        ps2xSafeLog("[probe] bu sec pump_calls=%u state=%u f74=0x%X\n", calls, state, f74);
+
+        // Sampler print
+        std::vector<std::pair<uint32_t, uint32_t>> hot;
+        uint32_t totalSamples = 0;
+        {
+            std::lock_guard<std::mutex> lock(s_buHotMutex);
+            hot.assign(s_buHotCounts.begin(), s_buHotCounts.end());
+            totalSamples = s_buHotTotalSamples;
+            s_buHotCounts.clear();
+            s_buHotTotalSamples = 0;
+        }
+
+        std::sort(hot.begin(), hot.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
+
+        std::string hotStr;
+        size_t count = std::min<size_t>(hot.size(), 12);
+        for (size_t i = 0; i < count; ++i) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%s0x%08X:%u", (i > 0 ? " " : ""), hot[i].first, hot[i].second);
+            hotStr += buf;
+        }
+
+        bhLog("[probe] bu hot top12=<%s> samples=%u\n", hotStr.c_str(), totalSamples);
+        ps2xSafeLog("[probe] bu hot top12=<%s> samples=%u\n", hotStr.c_str(), totalSamples);
     }
 }
