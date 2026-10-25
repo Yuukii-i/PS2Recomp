@@ -734,7 +734,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
 #if defined(PS2X_PROBE_AE) || 1
-            if (probe_ae::isEnabled() || probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify()) {
+            if (probe_ae::isEnabled() || probe_ae::isMovieHleFrameMode() || probe_ae::isMovieHleVerify()) {
                 uint8_t fmt = opcode & 0x0Fu;
                 uint32_t usn = (imm & 0x4000u) != 0u ? 1u : 0u;
                 uint32_t flg = (imm & 0x8000u) != 0u ? 1u : 0u;

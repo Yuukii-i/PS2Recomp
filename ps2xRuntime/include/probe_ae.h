@@ -664,6 +664,7 @@ namespace probe_ae {
     // Task BF Probes & Movie HLE
     bool isMovieHleActive();
     bool isMovieHleVerify();
+    bool isMovieHleFrameMode();
     bool handleMovieHleMscal(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize, const uint8_t *vuData, uint32_t dataSize, uint32_t top, class GS &gs, class PS2Memory *memory);
     inline bool handleMovieHleMscal(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize, class GS &gs, class PS2Memory *memory) {
         return handleMovieHleMscal(startPC, vuCode, codeSize, nullptr, 0, 0, gs, memory);

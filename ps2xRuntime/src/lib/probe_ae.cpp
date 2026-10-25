@@ -2116,15 +2116,37 @@ namespace probe_ae {
         s_bbLastVif1Regs = { itop, top, tops, base, ofst, cl, wl, mode };
     }
 
+    bool isMovieHleFrameMode();
+
     void onBbRecordUnpack(uint32_t posPayload, uint32_t totalBytes, uint32_t vuAddr, uint8_t fmt, uint8_t num) {
-        if (!isEnabled() && !isMovieHleActive() && !isMovieHleVerify()) return;
+        if (!isEnabled() && !isMovieHleFrameMode() && !isMovieHleVerify()) return;
         std::lock_guard<std::mutex> lock(s_bbMutex);
         uint32_t srcGuest = 0;
         const auto &spans = !s_bbSpans.empty() ? s_bbSpans : s_aySpans;
-        for (const auto &sp : spans) {
-            if (posPayload >= sp.bufOffset && posPayload < sp.bufOffset + sp.byteCount) {
-                srcGuest = sp.srcGuestAddr + (posPayload - sp.bufOffset);
+        bool isOrdered = true;
+        for (size_t i = 1; i < spans.size(); ++i) {
+            if (spans[i].bufOffset < spans[i - 1].bufOffset) {
+                isOrdered = false;
                 break;
+            }
+        }
+        if (isOrdered && !spans.empty()) {
+            auto it = std::upper_bound(spans.begin(), spans.end(), posPayload,
+                                       [](uint32_t val, const AySpan &sp) {
+                                           return val < sp.bufOffset;
+                                       });
+            if (it != spans.begin()) {
+                --it;
+                if (posPayload >= it->bufOffset && posPayload < it->bufOffset + it->byteCount) {
+                    srcGuest = it->srcGuestAddr + (posPayload - it->bufOffset);
+                }
+            }
+        } else {
+            for (const auto &sp : spans) {
+                if (posPayload >= sp.bufOffset && posPayload < sp.bufOffset + sp.byteCount) {
+                    srcGuest = sp.srcGuestAddr + (posPayload - sp.bufOffset);
+                    break;
+                }
             }
         }
         if (fmt == 2 && num == 0 && totalBytes == 256) {
@@ -2967,7 +2989,7 @@ namespace probe_ae {
         }
     }
 
-    static bool isMovieHleFrameMode() {
+    bool isMovieHleFrameMode() {
         static int s_envFrameMode = -1;
         if (s_envFrameMode == -1) {
             const char *env = std::getenv("PS2X_MOVIE_HLE_MODE");

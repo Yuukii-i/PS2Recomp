@@ -39,6 +39,12 @@ namespace probe_ae {
         std::unordered_map<std::string, uint64_t> leafCounts;
     };
 
+    struct LineInfoResult {
+        std::string fullPath;
+        std::string baseAndLine;
+        bool isProjectSource = false;
+    };
+
     static void cgSamplerWorker() {
         HANDLE hProc = GetCurrentProcess();
         DWORD currentPid = GetCurrentProcessId();
@@ -169,33 +175,58 @@ namespace probe_ae {
             return name;
         };
 
-        std::unordered_map<DWORD64, std::string> lineCache;
-        lineCache.reserve(16384);
+        std::unordered_map<DWORD64, LineInfoResult> frameLineCache;
+        frameLineCache.reserve(16384);
 
-        auto resolveLine = [&](DWORD64 addr, const std::string &fallbackSym) -> std::string {
-            auto it = lineCache.find(addr);
-            if (it != lineCache.end()) return it->second;
+        auto getLineResult = [&](DWORD64 addr, const std::string &fallbackSym) -> LineInfoResult {
+            auto it = frameLineCache.find(addr);
+            if (it != frameLineCache.end()) return it->second;
 
-            if (lineCache.size() >= 16384) {
-                lineCache.clear();
+            if (frameLineCache.size() >= 16384) {
+                frameLineCache.clear();
             }
 
+            LineInfoResult res;
             IMAGEHLP_LINE64 lineInfo{};
             lineInfo.SizeOfStruct = sizeof(lineInfo);
             DWORD lineDisp = 0;
-            std::string res;
             if (SymGetLineFromAddr64(hProc, addr, &lineDisp, &lineInfo) && lineInfo.FileName) {
+                res.fullPath = lineInfo.FileName;
                 const char *lastSlashF = strrchr(lineInfo.FileName, '\\');
                 const char *lastSlashF2 = strrchr(lineInfo.FileName, '/');
                 const char *baseFile = lastSlashF ? (lastSlashF + 1) : (lastSlashF2 ? (lastSlashF2 + 1) : lineInfo.FileName);
                 char lbuf[64];
                 snprintf(lbuf, sizeof(lbuf), "%s:%u", baseFile, lineInfo.LineNumber);
-                res = lbuf;
+                res.baseAndLine = lbuf;
+                res.isProjectSource = (res.fullPath.find("ps2xRuntime") != std::string::npos ||
+                                       res.fullPath.find("PS2Recomp") != std::string::npos);
             } else {
-                res = fallbackSym;
+                res.fullPath = "";
+                res.baseAndLine = fallbackSym.empty() ? resolveSym(addr) : fallbackSym;
+                res.isProjectSource = false;
             }
-            lineCache[addr] = res;
+            frameLineCache[addr] = res;
             return res;
+        };
+
+        auto resolveLine = [&](DWORD64 addr, const std::string &fallbackSym) -> std::string {
+            return getLineResult(addr, fallbackSym).baseAndLine;
+        };
+
+        auto isCrtOrExternal = [](const std::string &sym, const std::string &fullFilePath) -> bool {
+            static const char *prefixes[] = {
+                "std::", "_", "Rtl", "Nt", "Zw", "free_base", "strlen", "strchr",
+                "lroundf", "roundf", "memcpy", "memmove", "malloc", "free"
+            };
+            for (const char *p : prefixes) {
+                if (sym.rfind(p, 0) == 0) return true;
+            }
+            if (fullFilePath.empty()) return true;
+            if (fullFilePath.find("ps2xRuntime") == std::string::npos &&
+                fullFilePath.find("PS2Recomp") == std::string::npos) {
+                return true;
+            }
+            return false;
         };
 
         std::unordered_map<DWORD, CgThreadAgg> threadAggs;
@@ -204,6 +235,7 @@ namespace probe_ae {
         uint64_t mainSamplesCount = 0;
         std::unordered_map<std::string, uint64_t> mainInclusiveCounts;
         std::unordered_map<std::string, uint64_t> mainLineCounts;
+        std::unordered_map<std::string, uint64_t> mainOwnerCounts;
 
         std::unordered_map<DWORD, HANDLE> threadHandles;
         auto lastRefresh = std::chrono::steady_clock::now();
@@ -277,7 +309,7 @@ namespace probe_ae {
                     sf.AddrFrame.Offset = ctx.Rbp;
                     sf.AddrFrame.Mode = AddrModeFlat;
                     CONTEXT walkCtx = ctx;
-                    for (int f = 0; f < 6; ++f) {
+                    for (int f = 0; f < 14; ++f) {
                         if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, hThread, &sf, &walkCtx,
                                         NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
                             break;
@@ -300,6 +332,25 @@ namespace probe_ae {
                         mainSamplesCount++;
                         std::string leafLine = resolveLine(rip, leafSym);
                         mainLineCounts[leafLine]++;
+
+                        // Change 2: owner-line attribution
+                        std::string ownerLine;
+                        LineInfoResult leafRes = getLineResult(rip, leafSym);
+                        if (!isCrtOrExternal(leafSym, leafRes.fullPath) && leafRes.isProjectSource) {
+                            ownerLine = leafRes.baseAndLine;
+                        } else {
+                            for (size_t i = 0; i < frames.size(); ++i) {
+                                LineInfoResult fRes = getLineResult(frames[i], "");
+                                if (fRes.isProjectSource) {
+                                    ownerLine = fRes.baseAndLine;
+                                    break;
+                                }
+                            }
+                            if (ownerLine.empty()) {
+                                ownerLine = leafLine;
+                            }
+                        }
+                        mainOwnerCounts[ownerLine]++;
 
                         mainStackWalkCount++;
                         std::vector<std::string> frameSyms;
@@ -369,6 +420,25 @@ namespace probe_ae {
                         bhLog("[prof2] main lines: %s\n", linesStr.c_str());
                     }
 
+                    if (mainSamplesCount > 0 && !mainOwnerCounts.empty()) {
+                        std::vector<std::pair<std::string, uint64_t>> sortedOwners(mainOwnerCounts.begin(), mainOwnerCounts.end());
+                        std::sort(sortedOwners.begin(), sortedOwners.end(), [](const std::pair<std::string, uint64_t> &a, const std::pair<std::string, uint64_t> &b) {
+                            return a.second > b.second;
+                        });
+
+                        std::string ownersStr;
+                        size_t limit = (std::min)(size_t(15), sortedOwners.size());
+                        for (size_t i = 0; i < limit; ++i) {
+                            double pct = (static_cast<double>(sortedOwners[i].second) * 100.0) / static_cast<double>(mainSamplesCount);
+                            char sbuf[128];
+                            snprintf(sbuf, sizeof(sbuf), "%s=%.1f%% ", sortedOwners[i].first.c_str(), pct);
+                            ownersStr += sbuf;
+                        }
+                        if (!ownersStr.empty() && ownersStr.back() == ' ') ownersStr.pop_back();
+
+                        bhLog("[prof2] main owner: %s\n", ownersStr.c_str());
+                    }
+
                     if (mainStackWalkCount > 0) {
                         std::vector<std::pair<std::string, uint64_t>> sortedInc(mainInclusiveCounts.begin(), mainInclusiveCounts.end());
                         std::sort(sortedInc.begin(), sortedInc.end(), [](const std::pair<std::string, uint64_t> &a, const std::pair<std::string, uint64_t> &b) {
@@ -392,6 +462,7 @@ namespace probe_ae {
                 threadAggs.clear();
                 mainInclusiveCounts.clear();
                 mainLineCounts.clear();
+                mainOwnerCounts.clear();
                 totalProcessSamples = 0;
                 mainStackWalkCount = 0;
                 mainSamplesCount = 0;
