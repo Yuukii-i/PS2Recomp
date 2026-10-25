@@ -850,4 +850,12 @@ namespace probe_ae {
                           uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t currentTick);
     void onBxDrawPrimitive(const struct GSPrimitiveBatch &batch);
     void onBxTickSec(const uint8_t *rdram);
+
+    // Task BZ Probes
+    void onBzInitEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onBzInitExit(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onBzRaw8Call(uint32_t frameCount, uint32_t mbCapacity);
+    void onBzNativeBlock(int32_t mbX, int32_t mbY);
+    void onBzOrigRunBlock();
+    void onBzTickSec();
 }

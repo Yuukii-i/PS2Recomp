@@ -2473,6 +2473,7 @@ struct MpegCallLogger {
         const uint32_t mpegAddr = getRegU32(ctx, 4);
         const uint32_t dst = getRegU32(ctx, 5);
         const uint32_t mbCapacity = getRegU32(ctx, 6);
+        probe_ae::onBzRaw8Call(0, mbCapacity);
 
         uint32_t width = kStubMovieWidth;
         uint32_t height = kStubMovieHeight;
@@ -2558,6 +2559,7 @@ struct MpegCallLogger {
                 frameCount = playback.picturesServed;
             }
             probe_ae::onBwRaw8End(haveFrame, popsThisCall, bytesInThisCall, ringUnderflowThisCall);
+            probe_ae::onBzRaw8Call(frameCount, mbCapacity);
         }
 
         mpegGuestWrite32(rdram, mpegAddr + 0x00u, width);

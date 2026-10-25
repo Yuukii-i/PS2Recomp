@@ -3096,6 +3096,7 @@ namespace probe_ae {
 
         probe_ae::onBwMscalBlock(mbX, mbY);
         probe_ae::onBxNativeMscal(mbX, mbY, top & 0x3FFu);
+        probe_ae::onBzNativeBlock(mbX, mbY);
         // Log once per movie for the first MSCAL
         if (s_lastBsMovieInstance != s_movieInstance) {
             s_lastBsMovieInstance = s_movieInstance;
@@ -4999,6 +5000,7 @@ namespace probe_ae {
         onBvTickSec();
         onBwTickSec();
         onBxTickSec(rdram);
+        onBzTickSec();
         s_bqTotalSec++;
 
         uint32_t running = 0, blocked = 0;
@@ -6053,5 +6055,138 @@ namespace probe_ae {
             ps2xSafeLog("[probe] bx gsprim type=%s fbp=%u tbp0=%u xy=(%.1f,%.1f)-(%.1f,%.1f) uv=(%.1f,%.1f)-(%.1f,%.1f) tex_fbw=%u\n",
                         p.type, p.fbp, p.tbp0, p.x0, p.y0, p.x1, p.y1, p.u0, p.v0, p.u1, p.v1, p.tex_fbw);
         }
+    }
+
+    // =========================================================================
+    // Task BZ: Movie dimensions and MSCAL block order
+    // =========================================================================
+    static std::mutex s_bzMutex;
+    static uint32_t s_bzW = 0, s_bzH = 0;
+    static std::vector<std::pair<int32_t, int32_t>> s_bzOrderBlocks;
+    static bool s_bzOrderPrinted = false;
+    static uint32_t s_bzRaw8CallsInMovie = 0;
+    static uint32_t s_bzFirstFrameBlocks = 0;
+    static uint32_t s_bzFirstFrameRaw8A2 = 0;
+    static bool s_bzFirstFrameCounted = false;
+
+    // Part C: per-second mix
+    static std::atomic<uint32_t> s_bzSecNative{0};
+    static std::atomic<uint32_t> s_bzSecOrig{0};
+    static std::mutex s_bzPosMutex;
+    static std::set<std::pair<int32_t, int32_t>> s_bzSecPositions;
+
+    void onBzInitEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled() || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6); // w
+        uint32_t a3 = getRegU32(ctx, 7); // h
+        uint32_t t0 = getRegU32(ctx, 8); // flag
+        uint32_t ra = getRegU32(ctx, 31);
+        uint32_t s3 = getRegU32(ctx, 19);
+
+        char scene110Buf[32] = "n/a";
+        if (rdram && s3 >= 0x00100000u && s3 + 0x114u <= PS2_RAM_SIZE) {
+            uint32_t val = 0;
+            std::memcpy(&val, rdram + ((s3 + 0x110u) & PS2_RAM_MASK), 4);
+            std::snprintf(scene110Buf, sizeof(scene110Buf), "0x%08X", val);
+        }
+
+        bhLog("[probe] bz init a1=0x%08X w=%u h=%u t0=0x%08X ra=0x%08X scene+0x110=%s\n",
+              a1, a2, a3, t0, ra, scene110Buf);
+        ps2xSafeLog("[probe] bz init a1=0x%08X w=%u h=%u t0=0x%08X ra=0x%08X scene+0x110=%s\n",
+                    a1, a2, a3, t0, ra, scene110Buf);
+
+        std::lock_guard<std::mutex> lock(s_bzMutex);
+        s_bzW = a2;
+        s_bzH = a3;
+        s_bzOrderBlocks.clear();
+        s_bzOrderPrinted = false;
+        s_bzRaw8CallsInMovie = 0;
+        s_bzFirstFrameBlocks = 0;
+        s_bzFirstFrameRaw8A2 = 0;
+        s_bzFirstFrameCounted = false;
+    }
+
+    void onBzInitExit(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled() || !rdram) return;
+        uint32_t cfg204 = 0, cfg208 = 0, cfg20C = 0;
+        std::memcpy(&cfg204, rdram + (0x772384u & PS2_RAM_MASK), 4);
+        std::memcpy(&cfg208, rdram + (0x772388u & PS2_RAM_MASK), 4);
+        std::memcpy(&cfg20C, rdram + (0x77238Cu & PS2_RAM_MASK), 4);
+
+        bhLog("[probe] bz cfg [0x772384]=%u [0x772388]=%u [0x77238C]=%u\n",
+              cfg204, cfg208, cfg20C);
+        ps2xSafeLog("[probe] bz cfg [0x772384]=%u [0x772388]=%u [0x77238C]=%u\n",
+                    cfg204, cfg208, cfg20C);
+    }
+
+    void onBzRaw8Call(uint32_t frameCount, uint32_t mbCapacity) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_bzMutex);
+        s_bzRaw8CallsInMovie++;
+        if (s_bzRaw8CallsInMovie == 1) {
+            s_bzFirstFrameRaw8A2 = mbCapacity;
+        } else if (s_bzRaw8CallsInMovie == 2 && !s_bzFirstFrameCounted) {
+            s_bzFirstFrameCounted = true;
+            bhLog("[probe] bz frame_blocks=%u raw8_a2=%u\n", s_bzFirstFrameBlocks, s_bzFirstFrameRaw8A2);
+            ps2xSafeLog("[probe] bz frame_blocks=%u raw8_a2=%u\n", s_bzFirstFrameBlocks, s_bzFirstFrameRaw8A2);
+        }
+    }
+
+    void onBzNativeBlock(int32_t mbX, int32_t mbY) {
+        if (!isEnabled()) return;
+        s_bzSecNative.fetch_add(1, std::memory_order_relaxed);
+
+        {
+            std::lock_guard<std::mutex> lock(s_bzPosMutex);
+            s_bzSecPositions.insert({mbX, mbY});
+        }
+
+        std::lock_guard<std::mutex> lock(s_bzMutex);
+        if (s_bzRaw8CallsInMovie >= 1 && !s_bzFirstFrameCounted) {
+            s_bzFirstFrameBlocks++;
+        }
+
+        if (!s_bzOrderPrinted && s_bzOrderBlocks.size() < 96) {
+            s_bzOrderBlocks.push_back({mbX, mbY});
+            if (s_bzOrderBlocks.size() == 96) {
+                s_bzOrderPrinted = true;
+                for (int line = 0; line < 4; ++line) {
+                    std::string lineStr;
+                    for (int i = 0; i < 24; ++i) {
+                        const auto &pos = s_bzOrderBlocks[line * 24 + i];
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "%s(%d,%d)", (i > 0 ? " " : ""), pos.first, pos.second);
+                        lineStr += buf;
+                    }
+                    bhLog("[probe] bz order movie=%ux%u n=%u %s\n",
+                          s_bzW, s_bzH, (line + 1) * 24, lineStr.c_str());
+                    ps2xSafeLog("[probe] bz order movie=%ux%u n=%u %s\n",
+                                s_bzW, s_bzH, (line + 1) * 24, lineStr.c_str());
+                }
+            }
+        }
+    }
+
+    void onBzOrigRunBlock() {
+        if (!isEnabled()) return;
+        s_bzSecOrig.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void onBzTickSec() {
+        if (!isEnabled()) return;
+        uint32_t native = s_bzSecNative.exchange(0, std::memory_order_relaxed);
+        uint32_t orig = s_bzSecOrig.exchange(0, std::memory_order_relaxed);
+
+        size_t uniq = 0;
+        {
+            std::lock_guard<std::mutex> lock(s_bzPosMutex);
+            uniq = s_bzSecPositions.size();
+            s_bzSecPositions.clear();
+        }
+
+        bhLog("[probe] bz mix native=%u orig=%u uniq_pos=%zu\n", native, orig, uniq);
+        ps2xSafeLog("[probe] bz mix native=%u orig=%u uniq_pos=%zu\n", native, orig, uniq);
     }
 }

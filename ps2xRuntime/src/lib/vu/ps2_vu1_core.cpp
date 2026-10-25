@@ -1671,6 +1671,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     }
 
     probe_ae::onBxOrigRunStart(startPC, top, vuData, dataSize);
+    probe_ae::onBzOrigRunBlock();
 
     resetScheduler();
     m_state.pc = startPC & microAddressMask();

@@ -1429,6 +1429,31 @@ static void installBvReadSubmitProbe(PS2Runtime *rt) {
 }
 
 template<uint32_t Addr>
+struct BzInitWrapper {
+    static PS2Runtime::RecompiledFunction s_orig;
+    static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        probe_ae::onBzInitEntry(ctx, rdram);
+        if (s_orig) {
+            s_orig(rdram, ctx, runtime);
+        }
+        probe_ae::onBzInitExit(ctx, rdram);
+    }
+};
+template<uint32_t Addr>
+PS2Runtime::RecompiledFunction BzInitWrapper<Addr>::s_orig = nullptr;
+
+template<uint32_t Addr>
+static void installBzInitProbe(PS2Runtime *rt) {
+    if (Addr >= g_ps2RecompiledFunctionTableBase && Addr < g_ps2RecompiledFunctionTableEnd) {
+        const uint32_t slot = (Addr - g_ps2RecompiledFunctionTableBase) >> 2;
+        BzInitWrapper<Addr>::s_orig = g_ps2RecompiledFunctionTable[slot];
+        if (BzInitWrapper<Addr>::s_orig) {
+            rt->replaceFunction(Addr, &BzInitWrapper<Addr>::thunk);
+        }
+    }
+}
+
+template<uint32_t Addr>
 struct BrProbeWrapper {
     static PS2Runtime::RecompiledFunction s_orig;
     static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
@@ -2000,6 +2025,9 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
     // Task BV Probe
     installBvReadSubmitProbe<0x0024CA3Cu>(this);
+
+    // Task BZ Probe
+    installBzInitProbe<0x00319F38u>(this);
     installBtProbe<0x0024C690u>(this);
     installBtProbe<0x0024CE0Cu>(this);
     installBtProbe<0x0024CD58u>(this);
