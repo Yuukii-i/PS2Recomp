@@ -885,4 +885,11 @@ namespace probe_ae {
     void onCc3FBEACExit(const struct R5900Context *ctx);
     void onCcSg2Call(uint32_t op, uint32_t arg, uint32_t ret);
     void onCcTickSec();
+
+    // Task CE: Frame-locked guest time (PS2X_VTIME)
+    bool isVTimeEnabled();
+    bool onCeVblankProduced(uint32_t cause);
+    void onCeVblankDelivered(uint32_t cause);
+    uint64_t getCeDeliveredVblanks();
+    void onCeTickSec();
 }

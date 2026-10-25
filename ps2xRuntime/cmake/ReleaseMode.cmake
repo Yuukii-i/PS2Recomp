@@ -8,6 +8,7 @@ function(EnableFastReleaseMode TargetName)
         target_compile_options(${TargetName} PRIVATE
             $<$<CONFIG:Release>:
                 /O2 # speed
+                /Zi # PDB symbols
                 /Ob2 # inline aggressively
                 /Oi # intrinsics
                 /GL # whole program opt
@@ -26,6 +27,7 @@ function(EnableFastReleaseMode TargetName)
         if(TARGET ${TargetName})
             target_link_options(${TargetName} PRIVATE
                 $<$<CONFIG:Release>:
+                    /DEBUG # Generate PDB
                     /LTCG # link-time code generation
                     /OPT:REF # remove unreferenced
                     /OPT:ICF # fold identical COMDATs

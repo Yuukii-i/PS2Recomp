@@ -277,6 +277,10 @@ void EeScheduler::run()
                 GuestThread *owner = &acquireInvocationThread();
                 GuestInvocation invocation = std::move(m_pendingInvocations.front());
                 m_pendingInvocations.pop_front();
+                if (invocation.kind == GuestInvocationKind::Interrupt) {
+                    uint32_t cause = getRegU32(&invocation.context, 4);
+                    probe_ae::onCeVblankDelivered(cause);
+                }
                 owner->status = EeThreadStatus::Running;
                 m_currentThreadId = owner->id;
                 renewTimeSlice();
@@ -350,6 +354,10 @@ void EeScheduler::run()
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
+            if (invocation.kind == GuestInvocationKind::Interrupt) {
+                uint32_t cause = getRegU32(&invocation.context, 4);
+                probe_ae::onCeVblankDelivered(cause);
+            }
             if (getRegU32(&invocation.context, 29) == 0u)
             {
                 SET_GPR_U32(&invocation.context, 29, invocationStackTop());
@@ -1548,6 +1556,13 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
 void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
 {
     assertExecutor();
+    if (!dmac && (cause == 2u || cause == 3u))
+    {
+        if (!probe_ae::onCeVblankProduced(cause))
+        {
+            return;
+        }
+    }
     const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
     if (cause < 32u && (mask & (1u << cause)) == 0u)
     {

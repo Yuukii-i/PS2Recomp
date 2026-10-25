@@ -24,6 +24,7 @@ extern std::atomic<uint32_t> g_trackedCurScene;
 #include <set>
 #include <tuple>
 #include <chrono>
+#include <cmath>
 
 namespace probe_ae {
     std::atomic<uint64_t> s_cid1Fd3Offset{0};
@@ -62,6 +63,7 @@ static auto s_lastSg2SecLog = std::chrono::steady_clock::now();
 struct Sg2VoiceState {
     bool active = false;
     std::chrono::steady_clock::time_point keyOn{};
+    uint64_t keyOnDeliveredVblank = 0;
 };
 static Sg2VoiceState s_sg2Voices[24] = {};
 static std::mutex s_sg2VoiceMutex;
@@ -552,11 +554,13 @@ namespace ps2_syscalls
                                         hadKeyOn = true;
                                         s_lastSg2KeyOnMask = mask;
                                         s_lastSg2KeyOnTime = now;
+                                        uint64_t curVbl = probe_ae::getCeDeliveredVblanks();
                                         std::lock_guard<std::mutex> vlock(s_sg2VoiceMutex);
                                         for (uint32_t v = 0; v < 24; ++v) {
                                             if (mask & (1u << v)) {
                                                 s_sg2Voices[v].active = true;
                                                 s_sg2Voices[v].keyOn = now;
+                                                s_sg2Voices[v].keyOnDeliveredVblank = curVbl;
                                             }
                                         }
                                     }
@@ -616,10 +620,19 @@ namespace ps2_syscalls
                         auto now = std::chrono::steady_clock::now();
                         {
                             std::lock_guard<std::mutex> lock(s_sg2VoiceMutex);
+                            bool ceVTime = probe_ae::isVTimeEnabled();
+                            uint64_t ceCurVbl = ceVTime ? probe_ae::getCeDeliveredVblanks() : 0;
                             for (uint32_t v = 0; v < 24; ++v) {
                                 if (s_sg2Voices[v].active) {
-                                    double elapsed = std::chrono::duration<double>(now - s_sg2Voices[v].keyOn).count();
-                                    uint64_t pos = static_cast<uint64_t>(elapsed * 27428.0) % 0x10000u;
+                                    uint64_t pos = 0;
+                                    if (ceVTime) {
+                                        uint64_t vblDiff = (ceCurVbl >= s_sg2Voices[v].keyOnDeliveredVblank) ?
+                                            (ceCurVbl - s_sg2Voices[v].keyOnDeliveredVblank) : 0;
+                                        pos = static_cast<uint64_t>(std::floor(static_cast<double>(vblDiff) * 16384.0 / 36.0)) % 0x10000u;
+                                    } else {
+                                        double elapsed = std::chrono::duration<double>(now - s_sg2Voices[v].keyOn).count();
+                                        pos = static_cast<uint64_t>(elapsed * 27428.0) % 0x10000u;
+                                    }
                                     uint32_t wordVal = static_cast<uint32_t>((((pos >> 14) + 1) << 14) & 0xFFFFu);
                                     uint32_t offset = 0xC0u + 4u * v;
                                     if (offset + 4u <= copyBytes) {

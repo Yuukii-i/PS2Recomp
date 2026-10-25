@@ -5014,6 +5014,7 @@ namespace probe_ae {
         onBzTickSec();
         onCaTickSec();
         onCcTickSec();
+        onCeTickSec();
         s_bqTotalSec++;
 
         uint32_t running = 0, blocked = 0;
@@ -5487,6 +5488,8 @@ namespace probe_ae {
                     (unsigned long long)cid1Off);
     }
 
+    static std::atomic<uint32_t> s_ceLastGuestTicks{0};
+
     void onBvTickSec() {
         if (!isEnabled()) return;
         double totalMs = 0.0;
@@ -5517,6 +5520,7 @@ namespace probe_ae {
 
         uint32_t c3 = s_bvIntcCause3.exchange(0, std::memory_order_relaxed);
         uint32_t c5 = s_bvIntcCause5.exchange(0, std::memory_order_relaxed);
+        s_ceLastGuestTicks.store(c5, std::memory_order_relaxed);
 
         bhLog("[probe] bv wait total_ms=%.1f top5=<%s> cause3=%u cause5=%u\n",
               totalMs, topStr.c_str(), c3, c5);
@@ -6523,5 +6527,81 @@ namespace probe_ae {
 
         bhLog("[probe] cc sec polls=%u changes=%u maxjump=%u\n", polls, changes, maxjump);
         ps2xSafeLog("[probe] cc sec polls=%u changes=%u maxjump=%u\n", polls, changes, maxjump);
+    }
+
+    // =========================================================================
+    // Task CE: Frame-locked guest time (PS2X_VTIME)
+    // =========================================================================
+    static std::atomic<uint32_t> s_ceProduced{0};
+    static std::atomic<uint32_t> s_ceDelivered{0};
+    static std::atomic<uint32_t> s_ceDropped{0};
+    static std::atomic<bool> s_cePendingCause3{false};
+    static std::atomic<bool> s_cePendingCause2{false};
+    static std::atomic<uint64_t> s_ceDeliveredVblanksTotal{0};
+    static int s_ceVTimeEnabled = -1;
+
+    bool isVTimeEnabled() {
+        if (s_ceVTimeEnabled == -1) {
+            const char *env = std::getenv("PS2X_VTIME");
+            s_ceVTimeEnabled = (env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) ? 1 : 0;
+        }
+        return s_ceVTimeEnabled == 1;
+    }
+
+    bool onCeVblankProduced(uint32_t cause) {
+        if (!isVTimeEnabled()) {
+            s_ceProduced.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        if (cause == 3u) {
+            if (s_cePendingCause3.exchange(true, std::memory_order_acq_rel)) {
+                s_ceDropped.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+            s_ceProduced.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        if (cause == 2u) {
+            if (s_cePendingCause2.exchange(true, std::memory_order_acq_rel)) {
+                s_ceDropped.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+            s_ceProduced.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        return true;
+    }
+
+    void onCeVblankDelivered(uint32_t cause) {
+        if (cause == 3u) {
+            s_cePendingCause3.store(false, std::memory_order_release);
+            s_ceDeliveredVblanksTotal.fetch_add(1, std::memory_order_relaxed);
+            s_ceDelivered.fetch_add(1, std::memory_order_relaxed);
+        } else if (cause == 2u) {
+            s_cePendingCause2.store(false, std::memory_order_release);
+            s_ceDelivered.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    uint64_t getCeDeliveredVblanks() {
+        return s_ceDeliveredVblanksTotal.load(std::memory_order_relaxed);
+    }
+
+    void onCeTickSec() {
+        if (!isEnabled()) return;
+        uint32_t prod = s_ceProduced.exchange(0, std::memory_order_relaxed);
+        uint32_t deliv = s_ceDelivered.exchange(0, std::memory_order_relaxed);
+        uint32_t drop = s_ceDropped.exchange(0, std::memory_order_relaxed);
+        uint64_t totalDeliv = s_ceDeliveredVblanksTotal.load(std::memory_order_relaxed);
+        uint32_t sg2_pos = s_ccLastSg2Ret;
+        uint32_t guest_ticks = s_ceLastGuestTicks.load(std::memory_order_relaxed);
+
+        bhLog("[probe] ce vblank produced=%u delivered=%u dropped=%u\n", prod, deliv, drop);
+        ps2xSafeLog("[probe] ce vblank produced=%u delivered=%u dropped=%u\n", prod, deliv, drop);
+
+        bhLog("[probe] ce sec vblank_delivered=%llu sg2_pos=0x%08X guest_ticks=%u\n",
+              (unsigned long long)totalDeliv, sg2_pos, guest_ticks);
+        ps2xSafeLog("[probe] ce sec vblank_delivered=%llu sg2_pos=0x%08X guest_ticks=%u\n",
+                    (unsigned long long)totalDeliv, sg2_pos, guest_ticks);
     }
 }
