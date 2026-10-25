@@ -26,6 +26,8 @@ extern std::atomic<uint32_t> g_trackedCurScene;
 #include <chrono>
 
 namespace probe_ae {
+    std::atomic<uint64_t> s_cid1Fd3Offset{0};
+
     void onBpCloseLog(uint32_t fd, uint32_t freed_slots, uint32_t dev30_before, uint32_t dev30_after);
     void onBpDev30Log(uint32_t dev30);
 }
@@ -1722,6 +1724,7 @@ namespace ps2_syscalls
         }
 
         // Handle file3.irx command 1 (handshake and task dispatch)
+
         if (cid == 1u)
         {
             auto tCid1Start = std::chrono::steady_clock::now();
@@ -1732,6 +1735,9 @@ namespace ps2_syscalls
                 uint64_t offset = 0;
             };
             static VfiDescriptorSlot s_vfiDescriptors[16] = {};
+            auto updateFd3Offset = [&]() {
+                probe_ae::s_cid1Fd3Offset.store(s_vfiDescriptors[0].open ? s_vfiDescriptors[0].offset : 0, std::memory_order_relaxed);
+            };
 
             struct Cid1StreamJob
             {
@@ -1872,6 +1878,7 @@ namespace ps2_syscalls
                         {
                             s_vfiDescriptors[allocSlot].offset = 0;
                         }
+                        updateFd3Offset();
                         int allocFd = allocSlot + kCid1FdBase;
                         reply.result = static_cast<uint32_t>(allocFd);
                         ps2xSafeLog( "[CID1:Open] fd=%d (slot=%d) -> '%s' (size=%llu, LSN=%u)\n",
@@ -1888,6 +1895,7 @@ namespace ps2_syscalls
                 if (fdSlot >= 0 && fdSlot < 16 && s_vfiDescriptors[fdSlot].open)
                 {
                     s_vfiDescriptors[fdSlot].open = false;
+                    updateFd3Offset();
                     reply.result = 0;
                     ps2xSafeLog( "[CID1:Close] fd=%u (slot=%d)\n", fd, fdSlot);
                 }
@@ -2151,6 +2159,7 @@ namespace ps2_syscalls
 
                     g_movieSeekDone.store(true, std::memory_order_relaxed);
                     g_movieReadsCount.fetch_add(1, std::memory_order_relaxed);
+                    updateFd3Offset();
                     ps2xSafeLog("[CID1:Seek] fd=%u dstAddr=0x%08x reqSize=%u read=%llu newOff=%llu flags=0x%x\n",
                                 fd, dstAddr, reqSize, (unsigned long long)toRead, (unsigned long long)slot.offset, flags);
                 }
@@ -2479,6 +2488,10 @@ namespace ps2_syscalls
 }
 
 namespace probe_ae {
+    uint64_t probe_getCid1Fd3Offset() {
+        return s_cid1Fd3Offset.load(std::memory_order_relaxed);
+    }
+
     void onBqGetStats(uint32_t &sif_pending, uint32_t &sg2_polls, uint32_t &cid1_req) {
         sif_pending = 0;
         {

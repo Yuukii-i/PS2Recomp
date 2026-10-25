@@ -1573,6 +1573,10 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
         for (const auto &h : matching) addrs.push_back(h.handler);
         probe_ae::logCause3Dispatch(addrs);
     }
+    if (!dmac && (cause == 3u || cause == 5u) && probe_ae::isEnabled())
+    {
+        probe_ae::recordBvIntcDelivery(cause);
+    }
     for (const EeIrqHandler &handler : matching)
     {
         GuestInvocation invocation{};
@@ -1980,10 +1984,16 @@ void EeScheduler::removeFromWaitObject(GuestThread &item)
     item.wait = {};
 }
 
+static uint64_t s_bvMainWaitStartUs = 0;
+
 void EeScheduler::blockCurrent(EeWaitState wait)
 {
     GuestThread *self = currentThread();
     assert(self != nullptr);
+    if (self->id == kMainThreadId && probe_ae::isEnabled()) {
+        s_bvMainWaitStartUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
     self->wait = std::move(wait);
     self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
     m_currentThreadId = 0;
@@ -1997,6 +2007,24 @@ void EeScheduler::makeReady(GuestThread &item, int result, bool interruptSafe)
     item.wait = {};
     setReturnS32(&item.activeContext(), result);
     item.resumeCompletion = std::move(completion);
+    if (item.id == kMainThreadId && probe_ae::isEnabled()) {
+        uint64_t startUs = s_bvMainWaitStartUs;
+        if (startUs != 0) {
+            uint64_t nowUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            double dur_ms = (nowUs > startUs) ? (double)(nowUs - startUs) / 1000.0 : 0.0;
+            s_bvMainWaitStartUs = 0;
+            int kind = (int)item.wait.reason;
+            int id = 0;
+            if (auto *sw = std::get_if<EeSemaphoreWait>(&item.wait.payload)) {
+                id = sw->id;
+            } else if (auto *ew = std::get_if<EeEventFlagWait>(&item.wait.payload)) {
+                id = ew->id;
+            }
+            uint32_t ra = getRegU32(&item.activeContext(), 31);
+            probe_ae::recordBvMainWait(kind, id, ra, dur_ms);
+        }
+    }
     if (item.suspendCount != 0)
     {
         item.status = EeThreadStatus::Suspended;

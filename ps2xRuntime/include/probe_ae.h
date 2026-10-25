@@ -823,4 +823,11 @@ namespace probe_ae {
     void onBuPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram, BuPreState *pre);
     void onBuPumpExit(const struct R5900Context *ctx, const uint8_t *rdram, const BuPreState *pre);
     void onBuTickSec(const uint8_t *rdram);
+
+    // Task BV Probes
+    void onBvReadSubmit(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onBvTickSec();
+    void recordBvMainWait(int kind, int id, uint32_t ra, double duration_ms);
+    void recordBvIntcDelivery(uint32_t cause);
+    uint64_t probe_getCid1Fd3Offset();
 }

@@ -5360,4 +5360,145 @@ namespace probe_ae {
         bhLog("[probe] bu hot top12=<%s> samples=%u\n", hotStr.c_str(), totalSamples);
         ps2xSafeLog("[probe] bu hot top12=<%s> samples=%u\n", hotStr.c_str(), totalSamples);
     }
+
+    // =========================================================================
+    // Task BV: Stale video-read size probe (0x24CA3C) + Main thread wait tracker
+    // =========================================================================
+    static std::atomic<uint32_t> s_bvReadCalls{0};
+
+    struct BvWaitKey {
+        int kind;
+        int id;
+        uint32_t ra;
+        bool operator==(const BvWaitKey &o) const {
+            return kind == o.kind && id == o.id && ra == o.ra;
+        }
+    };
+    struct BvWaitKeyHash {
+        std::size_t operator()(const BvWaitKey &k) const {
+            return std::hash<int>()(k.kind) ^ (std::hash<int>()(k.id) << 1) ^ (std::hash<uint32_t>()(k.ra) << 2);
+        }
+    };
+
+    static std::mutex s_bvWaitMutex;
+    static double s_bvWaitTotalMs = 0.0;
+    static std::unordered_map<BvWaitKey, double, BvWaitKeyHash> s_bvWaitStats;
+    static std::atomic<uint32_t> s_bvIntcCause3{0};
+    static std::atomic<uint32_t> s_bvIntcCause5{0};
+
+    void recordBvMainWait(int kind, int id, uint32_t ra, double duration_ms) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_bvWaitMutex);
+        s_bvWaitTotalMs += duration_ms;
+        s_bvWaitStats[{kind, id, ra}] += duration_ms;
+    }
+
+    void recordBvIntcDelivery(uint32_t cause) {
+        if (cause == 3u) {
+            s_bvIntcCause3.fetch_add(1, std::memory_order_relaxed);
+        } else if (cause == 5u) {
+            s_bvIntcCause5.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    void onBvReadSubmit(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled() || !ctx || !rdram) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t a3 = getRegU32(ctx, 7);
+        uint32_t ra = getRegU32(ctx, 31);
+
+        uint32_t callCount = s_bvReadCalls.fetch_add(1, std::memory_order_relaxed);
+
+        uint32_t c48 = 0, c4C = 0, c50 = 0, c60 = 0, c64 = 0, c70 = 0, c74 = 0, c78 = 0;
+        std::memcpy(&c48, rdram + ((a0 + 0x48u) & PS2_RAM_MASK), 4);
+        std::memcpy(&c4C, rdram + ((a0 + 0x4Cu) & PS2_RAM_MASK), 4);
+        std::memcpy(&c50, rdram + ((a0 + 0x50u) & PS2_RAM_MASK), 4);
+        std::memcpy(&c60, rdram + ((a0 + 0x60u) & PS2_RAM_MASK), 4);
+        std::memcpy(&c64, rdram + ((a0 + 0x64u) & PS2_RAM_MASK), 4);
+        std::memcpy(&c70, rdram + ((a0 + 0x70u) & PS2_RAM_MASK), 4);
+        std::memcpy(&c74, rdram + ((a0 + 0x74u) & PS2_RAM_MASK), 4);
+        std::memcpy(&c78, rdram + ((a0 + 0x78u) & PS2_RAM_MASK), 4);
+
+        uint32_t expectedVsize = 0xFFFFFFFFu;
+        if (c4C >= 0x20u) {
+            uint32_t hdrBase = (c4C - 0x20u) & PS2_RAM_MASK;
+            std::memcpy(&expectedVsize, rdram + ((hdrBase + 0x28u) & PS2_RAM_MASK), 4);
+        }
+
+        bool shouldLog = (callCount < 40) || (a1 == 0) || (a1 != expectedVsize);
+        if (!shouldLog) return;
+
+        bhLog("[probe] bv rd a1=%u a2=0x%X a3=0x%X ra=0x%08X ctx[+0x48]=0x%X [+0x4C]=0x%X [+0x50]=%u [+0x60]=0x%X [+0x64]=0x%X [+0x70]=0x%X [+0x74]=0x%X [+0x78]=0x%X\n",
+              a1, a2, a3, ra, c48, c4C, c50, c60, c64, c70, c74, c78);
+        ps2xSafeLog("[probe] bv rd a1=%u a2=0x%X a3=0x%X ra=0x%08X ctx[+0x48]=0x%X [+0x4C]=0x%X [+0x50]=%u [+0x60]=0x%X [+0x64]=0x%X [+0x70]=0x%X [+0x74]=0x%X [+0x78]=0x%X\n",
+                    a1, a2, a3, ra, c48, c4C, c50, c60, c64, c70, c74, c78);
+
+        static const uint32_t bufs[3] = {0x187B600u, 0x18A7E00u, 0x18D4600u};
+        char bStr[3][128];
+        for (int i = 0; i < 3; ++i) {
+            uint32_t bAddr = bufs[i] & PS2_RAM_MASK;
+            uint32_t cnt = 0, frames = 0, n = 0, vsize = 0;
+            std::memcpy(&cnt, rdram + bAddr + 0x10u, 4);
+            std::memcpy(&frames, rdram + bAddr + 0x20u, 4);
+            std::memcpy(&n, rdram + bAddr + 0x24u, 4);
+            std::memcpy(&vsize, rdram + bAddr + 0x28u, 4);
+            std::snprintf(bStr[i], sizeof(bStr[i]), "0x%08X:cnt=%u frames=%u n=%u vsize=%u",
+                          bufs[i], cnt, frames, n, vsize);
+        }
+
+        uint32_t g742[8] = {0};
+        for (int i = 0; i < 8; ++i) {
+            std::memcpy(&g742[i], rdram + ((0x742C48u + 4u * i) & PS2_RAM_MASK), 4);
+        }
+
+        uint64_t cid1Off = probe_getCid1Fd3Offset();
+
+        bhLog("[probe] bv hdrs %s | %s | %s | g742=[0x%X 0x%X 0x%X 0x%X 0x%X 0x%X 0x%X 0x%X] newOff=%llu\n",
+              bStr[0], bStr[1], bStr[2],
+              g742[0], g742[1], g742[2], g742[3], g742[4], g742[5], g742[6], g742[7],
+              (unsigned long long)cid1Off);
+        ps2xSafeLog("[probe] bv hdrs %s | %s | %s | g742=[0x%X 0x%X 0x%X 0x%X 0x%X 0x%X 0x%X 0x%X] newOff=%llu\n",
+                    bStr[0], bStr[1], bStr[2],
+                    g742[0], g742[1], g742[2], g742[3], g742[4], g742[5], g742[6], g742[7],
+                    (unsigned long long)cid1Off);
+    }
+
+    void onBvTickSec() {
+        if (!isEnabled()) return;
+        double totalMs = 0.0;
+        std::vector<std::pair<BvWaitKey, double>> stats;
+        {
+            std::lock_guard<std::mutex> lock(s_bvWaitMutex);
+            totalMs = s_bvWaitTotalMs;
+            s_bvWaitTotalMs = 0.0;
+            stats.assign(s_bvWaitStats.begin(), s_bvWaitStats.end());
+            s_bvWaitStats.clear();
+        }
+
+        std::sort(stats.begin(), stats.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
+
+        const char *kindNames[] = {"None", "Sleep", "Sema", "EvFlag", "Unknown"};
+        std::string topStr;
+        size_t count = std::min<size_t>(stats.size(), 5);
+        for (size_t i = 0; i < count; ++i) {
+            const auto &k = stats[i].first;
+            int kIdx = (k.kind >= 0 && k.kind <= 3) ? k.kind : 4;
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%s%s:%d@0x%08X=%.1fms",
+                          (i > 0 ? " " : ""), kindNames[kIdx], k.id, k.ra, stats[i].second);
+            topStr += buf;
+        }
+
+        uint32_t c3 = s_bvIntcCause3.exchange(0, std::memory_order_relaxed);
+        uint32_t c5 = s_bvIntcCause5.exchange(0, std::memory_order_relaxed);
+
+        bhLog("[probe] bv wait total_ms=%.1f top5=<%s> cause3=%u cause5=%u\n",
+              totalMs, topStr.c_str(), c3, c5);
+        ps2xSafeLog("[probe] bv wait total_ms=%.1f top5=<%s> cause3=%u cause5=%u\n",
+                    totalMs, topStr.c_str(), c3, c5);
+    }
 }
