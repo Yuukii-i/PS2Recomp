@@ -25,6 +25,7 @@ function(EnableFastReleaseMode TargetName)
         )
 
         if(TARGET ${TargetName})
+            target_link_libraries(${TargetName} PRIVATE dbghelp)
             target_link_options(${TargetName} PRIVATE
                 $<$<CONFIG:Release>:
                     /DEBUG # Generate PDB

@@ -247,6 +247,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
 void EeScheduler::run()
 {
     assertExecutor();
+    probe_ae::recordMainGuestThread();
     m_running.store(true, std::memory_order_release);
 
     while (!m_stopRequested.load(std::memory_order_acquire))

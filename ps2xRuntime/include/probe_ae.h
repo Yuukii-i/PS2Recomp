@@ -892,4 +892,6 @@ namespace probe_ae {
     void onCeVblankDelivered(uint32_t cause);
     uint64_t getCeDeliveredVblanks();
     void onCeTickSec();
+    void recordMainGuestThread();
+    void cgStartSamplerIfEnabled();
 }

@@ -2009,7 +2009,7 @@ namespace probe_ae {
         return s_file;
     }
 
-    static void bhLog(const char *fmt, ...) {
+    void bhLog(const char *fmt, ...) {
         char buf[4096];
         va_list args;
         va_start(args, fmt);
@@ -3283,7 +3283,9 @@ namespace probe_ae {
     static std::atomic<bool> s_bhInitLogged{false};
     static std::atomic<bool> s_bhStartupPrinted{false};
     void bmStartSamplerThread();
+    void cgStartSamplerIfEnabled();
     void bhInitStartup() {
+        cgStartSamplerIfEnabled();
         bool expInit = false;
         if (s_bhInitLogged.compare_exchange_strong(expInit, true)) {
             const char *env = std::getenv("PS2X_PROBE_AE");
@@ -6543,7 +6545,14 @@ namespace probe_ae {
     bool isVTimeEnabled() {
         if (s_ceVTimeEnabled == -1) {
             const char *env = std::getenv("PS2X_VTIME");
-            s_ceVTimeEnabled = (env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) ? 1 : 0;
+            if (!env) {
+                s_ceVTimeEnabled = 1;
+            } else if (env[0] == '0' || env[0] == 'f' || env[0] == 'F' ||
+                       !_stricmp(env, "off") || !_stricmp(env, "false")) {
+                s_ceVTimeEnabled = 0;
+            } else {
+                s_ceVTimeEnabled = 1;
+            }
         }
         return s_ceVTimeEnabled == 1;
     }
