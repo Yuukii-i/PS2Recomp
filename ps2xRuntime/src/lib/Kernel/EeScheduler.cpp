@@ -1556,13 +1556,6 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
 void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
 {
     assertExecutor();
-    if (!dmac && (cause == 2u || cause == 3u))
-    {
-        if (!probe_ae::onCeVblankProduced(cause))
-        {
-            return;
-        }
-    }
     const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
     if (cause < 32u && (mask & (1u << cause)) == 0u)
     {
@@ -1582,6 +1575,14 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     }
     std::sort(matching.begin(), matching.end(), [](const EeIrqHandler &left, const EeIrqHandler &right)
               { return left.order < right.order; });
+    // Task CE: coalesce VBLANK interrupts (PS2X_VTIME); the pending flag is only set when an invocation is really queued
+    if (!dmac && (cause == 2u || cause == 3u) && !matching.empty())
+    {
+        if (!probe_ae::onCeVblankProduced(cause))
+        {
+            return;
+        }
+    }
     if (!dmac && cause == 3u && probe_ae::isEnabled())
     {
         std::vector<uint32_t> addrs;
