@@ -7,6 +7,8 @@ extern std::atomic<uint32_t> g_probe_F;
 extern std::atomic<uint32_t> g_probe_G;
 extern std::atomic<uint32_t> g_probe_4e2730;
 extern std::atomic<uint32_t> g_probe_31a514;
+extern std::atomic<uint32_t> g_trackedCurVtable;
+extern std::atomic<uint32_t> g_trackedCurScene;
 extern void ps2xSafeLog(const char *fmt, ...);
 
 #ifdef _WIN32
@@ -3455,8 +3457,29 @@ namespace probe_ae {
     // =========================================================================
     // Task BL Probes
     // =========================================================================
+    static std::atomic<bool> s_bnClose1sPending{false};
+    static std::chrono::steady_clock::time_point s_bnClose1sDueTime;
+
     void onBlCid1Req(uint32_t opcode, uint32_t slotPtr, uint32_t seq, uint32_t fd, uint32_t dst, uint32_t size, uint32_t flags, const char *path) {
         if (!isBhProbeEnabled()) return;
+        if (opcode == 0x04) { // Close
+            auto read32 = [&](uint32_t addr) -> uint32_t {
+                if (!s_cachedRdram || (addr & PS2_RAM_MASK) + 4 > PS2_RAM_SIZE) return 0;
+                uint32_t val = 0;
+                std::memcpy(&val, s_cachedRdram + (addr & PS2_RAM_MASK), 4);
+                return val;
+            };
+            uint32_t dev30 = read32(0x00771BB8u);
+            bhLog("[probe] bn close_req seq=%u dev30=%u\n", seq, dev30);
+            const uint32_t kDevBase = 0x00771B88u;
+            for (int i = 0; i < 16; ++i) {
+                uint32_t slotAddr = kDevBase + 0x34u + 16u * i;
+                bhLog("[probe] bn close_slot i=%02d addr=0x%08X: 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                      i, slotAddr, read32(slotAddr), read32(slotAddr + 4), read32(slotAddr + 8), read32(slotAddr + 12));
+            }
+            s_bnClose1sDueTime = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            s_bnClose1sPending.store(true, std::memory_order_relaxed);
+        }
         s_blCid1TotalReq.fetch_add(1, std::memory_order_relaxed);
         s_blCid1SecReq.fetch_add(1, std::memory_order_relaxed);
         uint32_t line = s_blCid1LineCount.fetch_add(1, std::memory_order_relaxed);
@@ -3714,6 +3737,20 @@ namespace probe_ae {
                             }
                         }
                     }
+
+                    if (s_bnClose1sPending.load(std::memory_order_relaxed)) {
+                        if (std::chrono::steady_clock::now() >= s_bnClose1sDueTime) {
+                            s_bnClose1sPending.store(false, std::memory_order_relaxed);
+                            uint32_t dev30_1s = read32(0x00771BB8u);
+                            bhLog("[probe] bn close_post1s dev30=%u\n", dev30_1s);
+                            const uint32_t kDevBase = 0x00771B88u;
+                            for (int i = 0; i < 16; ++i) {
+                                uint32_t slotAddr = kDevBase + 0x34u + 16u * i;
+                                bhLog("[probe] bn close_post1s_slot i=%02d addr=0x%08X: 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                                      i, slotAddr, read32(slotAddr), read32(slotAddr + 4), read32(slotAddr + 8), read32(slotAddr + 12));
+                            }
+                        }
+                    }
                 }
             }).detach();
         }
@@ -3882,5 +3919,212 @@ namespace probe_ae {
                 doBmStallDump(rdram, curScene);
             }
         }
+    }
+
+    // =========================================================================
+    // Task BN Probes
+    // =========================================================================
+    static std::mutex s_bnMutex;
+    static std::deque<std::string> s_bnPreRing; // max 60 lines
+    static std::atomic<bool> s_bnActive{false};
+    static std::atomic<bool> s_bnSceneEnded{false};
+    static std::atomic<uint32_t> s_bnTotalLines{0};
+
+    static void bnLogLine(const uint8_t *rdram, const char *fmt, ...) {
+        if (!isBhProbeEnabled()) return;
+        if (s_bnSceneEnded.load(std::memory_order_relaxed)) return;
+        if (s_bnTotalLines.load(std::memory_order_relaxed) >= 300) return;
+
+        char buf[512];
+        va_list args;
+        va_start(args, fmt);
+        std::vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+
+        const uint8_t *r = rdram ? rdram : s_cachedRdram;
+        uint32_t f_state = 0;
+        if (r && (0x00772188u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+            std::memcpy(&f_state, r + (0x00772188u & PS2_RAM_MASK), sizeof(f_state));
+        }
+
+        uint32_t curVtable = g_trackedCurVtable.load(std::memory_order_relaxed);
+
+        std::lock_guard<std::mutex> lock(s_bnMutex);
+        if (s_bnSceneEnded.load(std::memory_order_relaxed)) return;
+
+        if (!s_bnActive.load(std::memory_order_relaxed)) {
+            if (f_state >= 10 && curVtable == 0x006adfa8u) {
+                s_bnActive.store(true, std::memory_order_relaxed);
+                for (const auto &line : s_bnPreRing) {
+                    if (s_bnTotalLines.load(std::memory_order_relaxed) < 300) {
+                        s_bnTotalLines.fetch_add(1, std::memory_order_relaxed);
+                        bhLog("%s", line.c_str());
+                    }
+                }
+                s_bnPreRing.clear();
+            } else {
+                if (s_bnPreRing.size() >= 60) {
+                    s_bnPreRing.pop_front();
+                }
+                s_bnPreRing.push_back(std::string(buf));
+                return;
+            }
+        } else {
+            if (curVtable != 0x006adfa8u) {
+                s_bnSceneEnded.store(true, std::memory_order_relaxed);
+                return;
+            }
+        }
+
+        if (s_bnTotalLines.load(std::memory_order_relaxed) < 300) {
+            s_bnTotalLines.fetch_add(1, std::memory_order_relaxed);
+            bhLog("%s", buf);
+        }
+    }
+
+    // 0x24BFF8: Shutdown fn
+    BnHook_24BFF8::BnHook_24BFF8(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        auto read32 = [&](uint32_t addr) -> uint32_t {
+            if (!rdram || (addr & PS2_RAM_MASK) + 4 > PS2_RAM_SIZE) return 0;
+            uint32_t val = 0;
+            std::memcpy(&val, rdram + (addr & PS2_RAM_MASK), 4);
+            return val;
+        };
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t dev30 = read32(0x00771BB8u);
+        uint32_t w08 = read32(a0 + 0x08);
+        int32_t w0C = static_cast<int32_t>(read32(a0 + 0x0C));
+        int32_t w10 = static_cast<int32_t>(read32(a0 + 0x10));
+        uint32_t w14 = read32(a0 + 0x14);
+        uint32_t w18 = read32(a0 + 0x18);
+
+        bnLogLine(rdram, "[probe] bn 24BFF8 entry a0=0x%08X dev30=%u +08=0x%08X +0C=%d(0x%X) +10=%d(0x%X) +14=0x%08X +18=0x%08X\n",
+                  a0, dev30, w08, w0C, (uint32_t)w0C, w10, (uint32_t)w10, w14, w18);
+
+        if (w08 == 0) {
+            bnLogLine(rdram, "[probe] bn 24BFF8 SKIP ALL: [a0+0x08]==0\n");
+        }
+        if (w10 < 0) {
+            bnLogLine(rdram, "[probe] bn 24BFF8 SKIP slot10: [s0+0x10]=%d is negative\n", w10);
+        }
+        if (w0C < 0) {
+            bnLogLine(rdram, "[probe] bn 24BFF8 SKIP slot0C: [s0+0x0C]=%d is negative\n", w0C);
+        }
+
+        const uint32_t kDevBase = 0x00771B88u;
+        for (int i = 0; i < 16; ++i) {
+            uint32_t slotAddr = kDevBase + 0x34u + 16u * i;
+            uint32_t s0 = read32(slotAddr);
+            uint32_t s1 = read32(slotAddr + 4);
+            uint32_t s2 = read32(slotAddr + 8);
+            uint32_t s3 = read32(slotAddr + 12);
+            bnLogLine(rdram, "[probe] bn 24BFF8 slot i=%02d addr=0x%08X: 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                      i, slotAddr, s0, s1, s2, s3);
+        }
+    }
+
+    BnHook_24BFF8::~BnHook_24BFF8() {
+        if (!isEnabled()) return;
+        auto read32 = [&](uint32_t addr) -> uint32_t {
+            if (!rdram || (addr & PS2_RAM_MASK) + 4 > PS2_RAM_SIZE) return 0;
+            uint32_t val = 0;
+            std::memcpy(&val, rdram + (addr & PS2_RAM_MASK), 4);
+            return val;
+        };
+        uint32_t v0 = getRegU32(ctx, 2);
+        uint32_t dev30 = read32(0x00771BB8u);
+        bnLogLine(rdram, "[probe] bn 24BFF8 exit v0=0x%08X dev30=%u\n", v0, dev30);
+    }
+
+    // 0x1DA880
+    BnHook_1DA880::BnHook_1DA880(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        a0 = getRegU32(ctx, 4);
+        a1 = getRegU32(ctx, 5);
+        a2 = getRegU32(ctx, 6);
+        a3 = getRegU32(ctx, 7);
+        dev30_in = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+    }
+    BnHook_1DA880::~BnHook_1DA880() {
+        if (!isEnabled()) return;
+        uint32_t v0 = getRegU32(ctx, 2);
+        uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+        bnLogLine(rdram, "[probe] bn 1DA880 a0=0x%08X a1=%d(0x%X) a2=%u a3=0x%08X -> v0=0x%08X dev30=%u->%u\n",
+                  a0, (int32_t)a1, a1, a2, a3, v0, dev30_in, dev30_out);
+    }
+
+    // 0x1DB798
+    BnHook_1DB798::BnHook_1DB798(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        a0 = getRegU32(ctx, 4);
+        a1 = getRegU32(ctx, 5);
+        dev30_in = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+    }
+    BnHook_1DB798::~BnHook_1DB798() {
+        if (!isEnabled()) return;
+        uint32_t v0 = getRegU32(ctx, 2);
+        uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+        bnLogLine(rdram, "[probe] bn 1DB798 a0=0x%08X a1=%d(0x%X) -> v0=0x%08X dev30=%u->%u\n",
+                  a0, (int32_t)a1, a1, v0, dev30_in, dev30_out);
+    }
+
+    // 0x1DB164
+    BnHook_1DB164::BnHook_1DB164(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        a0 = getRegU32(ctx, 4);
+        a1 = getRegU32(ctx, 5);
+        a2 = getRegU32(ctx, 6);
+        dev30_in = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+    }
+    BnHook_1DB164::~BnHook_1DB164() {
+        if (!isEnabled()) return;
+        uint32_t v0 = getRegU32(ctx, 2);
+        uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+        bnLogLine(rdram, "[probe] bn 1DB164 a0=0x%08X a1=%d(0x%X) a2=%u -> v0=0x%08X dev30=%u->%u\n",
+                  a0, (int32_t)a1, a1, a2, v0, dev30_in, dev30_out);
+    }
+
+    // 0x1DBA64
+    BnHook_1DBA64::BnHook_1DBA64(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        a0 = getRegU32(ctx, 4);
+        dev30_in = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+    }
+    BnHook_1DBA64::~BnHook_1DBA64() {
+        if (!isEnabled()) return;
+        uint32_t v0 = getRegU32(ctx, 2);
+        uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+        bnLogLine(rdram, "[probe] bn 1DBA64 alloc a0=0x%08X -> slot=%d(0x%X) dev30=%u->%u\n",
+                  a0, (int32_t)v0, v0, dev30_in, dev30_out);
+    }
+
+    // 0x1DBAA0
+    BnHook_1DBAA0::BnHook_1DBAA0(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        a0 = getRegU32(ctx, 4);
+        a1 = getRegU32(ctx, 5);
+        dev30_in = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+    }
+    BnHook_1DBAA0::~BnHook_1DBAA0() {
+        if (!isEnabled()) return;
+        uint32_t v0 = getRegU32(ctx, 2);
+        uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+        bnLogLine(rdram, "[probe] bn 1DBAA0 release a0=0x%08X slot=%d(0x%X) -> v0=0x%08X dev30=%u->%u\n",
+                  a0, (int32_t)a1, a1, v0, dev30_in, dev30_out);
+    }
+
+    // 0x24CBFC
+    BnHook_24CBFC::BnHook_24CBFC(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        a0 = getRegU32(ctx, 4);
+        dev30_in = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+    }
+    BnHook_24CBFC::~BnHook_24CBFC() {
+        if (!isEnabled()) return;
+        uint32_t v0 = getRegU32(ctx, 2);
+        uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
+        bnLogLine(rdram, "[probe] bn 24CBFC poll a0=0x%08X -> v0=0x%08X dev30=%u->%u\n",
+                  a0, v0, dev30_in, dev30_out);
     }
 }

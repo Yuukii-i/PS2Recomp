@@ -702,4 +702,54 @@ namespace probe_ae {
     void onBmCid1Req(uint32_t opcode, uint32_t seq);
     void onBmCid1(uint32_t op, uint32_t seq, uint32_t dev30_before, uint32_t dev30_after);
     void setScheduler(const class EeScheduler *sched);
+
+    // Task BN
+    struct BnHook_24BFF8 {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        BnHook_24BFF8(const uint8_t *r, R5900Context *c);
+        ~BnHook_24BFF8();
+    };
+    struct BnHook_1DA880 {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        uint32_t a0, a1, a2, a3, dev30_in;
+        BnHook_1DA880(const uint8_t *r, R5900Context *c);
+        ~BnHook_1DA880();
+    };
+    struct BnHook_1DB798 {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        uint32_t a0, a1, dev30_in;
+        BnHook_1DB798(const uint8_t *r, R5900Context *c);
+        ~BnHook_1DB798();
+    };
+    struct BnHook_1DB164 {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        uint32_t a0, a1, a2, dev30_in;
+        BnHook_1DB164(const uint8_t *r, R5900Context *c);
+        ~BnHook_1DB164();
+    };
+    struct BnHook_1DBA64 {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        uint32_t a0, dev30_in;
+        BnHook_1DBA64(const uint8_t *r, R5900Context *c);
+        ~BnHook_1DBA64();
+    };
+    struct BnHook_1DBAA0 {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        uint32_t a0, a1, dev30_in;
+        BnHook_1DBAA0(const uint8_t *r, R5900Context *c);
+        ~BnHook_1DBAA0();
+    };
+    struct BnHook_24CBFC {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        uint32_t a0, dev30_in;
+        BnHook_24CBFC(const uint8_t *r, R5900Context *c);
+        ~BnHook_24CBFC();
+    };
 }
