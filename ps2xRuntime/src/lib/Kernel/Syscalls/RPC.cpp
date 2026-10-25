@@ -647,6 +647,10 @@ namespace ps2_syscalls
                             ps2xSafeLog("[sg2] status v0=0x%x v1=0x%x\n", v0, v1);
                             fflush(stderr);
                         }
+                        if (copyBytes >= 0xC4) {
+                            uint32_t v0 = *reinterpret_cast<const uint32_t *>(statusBuf + 0xC0);
+                            probe_ae::onCcSg2Call(0x09, 0, v0);
+                        }
                     }
                     dbcUpdatePadBuffers(call.rdram, call.runtime);
                     g_diagSg2Fno0Calls.fetch_add(1, std::memory_order_relaxed);

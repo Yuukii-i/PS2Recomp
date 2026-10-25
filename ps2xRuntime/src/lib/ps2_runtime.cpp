@@ -1484,6 +1484,49 @@ static void installCbDispProbe(PS2Runtime *rt) {
 }
 
 template<uint32_t Addr>
+struct Cc3F7780Wrapper {
+    static PS2Runtime::RecompiledFunction s_orig;
+    static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        uint32_t a0 = getRegU32(ctx, 4);
+        if (s_orig) {
+            s_orig(rdram, ctx, runtime);
+        }
+        probe_ae::onCc3F7780Exit(ctx, rdram, a0);
+    }
+};
+template<uint32_t Addr>
+PS2Runtime::RecompiledFunction Cc3F7780Wrapper<Addr>::s_orig = nullptr;
+
+template<uint32_t Addr>
+struct Cc3F7850Wrapper {
+    static PS2Runtime::RecompiledFunction s_orig;
+    static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        probe_ae::onCc3F7850Entry(ctx, rdram);
+        if (s_orig) {
+            s_orig(rdram, ctx, runtime);
+        }
+    }
+};
+template<uint32_t Addr>
+PS2Runtime::RecompiledFunction Cc3F7850Wrapper<Addr>::s_orig = nullptr;
+
+template<uint32_t Addr>
+static void installCcProbes(PS2Runtime *rt) {
+    if constexpr (Addr == 0x003F7780u) {
+        const uint32_t slot = (Addr - g_ps2RecompiledFunctionTableBase) >> 2;
+        Cc3F7780Wrapper<Addr>::s_orig = g_ps2RecompiledFunctionTable[slot];
+        if (Cc3F7780Wrapper<Addr>::s_orig) {
+            rt->replaceFunction(Addr, &Cc3F7780Wrapper<Addr>::thunk);
+        }
+    } else if constexpr (Addr == 0x003F7850u) {
+        const uint32_t slot = (Addr - g_ps2RecompiledFunctionTableBase) >> 2;
+        Cc3F7850Wrapper<Addr>::s_orig = g_ps2RecompiledFunctionTable[slot];
+        if (Cc3F7850Wrapper<Addr>::s_orig) {
+            rt->replaceFunction(Addr, &Cc3F7850Wrapper<Addr>::thunk);
+        }
+    }
+}
+template<uint32_t Addr>
 struct CbGenericCallWrapper {
     static PS2Runtime::RecompiledFunction s_orig;
     static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
@@ -2088,6 +2131,10 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     // Task CB Probes
     installCbDispProbe<0x0024CD04u>(this);
     installCbGenericCallProbe<0x001DB31Cu>(this);
+
+    // Task CC Probes
+    installCcProbes<0x003F7780u>(this);
+    installCcProbes<0x003F7850u>(this);
     installBtProbe<0x0024C690u>(this);
     installBtProbe<0x0024CE0Cu>(this);
     installBtProbe<0x0024CD58u>(this);

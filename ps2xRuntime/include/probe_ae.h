@@ -877,4 +877,12 @@ namespace probe_ae {
     void onCbPumpExit(const struct R5900Context *ctx, const uint8_t *rdram, const CbPumpPre *pre);
     void onCbRingCall(const struct R5900Context *ctx, const uint8_t *rdram);
     void onCbCid1Submit(const struct R5900Context *ctx, const uint8_t *rdram);
+
+    // Task CC Probes
+    void onCc3F7780Exit(const struct R5900Context *ctx, const uint8_t *rdram, uint32_t a0);
+    void onCc3F7850Entry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onCc3FBE78Entry(const struct R5900Context *ctx);
+    void onCc3FBEACExit(const struct R5900Context *ctx);
+    void onCcSg2Call(uint32_t op, uint32_t arg, uint32_t ret);
+    void onCcTickSec();
 }

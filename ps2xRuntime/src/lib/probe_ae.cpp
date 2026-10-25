@@ -5013,6 +5013,7 @@ namespace probe_ae {
         onBxTickSec(rdram);
         onBzTickSec();
         onCaTickSec();
+        onCcTickSec();
         s_bqTotalSec++;
 
         uint32_t running = 0, blocked = 0;
@@ -6407,5 +6408,120 @@ namespace probe_ae {
               n, f58, a1, a2, a3, t0);
         ps2xSafeLog("[probe] cb video n=%u size=0x%X a1=0x%X a2=0x%X a3=0x%X t0=0x%X\n",
                     n, f58, a1, a2, a3, t0);
+    }
+
+    // =========================================================================
+    // Task CC: Audio stream position & SG2 query probe
+    // =========================================================================
+    static auto s_ccStartTime = std::chrono::steady_clock::now();
+    static std::atomic<uint32_t> s_ccPolls{0};
+    static std::atomic<uint32_t> s_ccChanges{0};
+    static std::atomic<uint32_t> s_ccMaxJump{0};
+
+    static std::atomic<uint32_t> s_ccQCalls{0};
+    static uint32_t s_ccLastQV0 = 0xFFFFFFFFu;
+
+    static std::atomic<uint32_t> s_ccSg2Calls{0};
+    static uint32_t s_ccLastSg2Ret = 0xFFFFFFFFu;
+
+    void onCc3F7780Exit(const struct R5900Context *ctx, const uint8_t *rdram, uint32_t a0) {
+        if (!isEnabled() || !ctx || !rdram || a0 != 0x018BA600u) return;
+
+        s_ccPolls.fetch_add(1, std::memory_order_relaxed);
+        uint32_t v0 = getRegU32(ctx, 2);
+
+        uint32_t last = 0, size = 0, state = 0;
+        uint64_t voiceMask = 0;
+        std::memcpy(&last, rdram + ((a0 + 0x2D4u) & PS2_RAM_MASK), 4);
+        std::memcpy(&size, rdram + ((a0 + 0x234u) & PS2_RAM_MASK), 4);
+        std::memcpy(&state, rdram + (a0 & PS2_RAM_MASK), 4);
+        std::memcpy(&voiceMask, rdram + ((a0 + 0xA0u) & PS2_RAM_MASK), 8);
+
+        if (v0 != last) {
+            s_ccChanges.fetch_add(1, std::memory_order_relaxed);
+            uint32_t diff = 0;
+            if (size > 0) {
+                diff = (v0 >= last) ? (v0 - last) : ((v0 + size) - last);
+                diff = diff % size;
+            } else {
+                diff = (v0 >= last) ? (v0 - last) : (last - v0);
+            }
+
+            uint32_t curMax = s_ccMaxJump.load(std::memory_order_relaxed);
+            while (diff > curMax && !s_ccMaxJump.compare_exchange_weak(curMax, diff, std::memory_order_relaxed)) {}
+
+            auto now = std::chrono::steady_clock::now();
+            double t_ms = std::chrono::duration<double, std::milli>(now - s_ccStartTime).count();
+
+            bhLog("[probe] cc pos obj=0x%08X v0=%u last=%u size=%u t_ms=%.1f state=0x%08X mask=0x%016llX\n",
+                  a0, v0, last, size, t_ms, state, (unsigned long long)voiceMask);
+            ps2xSafeLog("[probe] cc pos obj=0x%08X v0=%u last=%u size=%u t_ms=%.1f state=0x%08X mask=0x%016llX\n",
+                        a0, v0, last, size, t_ms, state, (unsigned long long)voiceMask);
+        }
+    }
+
+    void onCc3F7850Entry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled() || !ctx || !rdram) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        if (a0 != 0x018BA600u) return;
+
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t a3 = getRegU32(ctx, 7);
+        uint32_t last = 0;
+        std::memcpy(&last, rdram + ((a0 + 0x2D4u) & PS2_RAM_MASK), 4);
+
+        bhLog("[probe] cc enq obj=0x%08X a1=%u a2=0x%08X a3=%u(0x%X) last=%u\n",
+              a0, a1, a2, a3, a3, last);
+        ps2xSafeLog("[probe] cc enq obj=0x%08X a1=%u a2=0x%08X a3=%u(0x%X) last=%u\n",
+                    a0, a1, a2, a3, a3, last);
+    }
+
+    struct CcQPre {
+        uint32_t a0, a1, a2, a3, ra;
+    };
+    static CcQPre s_ccLastQPre{};
+
+    void onCc3FBE78Entry(const struct R5900Context *ctx) {
+        if (!isEnabled() || !ctx) return;
+        s_ccLastQPre.a0 = getRegU32(ctx, 4);
+        s_ccLastQPre.a1 = getRegU32(ctx, 5);
+        s_ccLastQPre.a2 = getRegU32(ctx, 6);
+        s_ccLastQPre.a3 = getRegU32(ctx, 7);
+        s_ccLastQPre.ra = getRegU32(ctx, 31);
+    }
+
+    void onCc3FBEACExit(const struct R5900Context *ctx) {
+        if (!isEnabled() || !ctx) return;
+        uint32_t v0 = getRegU32(ctx, 2);
+        uint32_t callCount = s_ccQCalls.fetch_add(1, std::memory_order_relaxed);
+
+        if (callCount < 40 || v0 != s_ccLastQV0) {
+            s_ccLastQV0 = v0;
+            bhLog("[probe] cc q a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X ra=0x%08X\n",
+                  s_ccLastQPre.a0, s_ccLastQPre.a1, s_ccLastQPre.a2, s_ccLastQPre.a3, v0, s_ccLastQPre.ra);
+            ps2xSafeLog("[probe] cc q a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X ra=0x%08X\n",
+                        s_ccLastQPre.a0, s_ccLastQPre.a1, s_ccLastQPre.a2, s_ccLastQPre.a3, v0, s_ccLastQPre.ra);
+        }
+    }
+
+    void onCcSg2Call(uint32_t op, uint32_t arg, uint32_t ret) {
+        if (!isEnabled()) return;
+        uint32_t callCount = s_ccSg2Calls.fetch_add(1, std::memory_order_relaxed);
+        if (callCount < 60 || ret != s_ccLastSg2Ret) {
+            s_ccLastSg2Ret = ret;
+            bhLog("[probe] cc sg2 op=0x%02X arg=0x%08X ret=0x%08X\n", op, arg, ret);
+            ps2xSafeLog("[probe] cc sg2 op=0x%02X arg=0x%08X ret=0x%08X\n", op, arg, ret);
+        }
+    }
+
+    void onCcTickSec() {
+        if (!isEnabled()) return;
+        uint32_t polls = s_ccPolls.exchange(0, std::memory_order_relaxed);
+        uint32_t changes = s_ccChanges.exchange(0, std::memory_order_relaxed);
+        uint32_t maxjump = s_ccMaxJump.exchange(0, std::memory_order_relaxed);
+
+        bhLog("[probe] cc sec polls=%u changes=%u maxjump=%u\n", polls, changes, maxjump);
+        ps2xSafeLog("[probe] cc sec polls=%u changes=%u maxjump=%u\n", polls, changes, maxjump);
     }
 }
