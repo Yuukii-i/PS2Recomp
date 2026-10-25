@@ -1895,7 +1895,8 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
                              (alphaMode == 0x64u && (alphaFix >= 0x40u && alphaFix <= 0x80u)) ||
                              isColIdentity;
 
-    const bool displayCopy = state.prim.tme && state.prim.abe && state.prim.fst && state.prim.ctxt &&
+    // Task CO: the 512x448 movie display copy is drawn through context 1 (prim.ctxt == 0), so ctxt is no longer required
+    const bool displayCopy = state.prim.tme && state.prim.abe && state.prim.fst &&
                              ctx.frame.fbp != ctx.tex0.tbp0 && covers && alphaAccept;
 
     if (displayCopy)
@@ -1907,11 +1908,13 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
     }
 
     checkPeriodicCoLog();
-    uint32_t loggedCount = s_coAlphaLogged.fetch_add(1u, std::memory_order_relaxed);
-    if (loggedCount < 3u)
+    uint32_t loggedCount = covers ? s_coAlphaLogged.fetch_add(1u, std::memory_order_relaxed) : 1000u;
+    if (loggedCount < 6u)
     {
-        probe_ae::bhLog("[probe] co disp alphaReg=0x%llx mode=0x%x fix=0x%x covers=%u displayCopy=%u\n",
+        probe_ae::bhLog("[probe] co disp alphaReg=0x%llx mode=0x%x fix=0x%x covers=%u displayCopy=%u tme=%u abe=%u fst=%u ctxt=%u fbp=0x%x tbp0=0x%x\n",
                         (unsigned long long)ctx.alpha, (unsigned)alphaMode, (unsigned)alphaFix,
-                        covers ? 1u : 0u, displayCopy ? 1u : 0u);
+                        covers ? 1u : 0u, displayCopy ? 1u : 0u,
+                        (unsigned)state.prim.tme, (unsigned)state.prim.abe, (unsigned)state.prim.fst,
+                        (unsigned)state.prim.ctxt, (unsigned)ctx.frame.fbp, (unsigned)ctx.tex0.tbp0);
     }
 }
