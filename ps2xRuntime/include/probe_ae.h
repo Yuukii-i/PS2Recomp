@@ -697,4 +697,9 @@ namespace probe_ae {
     bool isMovieKickNative();
     bool isMovieSkipUnpackEnabled();
     void recordBlSkipUnpack(uint32_t skippedCount, uint32_t skippedBytes);
+
+    // Task BM
+    void onBmCid1Req(uint32_t opcode, uint32_t seq);
+    void onBmCid1(uint32_t op, uint32_t seq, uint32_t dev30_before, uint32_t dev30_after);
+    void setScheduler(const class EeScheduler *sched);
 }

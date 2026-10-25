@@ -1724,6 +1724,10 @@ namespace ps2_syscalls
                 uint32_t req_size = (cmdSize >= 0x1C) ? *reinterpret_cast<const uint32_t *>(src + 0x18) : 0;
                 uint32_t req_flags = (cmdSize >= 0x20) ? *reinterpret_cast<const uint32_t *>(src + 0x1C) : 0;
                 const char *pathPtr = (cmdSize > 0x20 && (opcode == 0x03 || opcode == 0x08)) ? reinterpret_cast<const char *>(src + 0x20) : "";
+                probe_ae::setRdram(rdram);
+                if (runtime) probe_ae::setScheduler(&runtime->eeScheduler());
+                uint32_t dev30_before = *reinterpret_cast<const uint32_t *>(rdram + (0x00771BB8u & 0x01FFFFFFu));
+                probe_ae::onBmCid1Req(opcode, seq);
                 probe_ae::onBlCid1Req(opcode, slotPtr, seq, req_fd, req_dst, req_size, req_flags, pathPtr);
 
                 uint32_t alignedCmdSize = (cmdSize + 15u) & ~15u;
@@ -2255,6 +2259,8 @@ namespace ps2_syscalls
 
                 probe_ae::onBlCid1Reply(reply.slotPtr, reply.seq, reply.result, (reply.cmd == 0x05) ? reply.result : 0);
                 ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
+                uint32_t dev30_after = *reinterpret_cast<const uint32_t *>(rdram + (0x00771BB8u & 0x01FFFFFFu));
+                probe_ae::onBmCid1(opcode, seq, dev30_before, dev30_after);
                 return alignedCmdSize;
             };
 

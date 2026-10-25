@@ -1,7 +1,12 @@
 #include "probe_ae.h"
+#include <thread>
 
 extern std::atomic<uint64_t> g_profPrims;
 extern std::atomic<uint64_t> g_profPixels;
+extern std::atomic<uint32_t> g_probe_F;
+extern std::atomic<uint32_t> g_probe_G;
+extern std::atomic<uint32_t> g_probe_4e2730;
+extern std::atomic<uint32_t> g_probe_31a514;
 extern void ps2xSafeLog(const char *fmt, ...);
 
 #ifdef _WIN32
@@ -3046,6 +3051,7 @@ namespace probe_ae {
 
     static std::atomic<bool> s_bhInitLogged{false};
     static std::atomic<bool> s_bhStartupPrinted{false};
+    void bmStartSamplerThread();
     void bhInitStartup() {
         bool expInit = false;
         if (s_bhInitLogged.compare_exchange_strong(expInit, true)) {
@@ -3054,6 +3060,7 @@ namespace probe_ae {
             bhLog("[probe] bh init enabled=%d env=%s\n", en ? 1 : 0, env ? env : "null");
         }
         if (!isBhProbeEnabled()) return;
+        bmStartSamplerThread();
         bool expected = false;
         if (s_bhStartupPrinted.compare_exchange_strong(expected, true)) {
             for (const auto &site : s_sleepSites) {
@@ -3266,6 +3273,7 @@ namespace probe_ae {
     static std::atomic<uint32_t> s_blCid1SecReply{0};
 
     static auto s_bhStartTime = std::chrono::steady_clock::now();
+    static void bmTickCheck(const uint8_t *rdram);
 
     void bhTickCheckPerSec(const uint8_t *rdram) {
         static std::atomic<uint32_t> s_bhTickCount{0};
@@ -3439,6 +3447,8 @@ namespace probe_ae {
             bhLog("[probe] bl cid1 sec req=%u reply=%u pending=%d\n", secReq, secRep, pending);
         }
 
+        bmTickCheck(rdram);
+
         s_bhLastSec = now;
     }
 
@@ -3476,10 +3486,9 @@ namespace probe_ae {
 
     void onBlStallDiag(const uint8_t *rdram, const EeScheduler *scheduler, uint32_t sec, uint32_t curScene) {
         if (!isBhProbeEnabled() || !rdram) return;
-        bool exp = false;
-        if (!s_blStallDumped.compare_exchange_strong(exp, true)) {
-            return;
-        }
+        if (scheduler) setScheduler(scheduler);
+        if (rdram && !s_cachedRdram) s_cachedRdram = rdram;
+        return; // Task BM: Stall dump is managed by bmTickCheck when movie scene stalls
 
         const GuestThread *th = scheduler ? scheduler->thread(1) : nullptr;
         if (th) {
@@ -3596,5 +3605,282 @@ namespace probe_ae {
         uint32_t c3cd288 = cnt_bl_3cd288.exchange(0, std::memory_order_relaxed);
         bhLog("[probe] bl stuck t=%u main_pc=0x%08X main_ra=0x%08X 3CD320=%u 3CA818=%u 435A00=%u 3CBFD0=%u 3CD288=%u\n",
               sec, mainPc, mainRa, c3cd320, c3ca818, c435a00, c3cbfd0, c3cd288);
+    }
+
+    // =========================================================================
+    // Task BM Probes
+    // =========================================================================
+    static const EeScheduler *s_bmScheduler = nullptr;
+    void setScheduler(const EeScheduler *sched) {
+        if (sched && !s_bmScheduler) s_bmScheduler = sched;
+    }
+
+    static std::atomic<uint32_t> s_bmLastCid1Op{0};
+    static std::atomic<uint32_t> s_bmLastCid1Seq{0};
+
+    void onBmCid1Req(uint32_t opcode, uint32_t seq) {
+        s_bmLastCid1Op.store(opcode, std::memory_order_relaxed);
+        s_bmLastCid1Seq.store(seq, std::memory_order_relaxed);
+    }
+
+    void onBmCid1(uint32_t op, uint32_t seq, uint32_t dev30_before, uint32_t dev30_after) {
+        if (!isBhProbeEnabled()) return;
+        static std::atomic<uint32_t> s_bmCid1Lines{0};
+        uint32_t l = s_bmCid1Lines.fetch_add(1, std::memory_order_relaxed);
+        if (l < 400) {
+            bhLog("[probe] bm cid1 op=%u seq=%u dev30_before=%u dev30_after=%u\n",
+                  op, seq, dev30_before, dev30_after);
+        }
+    }
+
+    static std::atomic<bool> s_bmSamplerStarted{false};
+    void bmStartSamplerThread() {
+        if (!isBhProbeEnabled()) return;
+        bool exp = false;
+        if (s_bmSamplerStarted.compare_exchange_strong(exp, true)) {
+            std::thread([]() {
+                while (true) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    const uint8_t *rdram = s_cachedRdram;
+                    if (!rdram) continue;
+
+                    auto read32 = [&](uint32_t addr) -> uint32_t {
+                        return *reinterpret_cast<const uint32_t *>(rdram + (addr & PS2_RAM_MASK));
+                    };
+
+                    // Read required addresses
+                    uint32_t curDev30 = read32(0x00771BB8u);
+                    uint32_t dev2c = read32(0x00771BB4u);
+                    uint32_t dev34 = read32(0x00771BBCu);
+                    uint32_t dev38 = read32(0x00771BC0u);
+                    uint32_t dev3c = read32(0x00771BC4u);
+                    uint32_t dev40 = read32(0x00771BC8u);
+                    uint32_t dev44 = read32(0x00771BCCu);
+                    uint32_t dev48 = read32(0x00771BD0u);
+                    uint32_t dev4c = read32(0x00771BD4u);
+                    uint32_t dev50 = read32(0x00771BD8u);
+                    uint32_t dev54 = read32(0x00771BDCu);
+                    uint32_t wait4 = read32(0x00649DE4u);
+                    (void)dev2c; (void)dev34; (void)dev38; (void)dev3c; (void)dev40;
+                    (void)dev44; (void)dev48; (void)dev4c; (void)dev50; (void)dev54; (void)wait4;
+
+                    static uint32_t s_lastDev30 = 0xFFFFFFFFu;
+                    if (s_lastDev30 == 0xFFFFFFFFu) {
+                        s_lastDev30 = curDev30;
+                    } else if (curDev30 != s_lastDev30) {
+                        static std::atomic<uint32_t> s_dev30Lines{0};
+                        uint32_t l = s_dev30Lines.fetch_add(1, std::memory_order_relaxed);
+                        if (l < 300) {
+                            uint64_t t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - s_bhStartTime).count();
+                            uint32_t mainPc = 0, mainRa = 0;
+                            if (s_bmScheduler) {
+                                const GuestThread *th = s_bmScheduler->thread(1);
+                                if (th) {
+                                    const R5900Context &ctx = th->activeContext();
+                                    mainPc = ctx.pc;
+                                    mainRa = getRegU32(&ctx, 31);
+                                }
+                            }
+                            uint32_t lastOp = s_bmLastCid1Op.load(std::memory_order_relaxed);
+                            uint32_t lastSeq = s_bmLastCid1Seq.load(std::memory_order_relaxed);
+                            bhLog("[probe] bm dev30 old=%u new=%u t_ms=%llu main_pc=0x%08X main_ra=0x%08X last_cid1_op=%u seq=%u\n",
+                                  s_lastDev30, curDev30, (unsigned long long)t_ms, mainPc, mainRa, lastOp, lastSeq);
+                        }
+                        s_lastDev30 = curDev30;
+                    }
+
+                    // Check [scene+0xF4]
+                    uint32_t smScene = read32(0x00635530u);
+                    if (smScene >= 0x10000 && (smScene + 0xF8) <= PS2_RAM_SIZE) {
+                        uint32_t vtable = read32(smScene);
+                        if (vtable == 0x006adfa8u) {
+                            uint32_t curSceneF4 = read32(smScene + 0xF4);
+                            static uint32_t s_lastSceneF4 = 0xFFFFFFFFu;
+                            static uint32_t s_lastSceneF4Ptr = 0;
+                            if (smScene != s_lastSceneF4Ptr) {
+                                s_lastSceneF4Ptr = smScene;
+                                s_lastSceneF4 = curSceneF4;
+                            } else if (curSceneF4 != s_lastSceneF4) {
+                                static std::atomic<uint32_t> s_sceneF4Lines{0};
+                                uint32_t l = s_sceneF4Lines.fetch_add(1, std::memory_order_relaxed);
+                                if (l < 300) {
+                                    uint64_t t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - s_bhStartTime).count();
+                                    bhLog("[probe] bm scene_f4 old=%u new=%u t_ms=%llu scene=0x%08X\n",
+                                          s_lastSceneF4, curSceneF4, (unsigned long long)t_ms, smScene);
+                                }
+                                s_lastSceneF4 = curSceneF4;
+                            }
+                        }
+                    }
+                }
+            }).detach();
+        }
+    }
+
+    static void doBmStallDump(const uint8_t *rdram, uint32_t curScene) {
+        if (!rdram) return;
+        auto read32 = [&](uint32_t addr) -> uint32_t {
+            if ((addr & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                uint32_t val = 0;
+                std::memcpy(&val, rdram + (addr & PS2_RAM_MASK), 4);
+                return val;
+            }
+            return 0;
+        };
+
+        bhLog("[probe] bm stall dump fired: curScene=0x%08X\n", curScene);
+
+        // 1. Stack walk and regs like Task AT
+        if (s_bmScheduler) {
+            const GuestThread *th = s_bmScheduler->thread(1);
+            if (th) {
+                const R5900Context &ctx = th->activeContext();
+                uint32_t pc = ctx.pc;
+                uint32_t sp = getRegU32(&ctx, 29);
+                uint32_t ra = getRegU32(&ctx, 31);
+                uint32_t gp = getRegU32(&ctx, 28);
+                uint32_t fp = getRegU32(&ctx, 30);
+                uint32_t v0 = getRegU32(&ctx, 2), v1 = getRegU32(&ctx, 3);
+                uint32_t a0 = getRegU32(&ctx, 4), a1 = getRegU32(&ctx, 5), a2 = getRegU32(&ctx, 6), a3 = getRegU32(&ctx, 7);
+                uint32_t t0 = getRegU32(&ctx, 8), t1 = getRegU32(&ctx, 9), t2 = getRegU32(&ctx, 10), t3 = getRegU32(&ctx, 11);
+                uint32_t t4 = getRegU32(&ctx, 12), t5 = getRegU32(&ctx, 13), t6 = getRegU32(&ctx, 14), t7 = getRegU32(&ctx, 15);
+                uint32_t s0 = getRegU32(&ctx, 16), s1 = getRegU32(&ctx, 17), s2 = getRegU32(&ctx, 18), s3 = getRegU32(&ctx, 19);
+                uint32_t s4 = getRegU32(&ctx, 20), s5 = getRegU32(&ctx, 21), s6 = getRegU32(&ctx, 22), s7 = getRegU32(&ctx, 23);
+
+                bhLog("[probe] bm dump trigger: stuck_main pc=0x%08X sp=0x%08X ra=0x%08X\n", pc, sp, ra);
+
+                uint32_t retLines = 0;
+                for (uint32_t off = 0; off <= 0x1800 && retLines < 40; off += 4) {
+                    uint32_t currAddr = sp + off;
+                    if ((currAddr & PS2_RAM_MASK) + 4 > PS2_RAM_SIZE) continue;
+                    uint32_t w = 0;
+                    std::memcpy(&w, rdram + (currAddr & PS2_RAM_MASK), 4);
+                    if (w >= 0x00100000u && w < 0x00600000u) {
+                        uint32_t insnAddr = w - 8;
+                        if (insnAddr >= 0x00100000u && (insnAddr & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                            uint32_t insn = 0;
+                            std::memcpy(&insn, rdram + (insnAddr & PS2_RAM_MASK), 4);
+                            if ((insn & 0xFC000000u) == 0x0C000000u) {
+                                uint32_t callee = ((w - 4) & 0xF0000000u) | ((insn & 0x03FFFFFFu) << 2);
+                                bhLog("[probe] bm ret w=0x%08X at sp+0x%X callee=0x%08X\n", w, off, callee);
+                                retLines++;
+                            } else if ((insn & 0xFC00003Fu) == 0x00000009u) {
+                                bhLog("[probe] bm ret w=0x%08X at sp+0x%X callee=jalr\n", w, off);
+                                retLines++;
+                            }
+                        }
+                    }
+                }
+
+                bhLog("[probe] bm regs pc=0x%08X ra=0x%08X sp=0x%08X gp=0x%08X fp=0x%08X "
+                      "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+                      "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X t6=0x%08X t7=0x%08X "
+                      "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X\n",
+                      pc, ra, sp, gp, fp,
+                      v0, v1, a0, a1, a2, a3,
+                      t0, t1, t2, t3, t4, t5, t6, t7,
+                      s0, s1, s2, s3, s4, s5, s6, s7);
+            }
+        }
+
+        // 2. Scene object 0x200 bytes
+        uint32_t sceneAddr = (curScene != 0) ? curScene : 0x008566a0u;
+        for (uint32_t off = 0; off < 0x200; off += 32) {
+            bhLog("[probe] bm scene +0x%03X: 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                  off,
+                  read32(sceneAddr + off + 0), read32(sceneAddr + off + 4), read32(sceneAddr + off + 8), read32(sceneAddr + off + 12),
+                  read32(sceneAddr + off + 16), read32(sceneAddr + off + 20), read32(sceneAddr + off + 24), read32(sceneAddr + off + 28));
+        }
+
+        // 3. Device 0x771B88..+0x100
+        const uint32_t kDevBase = 0x00771B88u;
+        for (uint32_t off = 0; off < 0x100; off += 32) {
+            bhLog("[probe] bm dev +0x%03X: 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                  off,
+                  read32(kDevBase + off + 0), read32(kDevBase + off + 4), read32(kDevBase + off + 8), read32(kDevBase + off + 12),
+                  read32(kDevBase + off + 16), read32(kDevBase + off + 20), read32(kDevBase + off + 24), read32(kDevBase + off + 28));
+        }
+
+        // 4. [0x649DE0..0x649DF0]
+        bhLog("[probe] bm wait 0x649DE0: 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X\n",
+              read32(0x00649DE0u), read32(0x00649DE4u), read32(0x00649DE8u), read32(0x00649DECu), read32(0x00649DF0u));
+
+        // 5. 4E2730 early-exit inputs
+        uint32_t scene_f4 = (curScene != 0) ? read32(curScene + 0xF4) : 0;
+        uint32_t dev30 = read32(0x00771BB8u);
+        uint8_t byte_72d390 = *reinterpret_cast<const uint8_t *>(rdram + (0x0072D390u & 0x01FFFFFFu));
+        bhLog("[probe] bm 4e2730 inputs: [scene+0xF4]=0x%08X [0x771BB8]=0x%08X byte[0x72D390]=0x%02X\n",
+              scene_f4, dev30, byte_72d390);
+    }
+
+    static void bmTickCheck(const uint8_t *rdram) {
+        if (!isBhProbeEnabled() || !rdram) return;
+        if (!s_cachedRdram) s_cachedRdram = rdram;
+        bmStartSamplerThread();
+
+        auto read32 = [&](uint32_t addr) -> uint32_t {
+            if ((addr & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                uint32_t val = 0;
+                std::memcpy(&val, rdram + (addr & PS2_RAM_MASK), 4);
+                return val;
+            }
+            return 0;
+        };
+
+        uint32_t sm = 0x00635530u;
+        uint32_t curScene = read32(sm);
+        uint32_t curVtable = (curScene >= 0x10000 && (curScene + 4) <= PS2_RAM_SIZE) ? read32(curScene) : 0;
+
+        uint32_t f_val = g_probe_F.load(std::memory_order_relaxed);
+        uint32_t g_val = g_probe_G.load(std::memory_order_relaxed);
+        uint32_t c4e = g_probe_4e2730.load(std::memory_order_relaxed);
+        uint32_t c31a = g_probe_31a514.load(std::memory_order_relaxed);
+        uint32_t dev30 = read32(0x00771BB8u);
+        uint32_t scene_f4 = (curScene >= 0x10000 && (curScene + 0xF8) <= PS2_RAM_SIZE) ? read32(curScene + 0xF4) : 0;
+
+        bhLog("[probe] bm sec dev30=%u F=%u G=%u 4e2730=%u 31a514=%u scene=0x%08X scene_f4=%u\n",
+              dev30, f_val, g_val, c4e, c31a, curScene, scene_f4);
+
+        static bool s_hasSeenFPositive = false;
+        static uint32_t s_consecFZeroSec = 0;
+        static uint32_t s_lastMovieScenePtr = 0;
+        static uint32_t s_newMovieSceneFZeroSec = 0;
+        static bool s_sceneChangedToNewMovie = false;
+        static std::atomic<bool> s_bmStallDumped{false};
+
+        if (f_val > 0) {
+            s_hasSeenFPositive = true;
+            s_consecFZeroSec = 0;
+        } else {
+            s_consecFZeroSec++;
+        }
+
+        if (curVtable == 0x006adfa8u) {
+            if (s_lastMovieScenePtr != 0 && curScene != s_lastMovieScenePtr) {
+                s_sceneChangedToNewMovie = true;
+                s_newMovieSceneFZeroSec = 0;
+            }
+            s_lastMovieScenePtr = curScene;
+            if (s_sceneChangedToNewMovie) {
+                if (f_val == 0) {
+                    s_newMovieSceneFZeroSec++;
+                } else {
+                    s_newMovieSceneFZeroSec = 0;
+                }
+            }
+        }
+
+        bool isMovieVtable = (curVtable == 0x006adfa8u);
+        bool cond1 = (s_hasSeenFPositive && s_consecFZeroSec >= 5);
+        bool cond2 = (s_sceneChangedToNewMovie && s_newMovieSceneFZeroSec >= 5);
+
+        if (isMovieVtable && (cond1 || cond2)) {
+            bool exp = false;
+            if (s_bmStallDumped.compare_exchange_strong(exp, true)) {
+                doBmStallDump(rdram, curScene);
+            }
+        }
     }
 }
