@@ -3,6 +3,9 @@
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
 #include "probe_ae.h"
+namespace probe_ae {
+    void bhLog(const char *fmt, ...);
+}
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -46,6 +49,63 @@ namespace
         uint64_t v;
         std::memcpy(&v, p, 8);
         return v;
+    }
+
+    static inline bool isSkipDisplayCopyEnabled()
+    {
+        static int s_val = -1;
+        if (s_val == -1)
+        {
+            const char *env = std::getenv("PS2X_GS_SKIP_DISPLAY_COPY");
+            s_val = (env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) ? 1 : 0;
+        }
+        return s_val == 1;
+    }
+
+    static std::atomic<uint64_t> s_coRecognised{0};
+    static std::atomic<uint64_t> s_coSkipped{0};
+    static std::atomic<uint64_t> s_coFlushed{0};
+    static std::atomic<uint32_t> s_coAlphaLogged{0};
+    static auto s_coLastSecLog = std::chrono::steady_clock::now();
+
+    static bool s_hasDeferredDisplayCopy = false;
+    static GSPrimitiveBatch s_deferredDisplayCopyBatch{};
+
+    static inline void checkPeriodicCoLog()
+    {
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_coLastSecLog).count() >= 1)
+        {
+            s_coLastSecLog = now;
+            s_coAlphaLogged.store(0, std::memory_order_relaxed);
+            probe_ae::bhLog("[probe] co disp recognised=%llu skipped=%llu flushed=%llu\n",
+                            (unsigned long long)s_coRecognised.load(std::memory_order_relaxed),
+                            (unsigned long long)s_coSkipped.load(std::memory_order_relaxed),
+                            (unsigned long long)s_coFlushed.load(std::memory_order_relaxed));
+        }
+    }
+
+    static inline void flushDeferredDisplayCopy(GSRasterBackend *backend)
+    {
+        if (s_hasDeferredDisplayCopy && backend)
+        {
+            s_hasDeferredDisplayCopy = false;
+            s_coFlushed.fetch_add(1u, std::memory_order_relaxed);
+            backend->Submit(s_deferredDisplayCopyBatch);
+        }
+        else
+        {
+            s_hasDeferredDisplayCopy = false;
+        }
+    }
+
+    static inline bool frameOverlaps(uint32_t fbpA, uint32_t fbwA, uint32_t fbpB, uint32_t fbwB)
+    {
+        uint32_t startA = fbpA;
+        uint32_t endA = fbpA + std::max(fbwA, 1u) * 32u;
+        uint32_t startB = fbpB;
+        uint32_t endB = fbpB + std::max(fbwB, 1u) * 32u;
+        return (startA < endB) && (startB < endA);
     }
 
     struct PackedGifPacketTag
@@ -137,6 +197,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 void GS::reset()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    flushDeferredDisplayCopy(m_backend.get());
     std::memset(m_ctx, 0, sizeof(m_ctx));
     m_prim = {};
     m_primRegister = {};
@@ -215,6 +276,7 @@ void GS::snapshotVRAM()
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
     if (!m_backend)
         return;
+    flushDeferredDisplayCopy(m_backend.get());
     std::vector<uint8_t> snapshot;
     m_backend->Sync(GSSyncReason::DebugReadback);
     m_backend->SnapshotVram(snapshot);
@@ -1418,6 +1480,29 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
 
         if (m_backend)
         {
+            if (s_hasDeferredDisplayCopy)
+            {
+                const uint32_t defDstFbp = s_deferredDisplayCopyBatch.state.context.frame.fbp;
+                const uint32_t defDstFbw = s_deferredDisplayCopyBatch.state.context.frame.fbw;
+                // direction: 0 = host to local, 1 = local to host, 2 = local to local
+                if (m_trxdir == 1) // local to host reads from sbp
+                {
+                    if (frameOverlaps(m_bitbltbuf.sbp, m_bitbltbuf.sbw, defDstFbp, defDstFbw))
+                        flushDeferredDisplayCopy(m_backend.get());
+                }
+                else if (m_trxdir == 2) // local to local reads sbp, writes dbp
+                {
+                    if (frameOverlaps(m_bitbltbuf.sbp, m_bitbltbuf.sbw, defDstFbp, defDstFbw) ||
+                        frameOverlaps(m_bitbltbuf.dbp, m_bitbltbuf.dbw, defDstFbp, defDstFbw))
+                        flushDeferredDisplayCopy(m_backend.get());
+                }
+                else if (m_trxdir == 0) // host to local writes to dbp
+                {
+                    if (frameOverlaps(m_bitbltbuf.dbp, m_bitbltbuf.dbw, defDstFbp, defDstFbw))
+                        flushDeferredDisplayCopy(m_backend.get());
+                }
+            }
+
             GSTransferCommand command{};
             command.bitbltbuf = m_bitbltbuf;
             command.trxpos = m_trxpos;
@@ -1608,7 +1693,43 @@ void GS::vertexKick(bool drawing)
     {
         GSPrimitiveBatch batch = buildDrawBatch(needed);
         updatePreferredDisplaySourceForDraw(batch);
-        m_backend->Submit(batch);
+
+        bool skipBatch = false;
+        if (m_hasPreferredDisplaySource &&
+            batch.state.prim.type == GS_PRIM_SPRITE &&
+            batch.state.context.frame.fbp == m_preferredDisplayDestFbp &&
+            batch.state.context.tex0.tbp0 == m_preferredDisplaySourceFrame.fbp &&
+            isSkipDisplayCopyEnabled())
+        {
+            if (s_hasDeferredDisplayCopy &&
+                s_deferredDisplayCopyBatch.state.context.frame.fbp != batch.state.context.frame.fbp)
+            {
+                flushDeferredDisplayCopy(m_backend.get());
+            }
+            s_deferredDisplayCopyBatch = batch;
+            s_hasDeferredDisplayCopy = true;
+            skipBatch = true;
+            s_coSkipped.fetch_add(1u, std::memory_order_relaxed);
+        }
+
+        if (!skipBatch)
+        {
+            if (s_hasDeferredDisplayCopy)
+            {
+                const uint32_t defDstFbp = s_deferredDisplayCopyBatch.state.context.frame.fbp;
+                const uint32_t defDstFbw = s_deferredDisplayCopyBatch.state.context.frame.fbw;
+
+                // (a) another draw whose ctx.frame.fbp == the stored destination fbp
+                // (b) any draw that reads the destination fbp (tex0.tbp0 overlapping defDstFbp)
+                if (batch.state.context.frame.fbp == defDstFbp ||
+                    (batch.state.prim.tme && frameOverlaps(batch.state.context.tex0.tbp0, batch.state.context.tex0.tbw, defDstFbp, defDstFbw)))
+                {
+                    flushDeferredDisplayCopy(m_backend.get());
+                }
+            }
+            m_backend->Submit(batch);
+        }
+
         recordDrawDebugEventUnlocked(needed);
     }
 
@@ -1738,7 +1859,10 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
     const GSDrawState &state = batch.state;
     const GSContext &ctx = state.context;
     if (m_hasPreferredDisplaySource && ctx.frame.fbp == m_preferredDisplayDestFbp)
+    {
         m_hasPreferredDisplaySource = false;
+        flushDeferredDisplayCopy(m_backend.get());
+    }
     if (state.prim.type != GS_PRIM_SPRITE || batch.vertexCount < 2u)
         return;
 
@@ -1750,18 +1874,44 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
     int y1 = static_cast<int>(v1.y) - (ctx.xyoffset.ofy >> 4);
     if (x0 > x1) std::swap(x0, x1);
     if (y0 > y1) std::swap(y0, y1);
-    const int xEnd = x0 + std::max(1, x1 - x0) - 1;
-    const int yEnd = y0 + std::max(1, y1 - y0) - 1;
+    const int spanW = std::max(1, x1 - x0);
+    const int spanH = std::max(1, y1 - y0);
+    const int xEnd = x0 + spanW - 1;
+    const int yEnd = y0 + spanH - 1;
+
     const uint8_t alphaMode = static_cast<uint8_t>(ctx.alpha & 0xFFu);
     const uint8_t alphaFix = static_cast<uint8_t>((ctx.alpha >> 32u) & 0xFFu);
+
+    const bool covers = (x0 <= ctx.scissor.x0 && y0 <= ctx.scissor.y0 &&
+                         xEnd >= ctx.scissor.x1 && yEnd >= ctx.scissor.y1 &&
+                         spanW >= 320 && spanH >= 224);
+
+    const bool isColIdentity = (v1.r == 0x80u && v1.g == 0x80u && v1.b == 0x80u);
+
+    // Alpha blending condition:
+    // Existing rule: alphaMode == 0x64 && (alphaFix == 0x60 || alphaFix == 0x80)
+    // Relaxed rule: alphaFix in range 0x40..0x80 with standard blend OR abe==1 with colour modulation 0x80
+    const bool alphaAccept = (alphaMode == 0x64u && (alphaFix == 0x60u || alphaFix == 0x80u)) ||
+                             (alphaMode == 0x64u && (alphaFix >= 0x40u && alphaFix <= 0x80u)) ||
+                             isColIdentity;
+
     const bool displayCopy = state.prim.tme && state.prim.abe && state.prim.fst && state.prim.ctxt &&
-                             ctx.frame.fbp != ctx.tex0.tbp0 && alphaMode == 0x64u &&
-                             (alphaFix == 0x60u || alphaFix == 0x80u) &&
-                             x0 <= 0 && y0 <= 0 && xEnd >= 639 && yEnd >= 447;
+                             ctx.frame.fbp != ctx.tex0.tbp0 && covers && alphaAccept;
+
     if (displayCopy)
     {
+        s_coRecognised.fetch_add(1u, std::memory_order_relaxed);
         m_preferredDisplaySourceFrame = {ctx.tex0.tbp0, ctx.tex0.tbw, ctx.tex0.psm, 0u};
         m_preferredDisplayDestFbp = ctx.frame.fbp;
         m_hasPreferredDisplaySource = true;
+    }
+
+    checkPeriodicCoLog();
+    uint32_t loggedCount = s_coAlphaLogged.fetch_add(1u, std::memory_order_relaxed);
+    if (loggedCount < 3u)
+    {
+        probe_ae::bhLog("[probe] co disp alphaReg=0x%llx mode=0x%x fix=0x%x covers=%u displayCopy=%u\n",
+                        (unsigned long long)ctx.alpha, (unsigned)alphaMode, (unsigned)alphaFix,
+                        covers ? 1u : 0u, displayCopy ? 1u : 0u);
     }
 }
