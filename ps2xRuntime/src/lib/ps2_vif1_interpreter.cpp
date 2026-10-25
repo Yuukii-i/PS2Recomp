@@ -757,9 +757,181 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             else if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
-                uint32_t srcIndex = 0u;
-                for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
+
+                static std::atomic<uint64_t> s_ciFastCount{0};
+                static std::atomic<uint64_t> s_ciGenericCount{0};
+                static std::atomic<uint64_t> s_ciMismCount{0};
+                static std::atomic<uint32_t> s_ciMismLogged{0};
+                static std::chrono::steady_clock::time_point s_ciLastSecLog{};
+
+                auto ciLogMsg = [](const char *msg) {
+                    static FILE *s_f = nullptr;
+                    static bool s_tried = false;
+                    if (!s_tried) {
+                        s_tried = true;
+                        s_f = std::fopen("logs/probe_bh_sink.txt", "a");
+                    }
+                    if (s_f) {
+                        std::fputs(msg, s_f);
+                        std::fflush(s_f);
+                    }
+                    std::printf("%s", msg);
+                };
+
+                auto isUnpackFastEnabled = []() -> bool {
+                    static int s_state = -1;
+                    if (s_state == -1) {
+                        const char *env = std::getenv("PS2X_UNPACK_FAST");
+                        s_state = (env && (env[0] == '0' || env[0] == 'f' || env[0] == 'F')) ? 0 : 1;
+                    }
+                    return s_state == 1;
+                };
+
+                auto isUnpackVerifyEnabled = []() -> bool {
+                    static int s_state = -1;
+                    if (s_state == -1) {
+                        const char *env = std::getenv("PS2X_UNPACK_VERIFY");
+                        s_state = (env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) ? 1 : 0;
+                    }
+                    return s_state == 1;
+                };
+
+                const uint64_t lastVec = static_cast<uint64_t>(vuAddr) + static_cast<uint64_t>(writeVectorCount - 1u) * cl;
+                const bool rangeOk = (lastVec < 0x400u) && ((lastVec + 1u) * 16u <= PS2_VU1_DATA_SIZE);
+                const bool canFastPath = (cl >= wl && wl == 1u && sourceVectorCount == writeVectorCount &&
+                                          vn == 0u && (vl == 0u || vl == 1u || vl == 2u) &&
+                                          ((vif1_regs.mode & 3u) == 0u) && rangeOk);
+
+                enum FieldAction : uint8_t {
+                    FA_DECODED = 0,
+                    FA_ROW     = 1,
+                    FA_COL     = 2,
+                    FA_PROTECT = 3
+                };
+
+                FieldAction fAction[4];
+                uint32_t fConst[4];
+                bool allDecoded = true;
+                bool allProtect = true;
+
+                if (canFastPath) {
+                    for (uint32_t f = 0u; f < 4u; ++f) {
+                        uint32_t spec = maskEnable ? ((vif1_regs.mask >> (f * 2u)) & 0x3u) : 0u;
+                        fAction[f] = static_cast<FieldAction>(spec);
+                        if (spec == 0u) {
+                            fConst[f] = 0u;
+                            allProtect = false;
+                        } else if (spec == 1u) {
+                            fConst[f] = vif1_regs.row[f];
+                            allDecoded = false;
+                            allProtect = false;
+                        } else if (spec == 2u) {
+                            fConst[f] = vif1_regs.col[0];
+                            allDecoded = false;
+                            allProtect = false;
+                        } else {
+                            fConst[f] = 0u;
+                            allDecoded = false;
+                        }
+                    }
+                }
+
+                auto runFastPath = [&](uint8_t *targetVuData) {
+                    if (allProtect) return;
+
+                    if (allDecoded && cl == 1u) {
+                        uint32_t *dest = reinterpret_cast<uint32_t*>(targetVuData) + (vuAddr * 4u);
+                        if (vl == 2u) {
+                            if (zeroExtend) {
+                                for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                    uint32_t s = static_cast<uint32_t>(srcBase[i]);
+                                    dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
+                                    dest += 4;
+                                }
+                            } else {
+                                for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                    uint32_t s = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcBase[i])));
+                                    dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
+                                    dest += 4;
+                                }
+                            }
+                        } else if (vl == 1u) {
+                            for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                uint16_t raw = 0;
+                                std::memcpy(&raw, srcBase + i * 2u, sizeof(raw));
+                                uint32_t s = zeroExtend ? static_cast<uint32_t>(raw) : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(raw)));
+                                dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
+                                dest += 4;
+                            }
+                        } else { // vl == 0u
+                            for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                uint32_t s = 0;
+                                std::memcpy(&s, srcBase + i * 4u, sizeof(s));
+                                dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
+                                dest += 4;
+                            }
+                        }
+                    } else {
+                        for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                            uint32_t scalar = 0;
+                            if (vl == 2u) {
+                                uint8_t raw = srcBase[i];
+                                scalar = zeroExtend ? static_cast<uint32_t>(raw) : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(raw)));
+                            } else if (vl == 1u) {
+                                uint16_t raw = 0;
+                                std::memcpy(&raw, srcBase + i * 2u, sizeof(raw));
+                                scalar = zeroExtend ? static_cast<uint32_t>(raw) : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(raw)));
+                            } else {
+                                std::memcpy(&scalar, srcBase + i * 4u, sizeof(scalar));
+                            }
+
+                            uint32_t *d = reinterpret_cast<uint32_t*>(targetVuData) + ((vuAddr + i * cl) * 4u);
+                            if (fAction[0] == FA_DECODED) d[0] = scalar; else if (fAction[0] != FA_PROTECT) d[0] = fConst[0];
+                            if (fAction[1] == FA_DECODED) d[1] = scalar; else if (fAction[1] != FA_PROTECT) d[1] = fConst[1];
+                            if (fAction[2] == FA_DECODED) d[2] = scalar; else if (fAction[2] != FA_PROTECT) d[2] = fConst[2];
+                            if (fAction[3] == FA_DECODED) d[3] = scalar; else if (fAction[3] != FA_PROTECT) d[3] = fConst[3];
+                        }
+                    }
+                };
+
+                const bool verifyActive = isUnpackVerifyEnabled();
+                const bool fastActive = isUnpackFastEnabled();
+
+                bool executeGeneric = true;
+                std::vector<uint8_t> savedBefore;
+                std::vector<uint8_t> fastResult;
+                size_t verifyRangeBytes = 0;
+                uint8_t *verifyRangeBase = nullptr;
+
+                if (canFastPath && fastActive) {
+                    if (verifyActive) {
+                        const uint32_t minVec = vuAddr;
+                        const uint32_t maxVec = static_cast<uint32_t>(lastVec);
+                        verifyRangeBytes = (maxVec - minVec + 1u) * 16u;
+                        verifyRangeBase = m_vu1Data + minVec * 16u;
+
+                        savedBefore.assign(verifyRangeBase, verifyRangeBase + verifyRangeBytes);
+                        fastResult.resize(verifyRangeBytes);
+
+                        runFastPath(m_vu1Data);
+                        std::memcpy(fastResult.data(), verifyRangeBase, verifyRangeBytes);
+                        std::memcpy(verifyRangeBase, savedBefore.data(), verifyRangeBytes);
+
+                        executeGeneric = true;
+                    } else {
+                        runFastPath(m_vu1Data);
+                        s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
+                        executeGeneric = false;
+                    }
+                } else {
+                    s_ciGenericCount.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                if (executeGeneric)
                 {
+                    uint32_t srcIndex = 0u;
+                    for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
+                    {
                     const uint32_t cyclePos = writeIndex % wl;
                     const bool sourceAvailable = (cl >= wl) || (cyclePos < cl);
 
@@ -950,6 +1122,32 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
                     std::memcpy(m_vu1Data + destOff, lanes, sizeof(lanes));
                 }
+
+                if (canFastPath && fastActive && verifyActive) {
+                    s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
+                    if (std::memcmp(fastResult.data(), verifyRangeBase, verifyRangeBytes) != 0) {
+                        s_ciMismCount.fetch_add(1, std::memory_order_relaxed);
+                        uint32_t logged = s_ciMismLogged.fetch_add(1, std::memory_order_relaxed);
+                        if (logged < 10) {
+                            char buf[256];
+                            std::snprintf(buf, sizeof(buf), "[probe] ci unpack mismatch fmt=0x%02X num=%u vuAddr=0x%03X cl=%u wl=%u\n",
+                                          opcode & 0x0Fu, num, vuAddr, cl, wl);
+                            ciLogMsg(buf);
+                        }
+                    }
+                }
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - s_ciLastSecLog).count() >= 1) {
+                s_ciLastSecLog = now;
+                char buf[256];
+                std::snprintf(buf, sizeof(buf), "[probe] ci unpack fast=%llu generic=%llu mism=%llu\n",
+                              (unsigned long long)s_ciFastCount.load(std::memory_order_relaxed),
+                              (unsigned long long)s_ciGenericCount.load(std::memory_order_relaxed),
+                              (unsigned long long)s_ciMismCount.load(std::memory_order_relaxed));
+                ciLogMsg(buf);
+            }
             }
             pos += totalBytes;
 
