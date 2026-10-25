@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 namespace probe_ae {
     void bhLog(const char *fmt, ...);
@@ -43,16 +44,92 @@ namespace probe_ae {
         DWORD currentPid = GetCurrentProcessId();
         DWORD samplerTid = GetCurrentThreadId();
 
-        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
         char exePath[MAX_PATH] = {};
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
-        char *lastSlash = strrchr(exePath, '\\');
-        char searchPath[MAX_PATH * 2] = {};
+
+        char exeDir[MAX_PATH] = {};
+        strncpy(exeDir, exePath, sizeof(exeDir) - 1);
+        char *lastSlash = strrchr(exeDir, '\\');
         if (lastSlash) {
             *lastSlash = '\0';
-            snprintf(searchPath, sizeof(searchPath), ".;%s", exePath);
+        } else {
+            strcpy(exeDir, ".");
         }
-        SymInitialize(hProc, searchPath[0] ? searchPath : nullptr, TRUE);
+
+        char searchPath[MAX_PATH * 3] = {};
+        snprintf(searchPath, sizeof(searchPath), "%s;%s\\..;.", exeDir, exeDir);
+
+        char pdbPath[MAX_PATH] = {};
+        strncpy(pdbPath, exePath, sizeof(pdbPath) - 1);
+        char *dot = strrchr(pdbPath, '.');
+        if (dot) {
+            strcpy(dot, ".pdb");
+        } else {
+            strncat(pdbPath, ".pdb", sizeof(pdbPath) - strlen(pdbPath) - 1);
+        }
+        DWORD pdbAttr = GetFileAttributesA(pdbPath);
+        int pdbExists = (pdbAttr != INVALID_FILE_ATTRIBUTES && !(pdbAttr & FILE_ATTRIBUTE_DIRECTORY)) ? 1 : 0;
+
+        DWORD64 exeBase = reinterpret_cast<DWORD64>(GetModuleHandleA(NULL));
+
+        SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_NO_PROMPTS);
+
+        BOOL initOk = SymInitialize(hProc, searchPath, TRUE);
+        DWORD initErr = GetLastError();
+        if (!initOk && initErr == ERROR_INVALID_PARAMETER) {
+            initOk = TRUE;
+        }
+        SymSetSearchPath(hProc, searchPath);
+
+        bhLog("[prof2] syminit ok=%d err=%lu exe=%s pdb_exists=%d base=0x%llX\n",
+              initOk ? 1 : 0, initErr, exePath, pdbExists, (unsigned long long)exeBase);
+
+        IMAGEHLP_MODULE64 modInfo{};
+        modInfo.SizeOfStruct = sizeof(modInfo);
+        bool needExplicitLoad = true;
+        if (SymGetModuleInfo64(hProc, exeBase, &modInfo)) {
+            if (modInfo.SymType != SymNone && modInfo.SymType != SymExport) {
+                needExplicitLoad = false;
+            }
+        }
+        if (needExplicitLoad) {
+            SymLoadModule64(hProc, NULL, exePath, NULL, exeBase, 0);
+        }
+
+        // Self-test
+        DWORD64 testAddr = reinterpret_cast<DWORD64>(&recordMainGuestThread);
+        char testBuffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR)] = {};
+        PSYMBOL_INFO pTestSymbol = reinterpret_cast<PSYMBOL_INFO>(testBuffer);
+        pTestSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        pTestSymbol->MaxNameLen = MAX_SYM_NAME;
+        DWORD64 testDisp = 0;
+        std::string testSymName = "none";
+        if (SymFromAddr(hProc, testAddr, &testDisp, pTestSymbol)) {
+            testSymName = pTestSymbol->Name;
+        }
+
+        IMAGEHLP_LINE64 testLineInfo{};
+        testLineInfo.SizeOfStruct = sizeof(testLineInfo);
+        DWORD testLineDisp = 0;
+        std::string testLineStr = "none";
+        if (SymGetLineFromAddr64(hProc, testAddr, &testLineDisp, &testLineInfo) && testLineInfo.FileName) {
+            const char *lastSlashF = strrchr(testLineInfo.FileName, '\\');
+            const char *lastSlashF2 = strrchr(testLineInfo.FileName, '/');
+            const char *baseFile = lastSlashF ? (lastSlashF + 1) : (lastSlashF2 ? (lastSlashF2 + 1) : testLineInfo.FileName);
+            char lbuf[64];
+            snprintf(lbuf, sizeof(lbuf), "%s:%u", baseFile, testLineInfo.LineNumber);
+            testLineStr = lbuf;
+        }
+
+        IMAGEHLP_MODULE64 testModInfo{};
+        testModInfo.SizeOfStruct = sizeof(testModInfo);
+        int testSymType = -1;
+        if (SymGetModuleInfo64(hProc, testAddr, &testModInfo)) {
+            testSymType = static_cast<int>(testModInfo.SymType);
+        }
+
+        bhLog("[prof2] selftest sym=%s line=%s symtype=%d\n",
+              testSymName.c_str(), testLineStr.c_str(), testSymType);
 
         std::unordered_map<DWORD64, std::string> symCache;
         symCache.reserve(16384);
@@ -76,11 +153,11 @@ namespace probe_ae {
             if (SymFromAddr(hProc, addr, &displacement, pSymbol)) {
                 name = pSymbol->Name;
             } else {
-                IMAGEHLP_MODULE64 modInfo{};
-                modInfo.SizeOfStruct = sizeof(modInfo);
-                if (SymGetModuleInfo64(hProc, addr, &modInfo)) {
+                IMAGEHLP_MODULE64 mInfo{};
+                mInfo.SizeOfStruct = sizeof(mInfo);
+                if (SymGetModuleInfo64(hProc, addr, &mInfo)) {
                     char buf[64];
-                    snprintf(buf, sizeof(buf), "%s+0x%llX", modInfo.ModuleName, (unsigned long long)(addr - modInfo.BaseOfImage));
+                    snprintf(buf, sizeof(buf), "%s+0x%llX", mInfo.ModuleName, (unsigned long long)(addr - mInfo.BaseOfImage));
                     name = buf;
                 } else {
                     char buf[32];
@@ -92,10 +169,41 @@ namespace probe_ae {
             return name;
         };
 
+        std::unordered_map<DWORD64, std::string> lineCache;
+        lineCache.reserve(16384);
+
+        auto resolveLine = [&](DWORD64 addr, const std::string &fallbackSym) -> std::string {
+            auto it = lineCache.find(addr);
+            if (it != lineCache.end()) return it->second;
+
+            if (lineCache.size() >= 16384) {
+                lineCache.clear();
+            }
+
+            IMAGEHLP_LINE64 lineInfo{};
+            lineInfo.SizeOfStruct = sizeof(lineInfo);
+            DWORD lineDisp = 0;
+            std::string res;
+            if (SymGetLineFromAddr64(hProc, addr, &lineDisp, &lineInfo) && lineInfo.FileName) {
+                const char *lastSlashF = strrchr(lineInfo.FileName, '\\');
+                const char *lastSlashF2 = strrchr(lineInfo.FileName, '/');
+                const char *baseFile = lastSlashF ? (lastSlashF + 1) : (lastSlashF2 ? (lastSlashF2 + 1) : lineInfo.FileName);
+                char lbuf[64];
+                snprintf(lbuf, sizeof(lbuf), "%s:%u", baseFile, lineInfo.LineNumber);
+                res = lbuf;
+            } else {
+                res = fallbackSym;
+            }
+            lineCache[addr] = res;
+            return res;
+        };
+
         std::unordered_map<DWORD, CgThreadAgg> threadAggs;
         uint64_t totalProcessSamples = 0;
         uint64_t mainStackWalkCount = 0;
+        uint64_t mainSamplesCount = 0;
         std::unordered_map<std::string, uint64_t> mainInclusiveCounts;
+        std::unordered_map<std::string, uint64_t> mainLineCounts;
 
         std::unordered_map<DWORD, HANDLE> threadHandles;
         auto lastRefresh = std::chrono::steady_clock::now();
@@ -189,6 +297,10 @@ namespace probe_ae {
                     totalProcessSamples++;
 
                     if (mainTid != 0 && tid == mainTid) {
+                        mainSamplesCount++;
+                        std::string leafLine = resolveLine(rip, leafSym);
+                        mainLineCounts[leafLine]++;
+
                         mainStackWalkCount++;
                         std::vector<std::string> frameSyms;
                         frameSyms.push_back(leafSym);
@@ -238,6 +350,25 @@ namespace probe_ae {
                         }
                     }
 
+                    if (mainSamplesCount > 0 && !mainLineCounts.empty()) {
+                        std::vector<std::pair<std::string, uint64_t>> sortedLines(mainLineCounts.begin(), mainLineCounts.end());
+                        std::sort(sortedLines.begin(), sortedLines.end(), [](const std::pair<std::string, uint64_t> &a, const std::pair<std::string, uint64_t> &b) {
+                            return a.second > b.second;
+                        });
+
+                        std::string linesStr;
+                        size_t limit = (std::min)(size_t(15), sortedLines.size());
+                        for (size_t i = 0; i < limit; ++i) {
+                            double linePct = (static_cast<double>(sortedLines[i].second) * 100.0) / static_cast<double>(mainSamplesCount);
+                            char sbuf[128];
+                            snprintf(sbuf, sizeof(sbuf), "%s=%.1f%% ", sortedLines[i].first.c_str(), linePct);
+                            linesStr += sbuf;
+                        }
+                        if (!linesStr.empty() && linesStr.back() == ' ') linesStr.pop_back();
+
+                        bhLog("[prof2] main lines: %s\n", linesStr.c_str());
+                    }
+
                     if (mainStackWalkCount > 0) {
                         std::vector<std::pair<std::string, uint64_t>> sortedInc(mainInclusiveCounts.begin(), mainInclusiveCounts.end());
                         std::sort(sortedInc.begin(), sortedInc.end(), [](const std::pair<std::string, uint64_t> &a, const std::pair<std::string, uint64_t> &b) {
@@ -260,8 +391,10 @@ namespace probe_ae {
 
                 threadAggs.clear();
                 mainInclusiveCounts.clear();
+                mainLineCounts.clear();
                 totalProcessSamples = 0;
                 mainStackWalkCount = 0;
+                mainSamplesCount = 0;
             }
 
             Sleep(1);
