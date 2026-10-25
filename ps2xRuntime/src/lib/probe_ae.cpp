@@ -2031,23 +2031,26 @@ namespace probe_ae {
     }
 
     static inline bool isBhProbeEnabled() {
-        const char *env = std::getenv("PS2X_PROBE_AE");
-        if (env && (env[0] == '1' || env[0] == 't' || env[0] == 'y' || env[0] == 'T' || env[0] == 'Y')) {
-            return true;
-        }
-#ifdef _WIN32
-        char winBuf[16] = {0};
-        if (GetEnvironmentVariableA("PS2X_PROBE_AE", winBuf, sizeof(winBuf)) > 0) {
-            if (winBuf[0] == '1' || winBuf[0] == 't' || winBuf[0] == 'y' || winBuf[0] == 'T' || winBuf[0] == 'Y') {
+        static const bool s_v = []() -> bool {
+            const char *env = std::getenv("PS2X_PROBE_AE");
+            if (env && (env[0] == '1' || env[0] == 't' || env[0] == 'y' || env[0] == 'T' || env[0] == 'Y')) {
                 return true;
             }
-        }
+#ifdef _WIN32
+            char winBuf[16] = {0};
+            if (GetEnvironmentVariableA("PS2X_PROBE_AE", winBuf, sizeof(winBuf)) > 0) {
+                if (winBuf[0] == '1' || winBuf[0] == 't' || winBuf[0] == 'y' || winBuf[0] == 'T' || winBuf[0] == 'Y') {
+                    return true;
+                }
+            }
 #endif
-        const char *envBh = std::getenv("PS2X_PROBE_BH");
-        if (envBh && (envBh[0] == '1' || envBh[0] == 't' || envBh[0] == 'y' || envBh[0] == 'T' || envBh[0] == 'Y')) {
-            return true;
-        }
-        return isEnabled();
+            const char *envBh = std::getenv("PS2X_PROBE_BH");
+            if (envBh && (envBh[0] == '1' || envBh[0] == 't' || envBh[0] == 'y' || envBh[0] == 'T' || envBh[0] == 'Y')) {
+                return true;
+            }
+            return isEnabled();
+        }();
+        return s_v;
     }
 
     enum class KickDecision {

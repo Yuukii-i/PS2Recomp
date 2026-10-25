@@ -23,8 +23,11 @@
 #include <cstdlib>
 #include <cstring>
 
+extern std::atomic<uint32_t> g_movieGetPictureCount;
+
 namespace probe_ae {
     void bhLog(const char *fmt, ...);
+    uint64_t getCeDeliveredVblanks();
 
 #ifdef _WIN32
     static std::atomic<bool> s_cgSamplerStarted{false};
@@ -241,6 +244,8 @@ namespace probe_ae {
         auto lastRefresh = std::chrono::steady_clock::now();
         auto lastDump = std::chrono::steady_clock::now();
         auto startTime = std::chrono::steady_clock::now();
+        uint64_t lastDeliveredVblanks = probe_ae::getCeDeliveredVblanks();
+        uint32_t lastRaw8Count = g_movieGetPictureCount.load(std::memory_order_relaxed);
 
         auto refreshThreads = [&]() {
             HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -374,6 +379,17 @@ namespace probe_ae {
             if (elapsedSinceDump >= 5.0) {
                 lastDump = now;
                 uint32_t tSec = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count());
+
+                uint64_t currentVblanks = probe_ae::getCeDeliveredVblanks();
+                uint32_t currentRaw8 = g_movieGetPictureCount.load(std::memory_order_relaxed);
+                double vblanksDelta = (currentVblanks >= lastDeliveredVblanks) ? static_cast<double>(currentVblanks - lastDeliveredVblanks) : 0.0;
+                double raw8Delta = (currentRaw8 >= lastRaw8Count) ? static_cast<double>(currentRaw8 - lastRaw8Count) : 0.0;
+                double vblankPerSec = (elapsedSinceDump > 0.0) ? (vblanksDelta / elapsedSinceDump) : 0.0;
+                double raw8PerSec = (elapsedSinceDump > 0.0) ? (raw8Delta / elapsedSinceDump) : 0.0;
+                lastDeliveredVblanks = currentVblanks;
+                lastRaw8Count = currentRaw8;
+
+                bhLog("[prof2] speed vblank_per_s=%.1f raw8_per_s=%.1f\n", vblankPerSec, raw8PerSec);
 
                 if (totalProcessSamples > 0) {
                     for (const auto &pair : threadAggs) {

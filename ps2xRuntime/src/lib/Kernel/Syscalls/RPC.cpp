@@ -1797,8 +1797,12 @@ namespace ps2_syscalls
                 uint32_t ringTail = destExtra + off + alignedCmdSize;
             g_diagCid1Requests.fetch_add(1, std::memory_order_relaxed);
 
-            const char *traceEnv = std::getenv("PS2X_CID1_TRACE");
-            const bool doTrace = (traceEnv && std::strcmp(traceEnv, "1") == 0);
+            static int s_cid1Trace = -1;
+            if (s_cid1Trace == -1) {
+                const char *traceEnv = std::getenv("PS2X_CID1_TRACE");
+                s_cid1Trace = (traceEnv && std::strcmp(traceEnv, "1") == 0) ? 1 : 0;
+            }
+            const bool doTrace = (s_cid1Trace == 1);
             if (doTrace)
             {
                 ps2xSafeLog( "[CID1:trace request] srcExtra=0x%08x size=%u (aligned=%u) op=0x%x slot=0x%08x seq=%u\n",
@@ -1927,8 +1931,12 @@ namespace ps2_syscalls
                     ? *reinterpret_cast<const uint32_t *>(rdram + (0x00771BB8u & 0x01FFFFFFu)) : 0;
                 uint32_t freed_slots = 0;
 
-                const char *cleanEnv = std::getenv("PS2X_CID1_CLOSE_CLEAN");
-                bool doClean = !(cleanEnv && std::strcmp(cleanEnv, "0") == 0);
+                static int s_cid1CloseClean = -1;
+                if (s_cid1CloseClean == -1) {
+                    const char *cleanEnv = std::getenv("PS2X_CID1_CLOSE_CLEAN");
+                    s_cid1CloseClean = !(cleanEnv && std::strcmp(cleanEnv, "0") == 0) ? 1 : 0;
+                }
+                bool doClean = (s_cid1CloseClean == 1);
 
                 if (doClean && rdram)
                 {
