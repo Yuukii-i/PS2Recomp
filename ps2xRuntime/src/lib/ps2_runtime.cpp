@@ -1268,6 +1268,8 @@ bool PS2Runtime::initialize(const char *title)
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
         }
+
+        probe_ae::bhInitStartup();
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
@@ -4368,6 +4370,7 @@ void PS2Runtime::run()
 
     extern void dumpEeDiagnostics(const EeScheduler *scheduler, uint32_t stuckPc);
     uint64_t tick = 0;
+    probe_ae::bhInitStartup();
     if (isVerboseLog()) {
         fprintf(stderr, "=== MAIN THREAD RUN LOOP STARTING ===\n");
         fflush(stderr);
@@ -4381,7 +4384,6 @@ void PS2Runtime::run()
             fflush(stderr);
         }
 
-        probe_ae::bhTickCheckPerSec(m_memory.getRDRAM());
         if (isVerboseLog() && ((tick % 60) == 0))
         {
             extern std::string ps2xGetIntcSummary();
@@ -4639,6 +4641,8 @@ void PS2Runtime::run()
             ps2xSafeLog("[prof] fps=%u ee_ms=%.2f gs_ms=%.2f xfer_ms=%.2f present_ms=%.2f prims=%llu pixels=%llu\n",
                         currentFps, ee_ms, gs_ms, xfer_ms, present_ms,
                         (unsigned long long)prims, (unsigned long long)pixels);
+
+            probe_ae::bhTickCheckPerSec(m_memory.getRDRAM());
 
             if (g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u)
             {
