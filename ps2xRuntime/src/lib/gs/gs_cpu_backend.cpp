@@ -7,6 +7,9 @@
 #include "runtime/gs/ps2_gs_memory.h"
 #include "ps2_log.h"
 #include "probe_ae.h"
+namespace probe_ae {
+    void bhLog(const char *fmt, ...);
+}
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -1622,6 +1625,32 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
            (static_cast<uint32_t>(a) << 24);
 }
 
+static std::atomic<uint64_t> s_cmFastTaken{0};
+static std::atomic<uint64_t> s_cmGeneric{0};
+static std::atomic<uint64_t> s_cmChecked{0};
+static std::atomic<uint64_t> s_cmFastOk{0};
+static std::atomic<uint64_t> s_cmMismPx{0};
+static std::atomic<uint32_t> s_cmMismLogged{0};
+static auto s_cmLastSecLog = std::chrono::steady_clock::now();
+
+static inline bool isSpriteFastEnabled() {
+    static int s_val = -1;
+    if (s_val == -1) {
+        const char *env = std::getenv("PS2X_GS_SPRITE_FAST");
+        s_val = (env && (env[0] == '0' || env[0] == 'f' || env[0] == 'F')) ? 0 : 1;
+    }
+    return s_val == 1;
+}
+
+static inline bool isSpriteVerifyEnabled() {
+    static int s_val = -1;
+    if (s_val == -1) {
+        const char *env = std::getenv("PS2X_GS_SPRITE_VERIFY");
+        s_val = (env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) ? 1 : 0;
+    }
+    return s_val == 1;
+}
+
 void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
 {
     const GSDrawState &state = batch.state;
@@ -1697,6 +1726,79 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         if (spriteH < 1.0f)
             spriteH = 1.0f;
 
+        const uint32_t fpsm = ctx.frame.psm;
+        const uint32_t fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+        const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+        const uint32_t zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+        const uint32_t zpsm = ctx.zbuf.psm;
+
+        const uint8_t wrapU = static_cast<uint8_t>(ctx.clamp & 0x3u);
+        const uint8_t wrapV = static_cast<uint8_t>((ctx.clamp >> 2) & 0x3u);
+
+        const int texU0 = static_cast<int>(v0.u >> 4);
+        const int texV0 = static_cast<int>(v0.v >> 4);
+        const int texU1 = static_cast<int>(v1.u >> 4);
+        const int texV1 = static_cast<int>(v1.v >> 4);
+
+        const bool isUvAligned = ((v0.u & 0xFu) == 0u) && ((v0.v & 0xFu) == 0u) &&
+                                 ((v1.u & 0xFu) == 0u) && ((v1.v & 0xFu) == 0u);
+        const bool isOneToOne = ((texU1 - texU0) == spanX) && ((texV1 - texV0) == spanY);
+        const bool isUvInBounds = (texU0 >= 0) && (texU1 <= texW) && (texV0 >= 0) && (texV1 <= texH);
+        const bool isWrapSupported = (wrapU <= 1u) && (wrapV <= 1u);
+
+        const bool isFormatSupported = (tex.psm == GS_PSM_CT32) && (fpsm == GS_PSM_CT32);
+
+        const bool isColorIdentity = (tex.tcc != 0u) &&
+            ((tex.tfx == 1u) ||
+             (tex.tfx == 0u && v1.r == 0x80u && v1.g == 0x80u && v1.b == 0x80u && v1.a == 0x80u));
+
+        const bool alphaTestOff = (ctx.test & 0x1u) == 0u;
+        const bool destAlphaTestOff = ((ctx.test >> 14) & 0x1u) == 0u;
+        const uint32_t ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+        const bool depthPass = ((ctx.test & (1u << 16)) == 0u) || (ztestMethod == 1u);
+        const bool writeDepth = !ctx.zbuf.zmask;
+
+        const bool isWritePixelPlain = (!state.prim.abe) && (!state.prim.fge) &&
+                                       (!state.dthe) && (ctx.frame.fbmsk == 0u) &&
+                                       ((ctx.fba & 1ull) == 0ull) && alphaTestOff &&
+                                       destAlphaTestOff && depthPass;
+
+        const bool canFastPath = state.prim.fst && isUvAligned && isOneToOne && isUvInBounds &&
+                                 isWrapSupported && isFormatSupported && isColorIdentity &&
+                                 isWritePixelPlain;
+
+        if (canFastPath && isSpriteFastEnabled() && !isSpriteVerifyEnabled())
+        {
+            s_cmFastTaken.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t drawnPxCount = static_cast<uint32_t>((drawY1 - drawY0 + 1) * (drawX1 - drawX0 + 1));
+            g_profPixels.fetch_add(drawnPxCount, std::memory_order_relaxed);
+
+            for (int y = drawY0; y <= drawY1; ++y)
+            {
+                const int sy = texV0 + (y - unclippedY0);
+                for (int x = drawX0; x <= drawX1; ++x)
+                {
+                    const int sx = texU0 + (x - unclippedX0);
+                    const uint32_t texel = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, sx, sy);
+                    WriteVramUnlocked(fpsm, fbp, fbw, x, y, texel);
+                    if (writeDepth)
+                    {
+                        WriteVramUnlocked(zpsm, zbp, fbw, x, y, z1);
+                    }
+                }
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cmLastSecLog).count() >= 1)
+            {
+                s_cmLastSecLog = now;
+                probe_ae::bhLog("[probe] cm sprite fast_taken=%llu generic=%llu\n",
+                                (unsigned long long)s_cmFastTaken.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cmGeneric.load(std::memory_order_relaxed));
+            }
+            return;
+        }
+
         for (int y = drawY0; y <= drawY1; ++y)
         {
             float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
@@ -1728,6 +1830,54 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 const TextureCombineResult color = combineTexture(tex, r, g, b, a, tr, tg, tb, ta);
                 WritePixel(state, x, y, z1, color.r, color.g, color.b, color.a, v1.fog);
             }
+        }
+
+        if (canFastPath && isSpriteVerifyEnabled())
+        {
+            s_cmChecked.fetch_add(1u, std::memory_order_relaxed);
+            bool spriteMatch = true;
+            for (int y = drawY0; y <= drawY1; ++y)
+            {
+                const int sy = texV0 + (y - unclippedY0);
+                for (int x = drawX0; x <= drawX1; ++x)
+                {
+                    const int sx = texU0 + (x - unclippedX0);
+                    const uint32_t expected = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, sx, sy);
+                    const uint32_t got = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+                    if (expected != got)
+                    {
+                        spriteMatch = false;
+                        s_cmMismPx.fetch_add(1u, std::memory_order_relaxed);
+                        uint32_t logged = s_cmMismLogged.fetch_add(1u, std::memory_order_relaxed);
+                        if (logged < 5u)
+                        {
+                            probe_ae::bhLog("[probe] cm sprite mism x=%d y=%d exp=0x%08X got=0x%08X\n", x, y, expected, got);
+                        }
+                    }
+                }
+            }
+            if (spriteMatch)
+            {
+                s_cmFastOk.fetch_add(1u, std::memory_order_relaxed);
+            }
+        }
+
+        s_cmGeneric.fetch_add(1u, std::memory_order_relaxed);
+
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cmLastSecLog).count() >= 1)
+        {
+            s_cmLastSecLog = now;
+            if (isSpriteVerifyEnabled())
+            {
+                probe_ae::bhLog("[probe] cm sprite fast_ok=%llu checked=%llu mism_px=%llu\n",
+                                (unsigned long long)s_cmFastOk.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cmChecked.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cmMismPx.load(std::memory_order_relaxed));
+            }
+            probe_ae::bhLog("[probe] cm sprite fast_taken=%llu generic=%llu\n",
+                            (unsigned long long)s_cmFastTaken.load(std::memory_order_relaxed),
+                            (unsigned long long)s_cmGeneric.load(std::memory_order_relaxed));
         }
     }
     else
