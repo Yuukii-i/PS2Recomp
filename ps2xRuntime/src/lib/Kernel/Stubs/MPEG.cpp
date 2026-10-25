@@ -27,6 +27,11 @@ extern std::atomic<uint32_t> g_trackedCurVtable;
 extern std::atomic<uint32_t> g_movieGetPictureCount;
 extern std::atomic<uint32_t> g_movieIsEndCount;
 
+namespace probe_ae {
+    void onMovieCreated();
+    void onMovieRaw8Geometry(uint32_t width, uint32_t height, uint32_t mbCols, uint32_t mbRows);
+}
+
 namespace ps2_stubs
 {
     namespace
@@ -2062,6 +2067,7 @@ struct MpegCallLogger {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             getPlaybackState(param_1) = makeFreshPlaybackState();
         }
+        probe_ae::onMovieCreated();
 
         const uint32_t puVar4 = uVar3 + 0x108u;
         const uint32_t innerSize = static_cast<uint32_t>(iVar2_signed) - 0x118u;
@@ -2580,6 +2586,8 @@ struct MpegCallLogger {
         {
             mbRows = static_cast<uint32_t>(s_raw8RowsEnv);
         }
+
+        probe_ae::onMovieRaw8Geometry(picWidth, picHeight, mbCols, mbRows);
 
         const uint32_t totalMbs = mbCols * mbRows;
         const uint32_t numMbs = std::min(mbCapacity, totalMbs);

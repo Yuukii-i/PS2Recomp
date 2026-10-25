@@ -7,6 +7,76 @@
 
 extern void recordCompletedIntcCause(uint32_t cause);
 
+namespace probe_ae {
+    void onMovieKickMscalCount(uint32_t count);
+}
+
+static uint32_t count0x48MscalsInKick(const uint8_t *data, uint32_t sizeBytes) {
+    uint32_t count = 0;
+    uint32_t pos = 0;
+    uint32_t cycle = 0;
+    while (pos + 4 <= sizeBytes) {
+        uint32_t cmd;
+        std::memcpy(&cmd, data + pos, 4);
+        pos += 4;
+        uint8_t opcode = (cmd >> 24) & 0x7F;
+        uint16_t imm = cmd & 0xFFFF;
+        uint8_t num = (cmd >> 16) & 0xFF;
+        if (opcode == 0) continue;
+        if (opcode == 0x01) { cycle = imm; continue; }
+        if (opcode == 0x02 || opcode == 0x03 || opcode == 0x04 || opcode == 0x05 || opcode == 0x07) continue;
+        if (opcode == 0x10 || opcode == 0x11 || opcode == 0x13) continue;
+        if (opcode == 0x14 || opcode == 0x15) {
+            if ((imm * 8u) == 0x048u) {
+                count++;
+            }
+            continue;
+        }
+        if (opcode == 0x17) continue;
+        if (opcode == 0x20) { pos += 4; continue; }
+        if (opcode == 0x30 || opcode == 0x31) { pos += 16; continue; }
+        if (opcode == 0x4A) {
+            uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
+            pos += instructionCount * 8u;
+            continue;
+        }
+        if (opcode == 0x50 || opcode == 0x51) {
+            uint32_t qw = (imm == 0u) ? 65536u : static_cast<uint32_t>(imm);
+            pos += qw * 16u;
+            continue;
+        }
+        if ((opcode & 0x60) == 0x60) {
+            uint8_t vn = (opcode >> 2) & 0x3;
+            uint8_t vl = opcode & 0x3;
+            int components = vn + 1;
+            int bitsPerComponent = 32;
+            switch (vl) {
+            case 0: bitsPerComponent = 32; break;
+            case 1: bitsPerComponent = 16; break;
+            case 2: bitsPerComponent = 8; break;
+            case 3: bitsPerComponent = (vn == 3) ? 4 : 16; break;
+            }
+            int bitsPerVector = (vl == 3 && vn == 3) ? 16 : (components * bitsPerComponent);
+            uint32_t bytesPerVector = (bitsPerVector + 7) / 8;
+            uint32_t writeVectorCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
+            uint32_t cl = cycle & 0xFFu; if (cl == 0) cl = 1;
+            uint32_t wl = (cycle >> 8) & 0xFFu; if (wl == 0) wl = 1;
+            uint32_t sourceVectorCount = writeVectorCount;
+            if (cl < wl) {
+                uint32_t fullBlocks = writeVectorCount / wl;
+                uint32_t rem = writeVectorCount % wl;
+                if (rem > cl) rem = cl;
+                sourceVectorCount = fullBlocks * cl + rem;
+            }
+            uint32_t totalBytes = (sourceVectorCount * bytesPerVector + 3u) & ~3u;
+            pos += totalBytes;
+            continue;
+        }
+        break;
+    }
+    return count;
+}
+
 enum VIFCmd : uint8_t
 {
     VIF_NOP = 0x00,
@@ -306,6 +376,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         return;
 
     probe_ae::onBhVif1Start();
+    uint32_t mscal0x48Count = count0x48MscalsInKick(data, sizeBytes);
+    probe_ae::onMovieKickMscalCount(mscal0x48Count);
     uint32_t kickUnpacksSkipped = 0;
     uint32_t kickBytesSkipped = 0;
     auto tVif1Start = std::chrono::steady_clock::now();

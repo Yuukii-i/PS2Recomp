@@ -1013,10 +1013,18 @@ namespace probe_ae {
     static uint32_t s_mainRing[16] = {0};
     static uint32_t s_mainRingIdx = 0;
 
+    static std::mutex s_brRingMutex;
+    static uint32_t s_brMainRing[24] = {0};
+    static uint32_t s_brMainRingIdx = 0;
+
     void recordMainThreadDispatch(uint32_t pc) {
         if (!isEnabled()) return;
         std::lock_guard<std::mutex> lock(s_ringMutex);
         s_mainRing[s_mainRingIdx++ % 16] = pc;
+        {
+            std::lock_guard<std::mutex> brLock(s_brRingMutex);
+            s_brMainRing[s_brMainRingIdx++ % 24] = pc;
+        }
     }
 
     std::string getRecentMainDispatches() {
@@ -2704,6 +2712,43 @@ namespace probe_ae {
     static auto s_bgProbeLastSec = std::chrono::steady_clock::now();
     static std::set<std::string> s_reportedInterpretReasons;
 
+    static uint32_t s_movieWidth = 512;
+    static uint32_t s_movieHeight = 384;
+    static uint32_t s_movieMbCols = 32;
+    static uint32_t s_movieMbRows = 24;
+    static uint32_t s_movieTotalMbs = 768;
+    static uint32_t s_movieInstance = 0;
+    static uint32_t s_lastPrintedMovieInstance = 0;
+    static uint32_t s_lastPrintedW = 0;
+    static uint32_t s_lastPrintedH = 0;
+    static std::atomic<uint32_t> s_kickMscalCount{0};
+
+    void onMovieCreated() {
+        s_movieInstance++;
+    }
+
+    void onMovieRaw8Geometry(uint32_t width, uint32_t height, uint32_t mbCols, uint32_t mbRows) {
+        s_movieWidth = width;
+        s_movieHeight = height;
+        s_movieMbCols = mbCols;
+        s_movieMbRows = mbRows;
+        s_movieTotalMbs = mbCols * mbRows;
+
+        if (s_movieInstance != s_lastPrintedMovieInstance || width != s_lastPrintedW || height != s_lastPrintedH) {
+            s_lastPrintedMovieInstance = s_movieInstance;
+            s_lastPrintedW = width;
+            s_lastPrintedH = height;
+            bhLog("[hle] movie geometry w=%u h=%u cols=%u rows=%u mbs=%u\n",
+                  width, height, mbCols, mbRows, s_movieTotalMbs);
+            ps2xSafeLog("[hle] movie geometry w=%u h=%u cols=%u rows=%u mbs=%u\n",
+                        width, height, mbCols, mbRows, s_movieTotalMbs);
+        }
+    }
+
+    void onMovieKickMscalCount(uint32_t count) {
+        s_kickMscalCount.store(count, std::memory_order_relaxed);
+    }
+
     static void doMovieFrameTransfer(GS &gs, PS2Memory *memory, uint32_t base, double &outNativeMs, double &outXferMs) {
         const uint8_t *rdram = memory ? memory->getRDRAM() : s_cachedRdram;
         if (!rdram) {
@@ -2720,12 +2765,14 @@ namespace probe_ae {
         const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
         const uint32_t dpsm = ctx.frame.psm & 0x3Fu;
 
-        // Preallocated packets:
-        // Packet 1: 96 bytes header + 393,216 bytes image data (rows 0..191)
-        // Packet 2: 96 bytes header + 393,216 bytes image data (rows 192..383)
-        // Packet 3: 80 bytes restore A+D
-        static std::vector<uint8_t> s_pkt1(96 + 393216, 0);
-        static std::vector<uint8_t> s_pkt2(96 + 393216, 0);
+        uint32_t scissorW = (ctx.scissor.x1 >= ctx.scissor.x0) ? (ctx.scissor.x1 - ctx.scissor.x0 + 1u) : s_movieWidth;
+        uint32_t scissorH = (ctx.scissor.y1 >= ctx.scissor.y0) ? (ctx.scissor.y1 - ctx.scissor.y0 + 1u) : (s_movieMbRows * 16u);
+
+        uint32_t targetW = std::min(s_movieWidth, scissorW);
+        uint32_t targetH = std::min(s_movieMbRows * 16u, scissorH);
+
+        static std::vector<uint8_t> s_pkt1;
+        static std::vector<uint8_t> s_pkt2;
         static std::vector<uint8_t> s_pktRestore(80, 0);
 
         auto writeSetupPacket = [](std::vector<uint8_t> &pkt, uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg, uint64_t trxdir, uint32_t imageNloop) {
@@ -2759,20 +2806,28 @@ namespace probe_ae {
         const uint64_t bitbltbuf_val = (static_cast<uint64_t>(fbp & 0x3FFFu) << 32u) |
                                        (static_cast<uint64_t>(fbw & 0x3Fu) << 48u) |
                                        (static_cast<uint64_t>(dpsm & 0x3Fu) << 56u);
-        const uint64_t trxreg_val = (512ull) | (192ull << 32u);
         const uint64_t trxdir_val = 0ull;
 
-        writeSetupPacket(s_pkt1, bitbltbuf_val, 0ull, trxreg_val, trxdir_val, 24576);
-        const uint64_t trxpos2_val = (static_cast<uint64_t>(192 & 0x7FFu) << 48u);
-        writeSetupPacket(s_pkt2, bitbltbuf_val, trxpos2_val, trxreg_val, trxdir_val, 24576);
+        uint32_t pkt1_h = std::min(targetH, 192u);
+        s_pkt1.resize(96 + targetW * pkt1_h * 4u);
+        const uint64_t trxreg1_val = static_cast<uint64_t>(targetW) | (static_cast<uint64_t>(pkt1_h) << 32u);
+        writeSetupPacket(s_pkt1, bitbltbuf_val, 0ull, trxreg1_val, trxdir_val, (targetW * pkt1_h) / 4u);
+
+        uint32_t pkt2_h = (targetH > 192u) ? (targetH - 192u) : 0u;
+        if (pkt2_h > 0) {
+            s_pkt2.resize(96 + targetW * pkt2_h * 4u);
+            const uint64_t trxpos2_val = (static_cast<uint64_t>(192 & 0x7FFu) << 48u);
+            const uint64_t trxreg2_val = static_cast<uint64_t>(targetW) | (static_cast<uint64_t>(pkt2_h) << 32u);
+            writeSetupPacket(s_pkt2, bitbltbuf_val, trxpos2_val, trxreg2_val, trxdir_val, (targetW * pkt2_h) / 4u);
+        }
 
         uint32_t *pkt1_pixels = reinterpret_cast<uint32_t*>(s_pkt1.data() + 96);
-        uint32_t *pkt2_pixels = reinterpret_cast<uint32_t*>(s_pkt2.data() + 96);
+        uint32_t *pkt2_pixels = (pkt2_h > 0) ? reinterpret_cast<uint32_t*>(s_pkt2.data() + 96) : nullptr;
 
         // Native YCbCr -> RGB conversion directly into packet payloads
-        for (uint32_t k = 0; k < 768u; ++k) {
-            const uint32_t mbx = k / 24u;
-            const uint32_t mby = k % 24u;
+        for (uint32_t k = 0; k < s_movieTotalMbs; ++k) {
+            const uint32_t mbx = k / s_movieMbRows;
+            const uint32_t mby = k % s_movieMbRows;
             const uint32_t mb_base = (base + k * 384u) & PS2_RAM_MASK;
             if (mb_base + 384u > PS2_RAM_SIZE) continue;
 
@@ -2782,15 +2837,19 @@ namespace probe_ae {
 
             const uint32_t startX = mbx * 16u;
             const uint32_t startY = mby * 16u;
+            if (startX >= targetW) continue;
 
             for (uint32_t py = 0; py < 16u; ++py) {
                 const uint32_t y = startY + py;
+                if (y >= targetH) continue;
                 const uint32_t py_chroma = (py >> 1u) * 8u;
 
-                uint32_t *rowDst = (y < 192u) ? (pkt1_pixels + y * 512u + startX)
-                                              : (pkt2_pixels + (y - 192u) * 512u + startX);
+                uint32_t *rowDst = (y < 192u) ? (pkt1_pixels + y * targetW + startX)
+                                              : (pkt2_pixels ? (pkt2_pixels + (y - 192u) * targetW + startX) : nullptr);
+                if (!rowDst) continue;
 
                 for (uint32_t px = 0; px < 16u; ++px) {
+                    if (startX + px >= targetW) continue;
                     const uint8_t y_val = mbY[py * 16u + px];
                     const uint32_t ch_idx = py_chroma + (px >> 1u);
                     const int cb_val = static_cast<int>(mbCb[ch_idx]) - 128;
@@ -2863,11 +2922,15 @@ namespace probe_ae {
         // Submit through Path1 in-order with surrounding draws
         if (memory) {
             memory->submitGifPacket(GifPathId::Path1, s_pkt1.data(), static_cast<uint32_t>(s_pkt1.size()));
-            memory->submitGifPacket(GifPathId::Path1, s_pkt2.data(), static_cast<uint32_t>(s_pkt2.size()));
+            if (pkt2_h > 0) {
+                memory->submitGifPacket(GifPathId::Path1, s_pkt2.data(), static_cast<uint32_t>(s_pkt2.size()));
+            }
             memory->submitGifPacket(GifPathId::Path1, s_pktRestore.data(), static_cast<uint32_t>(s_pktRestore.size()));
         } else {
             gs.processGIFPacket(s_pkt1.data(), static_cast<uint32_t>(s_pkt1.size()));
-            gs.processGIFPacket(s_pkt2.data(), static_cast<uint32_t>(s_pkt2.size()));
+            if (pkt2_h > 0) {
+                gs.processGIFPacket(s_pkt2.data(), static_cast<uint32_t>(s_pkt2.size()));
+            }
             gs.processGIFPacket(s_pktRestore.data(), static_cast<uint32_t>(s_pktRestore.size()));
         }
 
@@ -2946,14 +3009,23 @@ namespace probe_ae {
             const uint8_t *rdram = memory ? memory->getRDRAM() : s_cachedRdram;
             const bool movieActive = isMovieActive(rdram);
             uint32_t base = s_movieKickFirstUnpackSrc.load(std::memory_order_relaxed);
+            uint32_t mscalsInKick = s_kickMscalCount.load(std::memory_order_relaxed);
 
             const char *failReason = nullptr;
             if (!movieActive) {
                 failReason = "movie_not_active";
             } else if (base == 0) {
                 failReason = "no_y_unpack";
-            } else if (base + 768u * 384u > PS2_RAM_SIZE) {
+            } else if (base + s_movieTotalMbs * 384u > PS2_RAM_SIZE) {
                 failReason = "base_out_of_ram";
+            } else if (mscalsInKick != s_movieTotalMbs) {
+                failReason = "movie_geometry_mismatch";
+                static bool s_mismatchLogged = false;
+                if (!s_mismatchLogged) {
+                    s_mismatchLogged = true;
+                    bhLog("[hle] movie geometry mismatch mscals=%u expected=%u\n", mscalsInKick, s_movieTotalMbs);
+                    ps2xSafeLog("[hle] movie geometry mismatch mscals=%u expected=%u\n", mscalsInKick, s_movieTotalMbs);
+                }
             } else if (isMovieHleStrict() && !match) {
                 failReason = "strict_sig_mismatch";
             }
@@ -4652,8 +4724,132 @@ namespace probe_ae {
         ps2xSafeLog("================================================================\n");
     }
 
+    static const uint32_t s_brVtableAddrs[25] = {
+        0x004F131Cu, 0x004F14B0u, 0x004F1534u, 0x004F17B4u, 0x004F1818u,
+        0x00497E64u, 0x00497E6Cu, 0x004F12B0u, 0x004F12D4u, 0x00497E74u,
+        0x004F1300u, 0x004F12A0u, 0x004F1280u, 0x004F1200u, 0x004F1208u,
+        0x004F126Cu, 0x004F11F0u, 0x004F11D0u, 0x004F10B4u, 0x004F11B4u,
+        0x004F1100u, 0x004F1144u, 0x004F1178u, 0x004F10A4u, 0x004F1084u
+    };
+
+    static std::atomic<uint32_t> s_brFnSecCounts[25];
+    static std::atomic<bool> s_brSceneActive{false};
+    static uint32_t s_brSceneSec = 0;
+    static std::atomic<uint32_t> s_brRetCount_131c{0};
+    static std::atomic<uint32_t> s_brRetCount_14b0{0};
+    static std::atomic<uint32_t> s_brRetCount_1534{0};
+
+    static uint32_t s_prevSceneDump[96] = {0};
+    static bool s_hasPrevSceneDump = false;
+
+    void onBrFunctionEntry(uint32_t addr, const R5900Context *ctx) {
+        s_brSceneActive.store(true, std::memory_order_relaxed);
+        for (size_t i = 0; i < 25; ++i) {
+            if (s_brVtableAddrs[i] == addr) {
+                s_brFnSecCounts[i].fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+        }
+    }
+
+    void onBrFunctionExit(uint32_t addr, const R5900Context *ctx) {
+        if (!ctx) return;
+        uint32_t n = 0;
+        if (addr == 0x004F131Cu) n = s_brRetCount_131c.fetch_add(1, std::memory_order_relaxed) + 1;
+        else if (addr == 0x004F14B0u) n = s_brRetCount_14b0.fetch_add(1, std::memory_order_relaxed) + 1;
+        else if (addr == 0x004F1534u) n = s_brRetCount_1534.fetch_add(1, std::memory_order_relaxed) + 1;
+
+        if (n > 0 && n <= 20) {
+            uint32_t v0 = getRegU32(ctx, 2);
+            uint32_t ra = getRegU32(ctx, 31);
+            bhLog("[probe] br ret addr=0x%08X n=%u v0=0x%08X ra=0x%08X\n", addr, n, v0, ra);
+            ps2xSafeLog("[probe] br ret addr=0x%08X n=%u v0=0x%08X ra=0x%08X\n", addr, n, v0, ra);
+        }
+    }
+
+    void onBrTickSec(const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        if (!s_brSceneActive.load(std::memory_order_relaxed)) {
+            if (g_trackedCurScene.load(std::memory_order_relaxed) == 0x00852F20u ||
+                g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006AE6E0u) {
+                s_brSceneActive.store(true, std::memory_order_relaxed);
+            }
+        }
+        if (!s_brSceneActive.load(std::memory_order_relaxed)) return;
+
+        s_brSceneSec++;
+
+        // 1. Per-second entry counters
+        std::string countsStr;
+        uint32_t distinct = 0;
+        for (size_t i = 0; i < 25; ++i) {
+            uint32_t c = s_brFnSecCounts[i].exchange(0, std::memory_order_relaxed);
+            if (c > 0) {
+                distinct++;
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), " n(0x%08X)=%u", s_brVtableAddrs[i], c);
+                countsStr += buf;
+            }
+        }
+        bhLog("[probe] br fn sec=%u total_distinct=%u%s\n", s_brSceneSec, distinct, countsStr.c_str());
+        ps2xSafeLog("[probe] br fn sec=%u total_distinct=%u%s\n", s_brSceneSec, distinct, countsStr.c_str());
+
+        // 2. Every 5s dump scene object at 0x852F20 (0x180 bytes = 96 words)
+        if (s_brSceneSec % 5 == 0 && rdram) {
+            uint32_t currDump[96];
+            const uint32_t sceneAddr = 0x00852F20u & PS2_RAM_MASK;
+            if (sceneAddr + 0x180u <= PS2_RAM_SIZE) {
+                std::memcpy(currDump, rdram + sceneAddr, 0x180);
+
+                for (uint32_t line = 0; line < 12; ++line) {
+                    uint32_t off = line * 32;
+                    char buf[256];
+                    std::snprintf(buf, sizeof(buf),
+                                  "[probe] br scene +0x%03X: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+                                  off,
+                                  currDump[line * 8 + 0], currDump[line * 8 + 1],
+                                  currDump[line * 8 + 2], currDump[line * 8 + 3],
+                                  currDump[line * 8 + 4], currDump[line * 8 + 5],
+                                  currDump[line * 8 + 6], currDump[line * 8 + 7]);
+                    bhLog("%s", buf);
+                    ps2xSafeLog("%s", buf);
+                }
+
+                if (s_hasPrevSceneDump) {
+                    for (uint32_t i = 0; i < 96; ++i) {
+                        if (currDump[i] != s_prevSceneDump[i]) {
+                            bhLog("[probe] br scene delta +0x%03X: 0x%08X -> 0x%08X\n",
+                                  i * 4u, s_prevSceneDump[i], currDump[i]);
+                            ps2xSafeLog("[probe] br scene delta +0x%03X: 0x%08X -> 0x%08X\n",
+                                        i * 4u, s_prevSceneDump[i], currDump[i]);
+                        }
+                    }
+                }
+                std::memcpy(s_prevSceneDump, currDump, 0x180);
+                s_hasPrevSceneDump = true;
+            }
+        }
+
+        // 3. Ring at 10s and 30s
+        if (s_brSceneSec == 10 || s_brSceneSec == 30) {
+            std::lock_guard<std::mutex> lock(s_brRingMutex);
+            std::string ringStr;
+            uint32_t count = std::min(s_brMainRingIdx, 24u);
+            for (uint32_t i = 0; i < count; ++i) {
+                uint32_t idx = (s_brMainRingIdx >= 24) ? (s_brMainRingIdx - 24 + i) : i;
+                uint32_t pc = s_brMainRing[idx % 24];
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%s0x%08X", (i > 0 ? " " : ""), pc);
+                ringStr += buf;
+            }
+            bhLog("[probe] br main_ring sec=%u: %s\n", s_brSceneSec, ringStr.c_str());
+            ps2xSafeLog("[probe] br main_ring sec=%u: %s\n", s_brSceneSec, ringStr.c_str());
+        }
+    }
+
     void onBqTickSec(const uint8_t *rdram, double ee_ms) {
         if (!isEnabled()) return;
+        onBrTickSec(rdram);
         s_bqTotalSec++;
 
         uint32_t running = 0, blocked = 0;

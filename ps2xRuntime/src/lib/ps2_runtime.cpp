@@ -1342,6 +1342,36 @@ bool PS2Runtime::initialize(const char *title)
 
 static void registerConfigStubs(PS2Runtime &runtime, const std::string &configPath);
 
+namespace probe_ae {
+    void onBrFunctionEntry(uint32_t addr, const R5900Context *ctx);
+    void onBrFunctionExit(uint32_t addr, const R5900Context *ctx);
+}
+
+template<uint32_t Addr>
+struct BrProbeWrapper {
+    static PS2Runtime::RecompiledFunction s_orig;
+    static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        probe_ae::onBrFunctionEntry(Addr, ctx);
+        if (s_orig) {
+            s_orig(rdram, ctx, runtime);
+        }
+        probe_ae::onBrFunctionExit(Addr, ctx);
+    }
+};
+template<uint32_t Addr>
+PS2Runtime::RecompiledFunction BrProbeWrapper<Addr>::s_orig = nullptr;
+
+template<uint32_t Addr>
+static void installBrProbe(PS2Runtime *rt) {
+    if (Addr >= g_ps2RecompiledFunctionTableBase && Addr < g_ps2RecompiledFunctionTableEnd) {
+        const uint32_t slot = (Addr - g_ps2RecompiledFunctionTableBase) >> 2;
+        BrProbeWrapper<Addr>::s_orig = g_ps2RecompiledFunctionTable[slot];
+        if (BrProbeWrapper<Addr>::s_orig) {
+            rt->replaceFunction(Addr, &BrProbeWrapper<Addr>::thunk);
+        }
+    }
+}
+
 bool PS2Runtime::loadELF(const std::string &elfPath)
 {
     configureIoPathsFromElf(elfPath);
@@ -1850,6 +1880,33 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     INSTALL_STATENESS_PROBE(0x004E2730u, g_probe_4e2730);
     INSTALL_STATENESS_PROBE(0x0024C64Cu, g_probe_H);
 #undef INSTALL_STATENESS_PROBE
+
+    // Task BR: Scene 0x852F20 (vtable 0x6AE6E0) method probes
+    installBrProbe<0x004F131Cu>(this);
+    installBrProbe<0x004F14B0u>(this);
+    installBrProbe<0x004F1534u>(this);
+    installBrProbe<0x004F17B4u>(this);
+    installBrProbe<0x004F1818u>(this);
+    installBrProbe<0x00497E64u>(this);
+    installBrProbe<0x00497E6Cu>(this);
+    installBrProbe<0x004F12B0u>(this);
+    installBrProbe<0x004F12D4u>(this);
+    installBrProbe<0x00497E74u>(this);
+    installBrProbe<0x004F1300u>(this);
+    installBrProbe<0x004F12A0u>(this);
+    installBrProbe<0x004F1280u>(this);
+    installBrProbe<0x004F1200u>(this);
+    installBrProbe<0x004F1208u>(this);
+    installBrProbe<0x004F126Cu>(this);
+    installBrProbe<0x004F11F0u>(this);
+    installBrProbe<0x004F11D0u>(this);
+    installBrProbe<0x004F10B4u>(this);
+    installBrProbe<0x004F11B4u>(this);
+    installBrProbe<0x004F1100u>(this);
+    installBrProbe<0x004F1144u>(this);
+    installBrProbe<0x004F1178u>(this);
+    installBrProbe<0x004F10A4u>(this);
+    installBrProbe<0x004F1084u>(this);
 
     if (0x0031A514u >= g_ps2RecompiledFunctionTableBase && 0x0031A514u < g_ps2RecompiledFunctionTableEnd) {
         const uint32_t slot31a514 = (0x0031A514u - g_ps2RecompiledFunctionTableBase) >> 2;
