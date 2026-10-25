@@ -858,4 +858,9 @@ namespace probe_ae {
     void onBzNativeBlock(int32_t mbX, int32_t mbY);
     void onBzOrigRunBlock();
     void onBzTickSec();
+
+    // Task CA Probes
+    void recordCaMscal(uint32_t pc);
+    void checkCaDump(uint32_t startPC, uint32_t top, const uint8_t *vuData, uint32_t dataSize);
+    void onCaTickSec();
 }

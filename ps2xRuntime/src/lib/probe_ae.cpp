@@ -3009,7 +3009,11 @@ namespace probe_ae {
             s_sigCountsThisSec[hash]++;
         }
 
-        if (startPC != 0x048) {
+        probe_ae::recordCaMscal(startPC);
+
+        probe_ae::checkCaDump(startPC, top, vuData, dataSize);
+
+        if (startPC != 0x048 && startPC != 0x848) {
             s_movieKickMscalIndex.store(0, std::memory_order_relaxed);
             s_kickDecision.store(KickDecision::Undecided, std::memory_order_relaxed);
             return false;
@@ -3100,8 +3104,8 @@ namespace probe_ae {
         // Log once per movie for the first MSCAL
         if (s_lastBsMovieInstance != s_movieInstance) {
             s_lastBsMovieInstance = s_movieInstance;
-            bhLog("[hle] movie mscal-native pos0=(%d,%d) top=0x%03X\n", mbX, mbY, top & 0x3FFu);
-            ps2xSafeLog("[hle] movie mscal-native pos0=(%d,%d) top=0x%03X\n", mbX, mbY, top & 0x3FFu);
+            bhLog("[hle] movie mscal-native pc=0x%03X pos0=(%d,%d) top=0x%03X\n", startPC, mbX, mbY, top & 0x3FFu);
+            ps2xSafeLog("[hle] movie mscal-native pc=0x%03X pos0=(%d,%d) top=0x%03X\n", startPC, mbX, mbY, top & 0x3FFu);
         }
 
         // 2. Clip to SCISSOR_2
@@ -3174,18 +3178,25 @@ namespace probe_ae {
 
         uint32_t *dstPixels = reinterpret_cast<uint32_t*>(s_mbPkt.data() + 96);
 
+        static int s_movie848Shift = -999;
+        if (s_movie848Shift == -999) {
+            const char *env = std::getenv("PS2X_MOVIE_848_SHIFT");
+            s_movie848Shift = env ? std::atoi(env) : 0;
+        }
+        const uint32_t extraShift = (startPC == 0x848) ? static_cast<uint32_t>(s_movie848Shift) : 0u;
+
         // 4. Convert YCbCr to RGBA
         for (uint32_t py = 0; py < 16u; ++py) {
             const uint32_t py_chroma = (py >> 1u) * 8u;
             uint32_t *rowDst = dstPixels + py * 16u;
             for (uint32_t px = 0; px < 16u; ++px) {
                 const uint32_t p = py * 16u + px;
-                const uint32_t yByteOff = ((top + 0x20u + p) & 0x3FFu) * 16u;
+                const uint32_t yByteOff = ((top + 0x20u + extraShift + p) & 0x3FFu) * 16u;
                 const int32_t *yLane = reinterpret_cast<const int32_t*>(vuData + yByteOff);
                 const int32_t Y = yLane[0];
 
                 const uint32_t ch_idx = py_chroma + (px >> 1u);
-                const uint32_t chByteOff = ((top + 0x20u + ch_idx) & 0x3FFu) * 16u;
+                const uint32_t chByteOff = ((top + 0x20u + extraShift + ch_idx) & 0x3FFu) * 16u;
                 const int32_t *chLane = reinterpret_cast<const int32_t*>(vuData + chByteOff);
                 const int32_t Cb = chLane[1];
                 const int32_t Cr = chLane[2];
@@ -5001,6 +5012,7 @@ namespace probe_ae {
         onBwTickSec();
         onBxTickSec(rdram);
         onBzTickSec();
+        onCaTickSec();
         s_bqTotalSec++;
 
         uint32_t running = 0, blocked = 0;
@@ -6188,5 +6200,68 @@ namespace probe_ae {
 
         bhLog("[probe] bz mix native=%u orig=%u uniq_pos=%zu\n", native, orig, uniq);
         ps2xSafeLog("[probe] bz mix native=%u orig=%u uniq_pos=%zu\n", native, orig, uniq);
+    }
+
+    // =========================================================================
+    // Task CA: VU1 program start 0x848 support, dumps, and accounting
+    // =========================================================================
+    static std::atomic<uint32_t> s_caPc48{0};
+    static std::atomic<uint32_t> s_caPc848{0};
+    static std::atomic<uint32_t> s_caPcOther{0};
+
+    void recordCaMscal(uint32_t pc) {
+        if (!isEnabled()) return;
+        if (pc == 0x048) s_caPc48.fetch_add(1, std::memory_order_relaxed);
+        else if (pc == 0x848) s_caPc848.fetch_add(1, std::memory_order_relaxed);
+        else s_caPcOther.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    static std::mutex s_caDumpMutex;
+    static std::map<uint32_t, uint32_t> s_caDumpCounts; // top -> count (max 3 per top)
+    static uint32_t s_caTotalDumps = 0; // max 6 total
+
+    void checkCaDump(uint32_t startPC, uint32_t top, const uint8_t *vuData, uint32_t dataSize) {
+        if (!isEnabled() || startPC != 0x848 || !vuData || dataSize < 16384) return;
+        std::lock_guard<std::mutex> lock(s_caDumpMutex);
+        if (s_caTotalDumps >= 6) return;
+
+        uint32_t topVal = top & 0x3FFu;
+        uint32_t &cnt = s_caDumpCounts[topVal];
+        if (cnt >= 3) return;
+
+        uint32_t fileIndex = s_caTotalDumps++;
+        cnt++;
+
+        std::filesystem::create_directories("logs/vu1dump");
+        char filename[128];
+        std::snprintf(filename, sizeof(filename), "logs/vu1dump/i848_%u_top0x%03X.bin", fileIndex, topVal);
+
+        FILE *f = std::fopen(filename, "wb");
+        if (f) {
+            std::fwrite(vuData, 1, 16384, f);
+            std::fclose(f);
+        }
+
+        // Check if onBbRecordUnpack knows the EE source for this MSCAL
+        uint32_t srcGuest = 0;
+        if (!s_bbUnpacksSinceLastMscal.empty()) {
+            srcGuest = s_bbUnpacksSinceLastMscal.front().srcGuest;
+        }
+        if (srcGuest != 0) {
+            uint32_t base = s_movieKickFirstUnpackSrc.load(std::memory_order_relaxed);
+            uint32_t mb_idx = (base != 0 && srcGuest >= base) ? (srcGuest - base) / 384u : 0;
+            bhLog("[probe] ca src mb_index=%u ee_addr=0x%08X\n", mb_idx, srcGuest);
+            ps2xSafeLog("[probe] ca src mb_index=%u ee_addr=0x%08X\n", mb_idx, srcGuest);
+        }
+    }
+
+    void onCaTickSec() {
+        if (!isEnabled()) return;
+        uint32_t pc48 = s_caPc48.exchange(0, std::memory_order_relaxed);
+        uint32_t pc848 = s_caPc848.exchange(0, std::memory_order_relaxed);
+        uint32_t other = s_caPcOther.exchange(0, std::memory_order_relaxed);
+
+        bhLog("[probe] ca pcs pc48=%u pc848=%u other=%u\n", pc48, pc848, other);
+        ps2xSafeLog("[probe] ca pcs pc48=%u pc848=%u other=%u\n", pc48, pc848, other);
     }
 }
