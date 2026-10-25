@@ -804,4 +804,8 @@ namespace probe_ae {
     void onBqGetStats(uint32_t &sif_pending, uint32_t &sg2_polls, uint32_t &cid1_req);
     void recordSemaSignalBQ(int semaId, uint32_t ra, int threadId);
     void recordSemaWaitBQ(int semaId, uint32_t ra, int threadId);
+
+    // Task BT Probes
+    void onBtFunctionEntry(uint32_t addr, const struct R5900Context *ctx, const uint8_t *rdram);
+    void onBtTickSec(const uint8_t *rdram);
 }

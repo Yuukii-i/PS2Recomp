@@ -1345,6 +1345,31 @@ static void registerConfigStubs(PS2Runtime &runtime, const std::string &configPa
 namespace probe_ae {
     void onBrFunctionEntry(uint32_t addr, const R5900Context *ctx);
     void onBrFunctionExit(uint32_t addr, const R5900Context *ctx);
+    void onBtFunctionEntry(uint32_t addr, const R5900Context *ctx, const uint8_t *rdram);
+}
+
+template<uint32_t Addr>
+struct BtProbeWrapper {
+    static PS2Runtime::RecompiledFunction s_orig;
+    static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        probe_ae::onBtFunctionEntry(Addr, ctx, rdram);
+        if (s_orig) {
+            s_orig(rdram, ctx, runtime);
+        }
+    }
+};
+template<uint32_t Addr>
+PS2Runtime::RecompiledFunction BtProbeWrapper<Addr>::s_orig = nullptr;
+
+template<uint32_t Addr>
+static void installBtProbe(PS2Runtime *rt) {
+    if (Addr >= g_ps2RecompiledFunctionTableBase && Addr < g_ps2RecompiledFunctionTableEnd) {
+        const uint32_t slot = (Addr - g_ps2RecompiledFunctionTableBase) >> 2;
+        BtProbeWrapper<Addr>::s_orig = g_ps2RecompiledFunctionTable[slot];
+        if (BtProbeWrapper<Addr>::s_orig) {
+            rt->replaceFunction(Addr, &BtProbeWrapper<Addr>::thunk);
+        }
+    }
 }
 
 template<uint32_t Addr>
@@ -1907,6 +1932,17 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     installBrProbe<0x004F1178u>(this);
     installBrProbe<0x004F10A4u>(this);
     installBrProbe<0x004F1084u>(this);
+
+    // Task BT Probes
+    installBtProbe<0x0024CD04u>(this);
+    installBtProbe<0x0024C164u>(this);
+    installBtProbe<0x0024CE28u>(this);
+    installBtProbe<0x0024C2D4u>(this);
+    installBtProbe<0x0024C690u>(this);
+    installBtProbe<0x0024CE0Cu>(this);
+    installBtProbe<0x0024CD58u>(this);
+    installBtProbe<0x0024CDACu>(this);
+    installBtProbe<0x0024C1DCu>(this);
 
     if (0x0031A514u >= g_ps2RecompiledFunctionTableBase && 0x0031A514u < g_ps2RecompiledFunctionTableEnd) {
         const uint32_t slot31a514 = (0x0031A514u - g_ps2RecompiledFunctionTableBase) >> 2;

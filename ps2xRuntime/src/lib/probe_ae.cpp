@@ -4990,6 +4990,7 @@ namespace probe_ae {
     void onBqTickSec(const uint8_t *rdram, double ee_ms) {
         if (!isEnabled()) return;
         onBrTickSec(rdram);
+        onBtTickSec(rdram);
         s_bqTotalSec++;
 
         uint32_t running = 0, blocked = 0;
@@ -5025,6 +5026,145 @@ namespace probe_ae {
             }
         } else {
             s_idleSecCount.store(0, std::memory_order_relaxed);
+        }
+    }
+
+    // =========================================================================
+    // Task BT Probes
+    // =========================================================================
+    static std::atomic<uint32_t> s_btFCalls{0};
+    static std::atomic<uint32_t> s_btGCalls{0};
+    static std::map<uint32_t, std::atomic<uint32_t>> s_btHookCounts;
+    static std::atomic<uint32_t> s_lastMovieStateBT{0};
+
+    static std::string getBtMainRing() {
+        std::lock_guard<std::mutex> lock(s_brRingMutex);
+        std::string s;
+        uint32_t count = std::min(s_brMainRingIdx, 24u);
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t idx = (s_brMainRingIdx >= 24) ? (s_brMainRingIdx - 24 + i) : i;
+            uint32_t pc = s_brMainRing[idx % 24];
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%s0x%08X", (i > 0 ? " " : ""), pc);
+            s += buf;
+        }
+        return s;
+    }
+
+    static void checkBtState10(const uint8_t *rdram) {
+        if (!isEnabled() || !rdram) return;
+        uint32_t st = 0;
+        std::memcpy(&st, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        uint32_t oldSt = s_lastMovieStateBT.exchange(st, std::memory_order_relaxed);
+
+        if (st == 10 && oldSt != 10) {
+            bhLog("================ [probe] BT MOVIE STATE 9->10 DUMP ================\n");
+            ps2xSafeLog("================ [probe] BT MOVIE STATE 9->10 DUMP ================\n");
+
+            // 1. Context words
+            static const uint32_t ctxOffsets[] = {
+                0x08, 0x0C, 0x10, 0x14, 0x18, 0x48, 0x4C, 0x50, 0x58, 0x5C,
+                0x60, 0x64, 0x68, 0x6C, 0x70, 0x7C, 0x84, 0x88, 0xC8, 0xCC,
+                0xD8, 0xE0, 0xE4, 0xE8
+            };
+            std::string ctxStr;
+            for (uint32_t off : ctxOffsets) {
+                uint32_t val = 0;
+                std::memcpy(&val, rdram + ((0x772180u + off) & PS2_RAM_MASK), 4);
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), " +%02X=0x%08X", off, val);
+                ctxStr += buf;
+            }
+            bhLog("[probe] bt change ctx:%s\n", ctxStr.c_str());
+            ps2xSafeLog("[probe] bt change ctx:%s\n", ctxStr.c_str());
+
+            // 2. Command ring: head [+0x228], tail [+0x22C], entries from +0xA0
+            uint32_t head = 0, tail = 0;
+            std::memcpy(&head, rdram + ((0x1900E00u + 0x228u) & PS2_RAM_MASK), 4);
+            std::memcpy(&tail, rdram + ((0x1900E00u + 0x22Cu) & PS2_RAM_MASK), 4);
+            bhLog("[probe] bt change cmdq head=%u tail=%u\n", head, tail);
+            ps2xSafeLog("[probe] bt change cmdq head=%u tail=%u\n", head, tail);
+
+            for (uint32_t i = 0; i < 32; ++i) {
+                uint32_t eAddr = (0x1900E00u + 0x0A0u + i * 12u) & PS2_RAM_MASK;
+                uint32_t w0 = 0, w1 = 0, w2 = 0;
+                std::memcpy(&w0, rdram + eAddr + 0, 4);
+                std::memcpy(&w1, rdram + eAddr + 4, 4);
+                std::memcpy(&w2, rdram + eAddr + 8, 4);
+                if (w0 != 0 || w1 != 0 || w2 != 0 || i == head || i == tail) {
+                    bhLog("[probe] bt change cmdq[%u]: w0=0x%08X w1=0x%08X w2=0x%08X\n", i, w0, w1, w2);
+                    ps2xSafeLog("[probe] bt change cmdq[%u]: w0=0x%08X w1=0x%08X w2=0x%08X\n", i, w0, w1, w2);
+                }
+            }
+
+            // 3. Last 24 main thread function entries
+            std::string ring = getBtMainRing();
+            bhLog("[probe] bt change main_ring: %s\n", ring.c_str());
+            ps2xSafeLog("[probe] bt change main_ring: %s\n", ring.c_str());
+        }
+    }
+
+    void onBtFunctionEntry(uint32_t addr, const R5900Context *ctx, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        if (addr == 0x0024C164u) {
+            s_btFCalls.fetch_add(1, std::memory_order_relaxed);
+            if (rdram) {
+                checkBtState10(rdram);
+            }
+        } else if (addr == 0x0024CE28u) {
+            s_btGCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        uint32_t n = s_btHookCounts[addr].fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 10) {
+            uint32_t a0 = ctx ? getRegU32(ctx, 4) : 0;
+            uint32_t a1 = ctx ? getRegU32(ctx, 5) : 0;
+            uint32_t a2 = ctx ? getRegU32(ctx, 6) : 0;
+            uint32_t a3 = ctx ? getRegU32(ctx, 7) : 0;
+            uint32_t ra = ctx ? getRegU32(ctx, 31) : 0;
+            bhLog("[probe] bt hook 0x%08X n=%u a0=0x%08X a1=%u(0x%X) a2=0x%08X a3=0x%08X ra=0x%08X\n",
+                  addr, n, a0, a1, a1, a2, a3, ra);
+            ps2xSafeLog("[probe] bt hook 0x%08X n=%u a0=0x%08X a1=%u(0x%X) a2=0x%08X a3=0x%08X ra=0x%08X\n",
+                        addr, n, a0, a1, a1, a2, a3, ra);
+        }
+    }
+
+    void onBtTickSec(const uint8_t *rdram) {
+        if (!isEnabled() || !rdram) return;
+        checkBtState10(rdram);
+
+        uint32_t st = 0;
+        std::memcpy(&st, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        if (st == 9) {
+            uint32_t s60 = 0, s64 = 0, s5C = 0, s70 = 0;
+            std::memcpy(&s60, rdram + ((0x772180u + 0x60u) & PS2_RAM_MASK), 4);
+            std::memcpy(&s64, rdram + ((0x772180u + 0x64u) & PS2_RAM_MASK), 4);
+            std::memcpy(&s5C, rdram + ((0x772180u + 0x5Cu) & PS2_RAM_MASK), 4);
+            std::memcpy(&s70, rdram + ((0x772180u + 0x70u) & PS2_RAM_MASK), 4);
+
+            uint32_t head = 0, tail = 0;
+            std::memcpy(&head, rdram + ((0x1900E00u + 0x228u) & PS2_RAM_MASK), 4);
+            std::memcpy(&tail, rdram + ((0x1900E00u + 0x22Cu) & PS2_RAM_MASK), 4);
+
+            uint32_t g_calls = s_btGCalls.exchange(0, std::memory_order_relaxed);
+            uint32_t f_calls = s_btFCalls.exchange(0, std::memory_order_relaxed);
+
+            bhLog("[probe] bt sec s60=0x%X s64=0x%X s5C=%u s70=0x%X cmdq_head=%u cmdq_tail=%u g_calls=%u f_calls=%u\n",
+                  s60, s64, s5C, s70, head, tail, g_calls, f_calls);
+            ps2xSafeLog("[probe] bt sec s60=0x%X s64=0x%X s5C=%u s70=0x%X cmdq_head=%u cmdq_tail=%u g_calls=%u f_calls=%u\n",
+                        s60, s64, s5C, s70, head, tail, g_calls, f_calls);
+
+            if (head != tail) {
+                for (uint32_t idx = tail; idx != head; idx = (idx + 1) % 32) {
+                    uint32_t eAddr = (0x1900E00u + 0x0A0u + idx * 12u) & PS2_RAM_MASK;
+                    uint32_t w0 = 0, w1 = 0, w2 = 0;
+                    std::memcpy(&w0, rdram + eAddr + 0, 4);
+                    std::memcpy(&w1, rdram + eAddr + 4, 4);
+                    std::memcpy(&w2, rdram + eAddr + 8, 4);
+                    bhLog("[probe] bt sec cmdq[%u]: w0=0x%08X w1=0x%08X w2=0x%08X\n", idx, w0, w1, w2);
+                    ps2xSafeLog("[probe] bt sec cmdq[%u]: w0=0x%08X w1=0x%08X w2=0x%08X\n", idx, w0, w1, w2);
+                }
+            }
         }
     }
 }
