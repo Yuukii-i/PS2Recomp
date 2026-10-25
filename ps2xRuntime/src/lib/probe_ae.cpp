@@ -350,6 +350,7 @@ namespace probe_ae {
 
     void recordTraceLabel(uint32_t labelAddr) {
         if (!isEnabled()) return;
+        if (labelAddr == 0x24C1DCu) onBoLabel(0x24C1DCu);
         std::lock_guard<std::mutex> lock(s_traceMutex);
         s_ringBuffer[s_ringIdx] = labelAddr;
         s_ringIdx = (s_ringIdx + 1) % 64;
@@ -3480,6 +3481,7 @@ namespace probe_ae {
             s_bnClose1sDueTime = std::chrono::steady_clock::now() + std::chrono::seconds(1);
             s_bnClose1sPending.store(true, std::memory_order_relaxed);
         }
+        onBoCid1Req(opcode, fd, slotPtr, seq);
         s_blCid1TotalReq.fetch_add(1, std::memory_order_relaxed);
         s_blCid1SecReq.fetch_add(1, std::memory_order_relaxed);
         uint32_t line = s_blCid1LineCount.fetch_add(1, std::memory_order_relaxed);
@@ -3756,6 +3758,11 @@ namespace probe_ae {
         }
     }
 
+    void boFlushTail();
+    void boCheckStateChange(const uint8_t *rdram);
+    bool isBoActive();
+    void setBoClosed();
+
     static void doBmStallDump(const uint8_t *rdram, uint32_t curScene) {
         if (!rdram) return;
         auto read32 = [&](uint32_t addr) -> uint32_t {
@@ -3768,6 +3775,7 @@ namespace probe_ae {
         };
 
         bhLog("[probe] bm stall dump fired: curScene=0x%08X\n", curScene);
+        boFlushTail();
 
         // 1. Stack walk and regs like Task AT
         if (s_bmScheduler) {
@@ -3917,6 +3925,14 @@ namespace probe_ae {
             bool exp = false;
             if (s_bmStallDumped.compare_exchange_strong(exp, true)) {
                 doBmStallDump(rdram, curScene);
+            }
+        }
+
+        if (isBoActive()) {
+            boCheckStateChange(rdram);
+            if (curVtable != 0x006adfa8u) {
+                boFlushTail();
+                setBoClosed();
             }
         }
     }
@@ -4069,12 +4085,203 @@ namespace probe_ae {
                   a0, (int32_t)a1, a1, v0, dev30_in, dev30_out);
     }
 
+    // =========================================================================
+    // Task BO Probes
+    // =========================================================================
+    static std::mutex s_boMutex;
+    static std::atomic<bool> s_boActive{false};
+    static std::atomic<bool> s_boClosed{false};
+    static std::atomic<bool> s_boFlushed{false};
+    static std::atomic<uint32_t> s_boTotalLines{0};
+    static std::deque<std::string> s_boTailRing;
+    static std::atomic<uint32_t> s_boLastState{0xFFFFFFFFu};
+
+    struct BoCtxFields {
+        uint32_t st, c, h10, h14, h18;
+    };
+
+    static BoCtxFields getBoCtxFields(const uint8_t *rdram) {
+        BoCtxFields cf = {0, 0, 0, 0, 0};
+        const uint8_t *r = rdram ? rdram : s_cachedRdram;
+        if (r && (0x00772180u & PS2_RAM_MASK) + 0x20 <= PS2_RAM_SIZE) {
+            std::memcpy(&cf.st,  r + (0x00772188u & PS2_RAM_MASK), 4);
+            std::memcpy(&cf.c,   r + (0x0077218Cu & PS2_RAM_MASK), 4);
+            std::memcpy(&cf.h10, r + (0x00772190u & PS2_RAM_MASK), 4);
+            std::memcpy(&cf.h14, r + (0x00772194u & PS2_RAM_MASK), 4);
+            std::memcpy(&cf.h18, r + (0x00772198u & PS2_RAM_MASK), 4);
+        }
+        return cf;
+    }
+
+    static uint32_t getDev30(const uint8_t *rdram) {
+        const uint8_t *r = rdram ? rdram : s_cachedRdram;
+        if (r && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+            return *reinterpret_cast<const uint32_t *>(r + (0x00771BB8u & PS2_RAM_MASK));
+        }
+        return 0;
+    }
+
+    static bool isJalValidated(const uint8_t *rdram, uint32_t addr) {
+        const uint8_t *r = rdram ? rdram : s_cachedRdram;
+        if (!r) return false;
+        if ((addr & 3) != 0) return false;
+        if (addr < 0x00100008u || addr >= 0x00600000u) return false;
+        uint32_t callAddr = addr - 8;
+        if ((callAddr & PS2_RAM_MASK) + 4 > PS2_RAM_SIZE) return false;
+        uint32_t instr = *reinterpret_cast<const uint32_t *>(r + (callAddr & PS2_RAM_MASK));
+        uint32_t op = instr >> 26;
+        if (op == 3) return true; // jal target
+        if (op == 0 && (instr & 0x3Fu) == 9) return true; // jalr rs, rd
+        if (op == 1) { // bal / bgezal / bltzal
+            uint32_t rt = (instr >> 16) & 0x1Fu;
+            if (rt == 0x10 || rt == 0x11) return true;
+        }
+        return false;
+    }
+
+    static void getRaChain(const uint8_t *rdram, R5900Context *ctx, uint32_t ra_in, uint32_t sp_in, uint32_t &ra1, uint32_t &ra2) {
+        ra1 = ra_in ? ra_in : (ctx ? getRegU32(ctx, 31) : 0);
+        ra2 = 0;
+        uint32_t sp = sp_in ? sp_in : (ctx ? getRegU32(ctx, 29) : 0);
+        const uint8_t *r = rdram ? rdram : s_cachedRdram;
+        if (!r || sp < 0x1000) return;
+        uint32_t spMasked = sp & PS2_RAM_MASK;
+        for (uint32_t off = 0; off <= 0x200 - 4; off += 4) {
+            if (spMasked + off + 4 > PS2_RAM_SIZE) break;
+            uint32_t candidate = *reinterpret_cast<const uint32_t *>(r + spMasked + off);
+            if (candidate != ra1 && isJalValidated(r, candidate)) {
+                ra2 = candidate;
+                break;
+            }
+        }
+    }
+
+    static void boLogLine(const char *fmt, ...) {
+        if (!isEnabled()) return;
+        if (!s_boActive.load(std::memory_order_relaxed) || s_boClosed.load(std::memory_order_relaxed)) return;
+        char buf[512];
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+
+        std::lock_guard<std::mutex> lock(s_boMutex);
+        uint32_t idx = s_boTotalLines.fetch_add(1, std::memory_order_relaxed);
+        if (idx < 150) {
+            bhLog("%s", buf);
+            ps2xSafeLog("%s", buf);
+        } else {
+            if (s_boTailRing.size() >= 100) {
+                s_boTailRing.pop_front();
+            }
+            s_boTailRing.push_back(std::string(buf));
+        }
+    }
+
+    bool isBoActive() {
+        return s_boActive.load(std::memory_order_relaxed) && !s_boClosed.load(std::memory_order_relaxed);
+    }
+
+    void setBoClosed() {
+        s_boClosed.store(true, std::memory_order_relaxed);
+    }
+
+    void boFlushTail() {
+        std::lock_guard<std::mutex> lock(s_boMutex);
+        if (s_boFlushed.exchange(true)) return;
+        uint32_t total = s_boTotalLines.load(std::memory_order_relaxed);
+        if (total > 150 && !s_boTailRing.empty()) {
+            uint32_t skipped = (total > 150 + s_boTailRing.size()) ? (total - 150 - (uint32_t)s_boTailRing.size()) : 0;
+            if (skipped > 0) {
+                bhLog("[probe] bo ... (skipped %u lines) ...\n", skipped);
+                ps2xSafeLog("[probe] bo ... (skipped %u lines) ...\n", skipped);
+            }
+            for (const auto &line : s_boTailRing) {
+                bhLog("%s", line.c_str());
+                ps2xSafeLog("%s", line.c_str());
+            }
+        }
+        s_boTailRing.clear();
+    }
+
+    void boCheckStateChange(const uint8_t *rdram) {
+        if (!s_boActive.load(std::memory_order_relaxed) || s_boClosed.load(std::memory_order_relaxed)) return;
+        const uint8_t *r = rdram ? rdram : s_cachedRdram;
+        BoCtxFields cf = getBoCtxFields(r);
+        uint32_t lastSt = s_boLastState.load(std::memory_order_relaxed);
+        if (lastSt == 0xFFFFFFFFu) {
+            s_boLastState.store(cf.st, std::memory_order_relaxed);
+        } else if (cf.st != lastSt) {
+            s_boLastState.store(cf.st, std::memory_order_relaxed);
+            uint32_t dev30 = getDev30(r);
+            boLogLine("[probe] bo state %u->%u dev30=%u ctx_C=0x%08X ctx_10=0x%08X ctx_14=0x%08X\n",
+                      lastSt, cf.st, dev30, cf.c, cf.h10, cf.h14);
+        }
+    }
+
+    void onBoFEntry() {
+        if (!isEnabled()) return;
+        if (!s_boActive.load(std::memory_order_relaxed)) {
+            uint32_t curVtable = g_trackedCurVtable.load(std::memory_order_relaxed);
+            if (curVtable != 0x006adfa8u && s_cachedRdram) {
+                uint32_t sc = *reinterpret_cast<const uint32_t *>(s_cachedRdram + (0x00635530u & PS2_RAM_MASK));
+                if (sc >= 0x10000 && (sc & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) {
+                    curVtable = *reinterpret_cast<const uint32_t *>(s_cachedRdram + (sc & PS2_RAM_MASK));
+                }
+            }
+            if (curVtable == 0x006adfa8u) {
+                s_boActive.store(true, std::memory_order_relaxed);
+                boLogLine("[probe] bo activated on first F call in movie scene\n");
+            }
+        }
+        if (s_cachedRdram) {
+            boCheckStateChange(s_cachedRdram);
+        }
+    }
+
+    void onBoCid1Req(uint32_t opcode, uint32_t fd, uint32_t slotPtr, uint32_t seq) {
+        if (!isEnabled()) return;
+        if (!s_boActive.load(std::memory_order_relaxed) || s_boClosed.load(std::memory_order_relaxed)) return;
+        const uint8_t *rdram = s_cachedRdram;
+        boCheckStateChange(rdram);
+        uint32_t dev30 = getDev30(rdram);
+        boLogLine("[probe] bo cid1 op=%u fd=%u slot=0x%08X seq=%u dev30=%u\n",
+                  opcode, fd, slotPtr, seq, dev30);
+        if (opcode == 0x04) {
+            boFlushTail();
+            s_boClosed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    void onBoLabel(uint32_t labelAddr) {
+        if (!isEnabled()) return;
+        if (!s_boActive.load(std::memory_order_relaxed) || s_boClosed.load(std::memory_order_relaxed)) return;
+        const uint8_t *rdram = s_cachedRdram;
+        boCheckStateChange(rdram);
+        uint32_t dev30 = getDev30(rdram);
+        BoCtxFields cf = getBoCtxFields(rdram);
+        boLogLine("[probe] bo label 0x%08X dev30=%u st=%u ctx_C=0x%08X ctx_10=0x%08X ctx_14=0x%08X ctx_18=0x%08X\n",
+                  labelAddr, dev30, cf.st, cf.c, cf.h10, cf.h14, cf.h18);
+    }
+
+    void on24CD58(R5900Context *ctx) {
+        (void)ctx;
+        onBoLabel(0x24CD58u);
+    }
+
+    void on24CDAC(R5900Context *ctx) {
+        (void)ctx;
+        onBoLabel(0x24CDACu);
+    }
+
     // 0x1DB164
     BnHook_1DB164::BnHook_1DB164(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
         if (!isEnabled()) return;
         a0 = getRegU32(ctx, 4);
         a1 = getRegU32(ctx, 5);
         a2 = getRegU32(ctx, 6);
+        ra_in = getRegU32(ctx, 31);
+        sp_in = getRegU32(ctx, 29);
         dev30_in = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
     }
     BnHook_1DB164::~BnHook_1DB164() {
@@ -4083,12 +4290,22 @@ namespace probe_ae {
         uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
         bnLogLine(rdram, "[probe] bn 1DB164 a0=0x%08X a1=%d(0x%X) a2=%u -> v0=0x%08X dev30=%u->%u\n",
                   a0, (int32_t)a1, a1, a2, v0, dev30_in, dev30_out);
+        if (isBoActive()) {
+            boCheckStateChange(rdram);
+            uint32_t ra1 = 0, ra2 = 0;
+            getRaChain(rdram, ctx, ra_in, sp_in, ra1, ra2);
+            BoCtxFields cf = getBoCtxFields(rdram);
+            boLogLine("[probe] bo 1DB164 a0=0x%08X a1=%d(0x%X) a2=%u -> v0=0x%08X dev30=%u->%u ra=0x%08X ra2=0x%08X st=%u ctx_C=0x%08X ctx_10=0x%08X ctx_14=0x%08X ctx_18=0x%08X\n",
+                      a0, (int32_t)a1, a1, a2, v0, dev30_in, dev30_out, ra1, ra2, cf.st, cf.c, cf.h10, cf.h14, cf.h18);
+        }
     }
 
     // 0x1DBA64
     BnHook_1DBA64::BnHook_1DBA64(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
         if (!isEnabled()) return;
         a0 = getRegU32(ctx, 4);
+        ra_in = getRegU32(ctx, 31);
+        sp_in = getRegU32(ctx, 29);
         dev30_in = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
     }
     BnHook_1DBA64::~BnHook_1DBA64() {
@@ -4097,6 +4314,14 @@ namespace probe_ae {
         uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
         bnLogLine(rdram, "[probe] bn 1DBA64 alloc a0=0x%08X -> slot=%d(0x%X) dev30=%u->%u\n",
                   a0, (int32_t)v0, v0, dev30_in, dev30_out);
+        if (isBoActive()) {
+            boCheckStateChange(rdram);
+            uint32_t ra1 = 0, ra2 = 0;
+            getRaChain(rdram, ctx, ra_in, sp_in, ra1, ra2);
+            BoCtxFields cf = getBoCtxFields(rdram);
+            boLogLine("[probe] bo 1DBA64 alloc a0=0x%08X -> slot=%d(0x%X) dev30=%u->%u ra=0x%08X ra2=0x%08X st=%u ctx_C=0x%08X ctx_10=0x%08X ctx_14=0x%08X ctx_18=0x%08X\n",
+                      a0, (int32_t)v0, v0, dev30_in, dev30_out, ra1, ra2, cf.st, cf.c, cf.h10, cf.h14, cf.h18);
+        }
     }
 
     // 0x1DBAA0
@@ -4104,6 +4329,8 @@ namespace probe_ae {
         if (!isEnabled()) return;
         a0 = getRegU32(ctx, 4);
         a1 = getRegU32(ctx, 5);
+        ra_in = getRegU32(ctx, 31);
+        sp_in = getRegU32(ctx, 29);
         dev30_in = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
     }
     BnHook_1DBAA0::~BnHook_1DBAA0() {
@@ -4112,6 +4339,14 @@ namespace probe_ae {
         uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
         bnLogLine(rdram, "[probe] bn 1DBAA0 release a0=0x%08X slot=%d(0x%X) -> v0=0x%08X dev30=%u->%u\n",
                   a0, (int32_t)a1, a1, v0, dev30_in, dev30_out);
+        if (isBoActive()) {
+            boCheckStateChange(rdram);
+            uint32_t ra1 = 0, ra2 = 0;
+            getRaChain(rdram, ctx, ra_in, sp_in, ra1, ra2);
+            BoCtxFields cf = getBoCtxFields(rdram);
+            boLogLine("[probe] bo 1DBAA0 release a0=0x%08X slot=%d(0x%X) -> v0=0x%08X dev30=%u->%u ra=0x%08X ra2=0x%08X st=%u ctx_C=0x%08X ctx_10=0x%08X ctx_14=0x%08X ctx_18=0x%08X\n",
+                      a0, (int32_t)a1, a1, v0, dev30_in, dev30_out, ra1, ra2, cf.st, cf.c, cf.h10, cf.h14, cf.h18);
+        }
     }
 
     // 0x24CBFC
@@ -4126,5 +4361,90 @@ namespace probe_ae {
         uint32_t dev30_out = (rdram && (0x00771BB8u & PS2_RAM_MASK) + 4 <= PS2_RAM_SIZE) ? *reinterpret_cast<const uint32_t *>(rdram + 0x00771BB8u) : 0;
         bnLogLine(rdram, "[probe] bn 24CBFC poll a0=0x%08X -> v0=0x%08X dev30=%u->%u\n",
                   a0, v0, dev30_in, dev30_out);
+    }
+
+    // 0x1DC67C
+    BoHook_1DC67C::BoHook_1DC67C(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        a0 = getRegU32(ctx, 4);
+        a1 = getRegU32(ctx, 5);
+        a2 = getRegU32(ctx, 6);
+        a3 = getRegU32(ctx, 7);
+        t0 = getRegU32(ctx, 8);
+        ra_in = getRegU32(ctx, 31);
+        sp_in = getRegU32(ctx, 29);
+        dev30_in = getDev30(rdram);
+        a1_in[0] = a1_in[1] = a1_in[2] = a1_in[3] = 0;
+        const uint8_t *m = rdram ? rdram : s_cachedRdram;
+        if (m && a1 >= 0x1000 && (a1 & PS2_RAM_MASK) + 16 <= PS2_RAM_SIZE) {
+            std::memcpy(a1_in, m + (a1 & PS2_RAM_MASK), 16);
+        }
+    }
+    BoHook_1DC67C::~BoHook_1DC67C() {
+        if (!isEnabled()) return;
+        if (isBoActive()) {
+            boCheckStateChange(rdram);
+            uint32_t v0 = getRegU32(ctx, 2);
+            uint32_t dev30_out = getDev30(rdram);
+            uint32_t a1_out[4] = {0, 0, 0, 0};
+            const uint8_t *m = rdram ? rdram : s_cachedRdram;
+            if (m && a1 >= 0x1000 && (a1 & PS2_RAM_MASK) + 16 <= PS2_RAM_SIZE) {
+                std::memcpy(a1_out, m + (a1 & PS2_RAM_MASK), 16);
+            }
+            uint32_t ra1 = 0, ra2 = 0;
+            getRaChain(rdram, ctx, ra_in, sp_in, ra1, ra2);
+            BoCtxFields cf = getBoCtxFields(rdram);
+            boLogLine("[probe] bo 1DC67C a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X in=[0x%08X,0x%08X,0x%08X,0x%08X] -> v0=0x%08X out=[0x%08X,0x%08X,0x%08X,0x%08X] dev30=%u->%u ra=0x%08X ra2=0x%08X st=%u ctx_C=0x%08X ctx_10=0x%08X ctx_14=0x%08X ctx_18=0x%08X\n",
+                      a0, a1, a2, a3, t0,
+                      a1_in[0], a1_in[1], a1_in[2], a1_in[3],
+                      v0, a1_out[0], a1_out[1], a1_out[2], a1_out[3],
+                      dev30_in, dev30_out, ra1, ra2, cf.st, cf.c, cf.h10, cf.h14, cf.h18);
+        }
+    }
+
+    // 0x1DC578
+    BoHook_1DC578::BoHook_1DC578(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        a0 = getRegU32(ctx, 4);
+        a1 = getRegU32(ctx, 5);
+        ra_in = getRegU32(ctx, 31);
+        sp_in = getRegU32(ctx, 29);
+        dev30_in = getDev30(rdram);
+    }
+    BoHook_1DC578::~BoHook_1DC578() {
+        if (!isEnabled()) return;
+        if (isBoActive()) {
+            boCheckStateChange(rdram);
+            uint32_t v0 = getRegU32(ctx, 2);
+            uint32_t dev30_out = getDev30(rdram);
+            uint32_t ra1 = 0, ra2 = 0;
+            getRaChain(rdram, ctx, ra_in, sp_in, ra1, ra2);
+            BoCtxFields cf = getBoCtxFields(rdram);
+            boLogLine("[probe] bo 1DC578 poll a0=0x%08X a1=0x%08X -> v0=0x%08X dev30=%u->%u ra=0x%08X ra2=0x%08X st=%u ctx_C=0x%08X ctx_10=0x%08X ctx_14=0x%08X ctx_18=0x%08X\n",
+                      a0, a1, v0, dev30_in, dev30_out, ra1, ra2, cf.st, cf.c, cf.h10, cf.h14, cf.h18);
+        }
+    }
+
+    // 0x1DD010
+    BoHook_1DD010::BoHook_1DD010(const uint8_t *r, R5900Context *c) : rdram(r), ctx(c) {
+        if (!isEnabled()) return;
+        a0 = getRegU32(ctx, 4);
+        a1 = getRegU32(ctx, 5);
+        ra_in = getRegU32(ctx, 31);
+        sp_in = getRegU32(ctx, 29);
+        dev30_in = getDev30(rdram);
+    }
+    BoHook_1DD010::~BoHook_1DD010() {
+        if (!isEnabled()) return;
+        if (isBoActive()) {
+            boCheckStateChange(rdram);
+            uint32_t v0 = getRegU32(ctx, 2);
+            uint32_t dev30_out = getDev30(rdram);
+            uint32_t ra1 = 0, ra2 = 0;
+            getRaChain(rdram, ctx, ra_in, sp_in, ra1, ra2);
+            BoCtxFields cf = getBoCtxFields(rdram);
+            boLogLine("[probe] bo 1DD010 pump a0=0x%08X a1=0x%08X -> v0=0x%08X dev30=%u->%u ra=0x%08X ra2=0x%08X st=%u ctx_C=0x%08X ctx_10=0x%08X ctx_14=0x%08X ctx_18=0x%08X\n",
+                      a0, a1, v0, dev30_in, dev30_out, ra1, ra2, cf.st, cf.c, cf.h10, cf.h14, cf.h18);
+        }
     }
 }

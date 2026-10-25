@@ -152,6 +152,8 @@ namespace probe_ae {
 
     void printOncePerSec(uint32_t sec, const uint8_t *rdram);
 
+    void onBoFEntry();
+
     inline void onFEntry(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t s0, uint32_t s1) {
         if (!isEnabled()) return;
         cnt_F.fetch_add(1, std::memory_order_relaxed);
@@ -160,6 +162,7 @@ namespace probe_ae {
         reg_F_a2.store(a2, std::memory_order_relaxed);
         reg_F_s0.store(s0, std::memory_order_relaxed);
         reg_F_s1.store(s1, std::memory_order_relaxed);
+        onBoFEntry();
     }
 
     inline void onGEntry(uint32_t a0, uint32_t a1) {
@@ -265,10 +268,13 @@ namespace probe_ae {
         val_s3_680.store(getRegU32(ctx, 19), std::memory_order_relaxed);
     }
 
+    void onBoLabel(uint32_t labelAddr);
+
     // Task AF inlines
     inline void log24CE0C() {
         if (!isEnabled()) return;
         cnt_24ce0c.fetch_add(1, std::memory_order_relaxed);
+        onBoLabel(0x24CE0Cu);
     }
 
     inline void log24CE14(R5900Context *ctx, bool taken) {
@@ -343,6 +349,7 @@ namespace probe_ae {
 
     inline void logState6(R5900Context *ctx, const uint8_t *rdram) {
         if (!isEnabled()) return;
+        onBoLabel(0x24C4A4u);
         uint32_t s0 = getRegU32(ctx, 16);
         uint32_t b7c = 0, w30 = 0;
         if (rdram && s0 < PS2_RAM_SIZE - 0x80) {
@@ -459,6 +466,7 @@ namespace probe_ae {
     inline void log24C4C0() {
         if (!isEnabled()) return;
         cnt_24c4c0.fetch_add(1, std::memory_order_relaxed);
+        onBoLabel(0x24C4C0u);
     }
 
     inline void log24C4E0(R5900Context *ctx, const uint8_t *rdram) {
@@ -728,6 +736,7 @@ namespace probe_ae {
         const uint8_t *rdram;
         R5900Context *ctx;
         uint32_t a0, a1, a2, dev30_in;
+        uint32_t ra_in, sp_in;
         BnHook_1DB164(const uint8_t *r, R5900Context *c);
         ~BnHook_1DB164();
     };
@@ -735,6 +744,7 @@ namespace probe_ae {
         const uint8_t *rdram;
         R5900Context *ctx;
         uint32_t a0, dev30_in;
+        uint32_t ra_in, sp_in;
         BnHook_1DBA64(const uint8_t *r, R5900Context *c);
         ~BnHook_1DBA64();
     };
@@ -742,6 +752,7 @@ namespace probe_ae {
         const uint8_t *rdram;
         R5900Context *ctx;
         uint32_t a0, a1, dev30_in;
+        uint32_t ra_in, sp_in;
         BnHook_1DBAA0(const uint8_t *r, R5900Context *c);
         ~BnHook_1DBAA0();
     };
@@ -752,4 +763,35 @@ namespace probe_ae {
         BnHook_24CBFC(const uint8_t *r, R5900Context *c);
         ~BnHook_24CBFC();
     };
+
+    // Task BO
+    struct BoHook_1DC67C {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        uint32_t a0, a1, a2, a3, t0, dev30_in;
+        uint32_t a1_in[4];
+        uint32_t ra_in, sp_in;
+        BoHook_1DC67C(const uint8_t *r, R5900Context *c);
+        ~BoHook_1DC67C();
+    };
+    struct BoHook_1DC578 {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        uint32_t a0, a1, dev30_in;
+        uint32_t ra_in, sp_in;
+        BoHook_1DC578(const uint8_t *r, R5900Context *c);
+        ~BoHook_1DC578();
+    };
+    struct BoHook_1DD010 {
+        const uint8_t *rdram;
+        R5900Context *ctx;
+        uint32_t a0, a1, dev30_in;
+        uint32_t ra_in, sp_in;
+        BoHook_1DD010(const uint8_t *r, R5900Context *c);
+        ~BoHook_1DD010();
+    };
+
+    void on24CD58(R5900Context *ctx);
+    void on24CDAC(R5900Context *ctx);
+    void onBoCid1Req(uint32_t opcode, uint32_t fd, uint32_t slotPtr, uint32_t seq);
 }
