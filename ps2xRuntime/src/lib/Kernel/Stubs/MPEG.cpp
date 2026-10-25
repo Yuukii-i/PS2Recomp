@@ -2485,6 +2485,8 @@ struct MpegCallLogger {
 
             // Task AZ: Pop chunks from guest IPU ring (what Nodata callback 0x319E0C does)
             int popsThisCall = 0;
+            uint32_t ringUnderflowThisCall = 0;
+            uint32_t bytesInThisCall = 0;
             auto tFeedStart = std::chrono::steady_clock::now();
             while (playback.decodedFrames.empty() && popsThisCall < 4)
             {
@@ -2492,6 +2494,7 @@ struct MpegCallLogger {
                 uint32_t curHead = mpegGuestRead32(rdram, 0x696E8Cu) & 31u;
                 if (curHead == curTail)
                 {
+                    ringUnderflowThisCall = 1;
                     break;
                 }
 
@@ -2509,6 +2512,8 @@ struct MpegCallLogger {
                 size_t framesBefore = playback.decodedFrames.size();
                 if (packetSrc && entrySize > 0)
                 {
+                    bytesInThisCall += entrySize;
+                    probe_ae::onBwFeedChunk(packetSrc, entrySize);
                     if (!playback.decoder)
                     {
                         playback.decoder = std::make_unique<MpegFfmpegDecoder>();
@@ -2552,6 +2557,7 @@ struct MpegCallLogger {
                 height = playback.height;
                 frameCount = playback.picturesServed;
             }
+            probe_ae::onBwRaw8End(haveFrame, popsThisCall, bytesInThisCall, ringUnderflowThisCall);
         }
 
         mpegGuestWrite32(rdram, mpegAddr + 0x00u, width);

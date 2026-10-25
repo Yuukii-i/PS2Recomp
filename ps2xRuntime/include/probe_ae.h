@@ -830,4 +830,13 @@ namespace probe_ae {
     void recordBvMainWait(int kind, int id, uint32_t ra, double duration_ms);
     void recordBvIntcDelivery(uint32_t cause);
     uint64_t probe_getCid1Fd3Offset();
+
+    // Task BW Probes
+    void onBwFramePresented(uint32_t width, uint32_t height, const uint8_t *rgba, const uint8_t *rdram, const class PS2Runtime *rt);
+    void onBwMscalBlock(int32_t mbX, int32_t mbY);
+    void onBwDecPicture(int pict_type, int width, int height);
+    void onBwDecError(const char *err);
+    void onBwFeedChunk(const uint8_t *data, size_t size);
+    void onBwRaw8End(bool ok, int pops, uint32_t bytesIn, uint32_t underflow);
+    void onBwTickSec();
 }

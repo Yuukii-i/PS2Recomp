@@ -931,6 +931,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     }
 
     UpdateTexture(tex, s_uploadBuffer.data());
+    probe_ae::onBwFramePresented(width, height, s_uploadBuffer.data(), rt ? rt->memory().getRDRAM() : nullptr, rt);
     outWidth = width;
     outHeight = height;
     s_hasUploadedFrame = true;

@@ -34,6 +34,8 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA
 #include <unordered_set>
 #include <set>
 
+void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
+
 namespace probe_ae {
     // Task AE
     std::atomic<uint32_t> cnt_F{0};
@@ -3092,6 +3094,7 @@ namespace probe_ae {
         const int32_t mbX = rawX / 16;
         const int32_t mbY = rawY / 16;
 
+        probe_ae::onBwMscalBlock(mbX, mbY);
         // Log once per movie for the first MSCAL
         if (s_lastBsMovieInstance != s_movieInstance) {
             s_lastBsMovieInstance = s_movieInstance;
@@ -4992,6 +4995,8 @@ namespace probe_ae {
         onBrTickSec(rdram);
         onBtTickSec(rdram);
         onBuTickSec(rdram);
+        onBvTickSec();
+        onBwTickSec();
         s_bqTotalSec++;
 
         uint32_t running = 0, blocked = 0;
@@ -5500,5 +5505,242 @@ namespace probe_ae {
               totalMs, topStr.c_str(), c3, c5);
         ps2xSafeLog("[probe] bv wait total_ms=%.1f top5=<%s> cause3=%u cause5=%u\n",
                     totalMs, topStr.c_str(), c3, c5);
+    }
+
+    // =========================================================================
+    // Task BW: Display state, decode health, and screenshots for intro movie
+    // =========================================================================
+
+    static std::atomic<uint32_t> s_bwPresentedFrames{0};
+    static uint64_t s_bwLastXyoffset2 = 0xFFFFFFFFFFFFFFFFULL;
+    static uint64_t s_bwLastFrame2 = 0xFFFFFFFFFFFFFFFFULL;
+    static uint64_t s_bwLastScissor2 = 0xFFFFFFFFFFFFFFFFULL;
+    static uint64_t s_bwLastDispfb2 = 0xFFFFFFFFFFFFFFFFULL;
+    static uint64_t s_bwLastDisplay2 = 0xFFFFFFFFFFFFFFFFULL;
+    static uint64_t s_bwLastPmode = 0xFFFFFFFFFFFFFFFFULL;
+    static std::pair<int32_t, int32_t> s_bwLastFirstMscal{-9999, -9999};
+
+    // MSCAL block tracking per frame / per second
+    static std::mutex s_bwMscalMutex;
+    static bool s_bwFrameHasFirstMscal = false;
+    static std::pair<int32_t, int32_t> s_bwCurrentFrameFirstMscal{-1, -1};
+    static std::pair<int32_t, int32_t> s_bwSecFirstMscal{-1, -1};
+    static int32_t s_bwSecMinX = 999999, s_bwSecMinY = 999999;
+    static int32_t s_bwSecMaxX = -999999, s_bwSecMaxY = -999999;
+    static uint32_t s_bwSecBlocks = 0;
+
+    void onBwMscalBlock(int32_t mbX, int32_t mbY) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_bwMscalMutex);
+        if (!s_bwFrameHasFirstMscal) {
+            s_bwFrameHasFirstMscal = true;
+            s_bwCurrentFrameFirstMscal = {mbX, mbY};
+        }
+        if (s_bwSecBlocks == 0) {
+            s_bwSecFirstMscal = {mbX, mbY};
+        }
+        s_bwSecBlocks++;
+        if (mbX < s_bwSecMinX) s_bwSecMinX = mbX;
+        if (mbY < s_bwSecMinY) s_bwSecMinY = mbY;
+        if (mbX > s_bwSecMaxX) s_bwSecMaxX = mbX;
+        if (mbY > s_bwSecMaxY) s_bwSecMaxY = mbY;
+    }
+
+    // Screenshots
+    static auto s_bwLastShotTime = std::chrono::steady_clock::time_point::min();
+    static uint32_t s_bwShotIndex = 0;
+
+    void onBwFramePresented(uint32_t width, uint32_t height, const uint8_t *rgba, const uint8_t *rdram, const class PS2Runtime *rt) {
+        if (!isEnabled() || !rdram) return;
+        uint32_t st = 0;
+        std::memcpy(&st, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        if (st != 9) return;
+
+        uint32_t frameNum = s_bwPresentedFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+
+        // Fetch GS registers
+        uint64_t xyoffset2 = 0, frame2 = 0, scissor2 = 0;
+        uint64_t dispfb2 = 0, display2 = 0, pmode = 0;
+        {
+            std::lock_guard<std::mutex> lock(s_bbMutex);
+            xyoffset2 = s_bbGsRegs[0x19];
+            frame2 = s_bbGsRegs[0x4D];
+            scissor2 = s_bbGsRegs[0x41];
+            dispfb2 = s_bbDispfb2;
+            display2 = s_bbDisplay2;
+        }
+        if (rt) {
+            auto &mem = const_cast<PS2Runtime*>(rt)->memory();
+            pmode = mem.read64(0x12001000u + 0x0000u);
+            if (dispfb2 == 0) dispfb2 = mem.read64(0x12001000u + 0x0090u);
+            if (display2 == 0) display2 = mem.read64(0x12001000u + 0x00A0u);
+        }
+
+        std::pair<int32_t, int32_t> frameFirstMscal{-1, -1};
+        {
+            std::lock_guard<std::mutex> lock(s_bwMscalMutex);
+            frameFirstMscal = s_bwCurrentFrameFirstMscal;
+            s_bwFrameHasFirstMscal = false;
+            s_bwCurrentFrameFirstMscal = {-1, -1};
+        }
+
+        bool mscalDiff = (frameFirstMscal.first != -1 && frameFirstMscal != s_bwLastFirstMscal);
+        if (xyoffset2 != s_bwLastXyoffset2 || frame2 != s_bwLastFrame2 ||
+            scissor2 != s_bwLastScissor2 || dispfb2 != s_bwLastDispfb2 ||
+            display2 != s_bwLastDisplay2 || pmode != s_bwLastPmode || mscalDiff)
+        {
+            s_bwLastXyoffset2 = xyoffset2;
+            s_bwLastFrame2 = frame2;
+            s_bwLastScissor2 = scissor2;
+            s_bwLastDispfb2 = dispfb2;
+            s_bwLastDisplay2 = display2;
+            s_bwLastPmode = pmode;
+            if (frameFirstMscal.first != -1) s_bwLastFirstMscal = frameFirstMscal;
+
+            uint32_t dbp = static_cast<uint32_t>((dispfb2 >> 0) & 0x1FFu);
+            uint32_t dbw = static_cast<uint32_t>((dispfb2 >> 9) & 0x3Fu);
+            uint32_t psm = static_cast<uint32_t>((dispfb2 >> 15) & 0x1Fu);
+            uint32_t dbx = static_cast<uint32_t>((dispfb2 >> 32) & 0x7FFu);
+            uint32_t dby = static_cast<uint32_t>((dispfb2 >> 43) & 0x7FFu);
+
+            uint32_t dx = static_cast<uint32_t>((display2 >> 0) & 0xFFFu);
+            uint32_t dy = static_cast<uint32_t>((display2 >> 12) & 0x7FFu);
+            uint32_t magh = static_cast<uint32_t>((display2 >> 23) & 0x0Fu);
+            uint32_t magv = static_cast<uint32_t>((display2 >> 27) & 0x03u);
+            uint32_t dw = static_cast<uint32_t>((display2 >> 32) & 0x0FFFu);
+            uint32_t dh = static_cast<uint32_t>((display2 >> 44) & 0x07FFu);
+
+            bhLog("[probe] bw gs frame=%u XYOFF2=0x%016llX FRAME2=0x%016llX SCIS2=0x%016llX DISPFB2=(dbp=%u,dbw=%u,psm=%u,dbx=%u,dby=%u) DISPLAY2=(dx=%u,dy=%u,dw=%u,dh=%u,magh=%u,magv=%u) PMODE=0x%04llX mscal=(%d,%d)\n",
+                  frameNum, (unsigned long long)xyoffset2, (unsigned long long)frame2, (unsigned long long)scissor2,
+                  dbp, dbw, psm, dbx, dby, dx, dy, dw, dh, magh, magv, (unsigned long long)pmode,
+                  frameFirstMscal.first, frameFirstMscal.second);
+            ps2xSafeLog("[probe] bw gs frame=%u XYOFF2=0x%016llX FRAME2=0x%016llX SCIS2=0x%016llX DISPFB2=(dbp=%u,dbw=%u,psm=%u,dbx=%u,dby=%u) DISPLAY2=(dx=%u,dy=%u,dw=%u,dh=%u,magh=%u,magv=%u) PMODE=0x%04llX mscal=(%d,%d)\n",
+                        frameNum, (unsigned long long)xyoffset2, (unsigned long long)frame2, (unsigned long long)scissor2,
+                        dbp, dbw, psm, dbx, dby, dx, dy, dw, dh, magh, magv, (unsigned long long)pmode,
+                        frameFirstMscal.first, frameFirstMscal.second);
+        }
+
+        // Part C: screenshot every 3 seconds, max 30 files
+        auto now = std::chrono::steady_clock::now();
+        if (rgba && width > 0 && height > 0 && s_bwShotIndex < 30) {
+            double elapsedSec = std::chrono::duration<double>(now - s_bwLastShotTime).count();
+            if (elapsedSec >= 3.0) {
+                s_bwLastShotTime = now;
+                char filename[64];
+                std::snprintf(filename, sizeof(filename), "frames/bw_%02u.png", s_bwShotIndex++);
+                std::filesystem::create_directories("frames");
+                ::writeUncompressedPng(width, height, rgba, filename);
+                double t_ms = std::chrono::duration<double, std::milli>(now.time_since_epoch()).count();
+                bhLog("[probe] bw shot %s t_ms=%.1f\n", filename, t_ms);
+                ps2xSafeLog("[probe] bw shot %s t_ms=%.1f\n", filename, t_ms);
+            }
+        }
+    }
+
+    // Part B: Decode health
+    static std::atomic<uint32_t> s_bwDecCalls{0};
+    static std::atomic<uint32_t> s_bwDecOk{0};
+    static std::atomic<uint32_t> s_bwDecFail{0};
+    static std::atomic<uint32_t> s_bwRingPops{0};
+    static std::atomic<uint32_t> s_bwPicI{0};
+    static std::atomic<uint32_t> s_bwPicP{0};
+    static std::atomic<uint32_t> s_bwPicB{0};
+    static std::atomic<uint32_t> s_bwBytesIn{0};
+    static std::atomic<uint32_t> s_bwRingUnderflow{0};
+    static std::atomic<uint32_t> s_bwLastW{0};
+    static std::atomic<uint32_t> s_bwLastH{0};
+
+    static std::mutex s_bwErrMutex;
+    static uint32_t s_bwLoggedErrors = 0;
+    static std::atomic<uint32_t> s_bwChunksFed{0};
+
+    void onBwDecPicture(int pict_type, int width, int height) {
+        if (!isEnabled()) return;
+        if (pict_type == 1) s_bwPicI.fetch_add(1, std::memory_order_relaxed);
+        else if (pict_type == 2) s_bwPicP.fetch_add(1, std::memory_order_relaxed);
+        else if (pict_type == 3) s_bwPicB.fetch_add(1, std::memory_order_relaxed);
+        s_bwLastW.store(static_cast<uint32_t>(width), std::memory_order_relaxed);
+        s_bwLastH.store(static_cast<uint32_t>(height), std::memory_order_relaxed);
+    }
+
+    void onBwDecError(const char *err) {
+        if (!isEnabled() || !err) return;
+        std::lock_guard<std::mutex> lock(s_bwErrMutex);
+        if (s_bwLoggedErrors < 5) {
+            s_bwLoggedErrors++;
+            bhLog("[probe] bw decerr %s\n", err);
+            ps2xSafeLog("[probe] bw decerr %s\n", err);
+        }
+    }
+
+    void onBwFeedChunk(const uint8_t *data, size_t size) {
+        if (!isEnabled() || !data) return;
+        uint32_t chunkIdx = s_bwChunksFed.fetch_add(1, std::memory_order_relaxed);
+        if (chunkIdx < 6) {
+            char hexBuf[32];
+            int pos = 0;
+            size_t n = std::min<size_t>(size, 8);
+            for (size_t i = 0; i < n; ++i) {
+                pos += std::snprintf(hexBuf + pos, sizeof(hexBuf) - pos, "%02x ", data[i]);
+            }
+            bhLog("[probe] bw chunk%u bytes=%zu: %s\n", chunkIdx, size, hexBuf);
+            ps2xSafeLog("[probe] bw chunk%u bytes=%zu: %s\n", chunkIdx, size, hexBuf);
+        }
+    }
+
+    void onBwRaw8End(bool ok, int pops, uint32_t bytesIn, uint32_t underflow) {
+        if (!isEnabled()) return;
+        s_bwDecCalls.fetch_add(1, std::memory_order_relaxed);
+        if (ok) s_bwDecOk.fetch_add(1, std::memory_order_relaxed);
+        else s_bwDecFail.fetch_add(1, std::memory_order_relaxed);
+        s_bwRingPops.fetch_add(static_cast<uint32_t>(pops), std::memory_order_relaxed);
+        s_bwBytesIn.fetch_add(bytesIn, std::memory_order_relaxed);
+        s_bwRingUnderflow.fetch_add(underflow, std::memory_order_relaxed);
+    }
+
+    void onBwTickSec() {
+        if (!isEnabled()) return;
+
+        // 1. [probe] bw pos
+        std::pair<int32_t, int32_t> firstPos{-1, -1};
+        int32_t minX = 0, minY = 0, maxX = 0, maxY = 0;
+        uint32_t blocks = 0;
+        {
+            std::lock_guard<std::mutex> lock(s_bwMscalMutex);
+            firstPos = s_bwSecFirstMscal;
+            minX = (s_bwSecBlocks > 0) ? s_bwSecMinX : 0;
+            minY = (s_bwSecBlocks > 0) ? s_bwSecMinY : 0;
+            maxX = (s_bwSecBlocks > 0) ? s_bwSecMaxX : 0;
+            maxY = (s_bwSecBlocks > 0) ? s_bwSecMaxY : 0;
+            blocks = s_bwSecBlocks;
+
+            s_bwSecFirstMscal = {-1, -1};
+            s_bwSecMinX = 999999; s_bwSecMinY = 999999;
+            s_bwSecMaxX = -999999; s_bwSecMaxY = -999999;
+            s_bwSecBlocks = 0;
+        }
+
+        bhLog("[probe] bw pos first=(%d,%d) min=(%d,%d) max=(%d,%d) blocks=%u\n",
+              firstPos.first, firstPos.second, minX, minY, maxX, maxY, blocks);
+        ps2xSafeLog("[probe] bw pos first=(%d,%d) min=(%d,%d) max=(%d,%d) blocks=%u\n",
+                    firstPos.first, firstPos.second, minX, minY, maxX, maxY, blocks);
+
+        // 2. [probe] bw dec
+        uint32_t calls = s_bwDecCalls.exchange(0, std::memory_order_relaxed);
+        uint32_t ok = s_bwDecOk.exchange(0, std::memory_order_relaxed);
+        uint32_t fail = s_bwDecFail.exchange(0, std::memory_order_relaxed);
+        uint32_t pops = s_bwRingPops.exchange(0, std::memory_order_relaxed);
+        uint32_t picI = s_bwPicI.exchange(0, std::memory_order_relaxed);
+        uint32_t picP = s_bwPicP.exchange(0, std::memory_order_relaxed);
+        uint32_t picB = s_bwPicB.exchange(0, std::memory_order_relaxed);
+        uint32_t bytesIn = s_bwBytesIn.exchange(0, std::memory_order_relaxed);
+        uint32_t underflow = s_bwRingUnderflow.exchange(0, std::memory_order_relaxed);
+        uint32_t w = s_bwLastW.load(std::memory_order_relaxed);
+        uint32_t h = s_bwLastH.load(std::memory_order_relaxed);
+
+        bhLog("[probe] bw dec calls=%u ok=%u fail=%u ring_pops=%u pic_types=I:%u,P:%u,B:%u bytes_in=%u ring_underflow=%u w=%u h=%u\n",
+              calls, ok, fail, pops, picI, picP, picB, bytesIn, underflow, w, h);
+        ps2xSafeLog("[probe] bw dec calls=%u ok=%u fail=%u ring_pops=%u pic_types=I:%u,P:%u,B:%u bytes_in=%u ring_underflow=%u w=%u h=%u\n",
+                    calls, ok, fail, pops, picI, picP, picB, bytesIn, underflow, w, h);
     }
 }
