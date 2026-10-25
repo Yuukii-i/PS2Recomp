@@ -6264,4 +6264,148 @@ namespace probe_ae {
         bhLog("[probe] ca pcs pc48=%u pc848=%u other=%u\n", pc48, pc848, other);
         ps2xSafeLog("[probe] ca pcs pc48=%u pc848=%u other=%u\n", pc48, pc848, other);
     }
+
+    // =========================================================================
+    // Task CB: Stream-group boundary command ordering probe
+    // =========================================================================
+    static std::atomic<uint32_t> s_cbEventNum{0};
+    static uint32_t s_cbLastF58 = 0xFFFFFFFFu;
+    static uint32_t s_cbLastFrame60 = 0xFFFFFFFFu;
+
+    static bool isCbActive(const uint8_t *rdram) {
+        if (!isEnabled() || !rdram) return false;
+        // Check state at 0x772188: 9, 8, 6, 7
+        uint32_t st = 0;
+        std::memcpy(&st, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        if (st != 9 && st != 8 && st != 6 && st != 7) return false;
+
+        // Path at 0x772210 contains "advertise"
+        char pathBuf[64] = {0};
+        for (int i = 0; i < 63; ++i) {
+            char c = static_cast<char>(rdram[(0x772210u + i) & PS2_RAM_MASK]);
+            if (c == 0) break;
+            pathBuf[i] = c;
+        }
+        if (std::strstr(pathBuf, "advertise") == nullptr) return false;
+        return true;
+    }
+
+    static bool shouldLogCb(const uint8_t *rdram, uint32_t &curF58) {
+        if (!isCbActive(rdram)) return false;
+        std::memcpy(&curF58, rdram + (0x7721D8u & PS2_RAM_MASK), 4); // f58 = +0x58
+        uint32_t n = s_cbEventNum.load(std::memory_order_relaxed);
+        if (n < 200) return true;
+        if (curF58 != s_cbLastF58) {
+            s_cbLastF58 = curF58;
+            return true;
+        }
+        return false;
+    }
+
+    void onCbDispEntry(const struct R5900Context *ctx, const uint8_t *rdram, CbDispPre *pre) {
+        if (!ctx || !pre) return;
+        pre->a0 = getRegU32(ctx, 4);
+        pre->a1 = getRegU32(ctx, 5);
+        pre->a2 = getRegU32(ctx, 6);
+        pre->a3 = getRegU32(ctx, 7);
+    }
+
+    void onCbDispExit(const struct R5900Context *ctx, const uint8_t *rdram, const CbDispPre *pre) {
+        if (!ctx || !rdram || !pre) return;
+        uint32_t f58 = 0;
+        if (!shouldLogCb(rdram, f58)) return;
+
+        uint32_t n = s_cbEventNum.fetch_add(1, std::memory_order_relaxed);
+        uint32_t ret = getRegU32(ctx, 2); // v0
+
+        uint32_t st = 0, f60 = 0, f50 = 0, f74 = 0;
+        std::memcpy(&st, rdram + (0x772188u & PS2_RAM_MASK), 4);
+        std::memcpy(&f60, rdram + (0x7721E0u & PS2_RAM_MASK), 4);
+        std::memcpy(&f50, rdram + (0x7721D0u & PS2_RAM_MASK), 4);
+        std::memcpy(&f74, rdram + (0x7721F4u & PS2_RAM_MASK), 4);
+
+        uint32_t head = 0, tail = 0;
+        if (pre->a0 >= 0x00100000u && pre->a0 + 0x230u <= PS2_RAM_SIZE) {
+            std::memcpy(&head, rdram + ((pre->a0 + 0x228u) & PS2_RAM_MASK), 4);
+            std::memcpy(&tail, rdram + ((pre->a0 + 0x22Cu) & PS2_RAM_MASK), 4);
+        }
+
+        bhLog("[probe] cb disp n=%u cmd=%u a2=0x%X a3=0x%X ret=0x%X state=%u f58=0x%X f60=%u f50=%u f74=0x%X head=%u tail=%u\n",
+              n, pre->a1, pre->a2, pre->a3, ret, st, f58, f60, f50, f74, head, tail);
+        ps2xSafeLog("[probe] cb disp n=%u cmd=%u a2=0x%X a3=0x%X ret=0x%X state=%u f58=0x%X f60=%u f50=%u f74=0x%X head=%u tail=%u\n",
+                    n, pre->a1, pre->a2, pre->a3, ret, st, f58, f60, f50, f74, head, tail);
+
+        // Check frame60 multiple of 18
+        if (f60 > 0 && f60 % 18 == 0 && f60 != s_cbLastFrame60) {
+            s_cbLastFrame60 = f60;
+            bhLog("[probe] cb frame60=%u\n", f60);
+            ps2xSafeLog("[probe] cb frame60=%u\n", f60);
+        }
+    }
+
+    void onCbPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram, CbPumpPre *pre) {
+        if (!rdram || !pre) return;
+        std::memcpy(&pre->pre58, rdram + (0x7721D8u & PS2_RAM_MASK), 4);
+    }
+
+    void onCbPumpExit(const struct R5900Context *ctx, const uint8_t *rdram, const CbPumpPre *pre) {
+        if (!ctx || !rdram || !pre) return;
+        uint32_t post58 = 0;
+        if (!shouldLogCb(rdram, post58)) return;
+
+        uint32_t n = s_cbEventNum.fetch_add(1, std::memory_order_relaxed);
+        uint32_t ret = getRegU32(ctx, 2);
+        uint32_t postState = 0;
+        std::memcpy(&postState, rdram + (0x772188u & PS2_RAM_MASK), 4);
+
+        int32_t id10 = -1, idC = -1;
+        std::memcpy(&id10, rdram + (0x772190u & PS2_RAM_MASK), 4); // +0x10
+        std::memcpy(&idC, rdram + (0x77218Cu & PS2_RAM_MASK), 4);  // +0x0C
+
+        uint32_t w10[2] = {0, 0};
+        uint32_t wC[2] = {0, 0};
+        if (id10 >= 0) {
+            uint32_t a = (0x771BBCu + 16u * (uint32_t)id10) & PS2_RAM_MASK;
+            std::memcpy(w10, rdram + a, 8);
+        }
+        if (idC >= 0) {
+            uint32_t a = (0x771BBCu + 16u * (uint32_t)idC) & PS2_RAM_MASK;
+            std::memcpy(wC, rdram + a, 8);
+        }
+
+        bhLog("[probe] cb pump n=%u pre58=0x%X post58=0x%X ret=0x%X state_post=%u slot10=[%d:0x%X,0x%X] slotC=[%d:0x%X,0x%X]\n",
+              n, pre->pre58, post58, ret, postState, id10, w10[0], w10[1], idC, wC[0], wC[1]);
+        ps2xSafeLog("[probe] cb pump n=%u pre58=0x%X post58=0x%X ret=0x%X state_post=%u slot10=[%d:0x%X,0x%X] slotC=[%d:0x%X,0x%X]\n",
+                    n, pre->pre58, post58, ret, postState, id10, w10[0], w10[1], idC, wC[0], wC[1]);
+    }
+
+    void onCbRingCall(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!ctx || !rdram) return;
+        uint32_t f58 = 0;
+        if (!shouldLogCb(rdram, f58)) return;
+
+        uint32_t n = s_cbEventNum.fetch_add(1, std::memory_order_relaxed);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+
+        bhLog("[probe] cb ring n=%u a1=%u a2=0x%X f58=0x%X\n", n, a1, a2, f58);
+        ps2xSafeLog("[probe] cb ring n=%u a1=%u a2=0x%X f58=0x%X\n", n, a1, a2, f58);
+    }
+
+    void onCbCid1Submit(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!ctx || !rdram) return;
+        uint32_t f58 = 0;
+        if (!shouldLogCb(rdram, f58)) return;
+
+        uint32_t n = s_cbEventNum.fetch_add(1, std::memory_order_relaxed);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t a3 = getRegU32(ctx, 7);
+        uint32_t t0 = getRegU32(ctx, 8);
+
+        bhLog("[probe] cb video n=%u size=0x%X a1=0x%X a2=0x%X a3=0x%X t0=0x%X\n",
+              n, f58, a1, a2, a3, t0);
+        ps2xSafeLog("[probe] cb video n=%u size=0x%X a1=0x%X a2=0x%X a3=0x%X t0=0x%X\n",
+                    n, f58, a1, a2, a3, t0);
+    }
 }

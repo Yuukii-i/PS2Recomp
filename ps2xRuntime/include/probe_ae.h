@@ -863,4 +863,18 @@ namespace probe_ae {
     void recordCaMscal(uint32_t pc);
     void checkCaDump(uint32_t startPC, uint32_t top, const uint8_t *vuData, uint32_t dataSize);
     void onCaTickSec();
+
+    // Task CB Probes
+    struct CbPumpPre {
+        uint32_t pre58;
+    };
+    struct CbDispPre {
+        uint32_t a0, a1, a2, a3;
+    };
+    void onCbDispEntry(const struct R5900Context *ctx, const uint8_t *rdram, CbDispPre *pre);
+    void onCbDispExit(const struct R5900Context *ctx, const uint8_t *rdram, const CbDispPre *pre);
+    void onCbPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram, CbPumpPre *pre);
+    void onCbPumpExit(const struct R5900Context *ctx, const uint8_t *rdram, const CbPumpPre *pre);
+    void onCbRingCall(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onCbCid1Submit(const struct R5900Context *ctx, const uint8_t *rdram);
 }

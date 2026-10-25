@@ -1383,11 +1383,14 @@ struct BuPumpWrapper {
     static PS2Runtime::RecompiledFunction s_orig;
     static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
         probe_ae::BuPreState pre{};
+        probe_ae::CbPumpPre cbPre{};
         probe_ae::onBuPumpEntry(ctx, rdram, &pre);
+        probe_ae::onCbPumpEntry(ctx, rdram, &cbPre);
         if (s_orig) {
             s_orig(rdram, ctx, runtime);
         }
         probe_ae::onBuPumpExit(ctx, rdram, &pre);
+        probe_ae::onCbPumpExit(ctx, rdram, &cbPre);
     }
 };
 template<uint32_t Addr>
@@ -1409,6 +1412,7 @@ struct BvReadSubmitWrapper {
     static PS2Runtime::RecompiledFunction s_orig;
     static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
         probe_ae::onBvReadSubmit(ctx, rdram);
+        probe_ae::onCbRingCall(ctx, rdram);
         if (s_orig) {
             s_orig(rdram, ctx, runtime);
         }
@@ -1449,6 +1453,58 @@ static void installBzInitProbe(PS2Runtime *rt) {
         BzInitWrapper<Addr>::s_orig = g_ps2RecompiledFunctionTable[slot];
         if (BzInitWrapper<Addr>::s_orig) {
             rt->replaceFunction(Addr, &BzInitWrapper<Addr>::thunk);
+        }
+    }
+}
+
+template<uint32_t Addr>
+struct CbDispWrapper {
+    static PS2Runtime::RecompiledFunction s_orig;
+    static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        probe_ae::CbDispPre pre{};
+        probe_ae::onCbDispEntry(ctx, rdram, &pre);
+        if (s_orig) {
+            s_orig(rdram, ctx, runtime);
+        }
+        probe_ae::onCbDispExit(ctx, rdram, &pre);
+    }
+};
+template<uint32_t Addr>
+PS2Runtime::RecompiledFunction CbDispWrapper<Addr>::s_orig = nullptr;
+
+template<uint32_t Addr>
+static void installCbDispProbe(PS2Runtime *rt) {
+    if (Addr >= g_ps2RecompiledFunctionTableBase && Addr < g_ps2RecompiledFunctionTableEnd) {
+        const uint32_t slot = (Addr - g_ps2RecompiledFunctionTableBase) >> 2;
+        CbDispWrapper<Addr>::s_orig = g_ps2RecompiledFunctionTable[slot];
+        if (CbDispWrapper<Addr>::s_orig) {
+            rt->replaceFunction(Addr, &CbDispWrapper<Addr>::thunk);
+        }
+    }
+}
+
+template<uint32_t Addr>
+struct CbGenericCallWrapper {
+    static PS2Runtime::RecompiledFunction s_orig;
+    static void thunk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+        if constexpr (Addr == 0x001DB31Cu) {
+            probe_ae::onCbCid1Submit(ctx, rdram);
+        }
+        if (s_orig) {
+            s_orig(rdram, ctx, runtime);
+        }
+    }
+};
+template<uint32_t Addr>
+PS2Runtime::RecompiledFunction CbGenericCallWrapper<Addr>::s_orig = nullptr;
+
+template<uint32_t Addr>
+static void installCbGenericCallProbe(PS2Runtime *rt) {
+    if (Addr >= g_ps2RecompiledFunctionTableBase && Addr < g_ps2RecompiledFunctionTableEnd) {
+        const uint32_t slot = (Addr - g_ps2RecompiledFunctionTableBase) >> 2;
+        CbGenericCallWrapper<Addr>::s_orig = g_ps2RecompiledFunctionTable[slot];
+        if (CbGenericCallWrapper<Addr>::s_orig) {
+            rt->replaceFunction(Addr, &CbGenericCallWrapper<Addr>::thunk);
         }
     }
 }
@@ -2015,7 +2071,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     installBrProbe<0x004F1084u>(this);
 
     // Task BT Probes
-    installBtProbe<0x0024CD04u>(this);
+    // installBtProbe<0x0024CD04u>(this); replaced by Task CB CbDispProbe
     installBtProbe<0x0024C164u>(this);
     installBtProbe<0x0024CE28u>(this);
     installBtProbe<0x0024C2D4u>(this);
@@ -2028,6 +2084,10 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
     // Task BZ Probe
     installBzInitProbe<0x00319F38u>(this);
+
+    // Task CB Probes
+    installCbDispProbe<0x0024CD04u>(this);
+    installCbGenericCallProbe<0x001DB31Cu>(this);
     installBtProbe<0x0024C690u>(this);
     installBtProbe<0x0024CE0Cu>(this);
     installBtProbe<0x0024CD58u>(this);
