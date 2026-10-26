@@ -1660,6 +1660,128 @@ static std::atomic<uint64_t> s_cqMismPx{0};
 static std::atomic<uint32_t> s_cqMismLogged{0};
 static auto s_cqLastSecLog = std::chrono::steady_clock::now();
 
+// =========================================================================
+// Task CT: per-signature time table for GS sprites and triangles
+// =========================================================================
+struct CTSignature {
+    uint8_t kind; // 0 = sprite, 1 = triangle
+    uint16_t bucketW;
+    uint16_t bucketH;
+    uint8_t texOn;
+    uint8_t texPsm;
+    uint16_t texW;
+    uint16_t texH;
+    uint8_t linearFilter;
+    uint8_t tfx;
+    uint8_t abe;
+    uint16_t alphaReg; // low 8 bits + fix (bits 32..39 -> low 8 bits of fix)
+    uint8_t ate;
+    uint8_t zte;
+    uint8_t ztst;
+    uint8_t zmsk;
+    uint32_t fbmsk;
+    uint8_t framePsm;
+    uint32_t frameFbp;
+    uint32_t texTbp0;
+    uint8_t fastPathTaken;
+
+    bool operator==(const CTSignature &o) const {
+        return std::memcmp(this, &o, sizeof(CTSignature)) == 0;
+    }
+};
+
+struct CTSignatureHash {
+    size_t operator()(const CTSignature &s) const {
+        const uint8_t *p = reinterpret_cast<const uint8_t*>(&s);
+        size_t h = 14695981039346656037ULL;
+        for (size_t i = 0; i < sizeof(CTSignature); ++i) {
+            h ^= p[i];
+            h *= 1099511628211ULL;
+        }
+        return h;
+    }
+};
+
+struct CTStat {
+    uint64_t calls = 0;
+    uint64_t totalPixels = 0;
+    uint64_t totalUs = 0;
+};
+
+static std::unordered_map<CTSignature, CTStat, CTSignatureHash> s_ctMap;
+static uint64_t s_ctSpriteMs = 0;
+static uint64_t s_ctTriMs = 0;
+static uint64_t s_ctSpriteCalls = 0;
+static uint64_t s_ctTriCalls = 0;
+static auto s_ctLastIntervalTime = std::chrono::steady_clock::now();
+
+static inline void recordCTSample(const CTSignature &sig, uint64_t pxDrawn, uint64_t elapsedUs) {
+    auto &entry = s_ctMap[sig];
+    entry.calls++;
+    entry.totalPixels += pxDrawn;
+    entry.totalUs += elapsedUs;
+
+    uint64_t elapsedMs = elapsedUs / 1000u;
+    if (sig.kind == 0) {
+        s_ctSpriteCalls++;
+        s_ctSpriteMs += elapsedMs;
+    } else {
+        s_ctTriCalls++;
+        s_ctTriMs += elapsedMs;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto diffMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_ctLastIntervalTime).count();
+    if (diffMs >= 5000) {
+        s_ctLastIntervalTime = now;
+
+        struct RankedEntry {
+            CTSignature sig;
+            CTStat stat;
+        };
+        std::vector<RankedEntry> list;
+        list.reserve(s_ctMap.size());
+        for (const auto &kv : s_ctMap) {
+            list.push_back({kv.first, kv.second});
+        }
+        std::sort(list.begin(), list.end(), [](const RankedEntry &a, const RankedEntry &b) {
+            return a.stat.totalUs > b.stat.totalUs;
+        });
+
+        probe_ae::bhLog("[probe] ct top\n");
+        const size_t printCount = std::min<size_t>(10, list.size());
+        for (size_t i = 0; i < printCount; ++i) {
+            const auto &item = list[i];
+            const auto &s = item.sig;
+            const auto &st = item.stat;
+            uint64_t totalMs = st.totalUs / 1000u;
+            uint64_t nsPerPx = st.totalPixels > 0 ? (st.totalUs * 1000u) / st.totalPixels : 0;
+            const char kindChar = (s.kind == 0) ? 'S' : 'T';
+            probe_ae::bhLog("[probe] ct %zu kind=%c ms=%llu calls=%llu px=%llu ns_per_px=%llu size~%ux%u tex=%u psm=%u tex=%ux%u tbp0=0x%x lin=%u tfx=%u abe=%u alpha=0x%x ate=%u zte=%u ztst=%u zmsk=%u fbmsk=0x%x frame=%u@0x%x fast=%u\n",
+                            i + 1, kindChar, (unsigned long long)totalMs,
+                            (unsigned long long)st.calls, (unsigned long long)st.totalPixels,
+                            (unsigned long long)nsPerPx, (unsigned)s.bucketW, (unsigned)s.bucketH,
+                            (unsigned)s.texOn, (unsigned)s.texPsm, (unsigned)s.texW, (unsigned)s.texH,
+                            (unsigned)s.texTbp0, (unsigned)s.linearFilter, (unsigned)s.tfx,
+                            (unsigned)s.abe, (unsigned)s.alphaReg, (unsigned)s.ate,
+                            (unsigned)s.zte, (unsigned)s.ztst, (unsigned)s.zmsk,
+                            (unsigned)s.fbmsk, (unsigned)s.framePsm, (unsigned)s.frameFbp,
+                            (unsigned)s.fastPathTaken);
+        }
+
+        probe_ae::bhLog("[probe] ct sum sprite_ms=%llu tri_ms=%llu sprite_calls=%llu tri_calls=%llu interval_ms=%lld\n",
+                        (unsigned long long)s_ctSpriteMs, (unsigned long long)s_ctTriMs,
+                        (unsigned long long)s_ctSpriteCalls, (unsigned long long)s_ctTriCalls,
+                        (long long)diffMs);
+
+        s_ctMap.clear();
+        s_ctSpriteMs = 0;
+        s_ctTriMs = 0;
+        s_ctSpriteCalls = 0;
+        s_ctTriCalls = 0;
+    }
+}
+
 static inline bool isSpriteFastEnabled() {
     static int s_val = -1;
     if (s_val == -1) {
@@ -1681,6 +1803,10 @@ static inline bool isSpriteVerifyEnabled() {
 
 void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
 {
+    const bool isProbe = probe_ae::isEnabled();
+    const auto ctT0 = isProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    uint64_t ctPxBefore = isProbe ? g_profPixels.load(std::memory_order_relaxed) : 0u;
+
     const GSDrawState &state = batch.state;
     const GSVertex &v0 = batch.vertices[0];
     const GSVertex &v1 = batch.vertices[1];
@@ -1911,6 +2037,40 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                 (unsigned long long)s_cmFastTaken.load(std::memory_order_relaxed),
                                 (unsigned long long)s_cmGeneric.load(std::memory_order_relaxed));
             }
+
+            if (isProbe)
+            {
+                const auto ctT1 = std::chrono::steady_clock::now();
+                uint64_t elapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ctT1 - ctT0).count());
+                uint64_t pxDrawn = g_profPixels.load(std::memory_order_relaxed) - ctPxBefore;
+                int clippedW = drawX1 - drawX0 + 1;
+                int clippedH = drawY1 - drawY0 + 1;
+                uint16_t bW = static_cast<uint16_t>((clippedW + 15) & ~15);
+                uint16_t bH = static_cast<uint16_t>((clippedH + 15) & ~15);
+
+                CTSignature sig{};
+                sig.kind = 0;
+                sig.bucketW = bW;
+                sig.bucketH = bH;
+                sig.texOn = 1;
+                sig.texPsm = tex.psm;
+                sig.texW = static_cast<uint16_t>(texW);
+                sig.texH = static_cast<uint16_t>(texH);
+                sig.linearFilter = state.linearFilter ? 1u : 0u;
+                sig.tfx = tex.tfx;
+                sig.abe = state.prim.abe ? 1u : 0u;
+                sig.alphaReg = static_cast<uint16_t>((ctx.alpha & 0xFFu) | (((ctx.alpha >> 32u) & 0xFFu) << 8u));
+                sig.ate = static_cast<uint8_t>(ctx.test & 1u);
+                sig.zte = static_cast<uint8_t>((ctx.test >> 16u) & 1u);
+                sig.ztst = static_cast<uint8_t>((ctx.test >> 17u) & 3u);
+                sig.zmsk = ctx.zbuf.zmask ? 1u : 0u;
+                sig.fbmsk = ctx.frame.fbmsk;
+                sig.framePsm = static_cast<uint8_t>(fpsm);
+                sig.frameFbp = fbp;
+                sig.texTbp0 = tex.tbp0;
+                sig.fastPathTaken = 1;
+                recordCTSample(sig, pxDrawn, elapsedUs);
+            }
             return;
         }
 
@@ -2113,6 +2273,40 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 probe_ae::bhLog("[probe] cq sprite fast_taken=%llu generic=%llu\n",
                                 (unsigned long long)s_cqFastTaken.load(std::memory_order_relaxed),
                                 (unsigned long long)s_cqGeneric.load(std::memory_order_relaxed));
+            }
+
+            if (isProbe)
+            {
+                const auto ctT1 = std::chrono::steady_clock::now();
+                uint64_t elapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ctT1 - ctT0).count());
+                uint64_t pxDrawn = g_profPixels.load(std::memory_order_relaxed) - ctPxBefore;
+                int clippedW = drawX1 - drawX0 + 1;
+                int clippedH = drawY1 - drawY0 + 1;
+                uint16_t bW = static_cast<uint16_t>((clippedW + 15) & ~15);
+                uint16_t bH = static_cast<uint16_t>((clippedH + 15) & ~15);
+
+                CTSignature sig{};
+                sig.kind = 0;
+                sig.bucketW = bW;
+                sig.bucketH = bH;
+                sig.texOn = 1;
+                sig.texPsm = tex.psm;
+                sig.texW = static_cast<uint16_t>(texW);
+                sig.texH = static_cast<uint16_t>(texH);
+                sig.linearFilter = state.linearFilter ? 1u : 0u;
+                sig.tfx = tex.tfx;
+                sig.abe = state.prim.abe ? 1u : 0u;
+                sig.alphaReg = static_cast<uint16_t>((ctx.alpha & 0xFFu) | (((ctx.alpha >> 32u) & 0xFFu) << 8u));
+                sig.ate = static_cast<uint8_t>(ctx.test & 1u);
+                sig.zte = static_cast<uint8_t>((ctx.test >> 16u) & 1u);
+                sig.ztst = static_cast<uint8_t>((ctx.test >> 17u) & 3u);
+                sig.zmsk = ctx.zbuf.zmask ? 1u : 0u;
+                sig.fbmsk = ctx.frame.fbmsk;
+                sig.framePsm = static_cast<uint8_t>(fpsm);
+                sig.frameFbp = fbp;
+                sig.texTbp0 = tex.tbp0;
+                sig.fastPathTaken = 1;
+                recordCTSample(sig, pxDrawn, elapsedUs);
             }
             return;
         }
@@ -2437,10 +2631,48 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
             for (int x = drawX0; x <= drawX1; ++x)
                 WritePixel(state, x, y, z1, r, g, b, a, v1.fog);
     }
+
+    if (isProbe)
+    {
+        const auto ctT1 = std::chrono::steady_clock::now();
+        uint64_t elapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ctT1 - ctT0).count());
+        uint64_t pxDrawn = g_profPixels.load(std::memory_order_relaxed) - ctPxBefore;
+        int clippedW = drawX1 - drawX0 + 1;
+        int clippedH = drawY1 - drawY0 + 1;
+        uint16_t bW = static_cast<uint16_t>((clippedW + 15) & ~15);
+        uint16_t bH = static_cast<uint16_t>((clippedH + 15) & ~15);
+
+        CTSignature sig{};
+        sig.kind = 0;
+        sig.bucketW = bW;
+        sig.bucketH = bH;
+        sig.texOn = state.prim.tme ? 1u : 0u;
+        sig.texPsm = state.prim.tme ? ctx.tex0.psm : 0u;
+        sig.texW = state.prim.tme ? static_cast<uint16_t>(state.textureWidth) : 0u;
+        sig.texH = state.prim.tme ? static_cast<uint16_t>(state.textureHeight) : 0u;
+        sig.linearFilter = state.linearFilter ? 1u : 0u;
+        sig.tfx = state.prim.tme ? ctx.tex0.tfx : 0u;
+        sig.abe = state.prim.abe ? 1u : 0u;
+        sig.alphaReg = static_cast<uint16_t>((ctx.alpha & 0xFFu) | (((ctx.alpha >> 32u) & 0xFFu) << 8u));
+        sig.ate = static_cast<uint8_t>(ctx.test & 1u);
+        sig.zte = static_cast<uint8_t>((ctx.test >> 16u) & 1u);
+        sig.ztst = static_cast<uint8_t>((ctx.test >> 17u) & 3u);
+        sig.zmsk = ctx.zbuf.zmask ? 1u : 0u;
+        sig.fbmsk = ctx.frame.fbmsk;
+        sig.framePsm = static_cast<uint8_t>(ctx.frame.psm);
+        sig.frameFbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+        sig.texTbp0 = state.prim.tme ? ctx.tex0.tbp0 : 0u;
+        sig.fastPathTaken = 0;
+        recordCTSample(sig, pxDrawn, elapsedUs);
+    }
 }
 
 void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
 {
+    const bool isProbe = probe_ae::isEnabled();
+    const auto ctT0 = isProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    uint64_t ctPxBefore = isProbe ? g_profPixels.load(std::memory_order_relaxed) : 0u;
+
     const GSDrawState &state = batch.state;
     const GSVertex &v0 = batch.vertices[0];
     const GSVertex &v1 = batch.vertices[1];
@@ -2554,6 +2786,40 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
             const uint8_t fog = clampU8(static_cast<int>(v0.fog * w0 + v1.fog * w1 + v2.fog * w2));
             WritePixel(state, x, y, static_cast<u32>(z + 0.5), r, g, b, a, fog);
         }
+    }
+
+    if (isProbe)
+    {
+        const auto ctT1 = std::chrono::steady_clock::now();
+        uint64_t elapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ctT1 - ctT0).count());
+        uint64_t pxDrawn = g_profPixels.load(std::memory_order_relaxed) - ctPxBefore;
+        int clippedW = maxX >= minX ? (maxX - minX + 1) : 0;
+        int clippedH = maxY >= minY ? (maxY - minY + 1) : 0;
+        uint16_t bW = static_cast<uint16_t>((clippedW + 15) & ~15);
+        uint16_t bH = static_cast<uint16_t>((clippedH + 15) & ~15);
+
+        CTSignature sig{};
+        sig.kind = 1;
+        sig.bucketW = bW;
+        sig.bucketH = bH;
+        sig.texOn = state.prim.tme ? 1u : 0u;
+        sig.texPsm = state.prim.tme ? ctx.tex0.psm : 0u;
+        sig.texW = state.prim.tme ? static_cast<uint16_t>(state.textureWidth) : 0u;
+        sig.texH = state.prim.tme ? static_cast<uint16_t>(state.textureHeight) : 0u;
+        sig.linearFilter = state.linearFilter ? 1u : 0u;
+        sig.tfx = state.prim.tme ? ctx.tex0.tfx : 0u;
+        sig.abe = state.prim.abe ? 1u : 0u;
+        sig.alphaReg = static_cast<uint16_t>((ctx.alpha & 0xFFu) | (((ctx.alpha >> 32u) & 0xFFu) << 8u));
+        sig.ate = static_cast<uint8_t>(ctx.test & 1u);
+        sig.zte = static_cast<uint8_t>((ctx.test >> 16u) & 1u);
+        sig.ztst = static_cast<uint8_t>((ctx.test >> 17u) & 3u);
+        sig.zmsk = ctx.zbuf.zmask ? 1u : 0u;
+        sig.fbmsk = ctx.frame.fbmsk;
+        sig.framePsm = static_cast<uint8_t>(ctx.frame.psm);
+        sig.frameFbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+        sig.texTbp0 = state.prim.tme ? ctx.tex0.tbp0 : 0u;
+        sig.fastPathTaken = 0;
+        recordCTSample(sig, pxDrawn, elapsedUs);
     }
 }
 
