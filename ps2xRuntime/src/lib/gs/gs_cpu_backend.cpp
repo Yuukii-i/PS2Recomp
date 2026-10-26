@@ -281,6 +281,9 @@ static uint32_t s_ecZtestFail = 0;
 static uint32_t s_ecAtestFail = 0;
 static uint32_t s_ecScissorClip = 0;
 static uint32_t s_ecDateFail = 0;
+static uint32_t s_ecZeroPxCount = 0;
+static uint32_t s_ecPngCount = 0;
+static uint64_t s_ecTotalPxWritten = 0;
 static int s_presentFallback = -1;
 static int s_uploadDump = -1;
 static int s_texDump = -1;
@@ -1206,7 +1209,7 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
         const char *envA = std::getenv("PS2X_GS_STEP_AFTER_S");
         s_ecStepAfterS = envA ? std::atoi(envA) : -1;
         const char *envC = std::getenv("PS2X_GS_STEP_COUNT");
-        s_ecStepCount = envC ? std::atoi(envC) : 40;
+        s_ecStepCount = envC ? std::atoi(envC) : 3000;
     }
     const auto ecNow = std::chrono::steady_clock::now();
     const uint64_t ecElapsedSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(ecNow - s_processStartTime).count());
@@ -1667,53 +1670,55 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     {
         s_ecActiveWindow = false;
         uint64_t ecPxWritten = g_profPixels.load(std::memory_order_relaxed) - ecPxBefore;
-        uint32_t v0Rgba = 0;
-        uint32_t v0Z = 0;
-        if (!batch.vertices.empty()) {
-            const auto &v0 = batch.vertices[0];
-            v0Rgba = static_cast<uint32_t>(v0.r) | (static_cast<uint32_t>(v0.g) << 8u) |
-                     (static_cast<uint32_t>(v0.b) << 16u) | (static_cast<uint32_t>(v0.a) << 24u);
-            v0Z = static_cast<uint32_t>(v0.z);
-        }
-        uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17) & 3u);
-        uint32_t zte = static_cast<uint32_t>((ctx.test >> 16) & 1u);
-        uint32_t atst = static_cast<uint32_t>((ctx.test >> 1) & 7u);
-        uint32_t aref = static_cast<uint32_t>((ctx.test >> 4) & 0xFFu);
-        uint32_t afail = static_cast<uint32_t>((ctx.test >> 12) & 3u);
-        uint32_t date = static_cast<uint32_t>((ctx.test >> 14) & 1u);
-        uint32_t datm = static_cast<uint32_t>((ctx.test >> 15) & 1u);
-        int ofx = ctx.xyoffset.ofx >> 4;
-        int ofy = ctx.xyoffset.ofy >> 4;
-        uint32_t effCbp = (ctx.tex0.cbp != 0u) ? ctx.tex0.cbp : m_clutCbp[0];
-        std::printf("[probe] ec prim idx=%u type=%u fbp=%u fbw=%u fpsm=0x%02X zbp=%u zpsm=0x%02X zmsk=%u ztst=%u zte=%u atst=%u aref=%u afail=%u date=%u datm=%u abe=%u alpha=0x%016llx fba=%u tme=%u fst=%u tbp=0x%05X tbw=%u tpsm=0x%02X tw=%u th=%u cbp=0x%05X clamp=0x%016llx scissor=%u,%u,%u,%u ofx=%d ofy=%d rect=%d,%d,%d,%d v0_rgba=0x%08X v0_z=%u pixels_written=%llu ztest_fail=%u atest_fail=%u scissor_clip=%u date_fail=%u\n",
-                    currentPrimIdx, static_cast<unsigned>(state.prim.type), ctx.frame.fbp, ctx.frame.fbw, ctx.frame.psm,
-                    ctx.zbuf.zbp, ctx.zbuf.psm, (ctx.zbuf.zmask ? 1u : 0u), ztst, zte, atst, aref, afail, date, datm,
-                    (state.prim.abe ? 1u : 0u), static_cast<unsigned long long>(ctx.alpha), static_cast<unsigned>(ctx.fba & 1ull),
-                    (state.prim.tme ? 1u : 0u), (state.prim.fst ? 1u : 0u), ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw),
-                    static_cast<unsigned>(ctx.tex0.psm), static_cast<unsigned>(ctx.tex0.tw), static_cast<unsigned>(ctx.tex0.th),
-                    effCbp, static_cast<unsigned long long>(ctx.clamp), ctx.scissor.x0, ctx.scissor.x1, ctx.scissor.y0, ctx.scissor.y1,
-                    ofx, ofy, ecClampedX0, ecClampedY0, ecClampedX1, ecClampedY1, v0Rgba, v0Z,
-                    static_cast<unsigned long long>(ecPxWritten), s_ecZtestFail, s_ecAtestFail, s_ecScissorClip, s_ecDateFail);
-        std::fflush(stdout);
-        // Dump framebuffer 512x448 as PNG
-        std::filesystem::create_directories("logs/gs");
-        char ecFn[256];
-        std::snprintf(ecFn, sizeof(ecFn), "logs/gs/ec_%u_t%llus.png", currentPrimIdx, static_cast<unsigned long long>(ecElapsedSec));
-        std::vector<uint8_t> snapRgba(512u * 448u * 4u, 0u);
-        const uint32_t fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
-        const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
-        for (uint32_t py = 0; py < 448u; ++py) {
-            for (uint32_t px = 0; px < 512u; ++px) {
-                uint32_t raw = ReadVramUnlocked(ctx.frame.psm, fbp, fbw, px, py);
-                uint32_t c = (ctx.frame.psm == GS_PSM_CT32) ? raw :
-                             ((ctx.frame.psm == GS_PSM_CT16 || ctx.frame.psm == GS_PSM_CT16S) ? Rgba5551ToRgba8888(raw) : raw);
-                snapRgba[(py * 512u + px) * 4u + 0] = static_cast<uint8_t>(c & 0xFFu);
-                snapRgba[(py * 512u + px) * 4u + 1] = static_cast<uint8_t>((c >> 8u) & 0xFFu);
-                snapRgba[(py * 512u + px) * 4u + 2] = static_cast<uint8_t>((c >> 16u) & 0xFFu);
-                snapRgba[(py * 512u + px) * 4u + 3] = static_cast<uint8_t>((c >> 24u) & 0xFFu);
+        s_ecTotalPxWritten += ecPxWritten;
+        if (ecPxWritten > 0)
+        {
+            uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+            uint32_t atst = static_cast<uint32_t>((ctx.test >> 1) & 7u);
+            std::printf("[probe] ec prim idx=%u type=%u fbp=%u tbp=0x%05X tpsm=0x%02X abe=%u ztst=%u atst=%u rect=%d,%d,%d,%d px=%llu zf=%u af=%u sc=%u\n",
+                        currentPrimIdx, static_cast<unsigned>(state.prim.type), ctx.frame.fbp, ctx.tex0.tbp0,
+                        static_cast<unsigned>(ctx.tex0.psm), (state.prim.abe ? 1u : 0u), ztst, atst,
+                        ecClampedX0, ecClampedY0, ecClampedX1, ecClampedY1,
+                        static_cast<unsigned long long>(ecPxWritten), s_ecZtestFail, s_ecAtestFail, s_ecScissorClip);
+            std::fflush(stdout);
+            if (s_ecPngCount < 150u)
+            {
+                s_ecPngCount++;
+                std::filesystem::create_directories("logs/gs");
+                char ecFn[256];
+                std::snprintf(ecFn, sizeof(ecFn), "logs/gs/ec_%u_t%llus.png", currentPrimIdx, static_cast<unsigned long long>(ecElapsedSec));
+                std::vector<uint8_t> snapRgba(512u * 448u * 4u, 0u);
+                const uint32_t fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+                const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+                for (uint32_t py = 0; py < 448u; ++py) {
+                    for (uint32_t px = 0; px < 512u; ++px) {
+                        uint32_t raw = ReadVramUnlocked(ctx.frame.psm, fbp, fbw, px, py);
+                        uint32_t c = (ctx.frame.psm == GS_PSM_CT32) ? raw :
+                                     ((ctx.frame.psm == GS_PSM_CT16 || ctx.frame.psm == GS_PSM_CT16S) ? Rgba5551ToRgba8888(raw) : raw);
+                        snapRgba[(py * 512u + px) * 4u + 0] = static_cast<uint8_t>(c & 0xFFu);
+                        snapRgba[(py * 512u + px) * 4u + 1] = static_cast<uint8_t>((c >> 8u) & 0xFFu);
+                        snapRgba[(py * 512u + px) * 4u + 2] = static_cast<uint8_t>((c >> 16u) & 0xFFu);
+                        snapRgba[(py * 512u + px) * 4u + 3] = static_cast<uint8_t>((c >> 24u) & 0xFFu);
+                    }
+                }
+                writeUncompressedPng(512u, 448u, snapRgba.data(), ecFn);
             }
         }
-        writeUncompressedPng(512u, 448u, snapRgba.data(), ecFn);
+        else
+        {
+            s_ecZeroPxCount++;
+            if (s_ecZeroPxCount % 200u == 0u)
+            {
+                std::printf("[probe] ec zero_px count=%u idx=%u\n", s_ecZeroPxCount, currentPrimIdx);
+                std::fflush(stdout);
+            }
+        }
+        if (currentPrimIdx + 1u == s_ecStartPrimIdx + static_cast<uint32_t>(s_ecStepCount))
+        {
+            std::printf("[probe] ec window finished total_px_written=%llu zero_px_prims=%u pngs=%u\n",
+                        static_cast<unsigned long long>(s_ecTotalPxWritten), s_ecZeroPxCount, s_ecPngCount);
+            std::fflush(stdout);
+        }
     }
 }
 

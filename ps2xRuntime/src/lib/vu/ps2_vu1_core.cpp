@@ -20,6 +20,7 @@
 // Task DY: VU1 program execution & cycle cap telemetry
 // =========================================================================
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
@@ -59,6 +60,125 @@ static thread_local bool s_dyCurIsMscnt = false;
 static thread_local uint32_t s_dyCurStartPc = 0;
 static thread_local uint32_t s_dyCurTop = 0;
 static thread_local uint32_t s_dyCurItop = 0;
+
+// =========================================================================
+// Task ED: VU1 3D Census (PS2X_PROBE_VU3D=1)
+// =========================================================================
+static inline bool isVu3dProbeEnabled()
+{
+    static int s_vu3d = -1;
+    if (s_vu3d == -1)
+    {
+        const char *v = std::getenv("PS2X_PROBE_VU3D");
+        s_vu3d = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+    }
+    return s_vu3d == 1;
+}
+
+struct VdRunStats {
+    uint32_t runs = 0;
+    uint32_t capped = 0;
+    uint64_t totalCycles = 0;
+    uint32_t kicks = 0;
+    uint32_t verts = 0;
+    uint32_t vZeroXy = 0;
+    uint32_t vOob = 0;
+    uint32_t primHist[7] = {0}; // 0:point, 1:line, 2:linestrip, 3:tri, 4:strip, 5:fan, 6:sprite
+};
+
+static std::mutex s_vdMutex;
+static std::unordered_map<uint32_t, VdRunStats> s_vdStats;
+static std::chrono::steady_clock::time_point s_vdLastWindowTime{};
+static const auto s_vdStartTime = std::chrono::steady_clock::now();
+
+struct VdCandidateEntry {
+    bool valid = false;
+    uint32_t pc = 0;
+    uint32_t top = 0;
+    uint32_t vertCount = 0;
+    float vf[32][4];
+    int32_t vi[16];
+    uint32_t dataWords[26][4]; // [top-2, top+24)
+    uint32_t outWords[14][4];  // first 14 qw of first XGKICK
+};
+static std::map<uint32_t, VdCandidateEntry> s_vdCandidateEntries;
+static std::set<uint32_t> s_vdDumpedPcs;
+
+static thread_local uint32_t s_vdCurRunKicks = 0;
+static thread_local uint32_t s_vdCurRunVerts = 0;
+static thread_local uint32_t s_vdCurRunZeroXy = 0;
+static thread_local uint32_t s_vdCurRunOob = 0;
+static thread_local uint32_t s_vdCurRunPrimHist[7] = {0};
+static thread_local uint32_t s_vdFirstXgkickWords[14][4] = {{0}};
+static thread_local bool s_vdHaveFirstXgkick = false;
+
+static void decodeXgkickPacketStats(const uint8_t *data, uint32_t size,
+                                   uint32_t &outVerts, uint32_t &outZeroXy, uint32_t &outOob,
+                                   uint32_t primHist[7])
+{
+    uint32_t offset = 0;
+    while (offset + 16u <= size)
+    {
+        uint64_t tagLo = 0;
+        std::memcpy(&tagLo, data + offset, sizeof(tagLo));
+        uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+        uint32_t format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
+        uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
+        if (nreg == 0u) nreg = 16u;
+        uint32_t primType = static_cast<uint32_t>((tagLo >> 47) & 0x7u);
+        if (primType < 7u)
+            primHist[primType] += nloop;
+        uint64_t tagHi = 0;
+        std::memcpy(&tagHi, data + offset + 8u, sizeof(tagHi));
+        uint32_t tagBytes = 16u;
+        if (format == 0u)
+        {
+            uint8_t regs[16];
+            for (uint32_t r = 0; r < nreg; ++r)
+                regs[r] = static_cast<uint8_t>((tagHi >> (r * 4u)) & 0xFu);
+            uint32_t itemOffset = offset + 16u;
+            for (uint32_t loop = 0; loop < nloop; ++loop)
+            {
+                for (uint32_t r = 0; r < nreg; ++r)
+                {
+                    if (itemOffset + 16u <= size)
+                    {
+                        if (regs[r] == 0x05u || regs[r] == 0x0Du) // XYZ2 (5) or XYZF2 (D)
+                        {
+                            outVerts++;
+                            uint16_t xRaw = 0, yRaw = 0;
+                            std::memcpy(&xRaw, data + itemOffset + 0u, 2);
+                            std::memcpy(&yRaw, data + itemOffset + 4u, 2);
+                            if (xRaw == 0 && yRaw == 0)
+                                outZeroXy++;
+                            if (xRaw > (4095u << 4u) || yRaw > (4095u << 4u))
+                                outOob++;
+                        }
+                    }
+                    itemOffset += 16u;
+                }
+            }
+            tagBytes += nloop * nreg * 16u;
+        }
+        else if (format == 1u)
+        {
+            tagBytes += ((nloop * nreg + 1u) & ~1u) * 8u;
+        }
+        else if (format == 2u)
+        {
+            tagBytes += nloop * 16u;
+        }
+        else
+        {
+            break;
+        }
+        if (tagBytes < 16u || offset + tagBytes > size)
+            break;
+        offset += tagBytes;
+        if (((tagLo >> 15) & 1u) != 0u)
+            break;
+    }
+}
 
 // Task DZ state
 extern "C" void ps2_vif1_dumpDzRing();
@@ -1103,6 +1223,20 @@ void VU1Interpreter::finishXgkick()
         uint32_t prims = countPrimsInXgkickPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
         probe_ae::onBaXgkick(m_xgkick.totalBytes / 16u, ns, prims);
     }
+    if (isVu3dProbeEnabled())
+    {
+        s_vdCurRunKicks++;
+        decodeXgkickPacketStats(m_xgkick.packet.data(), m_xgkick.totalBytes,
+                                s_vdCurRunVerts, s_vdCurRunZeroXy, s_vdCurRunOob,
+                                s_vdCurRunPrimHist);
+        if (!s_vdHaveFirstXgkick)
+        {
+            s_vdHaveFirstXgkick = true;
+            uint32_t copyCount = std::min<uint32_t>(14u, m_xgkick.totalBytes / 16u);
+            std::memset(s_vdFirstXgkickWords, 0, sizeof(s_vdFirstXgkickWords));
+            std::memcpy(s_vdFirstXgkickWords, m_xgkick.packet.data(), copyCount * 16u);
+        }
+    }
     m_xgkick.active = false;
 }
 
@@ -1776,6 +1910,12 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     s_dyCurTop = top;
     s_dyCurItop = itop;
     s_dzPendingRun = false;
+    s_vdCurRunKicks = 0;
+    s_vdCurRunVerts = 0;
+    s_vdCurRunZeroXy = 0;
+    s_vdCurRunOob = 0;
+    std::memset(s_vdCurRunPrimHist, 0, sizeof(s_vdCurRunPrimHist));
+    s_vdHaveFirstXgkick = false;
     if (probe_ae::isDcProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u) {
         uint64_t vsyncTick = 0;
         uint8_t *ram = memory ? memory->getRDRAM() : nullptr;
@@ -2232,5 +2372,119 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
     }
 
+    if (isVu3dProbeEnabled())
+    {
+        uint64_t cyclesConsumed = (m_cycle > tRunStartCycle) ? (m_cycle - tRunStartCycle) : 0;
+        bool hitCap = (m_cycle >= budgetEnd);
+        const auto now = std::chrono::steady_clock::now();
+        const uint64_t procElapsedSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now - s_vdStartTime).count());
+        {
+            std::lock_guard<std::mutex> lock(s_vdMutex);
+            auto &st = s_vdStats[s_dyCurStartPc];
+            st.runs++;
+            if (hitCap) st.capped++;
+            st.totalCycles += cyclesConsumed;
+            st.kicks += s_vdCurRunKicks;
+            st.verts += s_vdCurRunVerts;
+            st.vZeroXy += s_vdCurRunZeroXy;
+            st.vOob += s_vdCurRunOob;
+            for (int p = 0; p < 7; ++p)
+                st.primHist[p] += s_vdCurRunPrimHist[p];
+
+            if (s_dyCurStartPc != 0x08u && s_dyCurStartPc != 0x48u && procElapsedSec >= 60u)
+            {
+                auto &cand = s_vdCandidateEntries[s_dyCurStartPc];
+                if (!cand.valid || s_vdCurRunVerts >= cand.vertCount)
+                {
+                    cand.valid = true;
+                    cand.pc = s_dyCurStartPc;
+                    cand.top = s_dyCurTop;
+                    cand.vertCount = s_vdCurRunVerts;
+                    std::memcpy(cand.vf, m_state.vf, sizeof(cand.vf));
+                    std::memcpy(cand.vi, m_state.vi, sizeof(cand.vi));
+                    int32_t baseQw = static_cast<int32_t>(s_dyCurTop) - 2;
+                    for (int i = 0; i < 26; ++i) {
+                        int32_t q = baseQw + i;
+                        uint32_t effQw = (q >= 0) ? (static_cast<uint32_t>(q) & 0x3FFu) : ((static_cast<uint32_t>(q + 1024)) & 0x3FFu);
+                        if (vuData && (effQw + 1u) * 16u <= dataSize) {
+                            std::memcpy(cand.dataWords[i], vuData + effQw * 16u, 16);
+                        } else {
+                            std::memset(cand.dataWords[i], 0, 16);
+                        }
+                    }
+                    std::memcpy(cand.outWords, s_vdFirstXgkickWords, sizeof(cand.outWords));
+                }
+            }
+
+            if (s_vdLastWindowTime == std::chrono::steady_clock::time_point{})
+                s_vdLastWindowTime = now;
+            else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_vdLastWindowTime).count() >= 3)
+            {
+                s_vdLastWindowTime = now;
+                std::vector<std::pair<uint32_t, VdRunStats>> sortedStats(s_vdStats.begin(), s_vdStats.end());
+                std::sort(sortedStats.begin(), sortedStats.end(), [](const auto &a, const auto &b) {
+                    return a.second.runs > b.second.runs;
+                });
+                size_t limit = std::min<size_t>(8u, sortedStats.size());
+                for (size_t i = 0; i < limit; ++i) {
+                    const auto &p = sortedStats[i];
+                    uint64_t avgCyc = p.second.runs ? (p.second.totalCycles / p.second.runs) : 0;
+                    std::printf("[probe] vd pc=0x%03X runs=%u capped=%u avg_cyc=%llu kicks=%u verts=%u v_zero_xy=%u v_oob=%u prim_types=tri:%u/strip:%u/fan:%u/sprite:%u/line:%u/point:%u\n",
+                                p.first, p.second.runs, p.second.capped, (unsigned long long)avgCyc,
+                                p.second.kicks, p.second.verts, p.second.vZeroXy, p.second.vOob,
+                                p.second.primHist[3], p.second.primHist[4], p.second.primHist[5],
+                                p.second.primHist[6], (p.second.primHist[1] + p.second.primHist[2]), p.second.primHist[0]);
+                }
+                std::fflush(stdout);
+                s_vdStats.clear();
+            }
+
+            // Check candidate entry dump for first 3 distinct PCs
+            if (procElapsedSec >= 60u && s_vdDumpedPcs.size() < 3u)
+            {
+                for (auto &pair : s_vdCandidateEntries) {
+                    if (s_vdDumpedPcs.size() >= 3u) break;
+                    uint32_t pc = pair.first;
+                    if (s_vdDumpedPcs.count(pc) == 0 && pair.second.valid) {
+                        s_vdDumpedPcs.insert(pc);
+                        const auto &cand = pair.second;
+                        std::printf("[probe] vd entry pc=0x%03X top=%u verts=%u\n", cand.pc, cand.top, cand.vertCount);
+                        for (int n = 0; n < 32; ++n) {
+                            uint32_t xw = 0, yw = 0, zw = 0, ww = 0;
+                            std::memcpy(&xw, &cand.vf[n][0], 4);
+                            std::memcpy(&yw, &cand.vf[n][1], 4);
+                            std::memcpy(&zw, &cand.vf[n][2], 4);
+                            std::memcpy(&ww, &cand.vf[n][3], 4);
+                            std::printf("[probe] vd entry vf%02d=%08X %08X %08X %08X\n", n, xw, yw, zw, ww);
+                        }
+                        std::string viStr;
+                        for (int r = 1; r < 16; ++r) {
+                            char buf[32];
+                            std::snprintf(buf, sizeof(buf), "%s%d", (r > 1 ? " " : ""), cand.vi[r]);
+                            viStr += buf;
+                        }
+                        std::printf("[probe] vd entry vi=%s\n", viStr.c_str());
+                        int32_t baseQw = static_cast<int32_t>(cand.top) - 2;
+                        for (int i = 0; i < 26; ++i) {
+                            int32_t q = baseQw + i;
+                            uint32_t effQw = (q >= 0) ? (static_cast<uint32_t>(q) & 0x3FFu) : ((static_cast<uint32_t>(q + 1024)) & 0x3FFu);
+                            std::printf("[probe] vd data qw=%u w=%08X %08X %08X %08X\n", effQw, cand.dataWords[i][0], cand.dataWords[i][1], cand.dataWords[i][2], cand.dataWords[i][3]);
+                        }
+                        for (int i = 0; i < 14; ++i) {
+                            std::printf("[probe] vd out qw=%u w=%08X %08X %08X %08X\n", i, cand.outWords[i][0], cand.outWords[i][1], cand.outWords[i][2], cand.outWords[i][3]);
+                        }
+                        for (uint32_t codePc = 0x000u; codePc < 0x300u; codePc += 8u) {
+                            if (codePc + 8u <= codeSize) {
+                                uint32_t lower = *reinterpret_cast<const uint32_t *>(vuCode + codePc + 0u);
+                                uint32_t upper = *reinterpret_cast<const uint32_t *>(vuCode + codePc + 4u);
+                                std::printf("[probe] vd code pc=0x%03X upper=0x%08X lower=0x%08X\n", codePc, upper, lower);
+                            }
+                        }
+                        std::fflush(stdout);
+                    }
+                }
+            }
+        }
+    }
     probe_ae::onBxOrigRunEnd();
 }
