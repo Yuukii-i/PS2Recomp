@@ -6595,8 +6595,11 @@ namespace probe_ae {
     }
 
     bool onCeVblankProduced(uint32_t cause) {
+        // The virtual clock counts one tick per accepted VBLANK EVENT (cause 3). It must not count handler
+        // invocations: cause 3 has two guest handlers, so counting deliveries doubled the audio clock.
         if (!isVTimeEnabled()) {
             s_ceProduced.fetch_add(1, std::memory_order_relaxed);
+            if (cause == 3u) s_ceDeliveredVblanksTotal.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
         if (cause == 3u) {
@@ -6605,6 +6608,7 @@ namespace probe_ae {
                 return false;
             }
             s_ceProduced.fetch_add(1, std::memory_order_relaxed);
+            s_ceDeliveredVblanksTotal.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
         if (cause == 2u) {
@@ -6621,7 +6625,6 @@ namespace probe_ae {
     void onCeVblankDelivered(uint32_t cause) {
         if (cause == 3u) {
             s_cePendingCause3.store(false, std::memory_order_release);
-            s_ceDeliveredVblanksTotal.fetch_add(1, std::memory_order_relaxed);
             s_ceDelivered.fetch_add(1, std::memory_order_relaxed);
         } else if (cause == 2u) {
             s_cePendingCause2.store(false, std::memory_order_release);
