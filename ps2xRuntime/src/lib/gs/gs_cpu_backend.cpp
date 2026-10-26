@@ -1782,6 +1782,15 @@ static inline void recordCTSample(const CTSignature &sig, uint64_t pxDrawn, uint
     }
 }
 
+static std::atomic<uint64_t> s_cvFastTaken{0};
+static std::atomic<uint64_t> s_cvChecked{0};
+static std::atomic<uint64_t> s_cvFastOk{0};
+static std::atomic<uint64_t> s_cvMismPx{0};
+static std::atomic<uint64_t> s_cvZMismPx{0};
+static std::atomic<uint32_t> s_cvMismLogged{0};
+static auto s_cvLastSecLog = std::chrono::steady_clock::now();
+static std::unordered_set<uint64_t> s_cvLoggedSignatures;
+
 static inline bool isSpriteFastEnabled() {
     static int s_val = -1;
     if (s_val == -1) {
@@ -2075,9 +2084,11 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         }
 
         // =========================================================================
-        // Task CQ: Fast path for 1:1 CT32 bilinear copy with identity blend
+        // Task CQ / CV: Fast path for 1:1 CT32 bilinear copy
+        // Supports: identity blend OR general alpha blend + depth test + z write
         // =========================================================================
         bool canCqFast = false;
+        bool isCvBlit = false;
         float cqFx = 0.0f;
         float cqFy = 0.0f;
         std::vector<int> cqU0_tab;
@@ -2087,53 +2098,82 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         const uint16_t minV = static_cast<uint16_t>((ctx.clamp >> 24) & 0x3FFu);
         const uint16_t maxV = static_cast<uint16_t>((ctx.clamp >> 34) & 0x3FFu);
 
+        uint8_t cvAsel = 0, cvBsel = 0, cvCsel = 0, cvDsel = 0, cvFix = 0;
+        bool cvNeedsCd = false;
+        bool cvNeedsReadFb = false;
+        bool cvWriteDepth = false;
+
         if (state.prim.fst && state.linearFilter &&
             tex.psm == GS_PSM_CT32 && fpsm == GS_PSM_CT32 &&
             !state.prim.fge && !state.dthe &&
-            (ctx.frame.fbmsk == 0u || ctx.frame.fbmsk == 0xFF000000u))
+            (tex.tfx <= 1u) &&
+            !state.pabe &&
+            ((ctx.fba & 1ull) == 0ull) &&
+            ((ctx.test >> 14) & 1u) == 0u) // date off
         {
             // 1:1 scale check
             if ((u1f - u0f) == spriteW && (v1f - v0f) == spriteH)
             {
-                // Check combine identity: TFX modulate with vertex r=g=b=0x80, or DECAL
+                // Check combine: TFX modulate or decal
                 const bool isModulateIdentity = (tex.tfx == 0u && v1.r == 0x80u && v1.g == 0x80u && v1.b == 0x80u);
                 const bool isDecalIdentity = (tex.tfx == 1u);
-                if (isModulateIdentity || isDecalIdentity)
+                const bool isCombineSupported = isModulateIdentity || isDecalIdentity || (tex.tfx == 0u);
+
+                if (isCombineSupported)
                 {
-                    // Check blend identity: abe==0, or ALPHA reg gives result == Cs
+                    // Check blend
+                    uint64_t alphaReg = ctx.alpha;
+                    uint8_t asel = alphaReg & 3;
+                    uint8_t bsel = (alphaReg >> 2) & 3;
+                    uint8_t csel = (alphaReg >> 4) & 3;
+                    uint8_t dsel = (alphaReg >> 6) & 3;
+                    uint8_t fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
+
                     bool blendIdentity = false;
                     if (!state.prim.abe)
                     {
                         blendIdentity = true;
                     }
-                    else
+                    else if (dsel == 0 && (asel == bsel || (csel == 2 && fix == 0)))
                     {
-                        uint64_t alphaReg = ctx.alpha;
-                        uint8_t asel = alphaReg & 3;
-                        uint8_t bsel = (alphaReg >> 2) & 3;
-                        uint8_t csel = (alphaReg >> 4) & 3;
-                        uint8_t dsel = (alphaReg >> 6) & 3;
-                        uint8_t fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
-                        // Blend formula: ((A - B) * C >> 7) + D
-                        // D == 0 (Cs) and (A == B or (C == 2 (FIX) and FIX == 0))
-                        if (dsel == 0 && (asel == bsel || (csel == 2 && fix == 0)))
-                        {
-                            blendIdentity = true;
-                        }
+                        blendIdentity = true;
                     }
 
-                    if (blendIdentity)
+                    // Check depth test & z format
+                    // ZTST: 0 = NEVER, 1 = ALWAYS, 2 = GEQUAL, 3 = GREATER
+                    const bool zte = ((ctx.test >> 16u) & 1u) != 0u;
+                    const uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17u) & 3u);
+                    const bool zFormatSupported = (zpsm == GS_PSM_Z32 || zpsm == GS_PSM_Z24 || zpsm == GS_PSM_Z16);
+
+                    // Check alpha test: ate == 0 or passesAlphaTest is always true (1 = ALWAYS)
+                    const bool ateOff = (ctx.test & 0x1u) == 0u;
+                    const uint8_t atst = static_cast<uint8_t>((ctx.test >> 1) & 0x7u);
+                    const bool atePasses = ateOff || (atst == 1u);
+
+                    if (atePasses)
                     {
-                        // Check alpha test: ate == 0 or passesAlphaTest is always true
-                        const bool ateOff = (ctx.test & 0x1u) == 0u;
-                        const uint8_t atst = static_cast<uint8_t>((ctx.test >> 1) & 0x7u);
-                        const bool atePasses = ateOff || (atst == 1u);
+                        if (blendIdentity && depthPass && (ctx.frame.fbmsk == 0u || ctx.frame.fbmsk == 0xFF000000u))
+                        {
+                            // Pure CQ identity path
+                            canCqFast = true;
+                            isCvBlit = false;
+                        }
+                        else if (state.prim.abe && zFormatSupported)
+                        {
+                            // Extended CV path
+                            canCqFast = true;
+                            isCvBlit = true;
+                            cvAsel = asel;
+                            cvBsel = bsel;
+                            cvCsel = csel;
+                            cvDsel = dsel;
+                            cvFix = fix;
+                            cvNeedsCd = (asel == 1 || bsel == 1 || dsel == 1 || csel == 1);
+                            cvNeedsReadFb = cvNeedsCd || (ctx.frame.fbmsk != 0u);
+                            cvWriteDepth = !ctx.zbuf.zmask;
+                        }
 
-                        // Check destination alpha test: date off
-                        const bool dateOff = ((ctx.test >> 14) & 0x1u) == 0u;
-
-                        // Check depth test
-                        if (atePasses && dateOff && depthPass)
+                        if (canCqFast)
                         {
                             // Precompute sample fraction from (drawX0, drawY0)
                             float tx0 = (static_cast<float>(drawX0 - unclippedX0) + 0.5f) / spriteW;
@@ -2166,7 +2206,6 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                 cqU0_tab[x - drawX0] = wrapTextureCoordinate(su0, texW, wrapU, minU, maxU);
                                 cqU1_tab[x - drawX0] = wrapTextureCoordinate(su1, texW, wrapU, minU, maxU);
                             }
-                            canCqFast = true;
                         }
                     }
                 }
@@ -2175,16 +2214,26 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
 
         if (canCqFast && isSpriteFastEnabled() && !isSpriteVerifyEnabled())
         {
-            s_cqFastTaken.fetch_add(1u, std::memory_order_relaxed);
+            if (isCvBlit) s_cvFastTaken.fetch_add(1u, std::memory_order_relaxed);
+            else s_cqFastTaken.fetch_add(1u, std::memory_order_relaxed);
+
             const uint32_t drawnPxCount = static_cast<uint32_t>((drawY1 - drawY0 + 1) * (drawX1 - drawX0 + 1));
             g_profPixels.fetch_add(drawnPxCount, std::memory_order_relaxed);
 
             const bool maskAlpha = (ctx.frame.fbmsk == 0xFF000000u);
-            const int numCols = drawX1 - drawX0 + 1;
-            std::vector<uint32_t> row0(numCols);
-            std::vector<uint32_t> row1(numCols);
-            int cachedV0 = -999999;
-            int cachedV1 = -999999;
+            const uint32_t rawFbMsk = ctx.frame.fbmsk;
+            const bool isFyZero = (cqFy == 0.0f);
+            const bool isModulate = (tex.tfx == 0u);
+            const bool isModulateIdentity = (isModulate && v1.r == 0x80u && v1.g == 0x80u && v1.b == 0x80u);
+
+            const bool zte = ((ctx.test >> 16u) & 1u) != 0u;
+            const uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17u) & 3u);
+
+            auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int {
+                if (sel == 0) return cs;
+                if (sel == 1) return cd;
+                return 0;
+            };
 
             for (int y = drawY0; y <= drawY1; ++y)
             {
@@ -2197,19 +2246,6 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 int rowV0 = wrapTextureCoordinate(sv0, texH, wrapV, minV, maxV);
                 int rowV1 = wrapTextureCoordinate(sv1, texH, wrapV, minV, maxV);
 
-                if (rowV0 != cachedV0)
-                {
-                    for (int i = 0; i < numCols; ++i)
-                    {
-                        // Note: cqU0_tab and cqU1_tab can share texels across adjacent pixels,
-                        // but reading directly into row buffers or per-column is fast.
-                    }
-                    cachedV0 = rowV0;
-                }
-
-                // If fy is exactly 0.0f, row1 is completely unused by lerpChannel
-                const bool isFyZero = (cqFy == 0.0f);
-
                 for (int x = drawX0; x <= drawX1; ++x)
                 {
                     const int colIdx = x - drawX0;
@@ -2219,7 +2255,7 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                     const uint32_t c00 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU0, rowV0);
                     const uint32_t c10 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU1, rowV0);
 
-                    uint8_t r_out, g_out, b_out;
+                    uint8_t tr_out, tg_out, tb_out, ta_out;
                     if (isFyZero)
                     {
                         const float topR = static_cast<float>(static_cast<uint8_t>(c00 & 0xFFu)) +
@@ -2228,40 +2264,115 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 8) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 8) & 0xFFu))) * cqFx;
                         const float topB = static_cast<float>(static_cast<uint8_t>((c00 >> 16) & 0xFFu)) +
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 16) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 16) & 0xFFu))) * cqFx;
-                        r_out = clampU8(static_cast<int>(std::lround(topR)));
-                        g_out = clampU8(static_cast<int>(std::lround(topG)));
-                        b_out = clampU8(static_cast<int>(std::lround(topB)));
+                        const float topA = static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu)) +
+                                           (static_cast<float>(static_cast<uint8_t>((c10 >> 24) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu))) * cqFx;
+                        tr_out = clampU8(static_cast<int>(std::lround(topR)));
+                        tg_out = clampU8(static_cast<int>(std::lround(topG)));
+                        tb_out = clampU8(static_cast<int>(std::lround(topB)));
+                        ta_out = clampU8(static_cast<int>(std::lround(topA)));
                     }
                     else
                     {
                         const uint32_t c01 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU0, rowV1);
                         const uint32_t c11 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU1, rowV1);
-                        r_out = lerpChannel(static_cast<uint8_t>(c00 & 0xFFu), static_cast<uint8_t>(c10 & 0xFFu),
-                                            static_cast<uint8_t>(c01 & 0xFFu), static_cast<uint8_t>(c11 & 0xFFu), cqFx, cqFy);
-                        g_out = lerpChannel(static_cast<uint8_t>((c00 >> 8) & 0xFFu), static_cast<uint8_t>((c10 >> 8) & 0xFFu),
-                                            static_cast<uint8_t>((c01 >> 8) & 0xFFu), static_cast<uint8_t>((c11 >> 8) & 0xFFu), cqFx, cqFy);
-                        b_out = lerpChannel(static_cast<uint8_t>((c00 >> 16) & 0xFFu), static_cast<uint8_t>((c10 >> 16) & 0xFFu),
-                                            static_cast<uint8_t>((c01 >> 16) & 0xFFu), static_cast<uint8_t>((c11 >> 16) & 0xFFu), cqFx, cqFy);
+                        tr_out = lerpChannel(static_cast<uint8_t>(c00 & 0xFFu), static_cast<uint8_t>(c10 & 0xFFu),
+                                             static_cast<uint8_t>(c01 & 0xFFu), static_cast<uint8_t>(c11 & 0xFFu), cqFx, cqFy);
+                        tg_out = lerpChannel(static_cast<uint8_t>((c00 >> 8) & 0xFFu), static_cast<uint8_t>((c10 >> 8) & 0xFFu),
+                                             static_cast<uint8_t>((c01 >> 8) & 0xFFu), static_cast<uint8_t>((c11 >> 8) & 0xFFu), cqFx, cqFy);
+                        tb_out = lerpChannel(static_cast<uint8_t>((c00 >> 16) & 0xFFu), static_cast<uint8_t>((c10 >> 16) & 0xFFu),
+                                             static_cast<uint8_t>((c01 >> 16) & 0xFFu), static_cast<uint8_t>((c11 >> 16) & 0xFFu), cqFx, cqFy);
+                        ta_out = lerpChannel(static_cast<uint8_t>((c00 >> 24) & 0xFFu), static_cast<uint8_t>((c10 >> 24) & 0xFFu),
+                                             static_cast<uint8_t>((c01 >> 24) & 0xFFu), static_cast<uint8_t>((c11 >> 24) & 0xFFu), cqFx, cqFy);
                     }
 
-                    uint32_t outPixel = static_cast<uint32_t>(r_out) |
-                                        (static_cast<uint32_t>(g_out) << 8) |
-                                        (static_cast<uint32_t>(b_out) << 16);
-
-                    if (maskAlpha)
+                    if (!isCvBlit)
                     {
-                        const uint32_t dstPixel = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
-                        outPixel |= (dstPixel & 0xFF000000u);
+                        uint32_t outPixel = static_cast<uint32_t>(tr_out) |
+                                            (static_cast<uint32_t>(tg_out) << 8) |
+                                            (static_cast<uint32_t>(tb_out) << 16);
+
+                        if (maskAlpha)
+                        {
+                            const uint32_t dstPixel = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+                            outPixel |= (dstPixel & 0xFF000000u);
+                        }
+                        else
+                        {
+                            outPixel |= 0xFF000000u;
+                        }
+
+                        WriteVramUnlocked(fpsm, fbp, fbw, x, y, outPixel);
+                        if (writeDepth)
+                        {
+                            WriteVramUnlocked(zpsm, zbp, fbw, x, y, z1);
+                        }
                     }
                     else
                     {
-                        outPixel |= 0xFF000000u;
-                    }
+                        // Depth test
+                        if (zte)
+                        {
+                            bool zpass = false;
+                            if (ztst == 1u)
+                            {
+                                zpass = true;
+                            }
+                            else
+                            {
+                                uint32_t storedZ = ReadVramUnlocked(zpsm, zbp, fbw, x, y);
+                                if (ztst == 2u) zpass = (static_cast<uint32_t>(z1) >= storedZ);
+                                else if (ztst == 3u) zpass = (static_cast<uint32_t>(z1) > storedZ);
+                            }
+                            if (!zpass) continue;
+                        }
 
-                    WriteVramUnlocked(fpsm, fbp, fbw, x, y, outPixel);
-                    if (writeDepth)
-                    {
-                        WriteVramUnlocked(zpsm, zbp, fbw, x, y, z1);
+                        // Combine texture
+                        uint8_t cr = tr_out, cg = tg_out, cb = tb_out;
+                        uint8_t ca = (tex.tcc != 0u) ? ta_out : v1.a;
+                        if (isModulate && !isModulateIdentity)
+                        {
+                            cr = clampU8((tr_out * v1.r) >> 7);
+                            cg = clampU8((tg_out * v1.g) >> 7);
+                            cb = clampU8((tb_out * v1.b) >> 7);
+                            if (tex.tcc != 0u) ca = clampU8((ta_out * v1.a) >> 7);
+                        }
+
+                        // Framebuffer read for blend or fbmsk
+                        uint32_t fbrgba = 0;
+                        if (cvNeedsReadFb)
+                        {
+                            fbrgba = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+                        }
+
+                        // Alpha blend
+                        uint8_t r_res = cr, g_res = cg, b_res = cb;
+                        if (state.prim.abe)
+                        {
+                            uint8_t dr = fbrgba & 0xFFu;
+                            uint8_t dg = (fbrgba >> 8) & 0xFFu;
+                            uint8_t db = (fbrgba >> 16) & 0xFFu;
+                            uint8_t da = (fbrgba >> 24) & 0xFFu;
+                            int cAlpha = (cvCsel == 0) ? ca : (cvCsel == 1) ? da : cvFix;
+                            r_res = clampU8(((pickRGB(cvAsel, cr, dr) - pickRGB(cvBsel, cr, dr)) * cAlpha >> 7) + pickRGB(cvDsel, cr, dr));
+                            g_res = clampU8(((pickRGB(cvAsel, cg, dg) - pickRGB(cvBsel, cg, dg)) * cAlpha >> 7) + pickRGB(cvDsel, cg, dg));
+                            b_res = clampU8(((pickRGB(cvAsel, cb, db) - pickRGB(cvBsel, cb, db)) * cAlpha >> 7) + pickRGB(cvDsel, cb, db));
+                        }
+
+                        uint32_t pixel = static_cast<uint32_t>(r_res) |
+                                         (static_cast<uint32_t>(g_res) << 8) |
+                                         (static_cast<uint32_t>(b_res) << 16) |
+                                         (static_cast<uint32_t>(ca) << 24);
+
+                        if (rawFbMsk != 0u)
+                        {
+                            pixel = (pixel & ~rawFbMsk) | (fbrgba & rawFbMsk);
+                        }
+
+                        WriteVramUnlocked(fpsm, fbp, fbw, x, y, pixel);
+                        if (cvWriteDepth)
+                        {
+                            WriteVramUnlocked(zpsm, zbp, fbw, x, y, z1);
+                        }
                     }
                 }
             }
@@ -2271,7 +2382,7 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
             {
                 s_cqLastSecLog = now;
                 probe_ae::bhLog("[probe] cq sprite fast_taken=%llu generic=%llu\n",
-                                (unsigned long long)s_cqFastTaken.load(std::memory_order_relaxed),
+                                (unsigned long long)(s_cqFastTaken.load(std::memory_order_relaxed) + s_cvFastTaken.load(std::memory_order_relaxed)),
                                 (unsigned long long)s_cqGeneric.load(std::memory_order_relaxed));
             }
 
@@ -2309,6 +2420,25 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 recordCTSample(sig, pxDrawn, elapsedUs);
             }
             return;
+        }
+
+        const int numCols = drawX1 - drawX0 + 1;
+        const int numRows = drawY1 - drawY0 + 1;
+        std::vector<uint32_t> preDrawFb;
+        std::vector<uint32_t> preDrawZb;
+        if (canCqFast && isSpriteVerifyEnabled())
+        {
+            preDrawFb.resize(numCols * numRows);
+            preDrawZb.resize(numCols * numRows);
+            for (int y = drawY0; y <= drawY1; ++y)
+            {
+                for (int x = drawX0; x <= drawX1; ++x)
+                {
+                    int idx = (y - drawY0) * numCols + (x - drawX0);
+                    preDrawFb[idx] = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+                    preDrawZb[idx] = ReadVramUnlocked(zpsm, zbp, fbw, x, y);
+                }
+            }
         }
 
         for (int y = drawY0; y <= drawY1; ++y)
@@ -2376,10 +2506,25 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
 
         if (canCqFast && isSpriteVerifyEnabled())
         {
-            s_cqChecked.fetch_add(1u, std::memory_order_relaxed);
+            if (isCvBlit) s_cvChecked.fetch_add(1u, std::memory_order_relaxed);
+            else s_cqChecked.fetch_add(1u, std::memory_order_relaxed);
+
             bool spriteMatch = true;
+            bool zMatch = true;
             const bool maskAlpha = (ctx.frame.fbmsk == 0xFF000000u);
+            const uint32_t rawFbMsk = ctx.frame.fbmsk;
             const bool isFyZero = (cqFy == 0.0f);
+            const bool isModulate = (tex.tfx == 0u);
+            const bool isModulateIdentity = (isModulate && v1.r == 0x80u && v1.g == 0x80u && v1.b == 0x80u);
+
+            const bool zte = ((ctx.test >> 16u) & 1u) != 0u;
+            const uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17u) & 3u);
+
+            auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int {
+                if (sel == 0) return cs;
+                if (sel == 1) return cd;
+                return 0;
+            };
 
             static std::atomic<uint32_t> s_crDumpLogged{0};
             static auto s_crLastSec = std::chrono::steady_clock::now();
@@ -2396,10 +2541,29 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 allowCrDump = true;
             }
 
+            // Signature logging for new CV signatures
+            if (isCvBlit)
+            {
+                uint64_t sigKey = (static_cast<uint64_t>(fpsm) << 0) |
+                                  (static_cast<uint64_t>(zpsm) << 8) |
+                                  (static_cast<uint64_t>(ztst) << 16) |
+                                  (static_cast<uint64_t>(ctx.zbuf.zmask ? 1 : 0) << 20) |
+                                  (static_cast<uint64_t>(ctx.alpha & 0xFF) << 24) |
+                                  (static_cast<uint64_t>(rawFbMsk) << 32);
+                if (s_cvLoggedSignatures.find(sigKey) == s_cvLoggedSignatures.end())
+                {
+                    s_cvLoggedSignatures.insert(sigKey);
+                    probe_ae::bhLog("[probe] cv sig fpsm=%u zpsm=%u ztst=%u zmsk=%u alpha=0x%x fbmsk=0x%x\n",
+                                    (unsigned)fpsm, (unsigned)zpsm, (unsigned)ztst,
+                                    (unsigned)(ctx.zbuf.zmask ? 1 : 0), (unsigned)(ctx.alpha & 0xFF),
+                                    (unsigned)rawFbMsk);
+                }
+            }
+
             // Precompute fast path result into temporary buffer for verification and shift analysis
-            const int numCols = drawX1 - drawX0 + 1;
-            const int numRows = drawY1 - drawY0 + 1;
             std::vector<uint32_t> fastBuf(numCols * numRows);
+            std::vector<uint32_t> fastZBuf(numCols * numRows);
+            std::vector<uint8_t> fastZWritten(numCols * numRows, 0);
             std::vector<uint32_t> rawC00Buf(numCols * numRows);
             std::vector<uint32_t> rawC10Buf(numCols * numRows);
 
@@ -2428,16 +2592,16 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 for (int x = drawX0; x <= drawX1; ++x)
                 {
                     const int colIdx = x - drawX0;
+                    const int bufIdx = (y - drawY0) * numCols + colIdx;
                     const int tapU0 = cqU0_tab[colIdx];
                     const int tapU1 = cqU1_tab[colIdx];
 
                     const uint32_t c00 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU0, rowV0);
                     const uint32_t c10 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU1, rowV0);
-                    const int bufIdx = (y - drawY0) * numCols + colIdx;
                     rawC00Buf[bufIdx] = c00;
                     rawC10Buf[bufIdx] = c10;
 
-                    uint8_t r_out, g_out, b_out;
+                    uint8_t tr_out, tg_out, tb_out, ta_out;
                     if (isFyZero)
                     {
                         const float topR = static_cast<float>(static_cast<uint8_t>(c00 & 0xFFu)) +
@@ -2446,29 +2610,127 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 8) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 8) & 0xFFu))) * cqFx;
                         const float topB = static_cast<float>(static_cast<uint8_t>((c00 >> 16) & 0xFFu)) +
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 16) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 16) & 0xFFu))) * cqFx;
-                        r_out = clampU8(static_cast<int>(std::lround(topR)));
-                        g_out = clampU8(static_cast<int>(std::lround(topG)));
-                        b_out = clampU8(static_cast<int>(std::lround(topB)));
+                        const float topA = static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu)) +
+                                           (static_cast<float>(static_cast<uint8_t>((c10 >> 24) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu))) * cqFx;
+                        tr_out = clampU8(static_cast<int>(std::lround(topR)));
+                        tg_out = clampU8(static_cast<int>(std::lround(topG)));
+                        tb_out = clampU8(static_cast<int>(std::lround(topB)));
+                        ta_out = clampU8(static_cast<int>(std::lround(topA)));
                     }
                     else
                     {
                         const uint32_t c01 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU0, rowV1);
                         const uint32_t c11 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU1, rowV1);
-                        r_out = lerpChannel(static_cast<uint8_t>(c00 & 0xFFu), static_cast<uint8_t>(c10 & 0xFFu),
-                                            static_cast<uint8_t>(c01 & 0xFFu), static_cast<uint8_t>(c11 & 0xFFu), cqFx, cqFy);
-                        g_out = lerpChannel(static_cast<uint8_t>((c00 >> 8) & 0xFFu), static_cast<uint8_t>((c10 >> 8) & 0xFFu),
-                                            static_cast<uint8_t>((c01 >> 8) & 0xFFu), static_cast<uint8_t>((c11 >> 8) & 0xFFu), cqFx, cqFy);
-                        b_out = lerpChannel(static_cast<uint8_t>((c00 >> 16) & 0xFFu), static_cast<uint8_t>((c10 >> 16) & 0xFFu),
-                                            static_cast<uint8_t>((c01 >> 16) & 0xFFu), static_cast<uint8_t>((c11 >> 16) & 0xFFu), cqFx, cqFy);
+                        tr_out = lerpChannel(static_cast<uint8_t>(c00 & 0xFFu), static_cast<uint8_t>(c10 & 0xFFu),
+                                             static_cast<uint8_t>(c01 & 0xFFu), static_cast<uint8_t>(c11 & 0xFFu), cqFx, cqFy);
+                        tg_out = lerpChannel(static_cast<uint8_t>((c00 >> 8) & 0xFFu), static_cast<uint8_t>((c10 >> 8) & 0xFFu),
+                                             static_cast<uint8_t>((c01 >> 8) & 0xFFu), static_cast<uint8_t>((c11 >> 8) & 0xFFu), cqFx, cqFy);
+                        tb_out = lerpChannel(static_cast<uint8_t>((c00 >> 16) & 0xFFu), static_cast<uint8_t>((c10 >> 16) & 0xFFu),
+                                             static_cast<uint8_t>((c01 >> 16) & 0xFFu), static_cast<uint8_t>((c11 >> 16) & 0xFFu), cqFx, cqFy);
+                        ta_out = lerpChannel(static_cast<uint8_t>((c00 >> 24) & 0xFFu), static_cast<uint8_t>((c10 >> 24) & 0xFFu),
+                                             static_cast<uint8_t>((c01 >> 24) & 0xFFu), static_cast<uint8_t>((c11 >> 24) & 0xFFu), cqFx, cqFy);
                     }
 
-                    fastBuf[bufIdx] = static_cast<uint32_t>(r_out) |
-                                      (static_cast<uint32_t>(g_out) << 8) |
-                                      (static_cast<uint32_t>(b_out) << 16);
+                    if (!isCvBlit)
+                    {
+                        uint32_t outPixel = static_cast<uint32_t>(tr_out) |
+                                            (static_cast<uint32_t>(tg_out) << 8) |
+                                            (static_cast<uint32_t>(tb_out) << 16);
+                        if (maskAlpha)
+                        {
+                            outPixel |= (preDrawFb[bufIdx] & 0xFF000000u);
+                        }
+                        else
+                        {
+                            outPixel |= 0xFF000000u;
+                        }
+                        fastBuf[bufIdx] = outPixel;
+                        if (writeDepth)
+                        {
+                            fastZBuf[bufIdx] = z1;
+                            fastZWritten[bufIdx] = 1;
+                        }
+                        else
+                        {
+                            fastZBuf[bufIdx] = preDrawZb[bufIdx];
+                        }
+                    }
+                    else
+                    {
+                        // Depth test
+                        if (zte)
+                        {
+                            bool zpass = false;
+                            if (ztst == 1u)
+                            {
+                                zpass = true;
+                            }
+                            else
+                            {
+                                uint32_t storedZ = preDrawZb[bufIdx];
+                                if (ztst == 2u) zpass = (static_cast<uint32_t>(z1) >= storedZ);
+                                else if (ztst == 3u) zpass = (static_cast<uint32_t>(z1) > storedZ);
+                            }
+                            if (!zpass)
+                            {
+                                fastBuf[bufIdx] = preDrawFb[bufIdx];
+                                fastZBuf[bufIdx] = preDrawZb[bufIdx];
+                                continue;
+                            }
+                        }
+
+                        // Combine texture
+                        uint8_t cr = tr_out, cg = tg_out, cb = tb_out;
+                        uint8_t ca = (tex.tcc != 0u) ? ta_out : v1.a;
+                        if (isModulate && !isModulateIdentity)
+                        {
+                            cr = clampU8((tr_out * v1.r) >> 7);
+                            cg = clampU8((tg_out * v1.g) >> 7);
+                            cb = clampU8((tb_out * v1.b) >> 7);
+                            if (tex.tcc != 0u) ca = clampU8((ta_out * v1.a) >> 7);
+                        }
+
+                        uint32_t fbrgba = preDrawFb[bufIdx];
+
+                        // Alpha blend
+                        uint8_t r_res = cr, g_res = cg, b_res = cb;
+                        if (state.prim.abe)
+                        {
+                            uint8_t dr = fbrgba & 0xFFu;
+                            uint8_t dg = (fbrgba >> 8) & 0xFFu;
+                            uint8_t db = (fbrgba >> 16) & 0xFFu;
+                            uint8_t da = (fbrgba >> 24) & 0xFFu;
+                            int cAlpha = (cvCsel == 0) ? ca : (cvCsel == 1) ? da : cvFix;
+                            r_res = clampU8(((pickRGB(cvAsel, cr, dr) - pickRGB(cvBsel, cr, dr)) * cAlpha >> 7) + pickRGB(cvDsel, cr, dr));
+                            g_res = clampU8(((pickRGB(cvAsel, cg, dg) - pickRGB(cvBsel, cg, dg)) * cAlpha >> 7) + pickRGB(cvDsel, cg, dg));
+                            b_res = clampU8(((pickRGB(cvAsel, cb, db) - pickRGB(cvBsel, cb, db)) * cAlpha >> 7) + pickRGB(cvDsel, cb, db));
+                        }
+
+                        uint32_t pixel = static_cast<uint32_t>(r_res) |
+                                         (static_cast<uint32_t>(g_res) << 8) |
+                                         (static_cast<uint32_t>(b_res) << 16) |
+                                         (static_cast<uint32_t>(ca) << 24);
+
+                        if (rawFbMsk != 0u)
+                        {
+                            pixel = (pixel & ~rawFbMsk) | (fbrgba & rawFbMsk);
+                        }
+                        fastBuf[bufIdx] = pixel;
+
+                        if (cvWriteDepth)
+                        {
+                            fastZBuf[bufIdx] = z1;
+                            fastZWritten[bufIdx] = 1;
+                        }
+                        else
+                        {
+                            fastZBuf[bufIdx] = preDrawZb[bufIdx];
+                        }
+                    }
                 }
             }
 
-            if (allowCrDump)
+            if (allowCrDump && !isCvBlit)
             {
                 // Generic SampleTexture instrument for (drawX0, drawY0)
                 float gen_tx = (static_cast<float>(drawX0 - unclippedX0) + 0.5f) / spriteW;
@@ -2496,7 +2758,7 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                 gen_u, gen_v, gen_fx, gen_fy, gen_u0, gen_v0);
             }
 
-            // Compare fast result vs generic destination pixels
+            // Compare fast result vs generic destination pixels & Z
             struct MismInfo { int x, y; uint32_t fastVal, genVal, c00, c10; };
             std::vector<MismInfo> misms;
 
@@ -2506,31 +2768,53 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 {
                     const int colIdx = x - drawX0;
                     const int bufIdx = (y - drawY0) * numCols + colIdx;
-                    const uint32_t fastRgb = fastBuf[bufIdx];
-                    const uint32_t got = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+                    const uint32_t fastPixel = fastBuf[bufIdx];
+                    const uint32_t gotPixel = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
 
                     bool mismatch = false;
-                    if ((fastRgb & 0xFFu) != (got & 0xFFu) ||
-                        ((fastRgb >> 8) & 0xFFu) != ((got >> 8) & 0xFFu) ||
-                        ((fastRgb >> 16) & 0xFFu) != ((got >> 16) & 0xFFu))
+                    if (isCvBlit)
                     {
-                        mismatch = true;
+                        if (fastPixel != gotPixel) mismatch = true;
+                    }
+                    else
+                    {
+                        if ((fastPixel & 0xFFu) != (gotPixel & 0xFFu) ||
+                            ((fastPixel >> 8) & 0xFFu) != ((gotPixel >> 8) & 0xFFu) ||
+                            ((fastPixel >> 16) & 0xFFu) != ((gotPixel >> 16) & 0xFFu))
+                        {
+                            mismatch = true;
+                        }
                     }
 
                     if (mismatch)
                     {
                         spriteMatch = false;
-                        s_cqMismPx.fetch_add(1u, std::memory_order_relaxed);
+                        if (isCvBlit) s_cvMismPx.fetch_add(1u, std::memory_order_relaxed);
+                        else s_cqMismPx.fetch_add(1u, std::memory_order_relaxed);
                         if (allowCrDump)
                         {
-                            misms.push_back({x, y, fastRgb, got, rawC00Buf[bufIdx], rawC10Buf[bufIdx]});
+                            misms.push_back({x, y, fastPixel, gotPixel, rawC00Buf[bufIdx], rawC10Buf[bufIdx]});
+                        }
+                    }
+
+                    // Check Z
+                    const uint32_t fastZ = fastZBuf[bufIdx];
+                    const uint32_t gotZ = ReadVramUnlocked(zpsm, zbp, fbw, x, y);
+                    if (fastZ != gotZ)
+                    {
+                        zMatch = false;
+                        if (isCvBlit) s_cvZMismPx.fetch_add(1u, std::memory_order_relaxed);
+                        uint32_t logged = s_cvMismLogged.fetch_add(1u, std::memory_order_relaxed);
+                        if (logged < 5u)
+                        {
+                            probe_ae::bhLog("[probe] cv z_mism x=%d y=%d exp=0x%08X got=0x%08X\n", x, y, fastZ, gotZ);
                         }
                     }
                 }
             }
 
-            // Shift analysis on central 64x64 block
-            if (allowCrDump && numCols >= 64 && numRows >= 64)
+            // Shift analysis on central 64x64 block (only for CQ debug)
+            if (allowCrDump && !isCvBlit && numCols >= 64 && numRows >= 64)
             {
                 int startCX = (numCols - 64) / 2;
                 int startCY = (numRows - 64) / 2;
@@ -2593,9 +2877,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 }
             }
 
-            if (spriteMatch)
+            if (spriteMatch && zMatch)
             {
-                s_cqFastOk.fetch_add(1u, std::memory_order_relaxed);
+                if (isCvBlit) s_cvFastOk.fetch_add(1u, std::memory_order_relaxed);
+                else s_cqFastOk.fetch_add(1u, std::memory_order_relaxed);
             }
         }
 
@@ -2603,6 +2888,19 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         s_cqGeneric.fetch_add(1u, std::memory_order_relaxed);
 
         auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cvLastSecLog).count() >= 1)
+        {
+            s_cvLastSecLog = now;
+            if (isSpriteVerifyEnabled())
+            {
+                probe_ae::bhLog("[probe] cv sprite checked=%llu fast_ok=%llu mism_px=%llu z_mism_px=%llu\n",
+                                (unsigned long long)s_cvChecked.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cvFastOk.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cvMismPx.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cvZMismPx.load(std::memory_order_relaxed));
+            }
+        }
+
         if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cmLastSecLog).count() >= 1)
         {
             s_cmLastSecLog = now;
@@ -2621,7 +2919,7 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                             (unsigned long long)s_cmFastTaken.load(std::memory_order_relaxed),
                             (unsigned long long)s_cmGeneric.load(std::memory_order_relaxed));
             probe_ae::bhLog("[probe] cq sprite fast_taken=%llu generic=%llu\n",
-                            (unsigned long long)s_cqFastTaken.load(std::memory_order_relaxed),
+                            (unsigned long long)(s_cqFastTaken.load(std::memory_order_relaxed) + s_cvFastTaken.load(std::memory_order_relaxed)),
                             (unsigned long long)s_cqGeneric.load(std::memory_order_relaxed));
         }
     }
