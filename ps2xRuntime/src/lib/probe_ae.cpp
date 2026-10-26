@@ -33,6 +33,18 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA
 #include <chrono>
 #include <unordered_set>
 #include <set>
+namespace probe_ae {
+    extern std::atomic<uint32_t> s_duDecodesSinceLastPresent;
+    extern std::atomic<uint32_t> s_duDecodesThisSec;
+    extern std::atomic<uint32_t> s_duPresentsThisSec;
+}
+extern "C" uint32_t ps2_getDuDecodesSinceLast() {
+    return probe_ae::s_duDecodesSinceLastPresent.exchange(0, std::memory_order_relaxed);
+}
+extern "C" void ps2_onDuPresent() {
+    probe_ae::s_duPresentsThisSec.fetch_add(1, std::memory_order_relaxed);
+}
+
 extern "C" void ps2_getDkThread1Info(int *outCurTh, const char **outTh1Status, uint32_t *outTh1Pc, uint32_t *outTh1Ra);
 
 
@@ -7313,6 +7325,11 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
         ev.g74 = g74;
     }
 
+    
+    std::atomic<uint32_t> s_duDecodesSinceLastPresent{0};
+    std::atomic<uint32_t> s_duDecodesThisSec{0};
+    std::atomic<uint32_t> s_duPresentsThisSec{0};
+
     static void dumpDcStatsLocked() {
         std::vector<std::pair<uint32_t, uint32_t>> raSorted(s_dcRaCounts.begin(), s_dcRaCounts.end());
         std::sort(raSorted.begin(), raSorted.end(), [](const auto &a, const auto &b) {
@@ -7422,6 +7439,14 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
             dcLog("[probe] dc5 rdcnt ring=%u video=%u disp=%u pump=%u\n",
                   ringCnt, videoCnt, dispCnt, pumpCnt);
         dcLog("[probe] dc12 sched preempt_policy=EeScheduler::checkCheckpoint on requestPreemptionIfHigher or timeslice expiry\n");
+        // Task DU: dc13 rate
+        {
+            uint32_t p = s_duPresentsThisSec.exchange(0, std::memory_order_relaxed);
+            uint32_t d = s_duDecodesThisSec.exchange(0, std::memory_order_relaxed);
+            std::printf("[probe] dc13 rate presents=%u guest_display_copies=0 decodes=%u\n", p, d);
+            std::fflush(stdout);
+        }
+
         }
 
         // Task DI: 3. Stall dump when F==0 for 3 consecutive seconds after F>0
@@ -7695,6 +7720,8 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
     }
 
     void onDc4DecEntry() {
+        s_duDecodesSinceLastPresent.fetch_add(1, std::memory_order_relaxed);
+        s_duDecodesThisSec.fetch_add(1, std::memory_order_relaxed);
         if (!isDcProbeEnabled()) return;
         std::lock_guard<std::mutex> lock(s_dc4Mutex);
         if (s_dc4GCalls > 200 && s_dc4LoggedCount < 150) {

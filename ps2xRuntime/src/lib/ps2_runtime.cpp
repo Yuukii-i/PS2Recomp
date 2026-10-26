@@ -58,6 +58,9 @@ namespace {
 #include <sstream>
 #include <mutex>
 #include <cstdarg>
+extern "C" uint32_t ps2_getDuDecodesSinceLast();
+extern "C" void ps2_onDuPresent();
+
 
 static std::mutex s_logMutex;
 
@@ -760,6 +763,33 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
             hasNonZeroPixels = true;
         }
     }
+
+    // Task DU: dc13 present logging & PNG dump
+    if (probe_ae::isDcProbeEnabled())
+    {
+        ps2_onDuPresent();
+        uint32_t decodesSinceLast = ps2_getDuDecodesSinceLast();
+        static auto s_duLastTime = std::chrono::steady_clock::now();
+        auto duNow = std::chrono::steady_clock::now();
+        double hostMsSinceLast = std::chrono::duration<double, std::milli>(duNow - s_duLastTime).count();
+        s_duLastTime = duNow;
+
+        static uint32_t s_duDumpCount = 0;
+        if (currentTick >= 1500 && s_duDumpCount < 24)
+        {
+            uint32_t n = s_duDumpCount++;
+            char filename[128];
+            std::snprintf(filename, sizeof(filename), "frames/dbg_%02u_t%llu.png", n, (unsigned long long)currentTick);
+            std::filesystem::create_directories("frames");
+            extern void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
+            writeUncompressedPng(width, height, s_scratch.data(), filename);
+
+            std::printf("[probe] dc13 present n=%u tick=%llu hash=0x%08X fbp=%u src=%u disp_copies_since_last=0 decodes_since_last=%u host_ms_since_last=%.2f\n",
+                        n, (unsigned long long)currentTick, frameHash, displayFbp, sourceFbp, decodesSinceLast, hostMsSinceLast);
+            std::fflush(stdout);
+        }
+    }
+
 
     if ((currentTick >= 68 && currentTick <= 75) || frameHash == 0xefb69dc5u)
     {
