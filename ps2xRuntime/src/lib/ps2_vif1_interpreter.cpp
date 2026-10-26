@@ -42,17 +42,21 @@ static void ps2_vif1_recordDzUnpack(uint8_t cmd, uint8_t vn, uint8_t vl, uint8_t
     s_dzUnpackTotal++;
 }
 
-extern "C" void ps2_vif1_dumpDzRing() {
+extern "C" void ps2_vif1_dumpDzRingCount(uint32_t maxCount, const char *prefix) {
     std::lock_guard<std::mutex> lock(s_dzUnpackMutex);
     uint32_t total = s_dzUnpackTotal;
-    uint32_t count = std::min<uint32_t>(256u, total);
+    uint32_t count = std::min<uint32_t>(maxCount, total);
     uint32_t startIdx = total - count;
     for (uint32_t i = 0; i < count; ++i) {
         const auto &e = s_dzUnpackRing[(startIdx + i) & 255u];
-        std::printf("[probe] dc15 unpack cmd=0x%02X vn=%u vl=%u usn=%u flg=%u cl=%u wl=%u num=%u dest=0x%03X src=0x%08X mode=%s\n",
-                    e.cmd, e.vn, e.vl, e.usn, e.flg, e.cl, e.wl, e.num, e.dest, e.src,
+        std::printf("%s cmd=0x%02X vn=%u vl=%u usn=%u flg=%u cl=%u wl=%u num=%u dest=0x%03X src=0x%08X mode=%s\n",
+                    prefix, e.cmd, e.vn, e.vl, e.usn, e.flg, e.cl, e.wl, e.num, e.dest, e.src,
                     e.fast ? "fast" : "generic");
     }
+}
+
+extern "C" void ps2_vif1_dumpDzRing() {
+    ps2_vif1_dumpDzRingCount(256u, "[probe] dc15 unpack");
 }
 
 extern void recordCompletedIntcCause(uint32_t cause);

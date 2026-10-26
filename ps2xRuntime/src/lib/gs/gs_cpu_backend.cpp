@@ -284,6 +284,9 @@ static uint32_t s_ecDateFail = 0;
 static uint32_t s_ecZeroPxCount = 0;
 static uint32_t s_ecPngCount = 0;
 static uint64_t s_ecTotalPxWritten = 0;
+static uint32_t s_eeZPrimCount = 0;
+static uint32_t s_eeZwriters = 0;
+static uint32_t s_eeZjunk = 0;
 static int s_presentFallback = -1;
 static int s_uploadDump = -1;
 static int s_texDump = -1;
@@ -1257,6 +1260,27 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
             ecClampedY1 = std::min(maxY, static_cast<int>(ctx.scissor.y1));
         }
     }
+    bool eeIsClearCandidate = false;
+    if (ecDoThisPrim)
+    {
+        uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+        if (ztst == 1u && ecClampedX0 <= 0 && ecClampedY0 <= 0 && ecClampedX1 >= 511 && ecClampedY1 >= 447)
+        {
+            eeIsClearCandidate = true;
+            uint32_t v0Z = !batch.vertices.empty() ? static_cast<uint32_t>(batch.vertices[0].z) : 0u;
+            uint32_t v0Rgba = 0;
+            if (!batch.vertices.empty()) {
+                const auto &v0 = batch.vertices[0];
+                v0Rgba = static_cast<uint32_t>(v0.r) | (static_cast<uint32_t>(v0.g) << 8u) |
+                         (static_cast<uint32_t>(v0.b) << 16u) | (static_cast<uint32_t>(v0.a) << 24u);
+            }
+            uint64_t bboxPix = static_cast<uint64_t>(ecClampedX1 - ecClampedX0 + 1) * static_cast<uint64_t>(ecClampedY1 - ecClampedY0 + 1);
+            std::printf("[probe] ee z clear idx=%u zmsk=%u v0_z=0x%08X tme=%u abe=%u rgba=0x%08X pixels=%llu\n",
+                        currentPrimIdx, (ctx.zbuf.zmask ? 1u : 0u), v0Z, (state.prim.tme ? 1u : 0u),
+                        (state.prim.abe ? 1u : 0u), v0Rgba, static_cast<unsigned long long>(bboxPix));
+            std::fflush(stdout);
+        }
+    }
 
     if (s_primLogFrom == -1)
     {
@@ -1681,6 +1705,57 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
                         ecClampedX0, ecClampedY0, ecClampedX1, ecClampedY1,
                         static_cast<unsigned long long>(ecPxWritten), s_ecZtestFail, s_ecAtestFail, s_ecScissorClip);
             std::fflush(stdout);
+
+            // Task EE Item 1 check
+            if (ztst == 2u && s_ecZtestFail > (ecPxWritten / 10u) && s_eeZPrimCount < 6u)
+            {
+                s_eeZPrimCount++;
+                int ofx = ctx.xyoffset.ofx >> 4;
+                int ofy = ctx.xyoffset.ofy >> 4;
+                std::string vStr;
+                size_t vertLimit = std::min<size_t>(6u, batch.vertices.size());
+                for (size_t vi = 0; vi < vertLimit; ++vi) {
+                    const auto &v = batch.vertices[vi];
+                    float vx = v.x - static_cast<float>(ofx);
+                    float vy = v.y - static_cast<float>(ofy);
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "(%.1f,%.1f,0x%08X)%s", vx, vy, static_cast<uint32_t>(v.z), (vi + 1 < vertLimit ? " " : ""));
+                    vStr += buf;
+                }
+                const uint32_t zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+                const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+                uint32_t zmin = 0xFFFFFFFFu, zmax = 0u, nonzeroCount = 0u, totalBboxPx = 0u;
+                for (int y = ecClampedY0; y <= ecClampedY1; ++y) {
+                    for (int x = ecClampedX0; x <= ecClampedX1; ++x) {
+                        totalBboxPx++;
+                        uint32_t zv = ReadVramUnlocked(ctx.zbuf.psm, zbp, fbw, x, y);
+                        if (zv != 0u) nonzeroCount++;
+                        if (zv < zmin) zmin = zv;
+                        if (zv > zmax) zmax = zv;
+                    }
+                }
+                if (zmin == 0xFFFFFFFFu) zmin = 0;
+                std::printf("[probe] ee z prim idx=%u zbp=%u zpsm=0x%02X zmsk=%u ztst=%u verts: %s zbuf_min=0x%08X zbuf_max=0x%08X nonzero_px=%u total_px=%u\n",
+                            currentPrimIdx, ctx.zbuf.zbp, ctx.zbuf.psm, (ctx.zbuf.zmask ? 1u : 0u), ztst,
+                            vStr.c_str(), zmin, zmax, nonzeroCount, totalBboxPx);
+                std::fflush(stdout);
+                // Dump Z buffer 512x448 as grayscale PNG
+                std::filesystem::create_directories("logs/gs");
+                char zFn[256];
+                std::snprintf(zFn, sizeof(zFn), "logs/gs/ee_z_%u.png", currentPrimIdx);
+                std::vector<uint8_t> zRgba(512u * 448u * 4u, 0u);
+                for (uint32_t py = 0; py < 448u; ++py) {
+                    for (uint32_t px = 0; px < 512u; ++px) {
+                        uint32_t zv = ReadVramUnlocked(ctx.zbuf.psm, zbp, fbw, px, py);
+                        uint8_t g = static_cast<uint8_t>(std::min<uint32_t>(255u, zv >> 16u));
+                        zRgba[(py * 512u + px) * 4u + 0] = g;
+                        zRgba[(py * 512u + px) * 4u + 1] = g;
+                        zRgba[(py * 512u + px) * 4u + 2] = g;
+                        zRgba[(py * 512u + px) * 4u + 3] = 0xFFu;
+                    }
+                }
+                writeUncompressedPng(512u, 448u, zRgba.data(), zFn);
+            }
             if (s_ecPngCount < 150u)
             {
                 s_ecPngCount++;
@@ -1713,10 +1788,34 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
                 std::fflush(stdout);
             }
         }
+        if (!ctx.zbuf.zmask && ecPxWritten > 0)
+        {
+            s_eeZwriters++;
+        }
+        uint32_t v0zVal = !batch.vertices.empty() ? static_cast<uint32_t>(batch.vertices[0].z) : 0u;
+        if (v0zVal == 0u || v0zVal >= 0xFFFu)
+        {
+            s_eeZjunk++;
+        }
+        if (eeIsClearCandidate)
+        {
+            const uint32_t zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+            const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+            uint32_t nzFull = 0;
+            for (uint32_t py = 0; py < 448u; ++py) {
+                for (uint32_t px = 0; px < 512u; ++px) {
+                    if (ReadVramUnlocked(ctx.zbuf.psm, zbp, fbw, px, py) != 0u)
+                        nzFull++;
+                }
+            }
+            std::printf("[probe] ee z clear idx=%u zbuf_nonzero_after=%u\n", currentPrimIdx, nzFull);
+            std::fflush(stdout);
+        }
         if (currentPrimIdx + 1u == s_ecStartPrimIdx + static_cast<uint32_t>(s_ecStepCount))
         {
             std::printf("[probe] ec window finished total_px_written=%llu zero_px_prims=%u pngs=%u\n",
                         static_cast<unsigned long long>(s_ecTotalPxWritten), s_ecZeroPxCount, s_ecPngCount);
+            std::printf("[probe] ee z summary zwriters=%u zjunk=%u\n", s_eeZwriters, s_eeZjunk);
             std::fflush(stdout);
         }
     }

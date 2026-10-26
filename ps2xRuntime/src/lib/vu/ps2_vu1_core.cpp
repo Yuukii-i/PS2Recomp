@@ -64,6 +64,14 @@ static thread_local uint32_t s_dyCurItop = 0;
 // =========================================================================
 // Task ED: VU1 3D Census (PS2X_PROBE_VU3D=1)
 // =========================================================================
+extern "C" void ps2_vif1_dumpDzRingCount(uint32_t maxCount, const char *prefix);
+static bool s_eeVuDone = false;
+struct EePacket {
+    uint32_t qwCount = 0;
+    uint32_t words[64][4];
+};
+static thread_local std::vector<EePacket> s_eeCurRunPackets;
+
 static inline bool isVu3dProbeEnabled()
 {
     static int s_vu3d = -1;
@@ -1229,6 +1237,15 @@ void VU1Interpreter::finishXgkick()
         decodeXgkickPacketStats(m_xgkick.packet.data(), m_xgkick.totalBytes,
                                 s_vdCurRunVerts, s_vdCurRunZeroXy, s_vdCurRunOob,
                                 s_vdCurRunPrimHist);
+        if (!s_eeVuDone && s_eeCurRunPackets.size() < 4u)
+        {
+            EePacket pkt{};
+            uint32_t qwAvailable = m_xgkick.totalBytes / 16u;
+            pkt.qwCount = std::min<uint32_t>(64u, qwAvailable);
+            std::memset(pkt.words, 0, sizeof(pkt.words));
+            std::memcpy(pkt.words, m_xgkick.packet.data(), pkt.qwCount * 16u);
+            s_eeCurRunPackets.push_back(pkt);
+        }
         if (!s_vdHaveFirstXgkick)
         {
             s_vdHaveFirstXgkick = true;
@@ -1916,6 +1933,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     s_vdCurRunOob = 0;
     std::memset(s_vdCurRunPrimHist, 0, sizeof(s_vdCurRunPrimHist));
     s_vdHaveFirstXgkick = false;
+    s_eeCurRunPackets.clear();
     if (probe_ae::isDcProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u) {
         uint64_t vsyncTick = 0;
         uint8_t *ram = memory ? memory->getRDRAM() : nullptr;
@@ -2390,6 +2408,60 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             st.vOob += s_vdCurRunOob;
             for (int p = 0; p < 7; ++p)
                 st.primHist[p] += s_vdCurRunPrimHist[p];
+
+            if (!s_eeVuDone && s_dyCurStartPc == 0x08u && procElapsedSec >= 60u &&
+                s_vdCurRunVerts >= 30u && s_vdCurRunZeroXy >= 4u)
+            {
+                s_eeVuDone = true;
+                std::string viStr;
+                for (int r = 1; r < 16; ++r) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%s%d", (r > 1 ? " " : ""), m_state.vi[r]);
+                    viStr += buf;
+                }
+                std::printf("[probe] ee vu entry vi=%s top=%u itop=%u\n", viStr.c_str(), s_dyCurTop, s_dyCurItop);
+                uint32_t zeroCount = 0;
+                for (uint32_t qw = 0; qw < 1024u; ++qw) {
+                    uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+                    if (vuData && (qw + 1u) * 16u <= dataSize) {
+                        std::memcpy(&w0, vuData + qw * 16u + 0u, 4);
+                        std::memcpy(&w1, vuData + qw * 16u + 4u, 4);
+                        std::memcpy(&w2, vuData + qw * 16u + 8u, 4);
+                        std::memcpy(&w3, vuData + qw * 16u + 12u, 4);
+                    }
+                    if (w0 == 0 && w1 == 0 && w2 == 0 && w3 == 0) {
+                        zeroCount++;
+                    } else {
+                        if (zeroCount > 0) {
+                            std::printf("[probe] ee vu data skipped_zero_qw count=%u\n", zeroCount);
+                            zeroCount = 0;
+                        }
+                        std::printf("[probe] ee vu data qw=%u w=%08X %08X %08X %08X\n", qw, w0, w1, w2, w3);
+                    }
+                }
+                if (zeroCount > 0) {
+                    std::printf("[probe] ee vu data skipped_zero_qw count=%u\n", zeroCount);
+                }
+                for (size_t p = 0; p < s_eeCurRunPackets.size(); ++p) {
+                    const auto &pkt = s_eeCurRunPackets[p];
+                    for (uint32_t q = 0; q < pkt.qwCount; ++q) {
+                        std::printf("[probe] ee vu out pkt=%u qw=%u w=%08X %08X %08X %08X\n",
+                                    static_cast<unsigned>(p), q, pkt.words[q][0], pkt.words[q][1], pkt.words[q][2], pkt.words[q][3]);
+                    }
+                }
+                ps2_vif1_dumpDzRingCount(64u, "[probe] ee vu unpack");
+                if (memory) {
+                    const auto &vr = memory->vif1_regs;
+                    uint32_t cl = vr.cycle & 0xFFu;
+                    uint32_t wl = (vr.cycle >> 8) & 0xFFu;
+                    std::printf("[probe] ee vu vif1 cl=%u wl=%u mode=%u mask=0x%08X tops=%u base=%u ofst=%u\n",
+                                cl, wl, vr.mode & 3u, vr.mask, vr.tops & 0x3FFu, vr.base & 0x3FFu, vr.ofst & 0x3FFu);
+                    std::printf("[probe] ee vu vif1_row col row=%08X %08X %08X %08X col=%08X %08X %08X %08X\n",
+                                vr.row[0], vr.row[1], vr.row[2], vr.row[3],
+                                vr.col[0], vr.col[1], vr.col[2], vr.col[3]);
+                }
+                std::fflush(stdout);
+            }
 
             if (s_dyCurStartPc != 0x08u && s_dyCurStartPc != 0x48u && procElapsedSec >= 60u)
             {
