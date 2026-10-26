@@ -2121,6 +2121,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     installBtProbe<0x0024C164u>(this);
     installBtProbe<0x0024CE28u>(this);
     installBtProbe<0x0024C2D4u>(this);
+    installBtProbe<0x0024CB10u>(this);
 
     // Task BU Probe
     installBuPumpProbe<0x0024C7DCu>(this);

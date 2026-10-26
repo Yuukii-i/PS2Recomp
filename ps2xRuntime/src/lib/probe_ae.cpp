@@ -5371,6 +5371,7 @@ namespace probe_ae {
     }
 
     void onBtFunctionEntry(uint32_t addr, const R5900Context *ctx, const uint8_t *rdram) {
+        if (addr == 0x0024CB10u) { onDhVideoReadEntry(ctx, rdram); }
         if (addr == 0x0024CE28u) {
             onDc4GEntry(ctx, rdram);
         } else if (addr == 0x0024C164u) {
@@ -5476,6 +5477,7 @@ namespace probe_ae {
     }
 
     void onBuPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram, BuPreState *pre) {
+        onDhPumpEntry(ctx, rdram);
         if (!isEnabled() || !ctx || !rdram || !pre) return;
         ensureBuSamplerStarted();
         s_buPumpCalls.fetch_add(1, std::memory_order_relaxed);
@@ -6340,6 +6342,7 @@ namespace probe_ae {
     static std::set<std::pair<int32_t, int32_t>> s_bzSecPositions;
 
     void onBzInitEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        onDhBzInitEntry(ctx, rdram);
         if (!isEnabled() || !ctx) return;
         uint32_t a0 = getRegU32(ctx, 4);
         uint32_t a1 = getRegU32(ctx, 5);
@@ -7220,6 +7223,7 @@ namespace probe_ae {
     }
 
     void onDc4FEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        onDhFEntry(ctx, rdram);
         if (!isDcProbeEnabled()) return;
         std::lock_guard<std::mutex> lock(s_dc4Mutex);
         if (s_dc4GCalls > 200 && s_dc4LoggedCount < 150) {
@@ -7266,3 +7270,129 @@ namespace probe_ae {
         }
     }
 }
+
+    
+namespace probe_ae {
+// =========================================================================
+    // Task DH: Movie stream feed deadlock diagnostics
+    // =========================================================================
+    extern "C" uint32_t ps2_getSg2Pos();
+
+    struct DhEvent {
+        char name[16];
+        uint32_t a0, a1, a2, a3;
+        uint64_t tick;
+        uint32_t st, b50, n58, i60, i64, g74, c70;
+    };
+
+    static std::mutex s_dhMutex;
+    static DhEvent s_dhRing[64];
+    static uint64_t s_dhRingTotal = 0;
+    static std::atomic<bool> s_dhRingDumped{false};
+    static std::atomic<bool> s_dhIntroMovieStarted{false};
+    static std::atomic<uint32_t> s_dhReadLogsCount{0};
+    static std::chrono::steady_clock::time_point s_dhLastFTime;
+    static std::atomic<bool> s_dhFEverEntered{false};
+
+    static void dhRecordEvent(const char *name, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, const uint8_t *rdram) {
+        if (!isDcProbeEnabled()) return;
+        uint32_t st = 0, b50 = 0, n58 = 0, i60 = 0, i64 = 0, g74 = 0, c70 = 0;
+        uint64_t tick = 0;
+        if (rdram) {
+            std::memcpy(&st, rdram + ((0x772180u + 0x08u) & PS2_RAM_MASK), 4);
+            std::memcpy(&b50, rdram + ((0x772180u + 0x50u) & PS2_RAM_MASK), 4);
+            std::memcpy(&n58, rdram + ((0x772180u + 0x58u) & PS2_RAM_MASK), 4);
+            std::memcpy(&i60, rdram + ((0x772180u + 0x60u) & PS2_RAM_MASK), 4);
+            std::memcpy(&i64, rdram + ((0x772180u + 0x64u) & PS2_RAM_MASK), 4);
+            std::memcpy(&c70, rdram + ((0x772180u + 0x70u) & PS2_RAM_MASK), 4);
+            std::memcpy(&g74, rdram + ((0x772180u + 0x74u) & PS2_RAM_MASK), 4);
+            std::memcpy(&tick, rdram + (0x696FD0u & PS2_RAM_MASK), 8);
+        }
+        std::lock_guard<std::mutex> lock(s_dhMutex);
+        uint32_t slot = static_cast<uint32_t>(s_dhRingTotal % 64);
+        s_dhRingTotal++;
+        DhEvent &ev = s_dhRing[slot];
+        std::strncpy(ev.name, name, sizeof(ev.name) - 1);
+        ev.name[sizeof(ev.name) - 1] = '\0';
+        ev.a0 = a0; ev.a1 = a1; ev.a2 = a2; ev.a3 = a3;
+        ev.tick = tick;
+        ev.st = st; ev.b50 = b50; ev.n58 = n58; ev.i60 = i60; ev.i64 = i64; ev.g74 = g74; ev.c70 = c70;
+    }
+
+    void onDhFEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isDcProbeEnabled()) return;
+        s_dhLastFTime = std::chrono::steady_clock::now();
+        s_dhFEverEntered.store(true, std::memory_order_relaxed);
+    }
+
+    void onDhBzInitEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isDcProbeEnabled() || !ctx) return;
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t a3 = getRegU32(ctx, 7);
+        if (a2 == 512 && a3 == 320) {
+            s_dhIntroMovieStarted.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    void onDhDispEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isDcProbeEnabled() || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        dhRecordEvent("dispatcher", a0, a1, a2, 0, rdram);
+    }
+
+    void onDhPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isDcProbeEnabled() || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t a3 = getRegU32(ctx, 7);
+        dhRecordEvent("pump", a0, a1, a2, a3, rdram);
+    }
+
+    void onDhRingReadEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isDcProbeEnabled() || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t a3 = getRegU32(ctx, 7);
+        dhRecordEvent("ring_read", a0, a1, a2, a3, rdram);
+        if (s_dhIntroMovieStarted.load(std::memory_order_relaxed)) {
+            uint32_t cnt = s_dhReadLogsCount.fetch_add(1, std::memory_order_relaxed);
+            if (cnt < 400) {
+                uint64_t tick = 0;
+                uint32_t n58 = 0;
+                if (rdram) {
+                    std::memcpy(&tick, rdram + (0x696FD0u & PS2_RAM_MASK), 8);
+                    std::memcpy(&n58, rdram + ((0x772180u + 0x58u) & PS2_RAM_MASK), 4);
+                }
+                dcLog("[probe] dc5 rd kind=ring a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X tick=%llu n58=%u\n",
+                      a0, a1, a2, a3, (unsigned long long)tick, n58);
+            }
+        }
+    }
+
+    void onDhVideoReadEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isDcProbeEnabled() || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t a3 = getRegU32(ctx, 7);
+        dhRecordEvent("video_read", a0, a1, a2, a3, rdram);
+        if (s_dhIntroMovieStarted.load(std::memory_order_relaxed)) {
+            uint32_t cnt = s_dhReadLogsCount.fetch_add(1, std::memory_order_relaxed);
+            if (cnt < 400) {
+                uint64_t tick = 0;
+                uint32_t n58 = 0;
+                if (rdram) {
+                    std::memcpy(&tick, rdram + (0x696FD0u & PS2_RAM_MASK), 8);
+                    std::memcpy(&n58, rdram + ((0x772180u + 0x58u) & PS2_RAM_MASK), 4);
+                }
+                dcLog("[probe] dc5 rd kind=video a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X tick=%llu n58=%u\n",
+                      a0, a1, a2, a3, (unsigned long long)tick, n58);
+            }
+        }
+    }
+
+} // namespace probe_ae

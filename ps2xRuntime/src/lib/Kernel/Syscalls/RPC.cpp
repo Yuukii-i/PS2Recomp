@@ -60,6 +60,8 @@ static std::mutex s_sg2ProfMutex;
 static std::unordered_map<uint32_t, uint32_t> s_sg2OpCounts;
 static std::set<Sg2PacketKey> s_sg2DistinctPackets;
 static auto s_lastSg2SecLog = std::chrono::steady_clock::now();
+static std::atomic<uint32_t> g_lastSg2Pos{0};
+extern "C" uint32_t ps2_getSg2Pos() { return g_lastSg2Pos.load(std::memory_order_relaxed); }
 struct Sg2VoiceState {
     bool active = false;
     std::chrono::steady_clock::time_point keyOn{};
@@ -633,6 +635,7 @@ namespace ps2_syscalls
                                         double elapsed = std::chrono::duration<double>(now - s_sg2Voices[v].keyOn).count();
                                         pos = static_cast<uint64_t>(elapsed * 54857.0) % 0x10000u;
                                     }
+                                    g_lastSg2Pos.store(static_cast<uint32_t>(pos), std::memory_order_relaxed);
                                     uint32_t wordVal = static_cast<uint32_t>((((pos >> 14) + 1) << 14) & 0xFFFFu);
                                     uint32_t offset = 0xC0u + 4u * v;
                                     if (offset + 4u <= copyBytes) {

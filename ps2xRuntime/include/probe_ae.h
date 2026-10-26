@@ -919,4 +919,10 @@ namespace probe_ae {
     void onDc4FEntry(const struct R5900Context *ctx, const uint8_t *rdram);
     void onDc4DEntry(const struct R5900Context *ctx, const uint8_t *rdram);
     void onDc4DecEntry();
+    void onDhVideoReadEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onDhRingReadEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onDhPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onDhDispEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onDhBzInitEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onDhFEntry(const struct R5900Context *ctx, const uint8_t *rdram);
 }
