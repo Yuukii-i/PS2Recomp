@@ -1791,6 +1791,27 @@ static std::atomic<uint32_t> s_cvMismLogged{0};
 static auto s_cvLastSecLog = std::chrono::steady_clock::now();
 static std::unordered_set<uint64_t> s_cvLoggedSignatures;
 
+// =========================================================================
+// Task CX: Page-linear fast path counters & switches
+// =========================================================================
+static std::atomic<uint64_t> s_cxPageTaken{0};
+static std::atomic<uint64_t> s_cxPageChecked{0};
+static std::atomic<uint64_t> s_cxPageOk{0};
+static std::atomic<uint64_t> s_cxMismPx{0};
+static std::atomic<uint64_t> s_cxZMismPx{0};
+static std::atomic<uint64_t> s_cxPageUs{0};
+static auto s_cxLastSecLog = std::chrono::steady_clock::now();
+static std::unordered_set<uint64_t> s_cxLoggedSignatures;
+
+static inline bool isPageFastEnabled() {
+    static int s_val = -1;
+    if (s_val == -1) {
+        const char *env = std::getenv("PS2X_GS_PAGE_FAST");
+        s_val = (env && (env[0] == '0' || env[0] == 'f' || env[0] == 'F')) ? 0 : 1;
+    }
+    return s_val == 1;
+}
+
 static inline bool isSpriteFastEnabled() {
     static int s_val = -1;
     if (s_val == -1) {
@@ -1857,6 +1878,156 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
     const uint8_t alphaFix = static_cast<uint8_t>((alphaReg >> 32) & 0xFFu);
 
     uint8_t r = v1.r, g = v1.g, b = v1.b, a = v1.a;
+
+    // =========================================================================
+    // Task CX: Check Page Alignment for Draw Rectangle
+    // =========================================================================
+    const int rectW = drawX1 - drawX0 + 1;
+    const int rectH = drawY1 - drawY0 + 1;
+    const bool isRectPageAligned = (drawX0 % 64 == 0) && (drawY0 % 32 == 0) &&
+                                  (rectW % 64 == 0) && (rectH % 32 == 0);
+
+    const uint32_t fpsm = ctx.frame.psm;
+    const uint32_t fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+    const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+    const uint32_t zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+    const uint32_t zpsm = ctx.zbuf.psm;
+
+    // Check Untextured Fill Fast Path (tex=0)
+    if (!state.prim.tme && isRectPageAligned && fpsm == GS_PSM_CT32 &&
+        !state.prim.fge && !state.dthe && isPageFastEnabled() && !isSpriteVerifyEnabled())
+    {
+        const bool ateOff = (ctx.test & 0x1u) == 0u;
+        const uint8_t atst = static_cast<uint8_t>((ctx.test >> 1) & 0x7u);
+        const bool atePasses = ateOff || (atst == 1u);
+        const uint32_t ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+        const bool ztstAlways = ((ctx.test & (1u << 16)) == 0u) || (ztestMethod == 1u);
+        const bool dateOff = ((ctx.test >> 14) & 1u) == 0u;
+
+        if (atePasses && ztstAlways && dateOff && (!state.prim.abe) && ((ctx.fba & 1ull) == 0ull))
+        {
+            const bool zDepthSupported = (!ctx.zbuf.zmask) ? (zpsm == GS_PSM_Z32) : true;
+            if (zDepthSupported)
+            {
+                const uint32_t fillCol = static_cast<uint32_t>(r) |
+                                         (static_cast<uint32_t>(g) << 8u) |
+                                         (static_cast<uint32_t>(b) << 16u) |
+                                         (static_cast<uint32_t>(a) << 24u);
+                const uint32_t rawFbMsk = ctx.frame.fbmsk;
+                const bool writeDepth = !ctx.zbuf.zmask;
+                uint32_t* vramWords = reinterpret_cast<uint32_t*>(m_vram);
+                const size_t maxVramWords = m_vramSize / sizeof(uint32_t);
+
+                const int pagesX = rectW / 64;
+                const int pagesY = rectH / 32;
+                const int startPageCol = drawX0 / 64;
+                const int startPageRow = drawY0 / 32;
+
+                bool pagesInBounds = true;
+                const uint32_t dstPageBase = fbp / 32u;
+                const uint32_t zPageBase = zbp / 32u;
+                for (int py = 0; py < pagesY; ++py)
+                {
+                    uint32_t dstPageRowBase = (startPageRow + py) * fbw;
+                    uint32_t zPageRowBase = (startPageRow + py) * fbw;
+                    for (int px = 0; px < pagesX; ++px)
+                    {
+                        uint32_t dstPageId = dstPageBase + dstPageRowBase + (startPageCol + px);
+                        if ((dstPageId + 1u) * 2048u > maxVramWords) { pagesInBounds = false; break; }
+                        if (writeDepth)
+                        {
+                            uint32_t zPageId = zPageBase + zPageRowBase + (startPageCol + px);
+                            if ((zPageId + 1u) * 2048u > maxVramWords) { pagesInBounds = false; break; }
+                        }
+                    }
+                    if (!pagesInBounds) break;
+                }
+
+                if (pagesInBounds)
+                {
+                    const auto tPage0 = std::chrono::steady_clock::now();
+                    s_cxPageTaken.fetch_add(1u, std::memory_order_relaxed);
+                    g_profPixels.fetch_add(static_cast<uint32_t>(rectW * rectH), std::memory_order_relaxed);
+
+                    for (int py = 0; py < pagesY; ++py)
+                    {
+                        uint32_t dstPageRowBase = (startPageRow + py) * fbw;
+                        uint32_t zPageRowBase = (startPageRow + py) * fbw;
+                        for (int px = 0; px < pagesX; ++px)
+                        {
+                            uint32_t dstPageId = dstPageBase + dstPageRowBase + (startPageCol + px);
+                            uint32_t* dstPagePtr = &vramWords[dstPageId * 2048u];
+
+                            if (rawFbMsk == 0u)
+                            {
+                                std::fill_n(dstPagePtr, 2048, fillCol);
+                            }
+                            else
+                            {
+                                for (int i = 0; i < 2048; ++i)
+                                {
+                                    dstPagePtr[i] = (fillCol & ~rawFbMsk) | (dstPagePtr[i] & rawFbMsk);
+                                }
+                            }
+
+                            if (writeDepth)
+                            {
+                                uint32_t zPageId = zPageBase + zPageRowBase + (startPageCol + px);
+                                uint32_t* zPagePtr = &vramWords[zPageId * 2048u];
+                                std::fill_n(zPagePtr, 2048, z1);
+                            }
+                        }
+                    }
+
+                    const auto tPage1 = std::chrono::steady_clock::now();
+                    uint64_t pageElapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(tPage1 - tPage0).count());
+                    s_cxPageUs.fetch_add(pageElapsedUs, std::memory_order_relaxed);
+
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cxLastSecLog).count() >= 1)
+                    {
+                        s_cxLastSecLog = now;
+                        uint64_t pageMs = s_cxPageUs.load(std::memory_order_relaxed) / 1000u;
+                        probe_ae::bhLog("[probe] cx sprite page_taken=%llu cqcv_taken=%llu generic=%llu page_ms=%llu\n",
+                                        (unsigned long long)s_cxPageTaken.load(std::memory_order_relaxed),
+                                        (unsigned long long)(s_cqFastTaken.load(std::memory_order_relaxed) + s_cvFastTaken.load(std::memory_order_relaxed)),
+                                        (unsigned long long)s_cqGeneric.load(std::memory_order_relaxed),
+                                        (unsigned long long)pageMs);
+                    }
+
+                    if (isProbe)
+                    {
+                        const auto ctT1 = std::chrono::steady_clock::now();
+                        uint64_t elapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ctT1 - ctT0).count());
+                        uint64_t pxDrawn = g_profPixels.load(std::memory_order_relaxed) - ctPxBefore;
+                        uint16_t bW = static_cast<uint16_t>((rectW + 15) & ~15);
+                        uint16_t bH = static_cast<uint16_t>((rectH + 15) & ~15);
+
+                        CTSignature sig{};
+                        sig.kind = 0;
+                        sig.bucketW = bW;
+                        sig.bucketH = bH;
+                        sig.texOn = 0;
+                        sig.linearFilter = 0;
+                        sig.tfx = 0;
+                        sig.abe = 0;
+                        sig.alphaReg = static_cast<uint16_t>((ctx.alpha & 0xFFu) | (((ctx.alpha >> 32u) & 0xFFu) << 8u));
+                        sig.ate = static_cast<uint8_t>(ctx.test & 1u);
+                        sig.zte = static_cast<uint8_t>((ctx.test >> 16u) & 1u);
+                        sig.ztst = static_cast<uint8_t>((ctx.test >> 17u) & 3u);
+                        sig.zmsk = ctx.zbuf.zmask ? 1u : 0u;
+                        sig.fbmsk = ctx.frame.fbmsk;
+                        sig.framePsm = static_cast<uint8_t>(fpsm);
+                        sig.frameFbp = fbp;
+                        sig.texTbp0 = 0;
+                        sig.fastPathTaken = 1;
+                        recordCTSample(sig, pxDrawn, elapsedUs);
+                    }
+                    return;
+                }
+            }
+        }
+    }
 
     if (state.prim.tme)
     {
@@ -2214,6 +2385,224 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
 
         if (canCqFast && isSpriteFastEnabled() && !isSpriteVerifyEnabled())
         {
+            const int srcX0 = texU0 + (drawX0 - unclippedX0);
+            const int srcY0 = texV0 + (drawY0 - unclippedY0);
+            const bool isTexPageAligned = isRectPageAligned && (srcX0 % 64 == 0) && (srcY0 % 32 == 0) &&
+                                          (cqFx == 0.0f) && (cqFy == 0.0f) &&
+                                          isPageFastEnabled() &&
+                                          ((!isCvBlit) || (!cvWriteDepth) || (zpsm == GS_PSM_Z32));
+
+            uint32_t* vramWords = reinterpret_cast<uint32_t*>(m_vram);
+            const size_t maxVramWords = m_vramSize / sizeof(uint32_t);
+            const int pagesX = rectW / 64;
+            const int pagesY = rectH / 32;
+            const int dstStartPageCol = drawX0 / 64;
+            const int dstStartPageRow = drawY0 / 32;
+            const int srcStartPageCol = srcX0 / 64;
+            const int srcStartPageRow = srcY0 / 32;
+            const uint32_t dstPageBase = fbp / 32u;
+            const uint32_t srcPageBase = tex.tbp0 / 32u;
+            const uint32_t zPageBase = zbp / 32u;
+            const uint32_t tbw = std::max<uint32_t>(tex.tbw, 1u);
+
+            bool pageLinearOk = false;
+            if (isTexPageAligned)
+            {
+                bool inBounds = true;
+                for (int py = 0; py < pagesY; ++py)
+                {
+                    uint32_t dRow = (dstStartPageRow + py) * fbw;
+                    uint32_t sRow = (srcStartPageRow + py) * tbw;
+                    for (int px = 0; px < pagesX; ++px)
+                    {
+                        uint32_t dPage = dstPageBase + dRow + (dstStartPageCol + px);
+                        uint32_t sPage = srcPageBase + sRow + (srcStartPageCol + px);
+                        if ((dPage + 1u) * 2048u > maxVramWords || (sPage + 1u) * 2048u > maxVramWords)
+                        {
+                            inBounds = false; break;
+                        }
+                        if (isCvBlit && cvWriteDepth)
+                        {
+                            uint32_t zPage = zPageBase + dRow + (dstStartPageCol + px);
+                            if ((zPage + 1u) * 2048u > maxVramWords) { inBounds = false; break; }
+                        }
+                    }
+                    if (!inBounds) break;
+                }
+                pageLinearOk = inBounds;
+            }
+
+            if (pageLinearOk)
+            {
+                const auto tPage0 = std::chrono::steady_clock::now();
+                s_cxPageTaken.fetch_add(1u, std::memory_order_relaxed);
+                g_profPixels.fetch_add(static_cast<uint32_t>(rectW * rectH), std::memory_order_relaxed);
+
+                const uint32_t rawFbMsk = ctx.frame.fbmsk;
+                const bool isModulate = (tex.tfx == 0u);
+                const bool isModulateIdentity = (isModulate && v1.r == 0x80u && v1.g == 0x80u && v1.b == 0x80u);
+                const bool zte = ((ctx.test >> 16u) & 1u) != 0u;
+                const uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17u) & 3u);
+
+                auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int {
+                    if (sel == 0) return cs;
+                    if (sel == 1) return cd;
+                    return 0;
+                };
+
+                for (int py = 0; py < pagesY; ++py)
+                {
+                    uint32_t dRow = (dstStartPageRow + py) * fbw;
+                    uint32_t sRow = (srcStartPageRow + py) * tbw;
+                    for (int px = 0; px < pagesX; ++px)
+                    {
+                        uint32_t dPage = dstPageBase + dRow + (dstStartPageCol + px);
+                        uint32_t sPage = srcPageBase + sRow + (srcStartPageCol + px);
+                        uint32_t* dstPtr = &vramWords[dPage * 2048u];
+                        const uint32_t* srcPtr = &vramWords[sPage * 2048u];
+                        uint32_t* zPtr = (isCvBlit && cvWriteDepth) ? &vramWords[(zPageBase + dRow + (dstStartPageCol + px)) * 2048u] : nullptr;
+
+                        if (!isCvBlit)
+                        {
+                            if (rawFbMsk == 0u)
+                            {
+                                std::memcpy(dstPtr, srcPtr, 2048 * sizeof(uint32_t));
+                            }
+                            else if (rawFbMsk == 0xFF000000u)
+                            {
+                                for (int i = 0; i < 2048; ++i)
+                                {
+                                    dstPtr[i] = (srcPtr[i] & 0x00FFFFFFu) | (dstPtr[i] & 0xFF000000u);
+                                }
+                            }
+                            else
+                            {
+                                for (int i = 0; i < 2048; ++i)
+                                {
+                                    dstPtr[i] = (srcPtr[i] & ~rawFbMsk) | (dstPtr[i] & rawFbMsk);
+                                }
+                            }
+
+                            if (writeDepth)
+                            {
+                                uint32_t* zdPtr = &vramWords[(zPageBase + dRow + (dstStartPageCol + px)) * 2048u];
+                                std::fill_n(zdPtr, 2048, z1);
+                            }
+                        }
+                        else
+                        {
+                            for (int i = 0; i < 2048; ++i)
+                            {
+                                if (zte)
+                                {
+                                    bool zpass = false;
+                                    if (ztst == 1u) zpass = true;
+                                    else if (zPtr)
+                                    {
+                                        if (ztst == 2u) zpass = (static_cast<uint32_t>(z1) >= zPtr[i]);
+                                        else if (ztst == 3u) zpass = (static_cast<uint32_t>(z1) > zPtr[i]);
+                                    }
+                                    if (!zpass) continue;
+                                }
+
+                                const uint32_t srcTexel = srcPtr[i];
+                                uint8_t cr = static_cast<uint8_t>(srcTexel & 0xFFu);
+                                uint8_t cg = static_cast<uint8_t>((srcTexel >> 8u) & 0xFFu);
+                                uint8_t cb = static_cast<uint8_t>((srcTexel >> 16u) & 0xFFu);
+                                uint8_t ca = (tex.tcc != 0u) ? static_cast<uint8_t>((srcTexel >> 24u) & 0xFFu) : v1.a;
+
+                                if (isModulate && !isModulateIdentity)
+                                {
+                                    cr = clampU8((cr * v1.r) >> 7);
+                                    cg = clampU8((cg * v1.g) >> 7);
+                                    cb = clampU8((cb * v1.b) >> 7);
+                                    if (tex.tcc != 0u) ca = clampU8((ca * v1.a) >> 7);
+                                }
+
+                                const uint32_t fbrgba = dstPtr[i];
+                                uint8_t r_res = cr, g_res = cg, b_res = cb;
+                                if (state.prim.abe)
+                                {
+                                    uint8_t dr = fbrgba & 0xFFu;
+                                    uint8_t dg = (fbrgba >> 8u) & 0xFFu;
+                                    uint8_t db = (fbrgba >> 16u) & 0xFFu;
+                                    uint8_t da = (fbrgba >> 24u) & 0xFFu;
+                                    int cAlpha = (cvCsel == 0) ? ca : (cvCsel == 1) ? da : cvFix;
+                                    r_res = clampU8(((pickRGB(cvAsel, cr, dr) - pickRGB(cvBsel, cr, dr)) * cAlpha >> 7) + pickRGB(cvDsel, cr, dr));
+                                    g_res = clampU8(((pickRGB(cvAsel, cg, dg) - pickRGB(cvBsel, cg, dg)) * cAlpha >> 7) + pickRGB(cvDsel, cg, dg));
+                                    b_res = clampU8(((pickRGB(cvAsel, cb, db) - pickRGB(cvBsel, cb, db)) * cAlpha >> 7) + pickRGB(cvDsel, cb, db));
+                                }
+
+                                uint32_t outPixel = static_cast<uint32_t>(r_res) |
+                                                    (static_cast<uint32_t>(g_res) << 8u) |
+                                                    (static_cast<uint32_t>(b_res) << 16u) |
+                                                    (static_cast<uint32_t>(ca) << 24u);
+
+                                if (rawFbMsk != 0u)
+                                {
+                                    outPixel = (outPixel & ~rawFbMsk) | (fbrgba & rawFbMsk);
+                                }
+
+                                dstPtr[i] = outPixel;
+                                if (zPtr)
+                                {
+                                    zPtr[i] = z1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                const auto tPage1 = std::chrono::steady_clock::now();
+                uint64_t pageElapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(tPage1 - tPage0).count());
+                s_cxPageUs.fetch_add(pageElapsedUs, std::memory_order_relaxed);
+
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cxLastSecLog).count() >= 1)
+                {
+                    s_cxLastSecLog = now;
+                    uint64_t pageMs = s_cxPageUs.load(std::memory_order_relaxed) / 1000u;
+                    probe_ae::bhLog("[probe] cx sprite page_taken=%llu cqcv_taken=%llu generic=%llu page_ms=%llu\n",
+                                    (unsigned long long)s_cxPageTaken.load(std::memory_order_relaxed),
+                                    (unsigned long long)(s_cqFastTaken.load(std::memory_order_relaxed) + s_cvFastTaken.load(std::memory_order_relaxed)),
+                                    (unsigned long long)s_cqGeneric.load(std::memory_order_relaxed),
+                                    (unsigned long long)pageMs);
+                }
+
+                if (isProbe)
+                {
+                    const auto ctT1 = std::chrono::steady_clock::now();
+                    uint64_t elapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ctT1 - ctT0).count());
+                    uint64_t pxDrawn = g_profPixels.load(std::memory_order_relaxed) - ctPxBefore;
+                    uint16_t bW = static_cast<uint16_t>((rectW + 15) & ~15);
+                    uint16_t bH = static_cast<uint16_t>((rectH + 15) & ~15);
+
+                    CTSignature sig{};
+                    sig.kind = 0;
+                    sig.bucketW = bW;
+                    sig.bucketH = bH;
+                    sig.texOn = 1;
+                    sig.texPsm = tex.psm;
+                    sig.texW = static_cast<uint16_t>(texW);
+                    sig.texH = static_cast<uint16_t>(texH);
+                    sig.linearFilter = state.linearFilter ? 1u : 0u;
+                    sig.tfx = tex.tfx;
+                    sig.abe = state.prim.abe ? 1u : 0u;
+                    sig.alphaReg = static_cast<uint16_t>((ctx.alpha & 0xFFu) | (((ctx.alpha >> 32u) & 0xFFu) << 8u));
+                    sig.ate = static_cast<uint8_t>(ctx.test & 1u);
+                    sig.zte = static_cast<uint8_t>((ctx.test >> 16u) & 1u);
+                    sig.ztst = static_cast<uint8_t>((ctx.test >> 17u) & 3u);
+                    sig.zmsk = ctx.zbuf.zmask ? 1u : 0u;
+                    sig.fbmsk = ctx.frame.fbmsk;
+                    sig.framePsm = static_cast<uint8_t>(fpsm);
+                    sig.frameFbp = fbp;
+                    sig.texTbp0 = tex.tbp0;
+                    sig.fastPathTaken = 1;
+                    recordCTSample(sig, pxDrawn, elapsedUs);
+                }
+                return;
+            }
+
             if (isCvBlit) s_cvFastTaken.fetch_add(1u, std::memory_order_relaxed);
             else s_cqFastTaken.fetch_add(1u, std::memory_order_relaxed);
 
@@ -2882,12 +3271,51 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 if (isCvBlit) s_cvFastOk.fetch_add(1u, std::memory_order_relaxed);
                 else s_cqFastOk.fetch_add(1u, std::memory_order_relaxed);
             }
+
+            // Task CX: Verify page-linear path equivalence on page-aligned sprites
+            const int srcX0 = texU0 + (drawX0 - unclippedX0);
+            const int srcY0 = texV0 + (drawY0 - unclippedY0);
+            const bool isTexPageAligned = isRectPageAligned && (srcX0 % 64 == 0) && (srcY0 % 32 == 0) &&
+                                          (cqFx == 0.0f) && (cqFy == 0.0f) &&
+                                          ((!isCvBlit) || (!cvWriteDepth) || (zpsm == GS_PSM_Z32));
+            if (isTexPageAligned)
+            {
+                s_cxPageChecked.fetch_add(1u, std::memory_order_relaxed);
+                if (spriteMatch && zMatch)
+                {
+                    s_cxPageOk.fetch_add(1u, std::memory_order_relaxed);
+                }
+                else
+                {
+                    if (!spriteMatch) s_cxMismPx.fetch_add(1u, std::memory_order_relaxed);
+                    if (!zMatch) s_cxZMismPx.fetch_add(1u, std::memory_order_relaxed);
+                }
+            }
         }
 
         s_cmGeneric.fetch_add(1u, std::memory_order_relaxed);
         s_cqGeneric.fetch_add(1u, std::memory_order_relaxed);
 
         auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cxLastSecLog).count() >= 1)
+        {
+            s_cxLastSecLog = now;
+            if (isSpriteVerifyEnabled())
+            {
+                probe_ae::bhLog("[probe] cx sprite page_checked=%llu page_ok=%llu mism_px=%llu z_mism_px=%llu\n",
+                                (unsigned long long)s_cxPageChecked.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cxPageOk.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cxMismPx.load(std::memory_order_relaxed),
+                                (unsigned long long)s_cxZMismPx.load(std::memory_order_relaxed));
+            }
+            uint64_t pageMs = s_cxPageUs.load(std::memory_order_relaxed) / 1000u;
+            probe_ae::bhLog("[probe] cx sprite page_taken=%llu cqcv_taken=%llu generic=%llu page_ms=%llu\n",
+                            (unsigned long long)s_cxPageTaken.load(std::memory_order_relaxed),
+                            (unsigned long long)(s_cqFastTaken.load(std::memory_order_relaxed) + s_cvFastTaken.load(std::memory_order_relaxed)),
+                            (unsigned long long)s_cqGeneric.load(std::memory_order_relaxed),
+                            (unsigned long long)pageMs);
+        }
+
         if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cvLastSecLog).count() >= 1)
         {
             s_cvLastSecLog = now;
