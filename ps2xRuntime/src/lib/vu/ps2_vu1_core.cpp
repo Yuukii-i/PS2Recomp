@@ -155,6 +155,135 @@ static EhStoreRecord s_ehStores[1024];
 static uint32_t s_ehStoreCount = 0;
 static thread_local uint32_t s_ehCurLowerInstr = 0;
 
+// =========================================================================
+// Task EI: Catch FIRST VU1 garbage store into qw 636..700
+// =========================================================================
+struct EiPairRingEntry {
+    uint32_t pc = 0;
+    uint32_t upper = 0;
+    uint32_t lower = 0;
+    int32_t mem_addr_qw = -1;
+    uint32_t mem_first_lane_u32 = 0;
+    bool mem_is_store = false;
+};
+
+struct EiRunHistory {
+    uint32_t runIndex = 0;
+    uint32_t startPc = 0;
+    uint64_t cycles = 0;
+    uint32_t st636 = 0;
+    uint32_t garb = 0;
+    std::vector<uint32_t> disp;
+};
+
+static bool s_eiHitDone = false;
+static uint32_t s_eiTotalRuns = 0;
+static uint32_t s_eiCurRunPairs = 0;
+static uint32_t s_eiCurRunSt636 = 0;
+static uint32_t s_eiCurRunGarb = 0;
+static uint32_t s_eiLastPairPc = 0xFFFFFFFFu;
+static std::vector<uint32_t> s_eiCurRunDisp;
+static uint32_t s_eiCurStartPc = 0;
+static uint32_t s_eiCurTop = 0;
+static uint32_t s_eiCurItop = 0;
+static uint64_t s_eiRunStartCycle = 0;
+static thread_local bool s_eiCurRunActive = false;
+static uint32_t s_eiEntryVuData[1024][4];
+
+static EiPairRingEntry s_eiRing[160];
+static uint32_t s_eiRingHead = 0;
+static uint32_t s_eiRingCount = 0;
+
+static EiRunHistory s_eiRunHist[12];
+static uint32_t s_eiRunHistHead = 0;
+static uint32_t s_eiRunHistCount = 0;
+
+struct EiMemOp {
+    int32_t qw = -1;
+    uint32_t firstLane = 0;
+    bool isStore = false;
+};
+
+static inline EiMemOp decodeEiMem(uint32_t lower, const VU1State &st, const uint8_t *vuData, uint32_t dataSize)
+{
+    EiMemOp op;
+    uint32_t opHi = (lower >> 25) & 0x7Fu;
+    auto getImm11 = [](uint32_t ins) -> int16_t {
+        uint16_t v = ins & 0x7FFu;
+        if (v & 0x400u) v |= 0xF800u;
+        return static_cast<int16_t>(v);
+    };
+    uint8_t fs = (lower >> 11) & 0x1Fu;
+    uint8_t it = (lower >> 16) & 0x0Fu;
+    uint8_t is = (lower >> 11) & 0x0Fu;
+
+    if (opHi == 0x00u) { // LQ
+        int32_t q = (static_cast<int32_t>(st.vi[is]) + getImm11(lower)) & 0x3FF;
+        op.qw = q;
+        op.isStore = false;
+        if (vuData && (q + 1) * 16 <= static_cast<int32_t>(dataSize)) {
+            std::memcpy(&op.firstLane, vuData + q * 16, 4);
+        }
+    } else if (opHi == 0x01u) { // SQ
+        int32_t q = (static_cast<int32_t>(st.vi[it]) + getImm11(lower)) & 0x3FF;
+        op.qw = q;
+        op.isStore = true;
+        std::memcpy(&op.firstLane, &st.vf[fs][0], 4);
+    } else if (opHi == 0x04u) { // ILW
+        int32_t q = (static_cast<int32_t>(st.vi[is]) + getImm11(lower)) & 0x3FF;
+        op.qw = q;
+        op.isStore = false;
+        if (vuData && (q + 1) * 16 <= static_cast<int32_t>(dataSize)) {
+            std::memcpy(&op.firstLane, vuData + q * 16, 4);
+        }
+    } else if (opHi == 0x05u) { // ISW
+        int32_t q = (static_cast<int32_t>(st.vi[is]) + getImm11(lower)) & 0x3FF;
+        op.qw = q;
+        op.isStore = true;
+        op.firstLane = static_cast<uint32_t>(static_cast<uint16_t>(st.vi[it] & 0xFFFF));
+    } else if (opHi >= 0x40u || (lower & 0x80000000u)) {
+        uint32_t special = (lower & 3u) | ((lower >> 4) & 0x7Cu);
+        if (special == 0x34u) { // LQI
+            int32_t q = (static_cast<uint32_t>(static_cast<uint16_t>(st.vi[is]))) & 0x3FF;
+            op.qw = q;
+            op.isStore = false;
+            if (vuData && (q + 1) * 16 <= static_cast<int32_t>(dataSize)) {
+                std::memcpy(&op.firstLane, vuData + q * 16, 4);
+            }
+        } else if (special == 0x35u) { // SQI
+            int32_t q = (static_cast<uint32_t>(static_cast<uint16_t>(st.vi[it]))) & 0x3FF;
+            op.qw = q;
+            op.isStore = true;
+            std::memcpy(&op.firstLane, &st.vf[fs][0], 4);
+        } else if (special == 0x36u) { // LQD
+            int32_t q = (static_cast<uint32_t>(static_cast<uint16_t>(st.vi[is] - 1))) & 0x3FF;
+            op.qw = q;
+            op.isStore = false;
+            if (vuData && (q + 1) * 16 <= static_cast<int32_t>(dataSize)) {
+                std::memcpy(&op.firstLane, vuData + q * 16, 4);
+            }
+        } else if (special == 0x37u) { // SQD
+            int32_t q = (static_cast<uint32_t>(static_cast<uint16_t>(st.vi[it] - 1))) & 0x3FF;
+            op.qw = q;
+            op.isStore = true;
+            std::memcpy(&op.firstLane, &st.vf[fs][0], 4);
+        } else if (special == 0x3Eu) { // ILWR
+            int32_t q = (static_cast<uint32_t>(static_cast<uint16_t>(st.vi[is]))) & 0x3FF;
+            op.qw = q;
+            op.isStore = false;
+            if (vuData && (q + 1) * 16 <= static_cast<int32_t>(dataSize)) {
+                std::memcpy(&op.firstLane, vuData + q * 16, 4);
+            }
+        } else if (special == 0x3Fu) { // ISWR
+            int32_t q = (static_cast<uint32_t>(static_cast<uint16_t>(st.vi[is]))) & 0x3FF;
+            op.qw = q;
+            op.isStore = true;
+            op.firstLane = static_cast<uint32_t>(static_cast<uint16_t>(st.vi[it] & 0xFFFF));
+        }
+    }
+    return op;
+}
+
 struct VdCandidateEntry {
     bool valid = false;
     uint32_t pc = 0;
@@ -977,6 +1106,108 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
             rec.kind = kind;
         }
     }
+    if (s_eiCurRunActive && !s_eiHitDone)
+    {
+        uint32_t qw = (address / 16u) & 0x3FFu;
+        uint32_t op = (s_ehCurLowerInstr >> 25) & 0x7Fu;
+        uint32_t special = (s_ehCurLowerInstr & 3u) | ((s_ehCurLowerInstr >> 4) & 0x7Cu);
+        bool isSq = (op == 0x01u) || ((op >= 0x40u || (s_ehCurLowerInstr & 0x80000000u)) && (special == 0x35u || special == 0x37u));
+        if (isSq && qw >= 636u && qw < 700u)
+        {
+            s_eiCurRunSt636++;
+            bool isGarbage = false;
+            for (int lane = 0; lane < 4; ++lane)
+            {
+                uint32_t w = words[lane];
+                if (w == 0x7F7FFFFFu || w == 0xFF7FFFFFu) {
+                    isGarbage = true;
+                    break;
+                }
+                float f = 0.0f;
+                std::memcpy(&f, &w, 4);
+                if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e8f) {
+                    isGarbage = true;
+                    break;
+                }
+            }
+            if (isGarbage)
+            {
+                s_eiCurRunGarb++;
+                if (!s_eiHitDone)
+                {
+                    s_eiHitDone = true;
+                    std::printf("[probe] ei hit run=%u pair=%u pc=0x%03X qw=%u w=%08X %08X %08X %08X\n",
+                                s_eiTotalRuns, s_eiCurRunPairs, m_state.pc, qw, words[0], words[1], words[2], words[3]);
+                    
+                    uint32_t rStart = (s_eiRingCount == 160u) ? s_eiRingHead : 0u;
+                    for (uint32_t i = 0; i < s_eiRingCount; ++i) {
+                        const auto &rp = s_eiRing[(rStart + i) % 160u];
+                        if (rp.mem_addr_qw >= 0) {
+                            std::printf("[probe] ei pc=0x%03X up=0x%08X lo=0x%08X mem=%cqw%d:%08X\n",
+                                        rp.pc, rp.upper, rp.lower, (rp.mem_is_store ? 'S' : 'L'), rp.mem_addr_qw, rp.mem_first_lane_u32);
+                        } else {
+                            std::printf("[probe] ei pc=0x%03X up=0x%08X lo=0x%08X\n",
+                                        rp.pc, rp.upper, rp.lower);
+                        }
+                    }
+
+                    for (int r = 0; r < 32; ++r) {
+                        uint32_t rw[4];
+                        std::memcpy(rw, m_state.vf[r], 16);
+                        std::printf("[probe] ei vf%02d=%08X %08X %08X %08X\n", r, rw[0], rw[1], rw[2], rw[3]);
+                    }
+                    std::string viStr;
+                    for (int r = 1; r < 16; ++r) {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "%s%d", (r > 1 ? " " : ""), m_state.vi[r]);
+                        viStr += buf;
+                    }
+                    uint32_t qHex = 0, pHex = 0;
+                    std::memcpy(&qHex, &m_state.q, 4);
+                    std::memcpy(&pHex, &m_state.p, 4);
+                    std::printf("[probe] ei vi=%s top=%u itop=%u q=0x%08X p=0x%08X\n",
+                                viStr.c_str(), s_eiCurTop, s_eiCurItop, qHex, pHex);
+
+                    std::set<uint32_t> loadedQws;
+                    for (uint32_t i = 0; i < s_eiRingCount; ++i) {
+                        const auto &rp = s_eiRing[(rStart + i) % 160u];
+                        if (!rp.mem_is_store && rp.mem_addr_qw >= 0 && rp.mem_addr_qw < 1024) {
+                            loadedQws.insert(static_cast<uint32_t>(rp.mem_addr_qw));
+                        }
+                    }
+                    for (uint32_t q : loadedQws) {
+                        const auto &w = s_eiEntryVuData[q];
+                        std::printf("[probe] ei in qw=%u w=%08X %08X %08X %08X\n", q, w[0], w[1], w[2], w[3]);
+                    }
+
+                    uint32_t hStart = (s_eiRunHistCount == 12u) ? s_eiRunHistHead : 0u;
+                    for (uint32_t h = 0; h < s_eiRunHistCount; ++h) {
+                        const auto &rh = s_eiRunHist[(hStart + h) % 12u];
+                        std::string dispStr;
+                        for (size_t d = 0; d < rh.disp.size(); ++d) {
+                            char buf[32];
+                            std::snprintf(buf, sizeof(buf), "%s0x%03X", (d > 0 ? "," : ""), rh.disp[d]);
+                            dispStr += buf;
+                        }
+                        std::printf("[probe] ei run n=%u start=0x%03X cyc=%llu st636=%u garb=%u disp=%s\n",
+                                    rh.runIndex, rh.startPc, static_cast<unsigned long long>(rh.cycles),
+                                    rh.st636, rh.garb, dispStr.c_str());
+                    }
+                    std::string curDispStr;
+                    for (size_t d = 0; d < s_eiCurRunDisp.size(); ++d) {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "%s0x%03X", (d > 0 ? "," : ""), s_eiCurRunDisp[d]);
+                        curDispStr += buf;
+                    }
+                    std::printf("[probe] ei run n=%u start=0x%03X cyc=%llu st636=%u garb=%u disp=%s\n",
+                                s_eiTotalRuns, s_eiCurStartPc, static_cast<unsigned long long>(m_cycle - s_eiRunStartCycle),
+                                s_eiCurRunSt636, s_eiCurRunGarb, curDispStr.c_str());
+
+                    std::fflush(stdout);
+                }
+            }
+        }
+    }
     for (PendingStore &store : m_storePipeline)
     {
         if (!store.valid)
@@ -1370,6 +1601,15 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
 void VU1Interpreter::advanceOneCycle()
 {
     ++m_cycle;
+    if (s_eiCurRunActive)
+    {
+        s_eiCurRunActive = false;
+        uint32_t hIdx = s_eiRunHistHead % 12u;
+        s_eiRunHist[hIdx] = {s_eiTotalRuns, s_eiCurStartPc, (m_cycle > s_eiRunStartCycle ? (m_cycle - s_eiRunStartCycle) : 0u),
+                             s_eiCurRunSt636, s_eiCurRunGarb, s_eiCurRunDisp};
+        s_eiRunHistHead = (s_eiRunHistHead + 1u) % 12u;
+        if (s_eiRunHistCount < 12u) s_eiRunHistCount++;
+    }
     m_state.cycles = m_cycle;
     // LSU commits become visible at the cycle boundary before PATH1 consumes
     // its next qword from VU memory.
@@ -2034,6 +2274,31 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     s_egCurRunTraced = false;
     s_egCurRunPackets.clear();
     s_egTotalPairs = 0;
+    s_eiCurRunActive = false;
+    if (isVu3dProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u && !s_eiHitDone)
+    {
+        const auto eiNow = std::chrono::steady_clock::now();
+        const uint64_t procSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(eiNow - s_vdStartTime).count());
+        if (procSec >= 60u)
+        {
+            s_eiCurRunActive = true;
+            s_eiTotalRuns++;
+            s_eiCurRunPairs = 0;
+            s_eiCurRunSt636 = 0;
+            s_eiCurRunGarb = 0;
+            s_eiLastPairPc = 0xFFFFFFFFu;
+            s_eiCurRunDisp.clear();
+            s_eiCurStartPc = (startPC & 0x7FFFFFFFu);
+            s_eiCurTop = top;
+            s_eiCurItop = itop;
+            s_eiRunStartCycle = m_cycle;
+            s_eiRingHead = 0;
+            s_eiRingCount = 0;
+            if (vuData && dataSize >= 16384u) {
+                std::memcpy(s_eiEntryVuData, vuData, 16384);
+            }
+        }
+    }
     if (!s_egDone && isVu3dProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u)
     {
         const auto ecNow = std::chrono::steady_clock::now();
@@ -2227,6 +2492,20 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (decoded.upperUsage.accWrite != 0u)
             std::memcpy(oldAcc, m_state.acc, sizeof(oldAcc));
 
+        if (s_eiCurRunActive)
+        {
+            s_eiCurRunPairs++;
+            if (s_eiLastPairPc == 0x038u)
+            {
+                s_eiCurRunDisp.push_back(m_state.pc);
+            }
+            s_eiLastPairPc = m_state.pc;
+            EiMemOp mop = decodeEiMem(decoded.lower, m_state, vuData, dataSize);
+            uint32_t ringIdx = s_eiRingHead % 160u;
+            s_eiRing[ringIdx] = {m_state.pc, decoded.upper, decoded.lower, mop.qw, mop.firstLane, mop.isStore};
+            s_eiRingHead = (s_eiRingHead + 1u) % 160u;
+            if (s_eiRingCount < 160u) s_eiRingCount++;
+        }
         s_ehCurLowerInstr = decoded.lower;
         if (decoded.iBit)
         {
