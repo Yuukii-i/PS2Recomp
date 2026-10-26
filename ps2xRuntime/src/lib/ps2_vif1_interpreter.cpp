@@ -4,6 +4,9 @@
 #include <cstring>
 #include <cstdio>
 #include <chrono>
+#include <map>
+#include <algorithm>
+#include <tuple>
 
 extern void recordCompletedIntcCause(uint32_t cause);
 
@@ -766,6 +769,22 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 static std::atomic<uint32_t> s_ciMismLogged{0};
                 static std::chrono::steady_clock::time_point s_ciLastSecLog{};
 
+                struct DbShapeKey {
+                    uint8_t vn, vl, cl, wl, mask, mode, flg, usn, num;
+                    uint16_t vuAddr;
+                    bool operator<(const DbShapeKey &o) const {
+                        return std::tie(vn, vl, cl, wl, mask, mode, flg, usn, num, vuAddr) <
+                               std::tie(o.vn, o.vl, o.cl, o.wl, o.mask, o.mode, o.flg, o.usn, o.num, o.vuAddr);
+                    }
+                };
+                struct DbShapeStats {
+                    uint64_t vecs = 0;
+                    uint32_t calls = 0;
+                };
+                static std::map<DbShapeKey, DbShapeStats> s_dbGenericShapes;
+                static std::atomic<uint64_t> s_dbFastVecs{0};
+                static std::atomic<uint64_t> s_dbGenericVecs{0};
+
                 auto ciLogMsg = [](const char *msg) {
                     static FILE *s_f = nullptr;
                     static bool s_tried = false;
@@ -798,42 +817,52 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     return s_state == 1;
                 };
 
-                const uint64_t lastVec = static_cast<uint64_t>(vuAddr) + static_cast<uint64_t>(writeVectorCount - 1u) * cl;
+                const uint32_t totalSpan = ((writeVectorCount - 1u) / wl) * cl + ((writeVectorCount - 1u) % wl);
+                const uint64_t lastVec = static_cast<uint64_t>(vuAddr) + totalSpan;
                 const bool rangeOk = (lastVec < 0x400u) && ((lastVec + 1u) * 16u <= PS2_VU1_DATA_SIZE);
-                const bool canFastPath = (cl >= wl && wl == 1u && sourceVectorCount == writeVectorCount &&
-                                          vn == 0u && (vl == 0u || vl == 1u || vl == 2u) &&
+                const bool canFastPath = (cl >= wl && sourceVectorCount == writeVectorCount &&
+                                          vn <= 3u && vl <= 2u &&
                                           ((vif1_regs.mode & 3u) == 0u) && rangeOk);
 
-                enum FieldAction : uint8_t {
-                    FA_DECODED = 0,
-                    FA_ROW     = 1,
-                    FA_COL     = 2,
-                    FA_PROTECT = 3
+                enum Act : uint8_t {
+                    ACT_DECODED = 0,
+                    ACT_CONST   = 1,
+                    ACT_PROTECT = 2
                 };
 
-                FieldAction fAction[4];
-                uint32_t fConst[4];
+                Act act[4][4];
+                uint32_t constVal[4][4];
                 bool allDecoded = true;
                 bool allProtect = true;
 
                 if (canFastPath) {
-                    for (uint32_t f = 0u; f < 4u; ++f) {
-                        uint32_t spec = maskEnable ? ((vif1_regs.mask >> (f * 2u)) & 0x3u) : 0u;
-                        fAction[f] = static_cast<FieldAction>(spec);
-                        if (spec == 0u) {
-                            fConst[f] = 0u;
-                            allProtect = false;
-                        } else if (spec == 1u) {
-                            fConst[f] = vif1_regs.row[f];
-                            allDecoded = false;
-                            allProtect = false;
-                        } else if (spec == 2u) {
-                            fConst[f] = vif1_regs.col[0];
-                            allDecoded = false;
-                            allProtect = false;
-                        } else {
-                            fConst[f] = 0u;
-                            allDecoded = false;
+                    const uint32_t maxC = std::min<uint32_t>(wl, 4u);
+                    for (uint32_t c = 0u; c < maxC; ++c) {
+                        for (uint32_t f = 0u; f < 4u; ++f) {
+                            uint32_t spec = maskEnable ? ((vif1_regs.mask >> (((c * 4u) + f) * 2u)) & 0x3u) : 0u;
+                            if (spec == 3u || (spec == 0u && vn != 0u && f >= static_cast<uint32_t>(components))) {
+                                act[c][f] = ACT_PROTECT;
+                                allDecoded = false;
+                            } else if (spec == 1u) {
+                                act[c][f] = ACT_CONST;
+                                constVal[c][f] = vif1_regs.row[f];
+                                allDecoded = false;
+                                allProtect = false;
+                            } else if (spec == 2u) {
+                                act[c][f] = ACT_CONST;
+                                constVal[c][f] = vif1_regs.col[c];
+                                allDecoded = false;
+                                allProtect = false;
+                            } else {
+                                act[c][f] = ACT_DECODED;
+                                allProtect = false;
+                            }
+                        }
+                    }
+                    for (uint32_t c = maxC; c < 4u; ++c) {
+                        for (uint32_t f = 0u; f < 4u; ++f) {
+                            act[c][f] = act[3][f];
+                            constVal[c][f] = constVal[3][f];
                         }
                     }
                 }
@@ -841,57 +870,194 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 auto runFastPath = [&](uint8_t *targetVuData) {
                     if (allProtect) return;
 
-                    if (allDecoded && cl == 1u) {
+                    if (allDecoded && cl == wl) {
                         uint32_t *dest = reinterpret_cast<uint32_t*>(targetVuData) + (vuAddr * 4u);
                         if (vl == 2u) {
-                            if (zeroExtend) {
+                            if (vn == 0u) {
+                                if (zeroExtend) {
+                                    for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                        uint32_t s = static_cast<uint32_t>(srcBase[i]);
+                                        dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
+                                        dest += 4;
+                                    }
+                                } else {
+                                    for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                        uint32_t s = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcBase[i])));
+                                        dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
+                                        dest += 4;
+                                    }
+                                }
+                            } else if (vn == 3u) {
+                                if (zeroExtend) {
+                                    for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                        const uint8_t *s = srcBase + i * 4u;
+                                        dest[0] = s[0]; dest[1] = s[1]; dest[2] = s[2]; dest[3] = s[3];
+                                        dest += 4;
+                                    }
+                                } else {
+                                    for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                        const int8_t *s = reinterpret_cast<const int8_t*>(srcBase + i * 4u);
+                                        dest[0] = static_cast<uint32_t>(static_cast<int32_t>(s[0]));
+                                        dest[1] = static_cast<uint32_t>(static_cast<int32_t>(s[1]));
+                                        dest[2] = static_cast<uint32_t>(static_cast<int32_t>(s[2]));
+                                        dest[3] = static_cast<uint32_t>(static_cast<int32_t>(s[3]));
+                                        dest += 4;
+                                    }
+                                }
+                            }
+                            return;
+                        } else if (vl == 1u) {
+                            if (vn == 0u) {
+                                if (zeroExtend) {
+                                    for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                        uint16_t raw = 0; std::memcpy(&raw, srcBase + i * 2u, 2);
+                                        uint32_t s = static_cast<uint32_t>(raw);
+                                        dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
+                                        dest += 4;
+                                    }
+                                } else {
+                                    for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                        int16_t raw = 0; std::memcpy(&raw, srcBase + i * 2u, 2);
+                                        uint32_t s = static_cast<uint32_t>(static_cast<int32_t>(raw));
+                                        dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
+                                        dest += 4;
+                                    }
+                                }
+                            } else if (vn == 3u) {
+                                if (zeroExtend) {
+                                    for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                        uint16_t r[4]; std::memcpy(r, srcBase + i * 8u, 8);
+                                        dest[0] = r[0]; dest[1] = r[1]; dest[2] = r[2]; dest[3] = r[3];
+                                        dest += 4;
+                                    }
+                                } else {
+                                    for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                        int16_t r[4]; std::memcpy(r, srcBase + i * 8u, 8);
+                                        dest[0] = static_cast<uint32_t>(static_cast<int32_t>(r[0]));
+                                        dest[1] = static_cast<uint32_t>(static_cast<int32_t>(r[1]));
+                                        dest[2] = static_cast<uint32_t>(static_cast<int32_t>(r[2]));
+                                        dest[3] = static_cast<uint32_t>(static_cast<int32_t>(r[3]));
+                                        dest += 4;
+                                    }
+                                }
+                            }
+                            return;
+                        } else { // vl == 0u
+                            if (vn == 0u) {
                                 for (uint32_t i = 0u; i < writeVectorCount; ++i) {
-                                    uint32_t s = static_cast<uint32_t>(srcBase[i]);
+                                    uint32_t s = 0; std::memcpy(&s, srcBase + i * 4u, 4);
                                     dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
                                     dest += 4;
                                 }
+                            } else if (vn == 3u) {
+                                std::memcpy(dest, srcBase, writeVectorCount * 16u);
+                            }
+                            return;
+                        }
+                    }
+
+                    const uint8_t *srcPtr = srcBase;
+                    uint32_t destVec = vuAddr;
+                    uint32_t cyclePos = 0;
+
+                    for (uint32_t i = 0; i < writeVectorCount; ++i) {
+                        uint32_t decoded[4];
+
+                        if (vl == 2u) {
+                            if (zeroExtend) {
+                                if (vn == 0u) {
+                                    uint32_t s = srcPtr[0];
+                                    decoded[0] = s; decoded[1] = s; decoded[2] = s; decoded[3] = s;
+                                } else if (vn == 1u) {
+                                    decoded[0] = srcPtr[0]; decoded[1] = srcPtr[1];
+                                } else if (vn == 2u) {
+                                    decoded[0] = srcPtr[0]; decoded[1] = srcPtr[1]; decoded[2] = srcPtr[2];
+                                } else {
+                                    decoded[0] = srcPtr[0]; decoded[1] = srcPtr[1]; decoded[2] = srcPtr[2]; decoded[3] = srcPtr[3];
+                                }
                             } else {
-                                for (uint32_t i = 0u; i < writeVectorCount; ++i) {
-                                    uint32_t s = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcBase[i])));
-                                    dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
-                                    dest += 4;
+                                if (vn == 0u) {
+                                    uint32_t s = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[0])));
+                                    decoded[0] = s; decoded[1] = s; decoded[2] = s; decoded[3] = s;
+                                } else if (vn == 1u) {
+                                    decoded[0] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[0])));
+                                    decoded[1] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[1])));
+                                } else if (vn == 2u) {
+                                    decoded[0] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[0])));
+                                    decoded[1] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[1])));
+                                    decoded[2] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[2])));
+                                } else {
+                                    decoded[0] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[0])));
+                                    decoded[1] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[1])));
+                                    decoded[2] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[2])));
+                                    decoded[3] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(srcPtr[3])));
                                 }
                             }
                         } else if (vl == 1u) {
-                            for (uint32_t i = 0u; i < writeVectorCount; ++i) {
-                                uint16_t raw = 0;
-                                std::memcpy(&raw, srcBase + i * 2u, sizeof(raw));
-                                uint32_t s = zeroExtend ? static_cast<uint32_t>(raw) : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(raw)));
-                                dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
-                                dest += 4;
+                            if (zeroExtend) {
+                                if (vn == 0u) {
+                                    uint16_t r = 0; std::memcpy(&r, srcPtr, 2);
+                                    uint32_t s = static_cast<uint32_t>(r);
+                                    decoded[0] = s; decoded[1] = s; decoded[2] = s; decoded[3] = s;
+                                } else if (vn == 1u) {
+                                    uint16_t r[2]; std::memcpy(r, srcPtr, 4);
+                                    decoded[0] = r[0]; decoded[1] = r[1];
+                                } else if (vn == 2u) {
+                                    uint16_t r[3]; std::memcpy(r, srcPtr, 6);
+                                    decoded[0] = r[0]; decoded[1] = r[1]; decoded[2] = r[2];
+                                } else {
+                                    uint16_t r[4]; std::memcpy(r, srcPtr, 8);
+                                    decoded[0] = r[0]; decoded[1] = r[1]; decoded[2] = r[2]; decoded[3] = r[3];
+                                }
+                            } else {
+                                if (vn == 0u) {
+                                    int16_t r = 0; std::memcpy(&r, srcPtr, 2);
+                                    uint32_t s = static_cast<uint32_t>(static_cast<int32_t>(r));
+                                    decoded[0] = s; decoded[1] = s; decoded[2] = s; decoded[3] = s;
+                                } else if (vn == 1u) {
+                                    int16_t r[2]; std::memcpy(r, srcPtr, 4);
+                                    decoded[0] = static_cast<uint32_t>(static_cast<int32_t>(r[0]));
+                                    decoded[1] = static_cast<uint32_t>(static_cast<int32_t>(r[1]));
+                                } else if (vn == 2u) {
+                                    int16_t r[3]; std::memcpy(r, srcPtr, 6);
+                                    decoded[0] = static_cast<uint32_t>(static_cast<int32_t>(r[0]));
+                                    decoded[1] = static_cast<uint32_t>(static_cast<int32_t>(r[1]));
+                                    decoded[2] = static_cast<uint32_t>(static_cast<int32_t>(r[2]));
+                                } else {
+                                    int16_t r[4]; std::memcpy(r, srcPtr, 8);
+                                    decoded[0] = static_cast<uint32_t>(static_cast<int32_t>(r[0]));
+                                    decoded[1] = static_cast<uint32_t>(static_cast<int32_t>(r[1]));
+                                    decoded[2] = static_cast<uint32_t>(static_cast<int32_t>(r[2]));
+                                    decoded[3] = static_cast<uint32_t>(static_cast<int32_t>(r[3]));
+                                }
                             }
                         } else { // vl == 0u
-                            for (uint32_t i = 0u; i < writeVectorCount; ++i) {
-                                uint32_t s = 0;
-                                std::memcpy(&s, srcBase + i * 4u, sizeof(s));
-                                dest[0] = s; dest[1] = s; dest[2] = s; dest[3] = s;
-                                dest += 4;
+                            if (vn == 0u) {
+                                uint32_t s = 0; std::memcpy(&s, srcPtr, 4);
+                                decoded[0] = s; decoded[1] = s; decoded[2] = s; decoded[3] = s;
+                            } else if (vn == 1u) {
+                                std::memcpy(&decoded[0], srcPtr, 8);
+                            } else if (vn == 2u) {
+                                std::memcpy(&decoded[0], srcPtr, 12);
+                            } else {
+                                std::memcpy(&decoded[0], srcPtr, 16);
                             }
                         }
-                    } else {
-                        for (uint32_t i = 0u; i < writeVectorCount; ++i) {
-                            uint32_t scalar = 0;
-                            if (vl == 2u) {
-                                uint8_t raw = srcBase[i];
-                                scalar = zeroExtend ? static_cast<uint32_t>(raw) : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(raw)));
-                            } else if (vl == 1u) {
-                                uint16_t raw = 0;
-                                std::memcpy(&raw, srcBase + i * 2u, sizeof(raw));
-                                scalar = zeroExtend ? static_cast<uint32_t>(raw) : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(raw)));
-                            } else {
-                                std::memcpy(&scalar, srcBase + i * 4u, sizeof(scalar));
-                            }
 
-                            uint32_t *d = reinterpret_cast<uint32_t*>(targetVuData) + ((vuAddr + i * cl) * 4u);
-                            if (fAction[0] == FA_DECODED) d[0] = scalar; else if (fAction[0] != FA_PROTECT) d[0] = fConst[0];
-                            if (fAction[1] == FA_DECODED) d[1] = scalar; else if (fAction[1] != FA_PROTECT) d[1] = fConst[1];
-                            if (fAction[2] == FA_DECODED) d[2] = scalar; else if (fAction[2] != FA_PROTECT) d[2] = fConst[2];
-                            if (fAction[3] == FA_DECODED) d[3] = scalar; else if (fAction[3] != FA_PROTECT) d[3] = fConst[3];
+                        const uint32_t c = (cyclePos > 3u) ? 3u : cyclePos;
+                        uint32_t *d = reinterpret_cast<uint32_t*>(targetVuData) + (destVec * 4u);
+
+                        if (act[c][0] == ACT_DECODED) d[0] = decoded[0]; else if (act[c][0] == ACT_CONST) d[0] = constVal[c][0];
+                        if (act[c][1] == ACT_DECODED) d[1] = decoded[1]; else if (act[c][1] == ACT_CONST) d[1] = constVal[c][1];
+                        if (act[c][2] == ACT_DECODED) d[2] = decoded[2]; else if (act[c][2] == ACT_CONST) d[2] = constVal[c][2];
+                        if (act[c][3] == ACT_DECODED) d[3] = decoded[3]; else if (act[c][3] == ACT_CONST) d[3] = constVal[c][3];
+
+                        srcPtr += bytesPerVector;
+                        cyclePos++;
+                        destVec++;
+                        if (cyclePos == wl) {
+                            cyclePos = 0;
+                            destVec += (cl - wl);
                         }
                     }
                 };
@@ -923,10 +1089,24 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     } else {
                         runFastPath(m_vu1Data);
                         s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
+                        s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
                         executeGeneric = false;
                     }
                 } else {
                     s_ciGenericCount.fetch_add(1, std::memory_order_relaxed);
+                    s_dbGenericVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
+                    if (probe_ae::isEnabled()) {
+                        DbShapeKey key{static_cast<uint8_t>(vn), static_cast<uint8_t>(vl),
+                                       static_cast<uint8_t>(cl), static_cast<uint8_t>(wl),
+                                       static_cast<uint8_t>(maskEnable ? 1u : 0u),
+                                       static_cast<uint8_t>(vif1_regs.mode & 3u),
+                                       static_cast<uint8_t>((imm & 0x8000u) ? 1u : 0u),
+                                       static_cast<uint8_t>((imm & 0x4000u) ? 1u : 0u),
+                                       static_cast<uint8_t>(num), static_cast<uint16_t>(vuAddr)};
+                        auto &entry = s_dbGenericShapes[key];
+                        entry.vecs += writeVectorCount;
+                        entry.calls++;
+                    }
                 }
 
                 if (executeGeneric)
@@ -1127,6 +1307,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
                 if (canFastPath && fastActive && verifyActive) {
                     s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
+                    s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
                     if (std::memcmp(fastResult.data(), verifyRangeBase, verifyRangeBytes) != 0) {
                         s_ciMismCount.fetch_add(1, std::memory_order_relaxed);
                         uint32_t logged = s_ciMismLogged.fetch_add(1, std::memory_order_relaxed);
@@ -1149,6 +1330,35 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                               (unsigned long long)s_ciGenericCount.load(std::memory_order_relaxed),
                               (unsigned long long)s_ciMismCount.load(std::memory_order_relaxed));
                 ciLogMsg(buf);
+
+                if (probe_ae::isEnabled()) {
+                    std::vector<std::pair<DbShapeKey, DbShapeStats>> sortedShapes(s_dbGenericShapes.begin(), s_dbGenericShapes.end());
+                    std::sort(sortedShapes.begin(), sortedShapes.end(), [](const auto &a, const auto &b) {
+                        if (a.second.vecs != b.second.vecs) return a.second.vecs > b.second.vecs;
+                        return a.second.calls > b.second.calls;
+                    });
+
+                    const size_t printCount = std::min<size_t>(6u, sortedShapes.size());
+                    for (size_t i = 0; i < printCount; ++i) {
+                        const auto &k = sortedShapes[i].first;
+                        const auto &s = sortedShapes[i].second;
+                        char shBuf[256];
+                        std::snprintf(shBuf, sizeof(shBuf),
+                            "[probe] db unpack generic shape vn=%u vl=%u cl=%u wl=%u mask=%u mode=%u flg=%u usn=%u num=%u vuAddr=0x%03X vecs=%llu calls=%u\n",
+                            k.vn, k.vl, k.cl, k.wl, k.mask, k.mode, k.flg, k.usn, k.num, k.vuAddr,
+                            (unsigned long long)s.vecs, s.calls);
+                        ciLogMsg(shBuf);
+                    }
+
+                    uint64_t fastV = s_dbFastVecs.exchange(0, std::memory_order_relaxed);
+                    uint64_t genV = s_dbGenericVecs.exchange(0, std::memory_order_relaxed);
+                    char totBuf[256];
+                    std::snprintf(totBuf, sizeof(totBuf), "[probe] db unpack fast_vecs=%llu generic_vecs=%llu\n",
+                                  (unsigned long long)fastV, (unsigned long long)genV);
+                    ciLogMsg(totBuf);
+
+                    s_dbGenericShapes.clear();
+                }
             }
             }
             pos += totalBytes;
