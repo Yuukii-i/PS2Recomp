@@ -267,6 +267,8 @@ static uint16_t s_savedClut[512] = {0};
 static uint32_t s_savedClutCbp[2] = {0};
 static int s_clut32Swizzle = -1;
 static int s_clutDrawtimeReload = -1;
+static uint32_t s_lastLoadedClutCbp = 0xFFFFFFFFu;
+static const auto s_processStartTime = std::chrono::steady_clock::now();
 static int s_presentFallback = -1;
 static int s_uploadDump = -1;
 static int s_texDump = -1;
@@ -844,6 +846,7 @@ void GSCpuBackend::ResetUnlocked()
 {
     m_clut.fill(0u);
     m_clutCbp.fill(0u);
+    s_lastLoadedClutCbp = 0xFFFFFFFFu;
     m_texturePageCache.Invalidate();
     m_transfer = {};
     m_transfer.direction = 3u;
@@ -986,6 +989,7 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
             std::fflush(stdout);
         }
     }
+    s_lastLoadedClutCbp = effectiveCbp;
     std::memcpy(s_savedClut, m_clut.data(), sizeof(s_savedClut));
     s_savedClutCbp[0] = m_clutCbp[0];
     s_savedClutCbp[1] = m_clutCbp[1];
@@ -1236,11 +1240,12 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     if (s_clutDrawtimeReload == -1)
     {
         const char *env = std::getenv("PS2X_GS_CLUT_DRAWTIME_RELOAD");
-        s_clutDrawtimeReload = (env && (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0)) ? 0 : 1;
+        s_clutDrawtimeReload = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ? 1 : 0;
     }
     if (state.prim.tme && (isFourBitIndexedPsm(ctx.tex0.psm) || isEightBitIndexedPsm(ctx.tex0.psm)))
     {
-        if (s_clutDrawtimeReload != 0 && (ctx.tex0.cbp != 0u || m_clutCbp[0] != 0u))
+        const uint32_t effCbp = (ctx.tex0.cbp != 0u) ? ctx.tex0.cbp : m_clutCbp[0];
+        if ((s_clutDrawtimeReload == 1 || effCbp != s_lastLoadedClutCbp) && effCbp != 0u)
         {
             LoadClutUnlocked(ctx.tex0, state.texclut);
         }
@@ -1252,7 +1257,15 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
         if (!env) env = std::getenv("PS2X_GS_TEXDUMP");
         s_texDump = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ? 1 : 0;
     }
-    if ((s_texDump == 1 || ctx.tex0.tbp0 == 10752u) && state.prim.tme && s_dumpedTexKeys.size() < 16u)
+    static int s_texDumpAfterS = -1;
+    if (s_texDumpAfterS == -1)
+    {
+        const char *envA = std::getenv("PS2X_TEX_DUMP_AFTER_S");
+        s_texDumpAfterS = envA ? std::atoi(envA) : 0;
+    }
+    const auto curNow = std::chrono::steady_clock::now();
+    const uint64_t elapsedSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(curNow - s_processStartTime).count());
+    if (s_texDump == 1 && elapsedSec >= static_cast<uint64_t>(s_texDumpAfterS) && state.prim.tme && s_dumpedTexKeys.size() < 64u)
     {
         const uint32_t effectiveCbp = (ctx.tex0.cbp != 0u) ? ctx.tex0.cbp : m_clutCbp[0];
         uint32_t clutHash = calculateCrc32(reinterpret_cast<const uint8_t*>(m_clut.data()), sizeof(m_clut));
@@ -1290,8 +1303,9 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
             }
             std::filesystem::create_directories("frames/tex");
             char fn[256];
-            std::snprintf(fn, sizeof(fn), "frames/tex/tex_%u_tbp%u_psm0x%02x_%ux%u.png",
-                          seq, ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.psm), tw_px, th_px);
+            std::snprintf(fn, sizeof(fn), "frames/tex/tex_%02u_%llus_tbp0x%05x_tbw%u_psm0x%02x_%ux%u_cbp0x%05x_csa%u.png",
+                          seq, static_cast<unsigned long long>(elapsedSec), ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw),
+                          static_cast<unsigned>(ctx.tex0.psm), tw_px, th_px, effectiveCbp, static_cast<unsigned>(ctx.tex0.csa));
             writeUncompressedPng(tw_px, th_px, sampledRgba.data(), fn);
 
             // Dump CLUT 16x16
@@ -1307,17 +1321,38 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
                 clutRgba[ci * 4u + 3] = static_cast<uint8_t>((raw >> 24u) & 0xFFu);
             }
             char clutFn[256];
-            std::snprintf(clutFn, sizeof(clutFn), "frames/tex/clut_%u_cbp%u_cpsm0x%02x.png",
-                          seq, effectiveCbp, static_cast<unsigned>(ctx.tex0.cpsm));
+            std::snprintf(clutFn, sizeof(clutFn), "frames/tex/clut_%02u_%llus_cbp0x%05x_cpsm0x%02x_csa%u.png",
+                          seq, static_cast<unsigned long long>(elapsedSec), effectiveCbp, static_cast<unsigned>(ctx.tex0.cpsm), static_cast<unsigned>(ctx.tex0.csa));
             writeUncompressedPng(16u, 16u, clutRgba.data(), clutFn);
 
             const bool csm1Remapped = (ctx.tex0.csm == 0 && (ctx.tex0.cpsm == GS_PSM_CT16 || ctx.tex0.cpsm == GS_PSM_CT16S));
-            std::fprintf(stderr, "[GS:TEXDUMP] [%u/16] tex=(tbp0=%u, tbw=%u, psm=0x%02x, tw=%u, th=%u, %ux%u) cbp=%u csa=%u csm=%u csm1_remap=%d clutHash=0x%08x -> %s\n",
+            std::fprintf(stderr, "[GS:TEXDUMP] [%u/64] tex=(tbp0=%u, tbw=%u, psm=0x%02x, tw=%u, th=%u, %ux%u) cbp=%u csa=%u csm=%u csm1_remap=%d clutHash=0x%08x -> %s\n",
                          seq, ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw), static_cast<unsigned>(ctx.tex0.psm),
                          static_cast<unsigned>(ctx.tex0.tw), static_cast<unsigned>(ctx.tex0.th), tw_px, th_px,
                          effectiveCbp, static_cast<unsigned>(ctx.tex0.csa), static_cast<unsigned>(ctx.tex0.csm),
                          csm1Remapped ? 1 : 0, clutHash, fn);
             std::fflush(stderr);
+        }
+    }
+    static std::chrono::steady_clock::time_point s_gaLastTexRowsTime{};
+    if (isFaProbeEnabled() && state.prim.tme)
+    {
+        if (std::chrono::duration_cast<std::chrono::seconds>(curNow - s_gaLastTexRowsTime).count() >= 1)
+        {
+            s_gaLastTexRowsTime = curNow;
+            uint32_t th_px = 1u << ctx.tex0.th;
+            uint32_t zeroRows = 0;
+            for (uint32_t y = 0; y < th_px; ++y) {
+                bool allZero = true;
+                for (uint32_t x = 0; x < 16u; ++x) {
+                    if (ReadTextureVramUnlocked(ctx.tex0.psm, ctx.tex0.tbp0, ctx.tex0.tbw, x, y) != 0u) {
+                        allZero = false; break;
+                    }
+                }
+                if (allZero) zeroRows++;
+            }
+            std::printf("[probe] ga texrows tbp=0x%05X rows_all_zero=%u th=%u\n", ctx.tex0.tbp0, zeroRows, th_px);
+            std::fflush(stdout);
         }
     }
 
