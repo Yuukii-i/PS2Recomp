@@ -56,7 +56,7 @@ namespace
     constexpr uint32_t WEF_CLEAR = 0x10u;
     constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
     constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
-    constexpr auto kVBlankDuration = std::chrono::microseconds(500);
+    constexpr auto kVBlankDuration = std::chrono::microseconds(1400); // NTSC vblank ~22 of 262.5 lines (was 500)
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
 }
@@ -81,7 +81,7 @@ namespace
     }
 
     constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16667u);
-    constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
+    constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(1400u); // NTSC vblank ~22 of 262.5 lines (was 500)
     constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
 
     template <typename Map>
