@@ -2081,7 +2081,12 @@ namespace probe_ae {
         }
     }
 
+    void flushMovieBatch(GS *gs, PS2Memory *memory);
+    void invalidateMovieSnapCache();
+
     void onBbChainStart(uint32_t tadr, uint32_t tagCount, const std::vector<AySpan> &spans) {
+        flushMovieBatch(nullptr, nullptr);
+        invalidateMovieSnapCache();
         s_movieKickMscalIndex.store(0, std::memory_order_relaxed);
         s_movieKickFirstUnpackSrc.store(0, std::memory_order_relaxed);
         s_kickDecision.store(KickDecision::Undecided, std::memory_order_relaxed);
@@ -3001,11 +3006,154 @@ namespace probe_ae {
         return s_envFrameMode == 1;
     }
 
+    struct MovieSnapshotCache {
+        bool valid = false;
+        uint32_t scisX0 = 0;
+        uint32_t scisX1 = 0;
+        uint32_t scisY0 = 0;
+        uint32_t scisY1 = 0;
+        uint32_t fbp = 0;
+        uint32_t fbw = 0;
+        uint32_t dpsm = 0;
+    };
+    static MovieSnapshotCache s_movieSnapCache;
+    void invalidateMovieSnapCache() {
+        s_movieSnapCache.valid = false;
+    }
+
     static std::atomic<uint32_t> s_secBsMscals{0};
     static std::atomic<uint32_t> s_secBsBlocksClipped{0};
     static std::atomic<uint64_t> s_secBsTimeUs{0};
+    static std::atomic<uint32_t> s_secDaFlushes{0};
+    static std::atomic<uint32_t> s_secDaBlocks{0};
+    static std::atomic<uint32_t> s_secDaMaxBlocks{0};
+    static std::atomic<uint32_t> s_secDaSnapshotReads{0};
     static auto s_bsProbeLastSec = std::chrono::steady_clock::now();
     static uint32_t s_lastBsMovieInstance = 0xFFFFFFFFu;
+
+    static std::vector<uint8_t> s_movieBatch;
+    static uint32_t s_movieBatchBlocks = 0;
+    static GS *s_batchGs = nullptr;
+    static PS2Memory *s_batchMemory = nullptr;
+    static uint32_t s_lastFrameFbp = 0;
+    static uint32_t s_kickMscalsExecuted = 0;
+    static uint32_t s_daVerifyFrameNum = 0;
+
+    static bool isMovieBatchEnabled() {
+        static int s_batchEnv = -1;
+        if (s_batchEnv == -1) {
+            const char *env = std::getenv("PS2X_MOVIE_BATCH");
+            s_batchEnv = (env && (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0)) ? 0 : 1;
+        }
+        return s_batchEnv == 1;
+    }
+
+    static bool isMovieBatchVerifyEnabled() {
+        static int s_verifyEnv = -1;
+        if (s_verifyEnv == -1) {
+            const char *env = std::getenv("PS2X_MOVIE_BATCH_VERIFY");
+            s_verifyEnv = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ? 1 : 0;
+        }
+        return s_verifyEnv == 1;
+    }
+
+    static void verifyDaFrameHash(PS2Memory *mem) {
+        if (!mem) return;
+        const uint8_t *vram = mem->getGSVRAM();
+        if (!vram) return;
+        const uint32_t fbp = s_lastFrameFbp;
+        const uint32_t baseOffset = fbp * 2048u * 4u;
+        uint32_t frameH = 384u;
+        if (baseOffset + 512u * frameH * 4u > 4u * 1024u * 1024u) {
+            frameH = 320u;
+        }
+        if (baseOffset + 512u * frameH * 4u <= 4u * 1024u * 1024u) {
+            const uint32_t frameBytes = 512u * frameH * 4u;
+            uint64_t h = 0xCBF29CE484222325ULL;
+            for (uint32_t i = 0; i < frameBytes; ++i) {
+                h ^= vram[baseOffset + i];
+                h *= 0x100000001B3ULL;
+            }
+            uint32_t n = s_daVerifyFrameNum++;
+            bhLog("[probe] da framehash n=%u h=0x%016llX\n", n, (unsigned long long)h);
+            ps2xSafeLog("[probe] da framehash n=%u h=0x%016llX\n", n, (unsigned long long)h);
+        }
+    }
+
+    static void checkDaProbeSecDump() {
+        auto now = std::chrono::steady_clock::now();
+        double secDiff = std::chrono::duration<double>(now - s_bsProbeLastSec).count();
+        if (secDiff >= 1.0) {
+            uint32_t mscals = s_secBsMscals.exchange(0, std::memory_order_relaxed);
+            uint32_t clipped = s_secBsBlocksClipped.exchange(0, std::memory_order_relaxed);
+            uint64_t totalUs = s_secBsTimeUs.exchange(0, std::memory_order_relaxed);
+            uint64_t avgUs = mscals > 0 ? (totalUs / mscals) : 0;
+            bhLog("[probe] bs mscals=%u blocks_clipped=%u avg_us=%llu\n",
+                  mscals, clipped, (unsigned long long)avgUs);
+            ps2xSafeLog("[probe] bs mscals=%u blocks_clipped=%u avg_us=%llu\n",
+                        mscals, clipped, (unsigned long long)avgUs);
+
+            uint32_t flushes = s_secDaFlushes.exchange(0, std::memory_order_relaxed);
+            uint32_t blocks = s_secDaBlocks.exchange(0, std::memory_order_relaxed);
+            uint32_t maxBlk = s_secDaMaxBlocks.exchange(0, std::memory_order_relaxed);
+            uint32_t avgBlk = flushes > 0 ? (blocks / flushes) : 0;
+            uint32_t snapReads = s_secDaSnapshotReads.exchange(0, std::memory_order_relaxed);
+
+            bhLog("[probe] da batch flushes=%u blocks=%u avg_blocks=%u max_blocks=%u\n",
+                  flushes, blocks, avgBlk, maxBlk);
+            ps2xSafeLog("[probe] da batch flushes=%u blocks=%u avg_blocks=%u max_blocks=%u\n",
+                        flushes, blocks, avgBlk, maxBlk);
+            bhLog("[probe] da snapshot reads=%u\n", snapReads);
+            ps2xSafeLog("[probe] da snapshot reads=%u\n", snapReads);
+
+            s_bsProbeLastSec = now;
+        }
+    }
+
+    void flushMovieBatch(GS *gs, PS2Memory *memory) {
+        if (s_movieBatchBlocks == 0 || s_movieBatch.empty()) {
+            if (isMovieBatchVerifyEnabled() && !isMovieBatchEnabled() && s_kickMscalsExecuted > 0) {
+                PS2Memory *targetMem = memory ? memory : s_batchMemory;
+                verifyDaFrameHash(targetMem);
+                s_kickMscalsExecuted = 0;
+            }
+            checkDaProbeSecDump();
+            return;
+        }
+
+        GS *targetGs = gs ? gs : s_batchGs;
+        PS2Memory *targetMem = memory ? memory : s_batchMemory;
+
+        // Set EOP=1 on the last block's IMAGE tag
+        const size_t lastBlockOffset = (static_cast<size_t>(s_movieBatchBlocks) - 1u) * 1120u;
+        if (lastBlockOffset + 88u <= s_movieBatch.size()) {
+            uint64_t *imgLoPtr = reinterpret_cast<uint64_t*>(s_movieBatch.data() + lastBlockOffset + 80u);
+            *imgLoPtr |= (1ull << 15u);
+        }
+
+        if (targetMem) {
+            targetMem->submitGifPacket(GifPathId::Path1, s_movieBatch.data(), static_cast<uint32_t>(s_movieBatch.size()));
+        } else if (targetGs) {
+            targetGs->processGIFPacket(s_movieBatch.data(), static_cast<uint32_t>(s_movieBatch.size()));
+        }
+
+        const uint32_t blks = s_movieBatchBlocks;
+        s_secDaFlushes.fetch_add(1, std::memory_order_relaxed);
+        s_secDaBlocks.fetch_add(blks, std::memory_order_relaxed);
+        uint32_t prevMax = s_secDaMaxBlocks.load(std::memory_order_relaxed);
+        while (blks > prevMax && !s_secDaMaxBlocks.compare_exchange_weak(prevMax, blks, std::memory_order_relaxed));
+
+        s_movieBatch.clear();
+        s_movieBatchBlocks = 0;
+        s_movieSnapCache.valid = false;
+
+        if (isMovieBatchVerifyEnabled()) {
+            verifyDaFrameHash(targetMem);
+        }
+        s_kickMscalsExecuted = 0;
+
+        checkDaProbeSecDump();
+    }
 
     bool handleMovieHleMscal(uint32_t startPC, const uint8_t *vuCode, uint32_t codeSize,
                              const uint8_t *vuData, uint32_t dataSize, uint32_t top,
@@ -3067,6 +3215,7 @@ namespace probe_ae {
         const uint8_t *rdram = memory ? memory->getRDRAM() : s_cachedRdram;
         const bool movieActive = isMovieActive(rdram);
         if (!movieActive) {
+            flushMovieBatch(&gs, memory);
             return false;
         }
 
@@ -3078,6 +3227,7 @@ namespace probe_ae {
         // Mode A: Legacy Frame Mode (PS2X_MOVIE_HLE_MODE=frame)
         // =====================================================================
         if (isMovieHleFrameMode()) {
+            flushMovieBatch(&gs, memory);
             uint32_t curIdx = s_movieKickMscalIndex.fetch_add(1, std::memory_order_relaxed);
             if (curIdx == 0) {
                 uint32_t base = s_movieKickFirstUnpackSrc.load(std::memory_order_relaxed);
@@ -3145,13 +3295,26 @@ namespace probe_ae {
             ps2xSafeLog("[hle] movie mscal-native pc=0x%03X pos0=(%d,%d) top=0x%03X\n", startPC, mbX, mbY, top & 0x3FFu);
         }
 
-        // 2. Clip to SCISSOR_2
-        GSDebugSnapshot snap = gs.getDebugSnapshot();
-        const auto &ctx = snap.ctx[1]; // Context 2
-        const uint32_t scisX0 = ctx.scissor.x0;
-        const uint32_t scisX1 = ctx.scissor.x1;
-        const uint32_t scisY0 = ctx.scissor.y0;
-        const uint32_t scisY1 = ctx.scissor.y1;
+        // 2. Clip to SCISSOR_2 (snapshot read once per kick)
+        if (!s_movieSnapCache.valid) {
+            GSDebugSnapshot snap = gs.getDebugSnapshot();
+            const auto &ctx = snap.ctx[1]; // Context 2
+            s_movieSnapCache.scisX0 = ctx.scissor.x0;
+            s_movieSnapCache.scisX1 = ctx.scissor.x1;
+            s_movieSnapCache.scisY0 = ctx.scissor.y0;
+            s_movieSnapCache.scisY1 = ctx.scissor.y1;
+            s_movieSnapCache.fbp = ctx.frame.fbp << 5u;
+            s_movieSnapCache.fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+            s_movieSnapCache.dpsm = ctx.frame.psm & 0x3Fu;
+            s_lastFrameFbp = ctx.frame.fbp;
+            s_movieSnapCache.valid = true;
+            s_secDaSnapshotReads.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        const uint32_t scisX0 = s_movieSnapCache.scisX0;
+        const uint32_t scisX1 = s_movieSnapCache.scisX1;
+        const uint32_t scisY0 = s_movieSnapCache.scisY0;
+        const uint32_t scisY1 = s_movieSnapCache.scisY1;
         bool isClipped = false;
         if (scisX1 >= scisX0 && scisY1 >= scisY0) {
             if (mbX >= static_cast<int32_t>(scisX1 + 1) || mbY >= static_cast<int32_t>(scisY1 + 1) ||
@@ -3169,13 +3332,9 @@ namespace probe_ae {
             return true;
         }
 
-        // 3. Prepare GIF image transfer packet for this 16x16 block
-        // 96 bytes setup header + 1024 bytes (256 RGBA pixels) = 1120 bytes
-        static std::vector<uint8_t> s_mbPkt(96 + 1024, 0);
-
-        const uint32_t fbp = ctx.frame.fbp << 5u; // DBP = FBP*32
-        const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
-        const uint32_t dpsm = ctx.frame.psm & 0x3Fu;
+        const uint32_t fbp = s_movieSnapCache.fbp; // DBP = FBP*32
+        const uint32_t fbw = s_movieSnapCache.fbw;
+        const uint32_t dpsm = s_movieSnapCache.dpsm;
 
         const uint64_t bitbltbuf_val = (static_cast<uint64_t>(fbp & 0x3FFFu) << 32u) |
                                        (static_cast<uint64_t>(fbw & 0x3Fu) << 48u) |
@@ -3185,35 +3344,84 @@ namespace probe_ae {
         const uint64_t trxreg_val = (16ull) | (16ull << 32u);
         const uint64_t trxdir_val = 0ull;
 
-        // Tag 1: A+D setup
-        uint64_t tagLo = 4ull | (0ull << 15u) | (0ull << 58u) | (1ull << 60u);
-        uint64_t tagHi = 0x0Eull;
-        std::memcpy(s_mbPkt.data(), &tagLo, 8);
-        std::memcpy(s_mbPkt.data() + 8, &tagHi, 8);
+        uint32_t *dstPixels = nullptr;
+        static std::vector<uint8_t> s_mbPkt(96 + 1024, 0);
 
-        uint64_t regAddr = 0x50ull; // BITBLTBUF
-        std::memcpy(s_mbPkt.data() + 16, &bitbltbuf_val, 8);
-        std::memcpy(s_mbPkt.data() + 24, &regAddr, 8);
+        if (isMovieBatchEnabled()) {
+            static bool s_batchReserved = false;
+            if (!s_batchReserved) {
+                s_movieBatch.reserve(800u * 1120u);
+                s_batchReserved = true;
+            }
 
-        regAddr = 0x51ull; // TRXPOS
-        std::memcpy(s_mbPkt.data() + 32, &trxpos_val, 8);
-        std::memcpy(s_mbPkt.data() + 40, &regAddr, 8);
+            if (s_movieBatchBlocks >= 1024u || (s_movieBatch.size() + 1120u) > (64u * 1024u * 16u)) {
+                flushMovieBatch(&gs, memory);
+            }
 
-        regAddr = 0x52ull; // TRXREG
-        std::memcpy(s_mbPkt.data() + 48, &trxreg_val, 8);
-        std::memcpy(s_mbPkt.data() + 56, &regAddr, 8);
+            const size_t blockOffset = s_movieBatch.size();
+            s_movieBatch.resize(blockOffset + 1120u);
+            uint8_t *blockPtr = s_movieBatch.data() + blockOffset;
 
-        regAddr = 0x53ull; // TRXDIR
-        std::memcpy(s_mbPkt.data() + 64, &trxdir_val, 8);
-        std::memcpy(s_mbPkt.data() + 72, &regAddr, 8);
+            // Tag 1: A+D setup
+            uint64_t tagLo = 4ull | (0ull << 15u) | (0ull << 58u) | (1ull << 60u);
+            uint64_t tagHi = 0x0Eull;
+            std::memcpy(blockPtr, &tagLo, 8);
+            std::memcpy(blockPtr + 8, &tagHi, 8);
 
-        // Tag 2: IMAGE transfer (256 pixels = 64 quadwords = 1024 bytes)
-        uint64_t imgLo = 64ull | (1ull << 15u /*EOP*/) | (2ull << 58u /*FLG=IMAGE*/);
-        uint64_t imgHi = 0ull;
-        std::memcpy(s_mbPkt.data() + 80, &imgLo, 8);
-        std::memcpy(s_mbPkt.data() + 88, &imgHi, 8);
+            uint64_t regAddr = 0x50ull; // BITBLTBUF
+            std::memcpy(blockPtr + 16, &bitbltbuf_val, 8);
+            std::memcpy(blockPtr + 24, &regAddr, 8);
 
-        uint32_t *dstPixels = reinterpret_cast<uint32_t*>(s_mbPkt.data() + 96);
+            regAddr = 0x51ull; // TRXPOS
+            std::memcpy(blockPtr + 32, &trxpos_val, 8);
+            std::memcpy(blockPtr + 40, &regAddr, 8);
+
+            regAddr = 0x52ull; // TRXREG
+            std::memcpy(blockPtr + 48, &trxreg_val, 8);
+            std::memcpy(blockPtr + 56, &regAddr, 8);
+
+            regAddr = 0x53ull; // TRXDIR
+            std::memcpy(blockPtr + 64, &trxdir_val, 8);
+            std::memcpy(blockPtr + 72, &regAddr, 8);
+
+            // Tag 2: IMAGE transfer (256 pixels = 64 quadwords = 1024 bytes)
+            uint64_t imgLo = 64ull | (0ull << 15u /*EOP=0*/) | (2ull << 58u /*FLG=IMAGE*/);
+            uint64_t imgHi = 0ull;
+            std::memcpy(blockPtr + 80, &imgLo, 8);
+            std::memcpy(blockPtr + 88, &imgHi, 8);
+
+            dstPixels = reinterpret_cast<uint32_t*>(blockPtr + 96);
+        } else {
+            // Tag 1: A+D setup
+            uint64_t tagLo = 4ull | (0ull << 15u) | (0ull << 58u) | (1ull << 60u);
+            uint64_t tagHi = 0x0Eull;
+            std::memcpy(s_mbPkt.data(), &tagLo, 8);
+            std::memcpy(s_mbPkt.data() + 8, &tagHi, 8);
+
+            uint64_t regAddr = 0x50ull; // BITBLTBUF
+            std::memcpy(s_mbPkt.data() + 16, &bitbltbuf_val, 8);
+            std::memcpy(s_mbPkt.data() + 24, &regAddr, 8);
+
+            regAddr = 0x51ull; // TRXPOS
+            std::memcpy(s_mbPkt.data() + 32, &trxpos_val, 8);
+            std::memcpy(s_mbPkt.data() + 40, &regAddr, 8);
+
+            regAddr = 0x52ull; // TRXREG
+            std::memcpy(s_mbPkt.data() + 48, &trxreg_val, 8);
+            std::memcpy(s_mbPkt.data() + 56, &regAddr, 8);
+
+            regAddr = 0x53ull; // TRXDIR
+            std::memcpy(s_mbPkt.data() + 64, &trxdir_val, 8);
+            std::memcpy(s_mbPkt.data() + 72, &regAddr, 8);
+
+            // Tag 2: IMAGE transfer (256 pixels = 64 quadwords = 1024 bytes)
+            uint64_t imgLo = 64ull | (1ull << 15u /*EOP*/) | (2ull << 58u /*FLG=IMAGE*/);
+            uint64_t imgHi = 0ull;
+            std::memcpy(s_mbPkt.data() + 80, &imgLo, 8);
+            std::memcpy(s_mbPkt.data() + 88, &imgHi, 8);
+
+            dstPixels = reinterpret_cast<uint32_t*>(s_mbPkt.data() + 96);
+        }
 
         static int s_movie848Shift = -999;
         if (s_movie848Shift == -999) {
@@ -3259,30 +3467,25 @@ namespace probe_ae {
             }
         }
 
-        // 5. Submit GIF packet ordered through Path 1
-        if (memory) {
-            memory->submitGifPacket(GifPathId::Path1, s_mbPkt.data(), static_cast<uint32_t>(s_mbPkt.size()));
+        s_batchGs = &gs;
+        s_batchMemory = memory;
+        s_kickMscalsExecuted++;
+
+        if (isMovieBatchEnabled()) {
+            s_movieBatchBlocks++;
         } else {
-            gs.processGIFPacket(s_mbPkt.data(), static_cast<uint32_t>(s_mbPkt.size()));
+            // 5. Submit GIF packet ordered through Path 1
+            if (memory) {
+                memory->submitGifPacket(GifPathId::Path1, s_mbPkt.data(), static_cast<uint32_t>(s_mbPkt.size()));
+            } else {
+                gs.processGIFPacket(s_mbPkt.data(), static_cast<uint32_t>(s_mbPkt.size()));
+            }
         }
 
         auto t1 = std::chrono::steady_clock::now();
         s_secBsTimeUs.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count(), std::memory_order_relaxed);
 
-        // 6. Per-second probe dump
-        auto now = std::chrono::steady_clock::now();
-        double secDiff = std::chrono::duration<double>(now - s_bsProbeLastSec).count();
-        if (secDiff >= 1.0) {
-            uint32_t mscals = s_secBsMscals.exchange(0, std::memory_order_relaxed);
-            uint32_t clipped = s_secBsBlocksClipped.exchange(0, std::memory_order_relaxed);
-            uint64_t totalUs = s_secBsTimeUs.exchange(0, std::memory_order_relaxed);
-            uint64_t avgUs = mscals > 0 ? (totalUs / mscals) : 0;
-            bhLog("[probe] bs mscals=%u blocks_clipped=%u avg_us=%llu\n",
-                  mscals, clipped, (unsigned long long)avgUs);
-            ps2xSafeLog("[probe] bs mscals=%u blocks_clipped=%u avg_us=%llu\n",
-                        mscals, clipped, (unsigned long long)avgUs);
-            s_bsProbeLastSec = now;
-        }
+        checkDaProbeSecDump();
 
         return true;
     }

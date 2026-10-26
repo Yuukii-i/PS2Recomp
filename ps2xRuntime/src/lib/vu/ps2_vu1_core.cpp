@@ -1670,6 +1670,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         return;
     }
 
+    probe_ae::flushMovieBatch(&gs, memory);
+
     probe_ae::onBxOrigRunStart(startPC, top, vuData, dataSize);
     probe_ae::onBzOrigRunBlock();
 

@@ -568,6 +568,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
+            probe_ae::flushMovieBatch(nullptr, this);
             if (m_vu1MscntCallback) {
                 auto tVu1Start = std::chrono::steady_clock::now();
                 m_vu1MscntCallback(runTop, runItop);
@@ -629,6 +630,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
         {
+            probe_ae::flushMovieBatch(nullptr, this);
             uint32_t qwCount = imm;
             if (qwCount == 0)
                 qwCount = 65536;
@@ -1178,4 +1180,5 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         probe_ae::recordBlSkipUnpack(kickUnpacksSkipped, kickBytesSkipped);
     }
     probe_ae::onBhVif1End();
+    probe_ae::flushMovieBatch(nullptr, this);
 }
