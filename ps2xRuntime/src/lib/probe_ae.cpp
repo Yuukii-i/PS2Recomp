@@ -5452,7 +5452,99 @@ namespace probe_ae {
         std::fflush(stdout);
     }
 
+    
+    // =========================================================================
+    // Task DQ: Movie dispatcher blocking diagnostics during g203 stall
+    // =========================================================================
+    static std::atomic<uint32_t> s_dqTotalLogCount{0};
+    static std::atomic<uint32_t> s_dqDa880Count{0};
+    static std::atomic<uint32_t> s_dqDd010Count{0};
+
+    static bool checkDqGate(const uint8_t *rdram, uint64_t *outTick) {
+        if (!isDcProbeEnabled() || !rdram) return false;
+        uint64_t tick = 0;
+        std::memcpy(&tick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+        if (outTick) *outTick = tick;
+        if (tick < 4255 || tick > 4385) return false;
+        return (s_dqTotalLogCount.fetch_add(1, std::memory_order_relaxed) < 400);
+    }
+
+    void onDqCbfcEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        uint64_t tick = 0;
+        if (!checkDqGate(rdram, &tick) || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        int32_t c0C = 0, c10 = 0;
+        uint32_t st = 0, dev30 = 0;
+        std::memcpy(&c0C, rdram + ((a0 + 0x0Cu) & 0x1FFFFFFFu), 4);
+        std::memcpy(&c10, rdram + ((a0 + 0x10u) & 0x1FFFFFFFu), 4);
+        std::memcpy(&st, rdram + ((a0 + 0x08u) & 0x1FFFFFFFu), 4);
+        std::memcpy(&dev30, rdram + (0x771BB8u & 0x1FFFFFFFu), 4);
+
+        auto read4W = [&](uint32_t addr) -> std::string {
+            char buf[64];
+            uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+            std::memcpy(&w0, rdram + ((addr + 0) & 0x1FFFFFFFu), 4);
+            std::memcpy(&w1, rdram + ((addr + 4) & 0x1FFFFFFFu), 4);
+            std::memcpy(&w2, rdram + ((addr + 8) & 0x1FFFFFFFu), 4);
+            std::memcpy(&w3, rdram + ((addr + 12) & 0x1FFFFFFFu), 4);
+            std::snprintf(buf, sizeof(buf), "[0x%08X,0x%08X,0x%08X,0x%08X]", w0, w1, w2, w3);
+            return std::string(buf);
+        };
+        std::string s0w = read4W(0x771BBCu);
+        std::string s1w = read4W(0x771BCCu);
+        std::string s2w = read4W(0x771BDCu);
+        std::string s3w = read4W(0x771BECu);
+
+        std::printf("[probe] dc11 cbfc tick=%llu c0C=%d c10=%d st=%u dev30=0x%08X s0w=%s s1w=%s s2w=%s s3w=%s\n",
+                    (unsigned long long)tick, c0C, c10, st, dev30, s0w.c_str(), s1w.c_str(), s2w.c_str(), s3w.c_str());
+        std::fflush(stdout);
+    }
+
+    void onDqDa880Entry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (s_dqDa880Count.fetch_add(1, std::memory_order_relaxed) >= 150) return;
+        uint64_t tick = 0;
+        if (!checkDqGate(rdram, &tick) || !ctx) return;
+        int32_t h = static_cast<int32_t>(getRegU32(ctx, 5));
+        uint32_t wait = getRegU32(ctx, 6);
+        uint32_t ra = getRegU32(ctx, 31);
+        std::printf("[probe] dc11 da880 tick=%llu h=%d wait=%u ra=0x%08X\n",
+                    (unsigned long long)tick, h, wait, ra);
+        std::fflush(stdout);
+    }
+
+    void onDqDd010Entry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (s_dqDd010Count.fetch_add(1, std::memory_order_relaxed) >= 100) return;
+        uint64_t tick = 0;
+        if (!checkDqGate(rdram, &tick) || !ctx) return;
+        uint32_t ra = getRegU32(ctx, 31);
+        std::printf("[probe] dc11 dd010 tick=%llu ra=0x%08X\n",
+                    (unsigned long long)tick, ra);
+        std::fflush(stdout);
+    }
+
+    void onDqPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        uint64_t tick = 0;
+        if (!checkDqGate(rdram, &tick)) return;
+        uint32_t st = 0, b64 = 0, b60 = 0, b68 = 0, b6c = 0, n58 = 0, f84 = 0;
+        int32_t c0C = 0, c10 = 0;
+        std::memcpy(&st, rdram + ((0x772180u + 0x08u) & 0x1FFFFFFFu), 4);
+        std::memcpy(&b64, rdram + ((0x772180u + 0x64u) & 0x1FFFFFFFu), 4);
+        std::memcpy(&b60, rdram + ((0x772180u + 0x60u) & 0x1FFFFFFFu), 4);
+        std::memcpy(&b68, rdram + ((0x772180u + 0x68u) & 0x1FFFFFFFu), 4);
+        std::memcpy(&b6c, rdram + ((0x772180u + 0x6Cu) & 0x1FFFFFFFu), 4);
+        std::memcpy(&n58, rdram + ((0x772180u + 0x58u) & 0x1FFFFFFFu), 4);
+        std::memcpy(&c0C, rdram + ((0x772180u + 0x0Cu) & 0x1FFFFFFFu), 4);
+        std::memcpy(&c10, rdram + ((0x772180u + 0x10u) & 0x1FFFFFFFu), 4);
+        std::memcpy(&f84, rdram + ((0x772180u + 0x84u) & 0x1FFFFFFFu), 4);
+        std::printf("[probe] dc11 pump tick=%llu st=%u b64=%u b60=%u b68=%u b6c=%u n58=%u c0C=%d c10=%d f84=%u\n",
+                    (unsigned long long)tick, st, b64, b60, b68, b6c, n58, c0C, c10, f84);
+        std::fflush(stdout);
+    }
+
     void onBtFunctionEntry(uint32_t addr, const R5900Context *ctx, const uint8_t *rdram) {
+        if (addr == 0x0024CBFCu) { onDqCbfcEntry(ctx, rdram); }
+        if (addr == 0x001DA880u) { onDqDa880Entry(ctx, rdram); }
+        if (addr == 0x001DD010u) { onDqDd010Entry(ctx, rdram); }
         if (addr == 0x003F7BA8u) { onDoProdEntry(ctx, rdram); }
         if (addr == 0x00402888u) { onDoPosEntry(ctx, rdram); }
         if (addr == 0x003F7A18u) { onDoRunEntry(ctx, rdram); }
@@ -5562,6 +5654,7 @@ namespace probe_ae {
     }
 
     void onBuPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram, BuPreState *pre) {
+        onDqPumpEntry(ctx, rdram);
         onDhPumpEntry(ctx, rdram);
         if (!isEnabled() || !ctx || !rdram || !pre) return;
         ensureBuSamplerStarted();
