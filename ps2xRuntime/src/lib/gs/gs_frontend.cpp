@@ -14,6 +14,7 @@ namespace probe_ae {
 #include <iostream>
 #include <sstream>
 
+std::atomic<uint64_t> g_hostPresentSeq{0};
 namespace
 {
     static inline bool isVerboseLog()
@@ -646,6 +647,7 @@ void GS::latchHostPresentationFrame()
     {
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
+        g_hostPresentSeq.fetch_add(1, std::memory_order_release);
     }
 }
 

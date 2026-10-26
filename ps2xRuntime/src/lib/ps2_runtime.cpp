@@ -616,6 +616,17 @@ namespace ps2_stubs
     void clearPadOverrideState();
 }
 
+
+static bool isVblankLatchEnabled()
+{
+    static const bool s_enabled = []() {
+        const char *e = std::getenv("PS2X_VBLANK_LATCH");
+        if (e && std::strcmp(e, "0") == 0) return false;
+        return true;
+    }();
+    return s_enabled;
+}
+
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight, uint64_t renderTick = 0u)
 {
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
@@ -715,18 +726,41 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     }
     const bool isDumpScheduled = (dumpTick == 1u || dumpTick == 10u || dumpTick == 100u || (dumpInterval > 0 && (dumpTick % static_cast<uint64_t>(dumpInterval) == 0u)));
 
-    const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick || isDumpScheduled;
-    if (needsLatch)
+    extern std::atomic<uint64_t> g_hostPresentSeq;
+    static uint64_t s_lastUploadedSeq = ~0ull;
+    const bool vblankLatchOn = isVblankLatchEnabled();
+
+    if (vblankLatchOn)
     {
-        rt->gs().latchHostPresentationFrame();
-        s_lastPresentationTick = currentTick;
-        s_hasLatchedInitialFrame = true;
+        if (!s_hasLatchedInitialFrame)
+        {
+            rt->gs().latchHostPresentationFrame();
+            s_hasLatchedInitialFrame = true;
+        }
+        uint64_t curSeq = g_hostPresentSeq.load(std::memory_order_acquire);
+        if (curSeq == s_lastUploadedSeq && s_hasUploadedFrame)
+        {
+            outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
+            outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
+            return;
+        }
+        s_lastUploadedSeq = curSeq;
     }
-    else if (s_hasUploadedFrame)
+    else
     {
-        outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
-        outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
-        return;
+        const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick || isDumpScheduled;
+        if (needsLatch)
+        {
+            rt->gs().latchHostPresentationFrame();
+            s_lastPresentationTick = currentTick;
+            s_hasLatchedInitialFrame = true;
+        }
+        else if (s_hasUploadedFrame)
+        {
+            outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
+            outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
+            return;
+        }
     }
 
     s_scratch.clear();
@@ -4932,19 +4966,26 @@ void PS2Runtime::run()
         g_hostPadButtons.store(activeButtons, std::memory_order_release);
 
         extern std::atomic<uint64_t> g_gsFrameKicks;
+        extern std::atomic<uint64_t> g_hostPresentSeq;
         static uint64_t s_lastPresentedGsKicks = std::numeric_limits<uint64_t>::max();
+        static uint64_t s_lastPresentedSeq = std::numeric_limits<uint64_t>::max();
         static auto s_lastPresentTime = std::chrono::steady_clock::now();
         static uint32_t s_fpsCounter = 0;
         static auto s_lastFpsLogTime = std::chrono::steady_clock::now();
 
         const uint64_t currentGsKicks = g_gsFrameKicks.load(std::memory_order_acquire);
+        const uint64_t currentPresentSeq = g_hostPresentSeq.load(std::memory_order_acquire);
         const auto now = std::chrono::steady_clock::now();
         const auto timeSinceLastPresent = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastPresentTime).count();
-        const bool shouldPresent = (currentGsKicks != s_lastPresentedGsKicks) || (timeSinceLastPresent >= 33);
+        const bool vblankLatchOn = isVblankLatchEnabled();
+        const bool shouldPresent = vblankLatchOn
+            ? ((currentPresentSeq != s_lastPresentedSeq) || (timeSinceLastPresent >= 33))
+            : ((currentGsKicks != s_lastPresentedGsKicks) || (timeSinceLastPresent >= 33));
 
         if (shouldPresent)
         {
             s_lastPresentedGsKicks = currentGsKicks;
+            s_lastPresentedSeq = currentPresentSeq;
             s_lastPresentTime = now;
             s_fpsCounter++;
             if (g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u)

@@ -24,6 +24,7 @@ namespace ps2_syscalls {
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_runtime.h"
 #include "Stubs/CD.h"
 
 #include <algorithm>
@@ -2192,6 +2193,17 @@ void EeScheduler::processDueDeadlines()
     }
 }
 
+
+static bool isVblankLatchEnabled()
+{
+    static const bool s_enabled = []() {
+        const char *e = std::getenv("PS2X_VBLANK_LATCH");
+        if (e && std::strcmp(e, "0") == 0) return false;
+        return true;
+    }();
+    return s_enabled;
+}
+
 void EeScheduler::processEvent(const EeEvent &event)
 {
     switch (event.type)
@@ -2222,6 +2234,19 @@ void EeScheduler::processEvent(const EeEvent &event)
         m_vsyncFlagAddress = 0u;
         m_vsyncTickAddress = 0u;
         completeVSync(m_vsyncTick);
+
+        if (isVblankLatchEnabled())
+        {
+            extern std::atomic<uint64_t> g_gsFrameKicks;
+            static uint64_t s_lastLatchKicks = ~0ull;
+            static uint64_t s_lastLatchTick = 0;
+            if ((g_gsFrameKicks.load(std::memory_order_relaxed) != s_lastLatchKicks) || (m_vsyncTick - s_lastLatchTick >= 30))
+            {
+                m_runtime.gs().latchHostPresentationFrame();
+                s_lastLatchKicks = g_gsFrameKicks.load(std::memory_order_relaxed);
+                s_lastLatchTick = m_vsyncTick;
+            }
+        }
 
         // GameThread pad injection
         {
