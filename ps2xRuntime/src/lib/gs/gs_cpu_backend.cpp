@@ -4021,7 +4021,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
             if (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon)
                 continue;
 
-            double z = v0.z * w0 + v1.z * w1 + v2.z * w2;
+            double z = (double)v0.z + ((double)v1.z - (double)v0.z) * (double)w1 + ((double)v2.z - (double)v0.z) * (double)w2;
 
             uint8_t r, g, b, a;
             if (state.prim.iip)
