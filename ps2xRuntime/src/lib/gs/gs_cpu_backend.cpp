@@ -1664,7 +1664,8 @@ static inline bool isSpriteFastEnabled() {
     static int s_val = -1;
     if (s_val == -1) {
         const char *env = std::getenv("PS2X_GS_SPRITE_FAST");
-        s_val = (env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) ? 1 : 0;
+        // Verified bit-exact (mism_px=0 over 446 sprites, log cr): default ON, PS2X_GS_SPRITE_FAST=0 disables
+        s_val = (env && (env[0] == '0' || env[0] == 'f' || env[0] == 'F')) ? 0 : 1;
     }
     return s_val == 1;
 }
