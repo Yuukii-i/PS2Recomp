@@ -913,4 +913,10 @@ namespace probe_ae {
     void onDc2ThreadDispatch(int thid, uint32_t entryPc);
     void onDc3IrqProduced(uint32_t cause, bool accepted);
     void onDc3IrqDelivered(uint32_t cause, uint32_t pc);
+
+    // Task DF Probes
+    void onDc4GEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onDc4FEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onDc4DEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onDc4DecEntry();
 }

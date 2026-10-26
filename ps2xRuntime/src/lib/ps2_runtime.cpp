@@ -1352,6 +1352,8 @@ namespace probe_ae {
     void onBrFunctionEntry(uint32_t addr, const R5900Context *ctx);
     void onBrFunctionExit(uint32_t addr, const R5900Context *ctx);
     void onBtFunctionEntry(uint32_t addr, const R5900Context *ctx, const uint8_t *rdram);
+    void onDc4DEntry(const struct R5900Context *ctx, const uint8_t *rdram);
+    void onDc4DecEntry();
 }
 
 template<uint32_t Addr>
@@ -2027,6 +2029,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         const uint32_t slot408e90 = (0x00408E90u - g_ps2RecompiledFunctionTableBase) >> 2;
         static RecompiledFunction s_orig408e90 = g_ps2RecompiledFunctionTable[slot408e90];
         replaceFunction(0x00408E90u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            probe_ae::onDc4DecEntry();
             g_movieIsEndCount.fetch_add(1, std::memory_order_relaxed);
             g_probe_408e90.fetch_add(1, std::memory_order_relaxed);
             static const char *fallbackEnv = std::getenv("PS2X_MOVIE_FALLBACK");
@@ -2225,6 +2228,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         const uint32_t slot = (0x0031A240u - g_ps2RecompiledFunctionTableBase) >> 2;
         static RecompiledFunction s_orig31a240 = g_ps2RecompiledFunctionTable[slot];
         replaceFunction(0x0031A240u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+            probe_ae::onDc4DEntry(ctx, rdram);
             static bool s_logged = false;
             if (!s_logged) { s_logged = true; ps2xSafeLog("[movie:diag] 0x0031A240 called!\n"); }
             g_mpegFunctionCalled.store(true, std::memory_order_relaxed);

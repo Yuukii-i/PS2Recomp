@@ -5371,6 +5371,11 @@ namespace probe_ae {
     }
 
     void onBtFunctionEntry(uint32_t addr, const R5900Context *ctx, const uint8_t *rdram) {
+        if (addr == 0x0024CE28u) {
+            onDc4GEntry(ctx, rdram);
+        } else if (addr == 0x0024C164u) {
+            onDc4FEntry(ctx, rdram);
+        }
         if (!isEnabled()) return;
         if (addr == 0x0024C164u) {
             s_btFCalls.fetch_add(1, std::memory_order_relaxed);
@@ -7188,6 +7193,76 @@ namespace probe_ae {
             }
         } else if (cause == 2u) {
             s_dc3Irq2Delivered++;
+        }
+    }
+
+    // =========================================================================
+    // Task DF Probes: values flowing through movie tick
+    // =========================================================================
+    static std::mutex s_dc4Mutex;
+    static uint32_t s_dc4GCalls = 0;
+    static uint32_t s_dc4LoggedCount = 0;
+
+    void onDc4GEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dc4Mutex);
+        s_dc4GCalls++;
+        if (s_dc4GCalls > 200 && s_dc4LoggedCount < 150) {
+            s_dc4LoggedCount++;
+            uint32_t delta = ctx ? getRegU32(ctx, 4) : 0u;
+            const uint8_t *ram = rdram ? rdram : s_cachedRdram;
+            uint64_t cnt696fd0 = 0;
+            if (ram) {
+                std::memcpy(&cnt696fd0, ram + (0x696FD0u & PS2_RAM_MASK), 8);
+            }
+            dcLog("[probe] dc4 G delta=%u cnt696fd0=%llu\n", delta, (unsigned long long)cnt696fd0);
+        }
+    }
+
+    void onDc4FEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dc4Mutex);
+        if (s_dc4GCalls > 200 && s_dc4LoggedCount < 150) {
+            s_dc4LoggedCount++;
+            uint32_t a0 = ctx ? getRegU32(ctx, 4) : 0u;
+            uint32_t s4 = ctx ? getRegU32(ctx, 5) : 0u;
+            const uint8_t *ram = rdram ? rdram : s_cachedRdram;
+            uint32_t state = 0, idx60 = 0, idx64 = 0, lim5c = 0;
+            if (ram && a0 != 0u) {
+                std::memcpy(&state, ram + ((a0 + 8u) & PS2_RAM_MASK), 4);
+                std::memcpy(&idx60, ram + ((a0 + 0x60u) & PS2_RAM_MASK), 4);
+                std::memcpy(&idx64, ram + ((a0 + 0x64u) & PS2_RAM_MASK), 4);
+                std::memcpy(&lim5c, ram + ((a0 + 0x5Cu) & PS2_RAM_MASK), 4);
+            }
+            dcLog("[probe] dc4 F s4=%u state=%u idx60=%u idx64=%u lim5c=%u\n",
+                  s4, state, idx60, idx64, lim5c);
+        }
+    }
+
+    void onDc4DEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dc4Mutex);
+        if (s_dc4GCalls > 200 && s_dc4LoggedCount < 150) {
+            s_dc4LoggedCount++;
+            uint32_t a0 = ctx ? getRegU32(ctx, 4) : 0u;
+            uint32_t a1 = ctx ? getRegU32(ctx, 5) : 0u;
+            uint32_t a2 = ctx ? getRegU32(ctx, 6) : 0u;
+            const uint8_t *ram = rdram ? rdram : s_cachedRdram;
+            uint32_t thr1f8 = 0;
+            if (ram && a0 != 0u) {
+                std::memcpy(&thr1f8, ram + ((a0 + 0x1F8u) & PS2_RAM_MASK), 4);
+            }
+            dcLog("[probe] dc4 D a0=0x%08X a1=%u a2=%u thr1f8=%u\n",
+                  a0, a1, a2, thr1f8);
+        }
+    }
+
+    void onDc4DecEntry() {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dc4Mutex);
+        if (s_dc4GCalls > 200 && s_dc4LoggedCount < 150) {
+            s_dc4LoggedCount++;
+            dcLog("[probe] dc4 DEC\n");
         }
     }
 }
