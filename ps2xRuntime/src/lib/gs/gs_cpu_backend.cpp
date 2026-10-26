@@ -41,6 +41,103 @@ static inline bool isVerboseLog()
 }
 
 // --- Task K: Offline Oracle & Diagnostic Helpers ---
+
+// =========================================================================
+// Task FA: GS cost per draw config + CLUT/texture census
+// =========================================================================
+#include <map>
+#include <set>
+#include <vector>
+#include <tuple>
+
+static inline bool isFaProbeEnabled()
+{
+    static int s_fa = -1;
+    if (s_fa == -1)
+    {
+        const char *v = std::getenv("PS2X_PROBE_GS");
+        s_fa = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+    }
+    return s_fa == 1;
+}
+
+struct FaCfgKey {
+    uint8_t primType;
+    uint8_t tme;
+    uint8_t abe;
+    uint8_t fst;
+    uint8_t linearFilter;
+    uint8_t texPsm;
+    uint8_t cpsm;
+    uint8_t csm;
+    uint8_t tfx;
+    uint8_t tcc;
+    uint8_t zte;
+    uint8_t atst;
+    uint8_t fba;
+    bool operator<(const FaCfgKey &o) const {
+        return std::tie(primType, tme, abe, fst, linearFilter, texPsm, cpsm, csm, tfx, tcc, zte, atst, fba) <
+               std::tie(o.primType, o.tme, o.abe, o.fst, o.linearFilter, o.texPsm, o.cpsm, o.csm, o.tfx, o.tcc, o.zte, o.atst, o.fba);
+    }
+};
+
+struct FaCfgVal {
+    uint64_t count = 0;
+    uint64_t bboxPixels = 0;
+    uint64_t totalUs = 0;
+};
+
+struct FaSlowPrim {
+    uint64_t us = 0;
+    uint8_t primType = 0;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    uint32_t tbp = 0;
+    uint32_t tbw = 0;
+    uint32_t psm = 0;
+    uint32_t tw = 0;
+    uint32_t th = 0;
+    uint32_t cbp = 0;
+    uint32_t csa = 0;
+    uint8_t abe = 0;
+    uint8_t lin = 0;
+};
+
+static std::map<FaCfgKey, FaCfgVal> s_faCfgStats;
+static std::vector<FaSlowPrim> s_faSlowPrims;
+static std::chrono::steady_clock::time_point s_faLastPrintTime{};
+
+struct FaClutKey {
+    uint32_t cbp;
+    uint8_t cpsm;
+    uint8_t csm;
+    uint8_t csa;
+    uint8_t texPsm;
+    uint8_t cld;
+    bool operator<(const FaClutKey &o) const {
+        return std::tie(cbp, cpsm, csm, csa, texPsm, cld) <
+               std::tie(o.cbp, o.cpsm, o.csm, o.csa, o.texPsm, o.cld);
+    }
+};
+static std::set<FaClutKey> s_faSeenClutKeys;
+
+struct FaTexPrimKey {
+    uint32_t tbp;
+    uint32_t tbw;
+    uint32_t psm;
+    uint32_t cbp;
+    uint32_t cpsm;
+    uint32_t csa;
+    uint32_t tfx;
+    uint32_t tcc;
+    uint32_t tw;
+    uint32_t th;
+    bool operator<(const FaTexPrimKey &o) const {
+        return std::tie(tbp, tbw, psm, cbp, cpsm, csa, tfx, tcc, tw, th) <
+               std::tie(o.tbp, o.tbw, o.psm, o.cbp, o.cpsm, o.csa, o.tfx, o.tcc, o.tw, o.th);
+    }
+};
+static std::set<FaTexPrimKey> s_faSeenTexPrimKeys;
+
 static uint32_t calculateCrc32(const uint8_t *data, size_t length)
 {
     static uint32_t table[256];
@@ -869,6 +966,26 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
             m_clut[destination + 256u] = static_cast<uint16_t>(raw >> 16u);
         }
     }
+    if (isFaProbeEnabled() && s_faSeenClutKeys.size() < 40u)
+    {
+        FaClutKey ck{effectiveCbp, static_cast<uint8_t>(tex0.cpsm), static_cast<uint8_t>(tex0.csm),
+                     static_cast<uint8_t>(tex0.csa), static_cast<uint8_t>(tex0.psm), static_cast<uint8_t>(tex0.cld)};
+        if (s_faSeenClutKeys.insert(ck).second)
+        {
+            char lo16Str[256]; char hi16Str[256]; char rgbaStr[256];
+            int loLen = 0, hiLen = 0, rgbaLen = 0;
+            for (int i = 0; i < 16; ++i) {
+                loLen += std::snprintf(lo16Str + loLen, sizeof(lo16Str) - loLen, "%s%04X", (i > 0 ? " " : ""), m_clut[i]);
+                hiLen += std::snprintf(hi16Str + hiLen, sizeof(hi16Str) - hiLen, "%s%04X", (i > 0 ? " " : ""), m_clut[256 + i]);
+                uint32_t cRgba = LookupCLUT(GSDrawState{}, static_cast<uint8_t>(i), static_cast<uint8_t>(tex0.cpsm),
+                                            static_cast<uint8_t>(tex0.csm), static_cast<uint8_t>(tex0.csa), static_cast<uint8_t>(tex0.psm));
+                rgbaLen += std::snprintf(rgbaStr + rgbaLen, sizeof(rgbaStr) - rgbaLen, "%s%08X", (i > 0 ? " " : ""), cRgba);
+            }
+            std::printf("[probe] fa clut cbp=0x%05X cpsm=0x%02X csm=%u csa=%u psm=0x%02X lo16[0..15]=%s hi16[0..15]=%s rgba[0..15]=%s\n",
+                        effectiveCbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, lo16Str, hi16Str, rgbaStr);
+            std::fflush(stdout);
+        }
+    }
     std::memcpy(s_savedClut, m_clut.data(), sizeof(s_savedClut));
     s_savedClutCbp[0] = m_clutCbp[0];
     s_savedClutCbp[1] = m_clutCbp[1];
@@ -1257,6 +1374,71 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
         }
     }
 
+    // Task FA timing & census
+    const bool faActive = isFaProbeEnabled();
+    std::chrono::steady_clock::time_point faT0;
+    int faClampedW = 0, faClampedH = 0;
+    int faMinX = 0, faMinY = 0, faMaxX = 0, faMaxY = 0;
+    if (faActive)
+    {
+        int ofx = ctx.xyoffset.ofx >> 4;
+        int ofy = ctx.xyoffset.ofy >> 4;
+        if (!batch.vertices.empty()) {
+            faMinX = static_cast<int>(std::floor(batch.vertices[0].x - static_cast<float>(ofx)));
+            faMaxX = static_cast<int>(std::ceil(batch.vertices[0].x - static_cast<float>(ofx)));
+            faMinY = static_cast<int>(std::floor(batch.vertices[0].y - static_cast<float>(ofy)));
+            faMaxY = static_cast<int>(std::ceil(batch.vertices[0].y - static_cast<float>(ofy)));
+            for (size_t i = 1; i < batch.vertices.size(); ++i) {
+                int vx0 = static_cast<int>(std::floor(batch.vertices[i].x - static_cast<float>(ofx)));
+                int vx1 = static_cast<int>(std::ceil(batch.vertices[i].x - static_cast<float>(ofx)));
+                int vy0 = static_cast<int>(std::floor(batch.vertices[i].y - static_cast<float>(ofy)));
+                int vy1 = static_cast<int>(std::ceil(batch.vertices[i].y - static_cast<float>(ofy)));
+                if (vx0 < faMinX) faMinX = vx0;
+                if (vx1 > faMaxX) faMaxX = vx1;
+                if (vy0 < faMinY) faMinY = vy0;
+                if (vy1 > faMaxY) faMaxY = vy1;
+            }
+            int cX0 = std::max(faMinX, static_cast<int>(ctx.scissor.x0));
+            int cX1 = std::min(faMaxX, static_cast<int>(ctx.scissor.x1));
+            int cY0 = std::max(faMinY, static_cast<int>(ctx.scissor.y0));
+            int cY1 = std::min(faMaxY, static_cast<int>(ctx.scissor.y1));
+            if (cX1 >= cX0 && cY1 >= cY0) {
+                faClampedW = cX1 - cX0 + 1;
+                faClampedH = cY1 - cY0 + 1;
+            }
+        }
+        if (state.prim.tme && s_faSeenTexPrimKeys.size() < 80u)
+        {
+            FaTexPrimKey tpk{ctx.tex0.tbp0, static_cast<uint32_t>(ctx.tex0.tbw), static_cast<uint32_t>(ctx.tex0.psm),
+                             (ctx.tex0.cbp != 0u ? ctx.tex0.cbp : m_clutCbp[0]), static_cast<uint32_t>(ctx.tex0.cpsm),
+                             static_cast<uint32_t>(ctx.tex0.csa), static_cast<uint32_t>(ctx.tex0.tfx),
+                             static_cast<uint32_t>(ctx.tex0.tcc), static_cast<uint32_t>(ctx.tex0.tw),
+                             static_cast<uint32_t>(ctx.tex0.th)};
+            if (s_faSeenTexPrimKeys.insert(tpk).second)
+            {
+                uint32_t v0Rgba = 0;
+                if (!batch.vertices.empty()) {
+                    const auto &v0 = batch.vertices[0];
+                    v0Rgba = static_cast<uint32_t>(v0.r) | (static_cast<uint32_t>(v0.g) << 8u) |
+                             (static_cast<uint32_t>(v0.b) << 16u) | (static_cast<uint32_t>(v0.a) << 24u);
+                }
+                uint64_t rawTexa = (static_cast<uint64_t>(state.texa.ta0) & 0xFFu) |
+                                   ((static_cast<uint64_t>(state.texa.aem) & 0x1u) << 15u) |
+                                   ((static_cast<uint64_t>(state.texa.ta1) & 0xFFu) << 32u);
+                char texelStr[256];
+                int tLen = 0;
+                for (uint32_t ti = 0; ti < 8; ++ti) {
+                    uint32_t rawVal = ReadTextureVramUnlocked(ctx.tex0.psm, ctx.tex0.tbp0, ctx.tex0.tbw, ti, 0);
+                    tLen += std::snprintf(texelStr + tLen, sizeof(texelStr) - tLen, "%s%08X", (ti > 0 ? " " : ""), rawVal);
+                }
+                std::printf("[probe] fa texprim tbp=0x%05X tbw=%u psm=0x%02X tw=%u th=%u cbp=0x%05X cpsm=0x%02X csm=%u csa=%u tfx=%u tcc=%u vtx0_rgba=0x%08X texa=0x%016llx bbox=%d,%d,%d,%d texel[0..7]=%s\n",
+                            tpk.tbp, tpk.tbw, tpk.psm, tpk.tw, tpk.th, tpk.cbp, tpk.cpsm, static_cast<unsigned>(ctx.tex0.csm), tpk.csa, tpk.tfx, tpk.tcc,
+                            v0Rgba, static_cast<unsigned long long>(rawTexa), faMinX, faMinY, faMaxX, faMaxY, texelStr);
+                std::fflush(stdout);
+            }
+        }
+        faT0 = std::chrono::steady_clock::now();
+    }
     switch (state.prim.type)
     {
     case GS_PRIM_SPRITE:
@@ -1282,6 +1464,70 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     }
     default:
         break;
+    }
+    if (faActive)
+    {
+        const auto faT1 = std::chrono::steady_clock::now();
+        uint64_t faElapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(faT1 - faT0).count());
+        uint64_t bboxPix = static_cast<uint64_t>(faClampedW) * static_cast<uint64_t>(faClampedH);
+        FaCfgKey key{
+            static_cast<uint8_t>(state.prim.type),
+            static_cast<uint8_t>(state.prim.tme ? 1u : 0u),
+            static_cast<uint8_t>(state.prim.abe ? 1u : 0u),
+            static_cast<uint8_t>(state.prim.fst ? 1u : 0u),
+            static_cast<uint8_t>(state.linearFilter ? 1u : 0u),
+            static_cast<uint8_t>(ctx.tex0.psm),
+            static_cast<uint8_t>(ctx.tex0.cpsm),
+            static_cast<uint8_t>(ctx.tex0.csm),
+            static_cast<uint8_t>(ctx.tex0.tfx),
+            static_cast<uint8_t>(ctx.tex0.tcc),
+            static_cast<uint8_t>((ctx.test >> 16u) & 1u),
+            static_cast<uint8_t>((ctx.test >> 1u) & 7u),
+            static_cast<uint8_t>(ctx.fba & 1ull)
+        };
+        auto &val = s_faCfgStats[key];
+        val.count++;
+        val.bboxPixels += bboxPix;
+        val.totalUs += faElapsedUs;
+        FaSlowPrim sp{faElapsedUs, static_cast<uint8_t>(state.prim.type), faMinX, faMinY, faMaxX, faMaxY,
+                      ctx.tex0.tbp0, static_cast<uint32_t>(ctx.tex0.tbw), static_cast<uint32_t>(ctx.tex0.psm),
+                      static_cast<uint32_t>(ctx.tex0.tw), static_cast<uint32_t>(ctx.tex0.th),
+                      (ctx.tex0.cbp != 0u ? ctx.tex0.cbp : m_clutCbp[0]), static_cast<uint32_t>(ctx.tex0.csa),
+                      static_cast<uint8_t>(state.prim.abe ? 1u : 0u), static_cast<uint8_t>(state.linearFilter ? 1u : 0u)};
+        if (s_faSlowPrims.size() < 3u) {
+            s_faSlowPrims.push_back(sp);
+            std::sort(s_faSlowPrims.begin(), s_faSlowPrims.end(), [](const auto &a, const auto &b) { return a.us > b.us; });
+        } else if (sp.us > s_faSlowPrims.back().us) {
+            s_faSlowPrims.back() = sp;
+            std::sort(s_faSlowPrims.begin(), s_faSlowPrims.end(), [](const auto &a, const auto &b) { return a.us > b.us; });
+        }
+        if (s_faLastPrintTime == std::chrono::steady_clock::time_point{}) {
+            s_faLastPrintTime = faT1;
+        } else if (std::chrono::duration_cast<std::chrono::seconds>(faT1 - s_faLastPrintTime).count() >= 5) {
+            s_faLastPrintTime = faT1;
+            std::vector<std::pair<FaCfgKey, FaCfgVal>> sortedCfgs(s_faCfgStats.begin(), s_faCfgStats.end());
+            std::sort(sortedCfgs.begin(), sortedCfgs.end(), [](const auto &a, const auto &b) {
+                return a.second.totalUs > b.second.totalUs;
+            });
+            size_t cfgCount = std::min<size_t>(10u, sortedCfgs.size());
+            for (size_t i = 0; i < cfgCount; ++i) {
+                const auto &k = sortedCfgs[i].first;
+                const auto &v = sortedCfgs[i].second;
+                uint64_t nsPerPix = (v.bboxPixels > 0) ? ((v.totalUs * 1000ull) / v.bboxPixels) : 0ull;
+                std::printf("[probe] fa cfg type=%u tme=%u abe=%u fst=%u lin=%u psm=0x%02X cpsm=0x%02X csm=%u tfx=%u tcc=%u zte=%u atst=%u n=%llu pix=%llu us=%llu ns_per_pix=%llu\n",
+                            k.primType, k.tme, k.abe, k.fst, k.linearFilter, k.texPsm, k.cpsm, k.csm, k.tfx, k.tcc, k.zte, k.atst,
+                            static_cast<unsigned long long>(v.count), static_cast<unsigned long long>(v.bboxPixels),
+                            static_cast<unsigned long long>(v.totalUs), static_cast<unsigned long long>(nsPerPix));
+            }
+            for (const auto &sp : s_faSlowPrims) {
+                std::printf("[probe] fa slow us=%llu type=%u bbox=%d,%d,%d,%d tbp=0x%05X tbw=%u psm=0x%02X tw=%u th=%u cbp=0x%05X csa=%u abe=%u lin=%u\n",
+                            static_cast<unsigned long long>(sp.us), sp.primType, sp.x0, sp.y0, sp.x1, sp.y1,
+                            sp.tbp, sp.tbw, sp.psm, sp.tw, sp.th, sp.cbp, sp.csa, sp.abe, sp.lin);
+            }
+            std::fflush(stdout);
+            s_faCfgStats.clear();
+            s_faSlowPrims.clear();
+        }
     }
 
     if (s_drawStepDump == -1)
