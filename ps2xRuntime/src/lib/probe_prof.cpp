@@ -48,6 +48,35 @@ namespace probe_ae {
         bool isProjectSource = false;
     };
 
+    static std::string shortenSymbolName(const std::string &raw) {
+        // Strip template arguments inside '<...>' or backticks '`...`'
+        std::string s;
+        s.reserve(raw.size());
+        int angleDepth = 0;
+        int backtickDepth = 0;
+        for (char c : raw) {
+            if (c == '<') {
+                angleDepth++;
+                continue;
+            } else if (c == '>') {
+                if (angleDepth > 0) angleDepth--;
+                continue;
+            } else if (c == '`') {
+                if (backtickDepth == 0) backtickDepth = 1;
+                else backtickDepth = 0;
+                continue;
+            }
+            if (angleDepth == 0 && backtickDepth == 0) {
+                s.push_back(c);
+            }
+        }
+        if (s.empty()) s = raw;
+        if (s.size() > 60) {
+            s.resize(60);
+        }
+        return s;
+    }
+
     static void cgSamplerWorker() {
         HANDLE hProc = GetCurrentProcess();
         DWORD currentPid = GetCurrentProcessId();
@@ -240,6 +269,18 @@ namespace probe_ae {
         std::unordered_map<std::string, uint64_t> mainLineCounts;
         std::unordered_map<std::string, uint64_t> mainOwnerCounts;
 
+        // Task CU buckets
+        uint64_t b_guest_fn = 0;
+        uint64_t b_vif1 = 0;
+        uint64_t b_gif = 0;
+        uint64_t b_gs_draw = 0;
+        uint64_t b_gs_xfer = 0;
+        uint64_t b_mpeg = 0;
+        uint64_t b_sched_wait = 0;
+        uint64_t b_native_mscal = 0;
+        uint64_t b_present = 0;
+        uint64_t b_sif_rpc = 0;
+
         std::unordered_map<DWORD, HANDLE> threadHandles;
         auto lastRefresh = std::chrono::steady_clock::now();
         auto lastDump = std::chrono::steady_clock::now();
@@ -314,7 +355,7 @@ namespace probe_ae {
                     sf.AddrFrame.Offset = ctx.Rbp;
                     sf.AddrFrame.Mode = AddrModeFlat;
                     CONTEXT walkCtx = ctx;
-                    for (int f = 0; f < 14; ++f) {
+                    for (int f = 0; f < 28; ++f) {
                         if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, hThread, &sf, &walkCtx,
                                         NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
                             break;
@@ -360,7 +401,7 @@ namespace probe_ae {
                         mainStackWalkCount++;
                         std::vector<std::string> frameSyms;
                         frameSyms.push_back(leafSym);
-                        for (size_t i = 0; i < frames.size() && frameSyms.size() < 3; ++i) {
+                        for (size_t i = 0; i < frames.size(); ++i) {
                             std::string fsym = resolveSym(frames[i]);
                             if (std::find(frameSyms.begin(), frameSyms.end(), fsym) == frameSyms.end()) {
                                 frameSyms.push_back(fsym);
@@ -369,6 +410,65 @@ namespace probe_ae {
                         for (size_t i = 0; i < frameSyms.size(); ++i) {
                             mainInclusiveCounts[frameSyms[i]]++;
                         }
+
+                        // Task CU: 8 named bucket percentages
+                        bool hasGuestFn = false;
+                        bool hasVif1 = false;
+                        bool hasGif = false;
+                        bool hasGsDraw = false;
+                        bool hasGsXfer = false;
+                        bool hasMpeg = false;
+                        bool hasEeSched = false;
+                        bool hasNativeMscal = false;
+                        bool hasPresent = false;
+                        bool hasSifRpc = false;
+
+                        for (const auto &fsym : frameSyms) {
+                            if (fsym.rfind("sub_", 0) == 0 || fsym.rfind("ps2_func_", 0) == 0 || fsym.find("sub_00") != std::string::npos) {
+                                hasGuestFn = true;
+                            }
+                            if (fsym.find("processVIF1Data") != std::string::npos) {
+                                hasVif1 = true;
+                            }
+                            if (fsym.find("submitGifPacket") != std::string::npos || fsym.find("GifArbiter") != std::string::npos || fsym.find("GIFArbiter") != std::string::npos) {
+                                hasGif = true;
+                            }
+                            if (fsym.find("DrawPrimitive") != std::string::npos) {
+                                hasGsDraw = true;
+                            }
+                            if (fsym.find("UploadImage") != std::string::npos || fsym.find("PerformLocalToLocalTransfer") != std::string::npos) {
+                                hasGsXfer = true;
+                            }
+                            if (fsym.find("Mpeg") != std::string::npos || fsym.find("mpeg") != std::string::npos || fsym.find("avcodec") != std::string::npos || fsym.find("ff_") != std::string::npos) {
+                                hasMpeg = true;
+                            }
+                            if (fsym.find("EeScheduler::run") != std::string::npos) {
+                                hasEeSched = true;
+                            }
+                            if (fsym.find("handleMovieHleMscal") != std::string::npos) {
+                                hasNativeMscal = true;
+                            }
+                            if (fsym.find("Present") != std::string::npos) {
+                                hasPresent = true;
+                            }
+                            if (fsym.find("SIF") != std::string::npos || fsym.find("RPC") != std::string::npos || fsym.find("CID1") != std::string::npos || fsym.find("Sg2") != std::string::npos) {
+                                hasSifRpc = true;
+                            }
+                        }
+
+                        bool leafInWait = (leafSym.rfind("Zw", 0) == 0 || leafSym.rfind("Nt", 0) == 0 || leafSym.find("SleepCondition") != std::string::npos || leafSym.find("WaitFor") != std::string::npos);
+                        bool isSchedWait = hasEeSched && leafInWait;
+
+                        if (hasGuestFn) b_guest_fn++;
+                        if (hasVif1) b_vif1++;
+                        if (hasGif) b_gif++;
+                        if (hasGsDraw) b_gs_draw++;
+                        if (hasGsXfer) b_gs_xfer++;
+                        if (hasMpeg) b_mpeg++;
+                        if (isSchedWait) b_sched_wait++;
+                        if (hasNativeMscal) b_native_mscal++;
+                        if (hasPresent) b_present++;
+                        if (hasSifRpc) b_sif_rpc++;
                     }
                 }
                 ++it;
@@ -455,23 +555,36 @@ namespace probe_ae {
                         bhLog("[prof2] main owner: %s\n", ownersStr.c_str());
                     }
 
-                    if (mainStackWalkCount > 0) {
+                    if (mainSamplesCount > 0) {
                         std::vector<std::pair<std::string, uint64_t>> sortedInc(mainInclusiveCounts.begin(), mainInclusiveCounts.end());
                         std::sort(sortedInc.begin(), sortedInc.end(), [](const std::pair<std::string, uint64_t> &a, const std::pair<std::string, uint64_t> &b) {
                             return a.second > b.second;
                         });
 
-                        std::string incStr;
-                        size_t limit = (std::min)(size_t(12), sortedInc.size());
-                        for (size_t i = 0; i < limit; ++i) {
-                            double incPct = (static_cast<double>(sortedInc[i].second) * 100.0) / static_cast<double>(mainStackWalkCount);
-                            char sbuf[128];
-                            snprintf(sbuf, sizeof(sbuf), "%s=%.1f%% ", sortedInc[i].first.c_str(), incPct);
-                            incStr += sbuf;
+                        // 3 lines of 15 symbols each = 45 symbols
+                        for (int chunk = 0; chunk < 3; ++chunk) {
+                            std::string bStr;
+                            size_t startIdx = chunk * 15;
+                            size_t endIdx = (std::min)(startIdx + 15, sortedInc.size());
+                            for (size_t i = startIdx; i < endIdx; ++i) {
+                                double incPct = (static_cast<double>(sortedInc[i].second) * 100.0) / static_cast<double>(mainSamplesCount);
+                                std::string shortName = shortenSymbolName(sortedInc[i].first);
+                                char sbuf[128];
+                                snprintf(sbuf, sizeof(sbuf), "%s=%.1f%% ", shortName.c_str(), incPct);
+                                bStr += sbuf;
+                            }
+                            if (!bStr.empty() && bStr.back() == ' ') bStr.pop_back();
+                            bhLog("[prof2] budget%d: %s\n", chunk + 1, bStr.c_str());
                         }
-                        if (!incStr.empty() && incStr.back() == ' ') incStr.pop_back();
 
-                        bhLog("[prof2] main inclusive: %s\n", incStr.c_str());
+                        // Named bucket percentages
+                        auto calcPct = [&](uint64_t count) -> double {
+                            return (static_cast<double>(count) * 100.0) / static_cast<double>(mainSamplesCount);
+                        };
+
+                        bhLog("[prof2] buckets guest_fn=%.1f%% vif1=%.1f%% gif=%.1f%% gs_draw=%.1f%% gs_xfer=%.1f%% mpeg=%.1f%% sched_wait=%.1f%% native_mscal=%.1f%% present=%.1f%% sif_rpc=%.1f%%\n",
+                              calcPct(b_guest_fn), calcPct(b_vif1), calcPct(b_gif), calcPct(b_gs_draw), calcPct(b_gs_xfer),
+                              calcPct(b_mpeg), calcPct(b_sched_wait), calcPct(b_native_mscal), calcPct(b_present), calcPct(b_sif_rpc));
                     }
                 }
 
@@ -479,6 +592,16 @@ namespace probe_ae {
                 mainInclusiveCounts.clear();
                 mainLineCounts.clear();
                 mainOwnerCounts.clear();
+                b_guest_fn = 0;
+                b_vif1 = 0;
+                b_gif = 0;
+                b_gs_draw = 0;
+                b_gs_xfer = 0;
+                b_mpeg = 0;
+                b_sched_wait = 0;
+                b_native_mscal = 0;
+                b_present = 0;
+                b_sif_rpc = 0;
                 totalProcessSamples = 0;
                 mainStackWalkCount = 0;
                 mainSamplesCount = 0;
