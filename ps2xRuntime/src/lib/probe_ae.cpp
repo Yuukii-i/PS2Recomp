@@ -5515,7 +5515,99 @@ namespace probe_ae {
         }
     }
 
+    
+    // =========================================================================
+    // Task DM: Group descriptor fields per pump
+    // =========================================================================
+    static std::atomic<uint32_t> s_dmPumpLogCount{0};
+
+    static void dumpDmState(const uint8_t *rdram, const char *tag) {
+        if (!isDcProbeEnabled()) return;
+        auto readU32 = [&](uint32_t addr) -> uint32_t {
+            if (!rdram || (addr & 0x1FFFFFFFu) + 4 > 32 * 1024 * 1024) return 0;
+            uint32_t v = 0;
+            std::memcpy(&v, rdram + (addr & 0x1FFFFFFFu), 4);
+            return v;
+        };
+        uint64_t tick = 0;
+        if (rdram) std::memcpy(&tick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+
+        uint32_t ctx = 0x772180u;
+        uint32_t g74 = readU32(ctx + 0x74);
+        uint32_t p48 = readU32(ctx + 0x48);
+        uint32_t w0 = p48 ? readU32(p48 + 0x00) : 0;
+        uint32_t w1 = p48 ? readU32(p48 + 0x04) : 0;
+        uint32_t w2 = p48 ? readU32(p48 + 0x08) : 0;
+        uint32_t w3 = p48 ? readU32(p48 + 0x0C) : 0;
+        uint32_t p4c = readU32(ctx + 0x4C);
+        uint32_t r4c_10 = p4c ? readU32(p4c + 0x10) : 0;
+        uint32_t r4c_14 = p4c ? readU32(p4c + 0x14) : 0;
+        uint32_t f50 = readU32(ctx + 0x50);
+        uint32_t f54 = readU32(ctx + 0x54);
+        uint32_t n58 = readU32(ctx + 0x58);
+        uint32_t f5c = readU32(ctx + 0x5C);
+        uint32_t f60 = readU32(ctx + 0x60);
+        uint32_t f64 = readU32(ctx + 0x64);
+        uint32_t f68 = readU32(ctx + 0x68);
+        uint32_t f6c = readU32(ctx + 0x6C);
+        uint32_t p70 = readU32(ctx + 0x70);
+
+        if (std::strcmp(tag, "pump") == 0) {
+            std::printf("[probe] dc8 pump g74=%u p48=0x%08X w0=%u w1=%u w2=%u w3=%u p4c=0x%08X r4c_10=%u r4c_14=%u f50=%u f54=%u n58=%u f5c=%u f60=%u f64=%u f68=%u f6c=%u p70=%u tick=%llu\n",
+                        g74, p48, w0, w1, w2, w3, p4c, r4c_10, r4c_14,
+                        f50, f54, n58, f5c, f60, f64, f68, f6c, p70, (unsigned long long)tick);
+        } else {
+            std::printf("[probe] dc8 stall g74=%u p48=0x%08X w0=%u w1=%u w2=%u w3=%u p4c=0x%08X r4c_10=%u r4c_14=%u f50=%u f54=%u n58=%u f5c=%u f60=%u f64=%u f68=%u f6c=%u p70=%u tick=%llu\n",
+                        g74, p48, w0, w1, w2, w3, p4c, r4c_10, r4c_14,
+                        f50, f54, n58, f5c, f60, f64, f68, f6c, p70, (unsigned long long)tick);
+        }
+
+        if (std::strcmp(tag, "pump") == 0) {
+            char hex48[512] = "";
+            for (int i = 0; i < 16; ++i) {
+                char b[32];
+                std::snprintf(b, sizeof(b), "%s0x%08X", (i > 0 ? " " : ""), p48 ? readU32(p48 + i * 4) : 0);
+                std::strcat(hex48, b);
+            }
+            std::printf("[probe] dc8 hdr g74=%u a=0x%08X w=%s\n", g74, p48, hex48);
+
+            char hex4c[512] = "";
+            for (int i = 0; i < 16; ++i) {
+                char b[32];
+                std::snprintf(b, sizeof(b), "%s0x%08X", (i > 0 ? " " : ""), p4c ? readU32(p4c + i * 4) : 0);
+                std::strcat(hex4c, b);
+            }
+            std::printf("[probe] dc8 hdr4c g74=%u a=0x%08X w=%s\n", g74, p4c, hex4c);
+        } else if (std::strcmp(tag, "stall") == 0) {
+            for (int row = 0; row < 2; ++row) {
+                char buf[512] = "";
+                for (int i = 0; i < 16; ++i) {
+                    char b[32];
+                    std::snprintf(b, sizeof(b), "%s0x%08X", (i > 0 ? " " : ""), p48 ? readU32(p48 + (row * 16 + i) * 4) : 0);
+                    std::strcat(buf, b);
+                }
+                std::printf("[probe] dc8 stall_p48 row=%d a=0x%08X w=%s\n", row, p48 + row * 64, buf);
+            }
+            for (int row = 0; row < 2; ++row) {
+                char buf[512] = "";
+                for (int i = 0; i < 16; ++i) {
+                    char b[32];
+                    std::snprintf(b, sizeof(b), "%s0x%08X", (i > 0 ? " " : ""), p4c ? readU32(p4c + (row * 16 + i) * 4) : 0);
+                    std::strcat(buf, b);
+                }
+                std::printf("[probe] dc8 stall_p4c row=%d a=0x%08X w=%s\n", row, p4c + row * 64, buf);
+            }
+        }
+        std::fflush(stdout);
+    }
+
     void onBuPumpExit(const struct R5900Context *ctx, const uint8_t *rdram, const BuPreState *pre) {
+        if (isDcProbeEnabled()) {
+            if (s_dmPumpLogCount.fetch_add(1, std::memory_order_relaxed) < 400) {
+                dumpDmState(rdram, "pump");
+            }
+        }
+
         if (!isEnabled() || !ctx || !rdram || !pre) return;
 
         uint32_t a0 = pre->a0;
@@ -7115,6 +7207,7 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
                 if (s_diFZeroSecConsecutive == 3 || s_diFZeroSecConsecutive == 13) {
                     if (s_diFZeroSecConsecutive == 3) s_diStallDumped = true;
                     dcLog("[probe] dc5 STALL (seq=%u)\n", (s_diFZeroSecConsecutive == 3 ? 1u : 2u));
+                    dumpDmState(ram, "stall");
                     ps2_dumpDkSchedulerState();
                     ps2_dumpDkCid1State(ram);
                     std::lock_guard<std::mutex> lock(s_diMutex);
