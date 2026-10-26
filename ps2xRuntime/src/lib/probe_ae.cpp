@@ -5378,9 +5378,9 @@ namespace probe_ae {
 
     static bool checkDoGate(const uint8_t *rdram) {
         if (!isDcProbeEnabled() || !rdram) return false;
-        uint32_t g74 = 0;
-        std::memcpy(&g74, rdram + ((0x772180u + 0x74u) & 0x1FFFFFFFu), 4);
-        if (g74 < 195) return false;
+        uint64_t gtick = 0;
+        std::memcpy(&gtick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+        if (gtick < 5010 || gtick > 5045) return false; // window around the g241 burst (tick 5035, deterministic)
         return (s_dc10LogCount.fetch_add(1, std::memory_order_relaxed) < 600);
     }
 
