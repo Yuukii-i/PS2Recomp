@@ -900,10 +900,15 @@ namespace probe_ae {
     void recordMainGuestThread();
     void cgStartSamplerIfEnabled();
 
-    // Task DC Probes
-    void onDcSyncVStart(uint32_t ra, uint32_t a0, bool interlace, const uint8_t *rdram);
+    // Task DC / DD Probes
+    bool isDcProbeEnabled();
+    void onDcSyncVStart(uint32_t ra, uint32_t a0, bool interlace, const uint8_t *rdram, int thid = 0);
     void onDcSyncVComplete(uint32_t ra, uint64_t deltaTicks, uint32_t retVal, double waitMs);
     void onDcSwapDBuff();
     void onDcResetPath();
     void onDcSyncPath();
+    void onDc2VBlankStart(double lateMs);
+    void onDc2VBlankProduced();
+    void onDc2ThreadWake(int thid);
+    void onDc2ThreadDispatch(int thid, uint32_t entryPc);
 }

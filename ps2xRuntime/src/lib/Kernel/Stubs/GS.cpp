@@ -856,7 +856,7 @@ namespace ps2_stubs
 
     void sceGsResetPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (probe_ae::isEnabled()) probe_ae::onDcResetPath();
+        if (probe_ae::isDcProbeEnabled()) probe_ae::onDcResetPath();
         setReturnS32(ctx, 0);
     }
 
@@ -1190,7 +1190,7 @@ namespace ps2_stubs
 
     void sceGsSwapDBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (probe_ae::isEnabled()) probe_ae::onDcSwapDBuff();
+        if (probe_ae::isDcProbeEnabled()) probe_ae::onDcSwapDBuff();
         const uint32_t envAddr = getRegU32(ctx, 4);
         const uint32_t which = getRegU32(ctx, 5) & 1u;
 
@@ -1216,7 +1216,7 @@ namespace ps2_stubs
 
     void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (probe_ae::isEnabled()) probe_ae::onDcSyncPath();
+        if (probe_ae::isDcProbeEnabled()) probe_ae::onDcSyncPath();
         int32_t mode = static_cast<int32_t>(getRegU32(ctx, 4));
         auto &mem = runtime->memory();
 

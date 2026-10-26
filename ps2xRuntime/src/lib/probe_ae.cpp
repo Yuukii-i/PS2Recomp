@@ -6858,8 +6858,37 @@ namespace probe_ae {
     }
 
     // =========================================================================
-    // Task DC Probes: sceGsSyncV & GS wait tracking
+    // Task DC / DD Probes: sceGsSyncV & GS wait tracking
     // =========================================================================
+    bool isDcProbeEnabled() {
+        static int s_dcEnv = -1;
+        if (s_dcEnv == -1) {
+            const char *env = std::getenv("PS2X_PROBE_DC");
+            const char *envAe = std::getenv("PS2X_PROBE_AE");
+            bool on = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ||
+                      (envAe && (std::strcmp(envAe, "1") == 0 || std::strcmp(envAe, "true") == 0));
+            s_dcEnv = on ? 1 : 0;
+        }
+        return s_dcEnv == 1;
+    }
+
+    static void dcLog(const char *fmt, ...) {
+        char buf[512];
+        va_list args;
+        va_start(args, fmt);
+        std::vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+
+        std::printf("%s", buf);
+        std::fflush(stdout);
+
+        FILE *f = bhSink();
+        if (f) {
+            std::fputs(buf, f);
+            std::fflush(f);
+        }
+    }
+
     static std::mutex s_dcMutex;
     static uint32_t s_dcCalls = 0;
     static std::map<uint32_t, uint32_t> s_dcRaCounts;
@@ -6878,6 +6907,23 @@ namespace probe_ae {
     static uint32_t s_dcLastCtr = 0;
     static auto s_dcLastSec = std::chrono::steady_clock::now();
 
+    // DC2 (DD) state
+    static int s_dc2MovieThid = -1;
+    static bool s_dc2MovieWoken = false;
+    static std::chrono::steady_clock::time_point s_dc2WakeTime{};
+    static double s_dc2SecWakeToRunMs = 0.0;
+    static uint32_t s_dc2SecWaitN = 0;
+    static double s_dc2SecWaitMsTotal = 0.0;
+
+    static int s_dc2CurRunningThid = -1;
+    static uint32_t s_dc2CurRunningEntry = 0;
+    static std::chrono::steady_clock::time_point s_dc2CurSliceStart{};
+    static std::map<std::pair<int, uint32_t>, double> s_dc2InterveningThreads;
+
+    static uint32_t s_dc2VbProduced = 0;
+    static uint32_t s_dc2VbProcessed = 0;
+    static double s_dc2LateMsMax = 0.0;
+
     static void dumpDcStatsLocked() {
         std::vector<std::pair<uint32_t, uint32_t>> raSorted(s_dcRaCounts.begin(), s_dcRaCounts.end());
         std::sort(raSorted.begin(), raSorted.end(), [](const auto &a, const auto &b) {
@@ -6892,28 +6938,43 @@ namespace probe_ae {
             raHistStr += buf;
         }
 
-        bhLog("[probe] dc syncv calls=%u ra_hist=<%s> mode=%u a0=%u ret_parity0=%u ret_parity1=%u\n",
+        dcLog("[probe] dc syncv calls=%u ra_hist=<%s> mode=%u a0=%u ret_parity0=%u ret_parity1=%u\n",
               s_dcCalls, raHistStr.c_str(), s_dcLastMode, s_dcLastA0, s_dcRetParity0, s_dcRetParity1);
-        ps2xSafeLog("[probe] dc syncv calls=%u ra_hist=<%s> mode=%u a0=%u ret_parity0=%u ret_parity1=%u\n",
-                    s_dcCalls, raHistStr.c_str(), s_dcLastMode, s_dcLastA0, s_dcRetParity0, s_dcRetParity1);
 
-        bhLog("[probe] dc syncv_delta hist={1:%u,2:%u,3:%u,4+:%u}\n",
+        dcLog("[probe] dc syncv_delta hist={1:%u,2:%u,3:%u,4+:%u}\n",
               s_dcDelta1, s_dcDelta2, s_dcDelta3, s_dcDelta4p);
-        ps2xSafeLog("[probe] dc syncv_delta hist={1:%u,2:%u,3:%u,4+:%u}\n",
-                    s_dcDelta1, s_dcDelta2, s_dcDelta3, s_dcDelta4p);
 
         for (const auto &[ra, ms] : s_dcRaMs) {
-            bhLog("[probe] dc syncv_ms ra=0x%08X ms=%.2f\n", ra, ms);
-            ps2xSafeLog("[probe] dc syncv_ms ra=0x%08X ms=%.2f\n", ra, ms);
+            dcLog("[probe] dc syncv_ms ra=0x%08X ms=%.2f\n", ra, ms);
         }
 
-        bhLog("[probe] dc stubs swap_dbuff=%u reset_path=%u sync_path=%u\n",
+        dcLog("[probe] dc stubs swap_dbuff=%u reset_path=%u sync_path=%u\n",
               s_dcSwapDBuff, s_dcResetPath, s_dcSyncPath);
-        ps2xSafeLog("[probe] dc stubs swap_dbuff=%u reset_path=%u sync_path=%u\n",
-                    s_dcSwapDBuff, s_dcResetPath, s_dcSyncPath);
 
-        bhLog("[probe] dc ctr=%u\n", s_dcLastCtr);
-        ps2xSafeLog("[probe] dc ctr=%u\n", s_dcLastCtr);
+        dcLog("[probe] dc ctr=%u\n", s_dcLastCtr);
+
+        // Task DD (dc2) dumps
+        dcLog("[probe] dc2 wait ms_total=%.2f n=%u wake_to_run_ms=%.2f\n",
+              s_dc2SecWaitMsTotal, s_dc2SecWaitN, s_dc2SecWakeToRunMs);
+
+        // Who ran
+        std::vector<std::pair<std::pair<int, uint32_t>, double>> whoSorted(s_dc2InterveningThreads.begin(), s_dc2InterveningThreads.end());
+        std::sort(whoSorted.begin(), whoSorted.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
+        std::string whoStr;
+        const size_t whoLimit = std::min<size_t>(4u, whoSorted.size());
+        for (size_t i = 0; i < whoLimit; ++i) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%s[th%d:0x%08X]=%.2fms",
+                          (i > 0 ? " " : ""), whoSorted[i].first.first, whoSorted[i].first.second, whoSorted[i].second);
+            whoStr += buf;
+        }
+        dcLog("[probe] dc2 who %s\n", whoStr.c_str());
+
+        // VBlank start timing
+        dcLog("[probe] dc2 vb produced=%u processed_ticks=%u late_ms_max=%.2f\n",
+              s_dc2VbProduced, s_dc2VbProcessed, s_dc2LateMsMax);
 
         s_dcCalls = 0;
         s_dcRaCounts.clear();
@@ -6927,6 +6988,14 @@ namespace probe_ae {
         s_dcSwapDBuff = 0;
         s_dcResetPath = 0;
         s_dcSyncPath = 0;
+
+        s_dc2SecWakeToRunMs = 0.0;
+        s_dc2SecWaitN = 0;
+        s_dc2SecWaitMsTotal = 0.0;
+        s_dc2InterveningThreads.clear();
+        s_dc2VbProduced = 0;
+        s_dc2VbProcessed = 0;
+        s_dc2LateMsMax = 0.0;
     }
 
     static void checkDcSecDumpLocked() {
@@ -6937,13 +7006,16 @@ namespace probe_ae {
         }
     }
 
-    void onDcSyncVStart(uint32_t ra, uint32_t a0, bool interlace, const uint8_t *rdram) {
-        if (!isEnabled()) return;
+    void onDcSyncVStart(uint32_t ra, uint32_t a0, bool interlace, const uint8_t *rdram, int thid) {
+        if (!isDcProbeEnabled()) return;
         std::lock_guard<std::mutex> lock(s_dcMutex);
         s_dcCalls++;
         s_dcRaCounts[ra]++;
         s_dcLastMode = interlace ? 1u : 0u;
         s_dcLastA0 = a0;
+        if (ra == 0x51E3D0u) {
+            s_dc2MovieThid = thid;
+        }
 
         const uint8_t *ram = rdram ? rdram : s_cachedRdram;
         if (ram) {
@@ -6956,7 +7028,7 @@ namespace probe_ae {
     }
 
     void onDcSyncVComplete(uint32_t ra, uint64_t deltaTicks, uint32_t retVal, double waitMs) {
-        if (!isEnabled()) return;
+        if (!isDcProbeEnabled()) return;
         std::lock_guard<std::mutex> lock(s_dcMutex);
         if ((retVal & 1u) == 0u) {
             s_dcRetParity0++;
@@ -6976,24 +7048,77 @@ namespace probe_ae {
 
         s_dcRaMs[ra] += waitMs;
 
+        if (ra == 0x51E3D0u) {
+            s_dc2SecWaitN++;
+            s_dc2SecWaitMsTotal += waitMs;
+        }
+
         checkDcSecDumpLocked();
     }
 
     void onDcSwapDBuff() {
-        if (!isEnabled()) return;
+        if (!isDcProbeEnabled()) return;
         std::lock_guard<std::mutex> lock(s_dcMutex);
         s_dcSwapDBuff++;
     }
 
     void onDcResetPath() {
-        if (!isEnabled()) return;
+        if (!isDcProbeEnabled()) return;
         std::lock_guard<std::mutex> lock(s_dcMutex);
         s_dcResetPath++;
     }
 
     void onDcSyncPath() {
-        if (!isEnabled()) return;
+        if (!isDcProbeEnabled()) return;
         std::lock_guard<std::mutex> lock(s_dcMutex);
         s_dcSyncPath++;
+    }
+
+    void onDc2VBlankStart(double lateMs) {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        s_dc2VbProcessed++;
+        if (lateMs > s_dc2LateMsMax) {
+            s_dc2LateMsMax = lateMs;
+        }
+        checkDcSecDumpLocked();
+    }
+
+    void onDc2VBlankProduced() {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        s_dc2VbProduced++;
+    }
+
+    void onDc2ThreadWake(int thid) {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        if (thid == s_dc2MovieThid && s_dc2MovieThid != -1) {
+            s_dc2MovieWoken = true;
+            s_dc2WakeTime = std::chrono::steady_clock::now();
+        }
+    }
+
+    void onDc2ThreadDispatch(int thid, uint32_t entryPc) {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        const auto now = std::chrono::steady_clock::now();
+
+        if (s_dc2CurRunningThid != -1 && s_dc2MovieWoken && s_dc2CurRunningThid != s_dc2MovieThid) {
+            const double elapsed = std::chrono::duration<double, std::milli>(now - s_dc2CurSliceStart).count();
+            s_dc2InterveningThreads[{s_dc2CurRunningThid, s_dc2CurRunningEntry}] += elapsed;
+        }
+
+        if (s_dc2MovieWoken && thid == s_dc2MovieThid && s_dc2MovieThid != -1) {
+            const double wakeToRun = std::chrono::duration<double, std::milli>(now - s_dc2WakeTime).count();
+            s_dc2SecWakeToRunMs += wakeToRun;
+            s_dc2MovieWoken = false;
+        }
+
+        s_dc2CurRunningThid = thid;
+        s_dc2CurRunningEntry = entryPc;
+        s_dc2CurSliceStart = now;
+
+        checkDcSecDumpLocked();
     }
 }

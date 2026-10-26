@@ -295,6 +295,7 @@ void EeScheduler::run()
 
         GuestThread *running = currentThread();
         assert(running != nullptr);
+        probe_ae::onDc2ThreadDispatch(running->id, running->entry);
         if (running->resumeCompletion)
         {
             auto completion = std::move(running->resumeCompletion);
@@ -1579,6 +1580,7 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     // Task CE: coalesce VBLANK interrupts (PS2X_VTIME); the pending flag is only set when an invocation is really queued
     if (!dmac && (cause == 2u || cause == 3u) && !matching.empty())
     {
+        if (cause == 3u) probe_ae::onDc2VBlankProduced();
         if (!probe_ae::onCeVblankProduced(cause))
         {
             return;
@@ -1671,6 +1673,7 @@ void EeScheduler::completeVSync(uint64_t tick)
         const int result = wait.fixedResult >= 0
                                ? wait.fixedResult
                                : static_cast<int>((tick - 1u) & 1u);
+        probe_ae::onDc2ThreadWake(waiter->id);
         makeReady(*waiter, result, false);
     }
     publishSnapshot();
@@ -2166,6 +2169,8 @@ void EeScheduler::processDueDeadlines()
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
                 const auto now = std::chrono::steady_clock::now();
+                const double lateMs = std::chrono::duration<double, std::milli>(now - scheduled.hostDeadline).count();
+                probe_ae::onDc2VBlankStart(lateMs);
                 auto nextHost = scheduled.hostDeadline + kVBlankPeriod;
                 if (nextHost < now || nextHost > now + kVBlankPeriod * 2)
                 {

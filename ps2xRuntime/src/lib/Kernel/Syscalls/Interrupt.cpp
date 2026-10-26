@@ -98,8 +98,8 @@ namespace ps2_syscalls
         const bool interlace = (fixedResult < 0);
         const auto t0 = std::chrono::steady_clock::now();
 
-        if (probe_ae::isEnabled()) {
-            probe_ae::onDcSyncVStart(ra, a0, interlace, rdram);
+        if (probe_ae::isDcProbeEnabled()) {
+            probe_ae::onDcSyncVStart(ra, a0, interlace, rdram, ee.currentThreadId());
             ee.waitVSync(startTick, fixedResult, [&ee, startTick, ra, t0](R5900Context &c) {
                 const uint64_t resumeTick = ee.currentVSyncTick();
                 const uint64_t deltaTicks = (resumeTick >= startTick) ? (resumeTick - startTick) : 0u;
