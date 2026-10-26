@@ -33,6 +33,8 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA
 #include <chrono>
 #include <unordered_set>
 #include <set>
+extern "C" void ps2_getDkThread1Info(int *outCurTh, const char **outTh1Status, uint32_t *outTh1Pc, uint32_t *outTh1Ra);
+
 
 void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
 
@@ -5654,6 +5656,27 @@ namespace probe_ae {
     }
 
     void onBuPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram, BuPreState *pre) {
+        // Task DS: dc12 pump race test hook (cap 400)
+        if (isDcProbeEnabled() && rdram) {
+            static std::atomic<uint32_t> s_dc12PumpCount{0};
+            if (s_dc12PumpCount.fetch_add(1, std::memory_order_relaxed) < 400) {
+                uint64_t tick = 0;
+                std::memcpy(&tick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+                int curTh = -1;
+                const char *th1Status = "none";
+                uint32_t th1Pc = 0, th1Ra = 0;
+                ps2_getDkThread1Info(&curTh, &th1Status, &th1Pc, &th1Ra);
+                int inWindow = (th1Pc >= 0x0024C6D4u && th1Pc <= 0x0024C720u) ? 1 : 0;
+                uint32_t g74 = 0, p4c = 0, p70 = 0;
+                std::memcpy(&g74, rdram + ((0x772180u + 0x74u) & 0x1FFFFFFFu), 4);
+                std::memcpy(&p4c, rdram + ((0x772180u + 0x4Cu) & 0x1FFFFFFFu), 4);
+                std::memcpy(&p70, rdram + ((0x772180u + 0x70u) & 0x1FFFFFFFu), 4);
+                std::printf("[probe] dc12 pump tick=%llu cur_th=%d th1_status=%s th1_pc=0x%08X th1_ra=0x%08X in_window=%d g74=%u p4c=0x%08X p70=%u\n",
+                            (unsigned long long)tick, curTh, th1Status, th1Pc, th1Ra, inWindow, g74, p4c, p70);
+                std::fflush(stdout);
+            }
+        }
+
         onDqPumpEntry(ctx, rdram);
         onDhPumpEntry(ctx, rdram);
         if (!isEnabled() || !ctx || !rdram || !pre) return;
@@ -7245,6 +7268,7 @@ namespace probe_ae {
     // =========================================================================
     extern "C" uint32_t ps2_getSg2Pos();
     extern "C" void ps2_dumpDkSchedulerState();
+    extern "C" void ps2_getDkThread1Info(int *outCurTh, const char **outTh1Status, uint32_t *outTh1Pc, uint32_t *outTh1Ra);
 extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
 
 
@@ -7397,6 +7421,7 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
             uint32_t pumpCnt = s_diPumpCalls.exchange(0, std::memory_order_relaxed);
             dcLog("[probe] dc5 rdcnt ring=%u video=%u disp=%u pump=%u\n",
                   ringCnt, videoCnt, dispCnt, pumpCnt);
+        dcLog("[probe] dc12 sched preempt_policy=EeScheduler::checkCheckpoint on requestPreemptionIfHigher or timeslice expiry\n");
         }
 
         // Task DI: 3. Stall dump when F==0 for 3 consecutive seconds after F>0
@@ -7686,6 +7711,7 @@ namespace probe_ae {
     // =========================================================================
     extern "C" uint32_t ps2_getSg2Pos();
     extern "C" void ps2_dumpDkSchedulerState();
+    extern "C" void ps2_getDkThread1Info(int *outCurTh, const char **outTh1Status, uint32_t *outTh1Pc, uint32_t *outTh1Ra);
 extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
 
 

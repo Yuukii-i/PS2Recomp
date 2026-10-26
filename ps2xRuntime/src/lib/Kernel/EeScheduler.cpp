@@ -2776,6 +2776,44 @@ extern "C" void ps2_dumpDkSchedulerState() {
 }
 namespace probe_ae {
 
+    
+    void getTaskDsThread1Info(int *outCurTh, const char **outTh1Status, uint32_t *outTh1Pc, uint32_t *outTh1Ra) {
+        if (!s_activeScheduler) {
+            if (outCurTh) *outCurTh = -1;
+            if (outTh1Status) *outTh1Status = "none";
+            if (outTh1Pc) *outTh1Pc = 0;
+            if (outTh1Ra) *outTh1Ra = 0;
+            return;
+        }
+        if (outCurTh) *outCurTh = s_activeScheduler->currentThreadId();
+        const GuestThread *th1 = s_activeScheduler->thread(1);
+        if (th1) {
+            const char *stName = "unknown";
+            switch (th1->status) {
+                case EeThreadStatus::Running: stName = "RUNNING"; break;
+                case EeThreadStatus::Ready: stName = "READY"; break;
+                case EeThreadStatus::Waiting: stName = "WAIT"; break;
+                case EeThreadStatus::Suspended: stName = "SUSPEND"; break;
+                case EeThreadStatus::WaitingSuspended: stName = "WAIT_SUSP"; break;
+                case EeThreadStatus::Dormant: stName = "DORMANT"; break;
+            }
+            if (outTh1Status) *outTh1Status = stName;
+            const R5900Context &ctx = th1->activeContext();
+            if (outTh1Pc) *outTh1Pc = ctx.pc;
+            if (outTh1Ra) *outTh1Ra = getRegU32(&ctx, 31);
+        } else {
+            if (outTh1Status) *outTh1Status = "not_found";
+            if (outTh1Pc) *outTh1Pc = 0;
+            if (outTh1Ra) *outTh1Ra = 0;
+        }
+    }
+} // namespace probe_ae
+
+extern "C" void ps2_getDkThread1Info(int *outCurTh, const char **outTh1Status, uint32_t *outTh1Pc, uint32_t *outTh1Ra) {
+    probe_ae::getTaskDsThread1Info(outCurTh, outTh1Status, outTh1Pc, outTh1Ra);
+}
+namespace probe_ae {
+
     void dumpTaskASInfo(uint32_t sec, bool isFirstStuckSec) {
         if (!isEnabled() || !s_activeScheduler) return;
 
