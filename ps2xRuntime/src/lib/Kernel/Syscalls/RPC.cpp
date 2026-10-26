@@ -628,10 +628,10 @@ namespace ps2_syscalls
                                     if (ceVTime) {
                                         uint64_t vblDiff = (ceCurVbl >= s_sg2Voices[v].keyOnDeliveredVblank) ?
                                             (ceCurVbl - s_sg2Voices[v].keyOnDeliveredVblank) : 0;
-                                        pos = static_cast<uint64_t>(std::floor(static_cast<double>(vblDiff) * 16384.0 / 36.0)) % 0x10000u;
+                                        pos = static_cast<uint64_t>(std::floor(static_cast<double>(vblDiff) * 16384.0 / 18.0)) % 0x10000u; // PCSX2: one 16 KB ring chunk per 88.6M EE cycles = 18 vblanks (EE 294.9 MHz, 4.92M cycles/vblank)
                                     } else {
                                         double elapsed = std::chrono::duration<double>(now - s_sg2Voices[v].keyOn).count();
-                                        pos = static_cast<uint64_t>(elapsed * 27428.0) % 0x10000u;
+                                        pos = static_cast<uint64_t>(elapsed * 54857.0) % 0x10000u;
                                     }
                                     uint32_t wordVal = static_cast<uint32_t>((((pos >> 14) + 1) << 14) & 0xFFFFu);
                                     uint32_t offset = 0xC0u + 4u * v;
@@ -2590,7 +2590,7 @@ namespace probe_ae {
             for (uint32_t v = 0; v < 24; ++v) {
                 if (s_sg2Voices[v].active) {
                     double elapsed = std::chrono::duration<double>(now - s_sg2Voices[v].keyOn).count();
-                    uint64_t pos = static_cast<uint64_t>(elapsed * 27428.0) % 0x10000u;
+                    uint64_t pos = static_cast<uint64_t>(elapsed * 54857.0) % 0x10000u;
                     ps2xSafeLog("  [voice %u] active=1 elapsed=%.2fs pos=0x%04llX\n", v, elapsed, (unsigned long long)pos);
                 }
             }
