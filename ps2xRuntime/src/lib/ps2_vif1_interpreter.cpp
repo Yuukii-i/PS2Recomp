@@ -109,8 +109,10 @@ static uint32_t count0x48MscalsInKick(const uint8_t *data, uint32_t sizeBytes) {
             int bitsPerVector = (vl == 3 && vn == 3) ? 16 : (components * bitsPerComponent);
             uint32_t bytesPerVector = (bitsPerVector + 7) / 8;
             uint32_t writeVectorCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
-            uint32_t cl = cycle & 0xFFu; if (cl == 0) cl = 1;
-            uint32_t wl = (cycle >> 8) & 0xFFu; if (wl == 0) wl = 1;
+            uint32_t cl = cycle & 0xFFu;
+            uint32_t wl = (cycle >> 8) & 0xFFu;
+            if (cl == 0u && wl == 0u) { cl = 1u; wl = 1u; }
+            else if (wl == 0u) { wl = 1u; }
             uint32_t sourceVectorCount = writeVectorCount;
             if (cl < wl) {
                 uint32_t fullBlocks = writeVectorCount / wl;
@@ -344,10 +346,15 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
             const uint32_t writeVectorCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             uint32_t cl = vif0_regs.cycle & 0xFFu;
             uint32_t wl = (vif0_regs.cycle >> 8) & 0xFFu;
-            if (cl == 0u)
+            if (cl == 0u && wl == 0u)
+            {
                 cl = 1u;
-            if (wl == 0u)
                 wl = 1u;
+            }
+            else if (wl == 0u)
+            {
+                wl = 1u;
+            }
             uint32_t sourceVectorCount = writeVectorCount;
             if (cl < wl)
             {
@@ -762,10 +769,15 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             // STCYCL controls write cycles for UNPACK.
             uint32_t cl = vif1_regs.cycle & 0xFFu;
             uint32_t wl = (vif1_regs.cycle >> 8) & 0xFFu;
-            if (cl == 0u)
+            if (cl == 0u && wl == 0u)
+            {
                 cl = 1u;
-            if (wl == 0u)
                 wl = 1u;
+            }
+            else if (wl == 0u)
+            {
+                wl = 1u;
+            }
 
             uint32_t sourceVectorCount = writeVectorCount;
             if (cl < wl)
@@ -785,6 +797,17 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
+            if (cl == 0u && probe_ae::isDcProbeEnabled())
+            {
+                static std::atomic<uint32_t> s_dc16Cl0Count{0};
+                uint32_t cnt = s_dc16Cl0Count.fetch_add(1, std::memory_order_relaxed);
+                if (cnt < 8u)
+                {
+                    std::printf("[probe] dc16 cl0 unpack cmd=0x%02X num=%u wl=%u dest=0x%03X mask=0x%08X row0=0x%08X bytes_consumed=%u\n",
+                                opcode, num, wl, vuAddr, vif1_regs.mask, vif1_regs.row[0], totalBytes);
+                    std::fflush(stdout);
+                }
+            }
 #if defined(PS2X_PROBE_AE) || 1
             if (probe_ae::isEnabled() || probe_ae::isMovieHleFrameMode() || probe_ae::isMovieHleVerify()) {
                 uint8_t fmt = opcode & 0x0Fu;
@@ -806,7 +829,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 kickUnpacksSkipped++;
                 kickBytesSkipped += totalBytes;
             }
-            else if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
+            else if (m_vu1Data && (totalBytes > 0 || cl == 0u) && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
 
