@@ -5370,7 +5370,92 @@ namespace probe_ae {
         }
     }
 
+    
+    // =========================================================================
+    // Task DO: Producer 0x3F7BA8 enqueue amounts probe
+    // =========================================================================
+    static std::atomic<uint32_t> s_dc10LogCount{0};
+
+    static bool checkDoGate(const uint8_t *rdram) {
+        if (!isDcProbeEnabled() || !rdram) return false;
+        uint32_t g74 = 0;
+        std::memcpy(&g74, rdram + ((0x772180u + 0x74u) & 0x1FFFFFFFu), 4);
+        if (g74 < 195) return false;
+        return (s_dc10LogCount.fetch_add(1, std::memory_order_relaxed) < 600);
+    }
+
+    void onDoProdEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!checkDoGate(rdram) || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint64_t tick = 0;
+        std::memcpy(&tick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+        uint32_t state = 0, last2D4 = 0, r230 = 0, r234 = 0, r244 = 0, r248 = 0, head = 0, tail = 0;
+        uint64_t mask = 0;
+        if ((a0 & 0x1FFFFFFFu) + 0x2E0 <= 32 * 1024 * 1024) {
+            std::memcpy(&state, rdram + ((a0 + 0x00u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&last2D4, rdram + ((a0 + 0x2D4u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&r230, rdram + ((a0 + 0x230u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&r234, rdram + ((a0 + 0x234u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&r244, rdram + ((a0 + 0x244u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&r248, rdram + ((a0 + 0x248u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&mask, rdram + ((a0 + 0xA0u) & 0x1FFFFFFFu), 8);
+            std::memcpy(&head, rdram + ((a0 + 0x228u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&tail, rdram + ((a0 + 0x22Cu) & 0x1FFFFFFFu), 4);
+        }
+        std::printf("[probe] dc10 prod tick=%llu obj=0x%08X state=%u last2D4=%u r230=%u r234=%u r244=%u r248=%u mask=0x%llX head=%u tail=%u\n",
+                    (unsigned long long)tick, a0, state, last2D4, r230, r234, r244, r248, (unsigned long long)mask, head, tail);
+        std::fflush(stdout);
+    }
+
+    void onDoEnqEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!checkDoGate(rdram) || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint32_t a2 = getRegU32(ctx, 6);
+        uint32_t a3 = getRegU32(ctx, 7);
+        uint64_t tick = 0;
+        std::memcpy(&tick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+        uint32_t last2D4 = 0, head = 0, tail = 0;
+        if ((a0 & 0x1FFFFFFFu) + 0x2E0 <= 32 * 1024 * 1024) {
+            std::memcpy(&last2D4, rdram + ((a0 + 0x2D4u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&head, rdram + ((a0 + 0x228u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&tail, rdram + ((a0 + 0x22Cu) & 0x1FFFFFFFu), 4);
+        }
+        std::printf("[probe] dc10 enq tick=%llu a1=%u a2=0x%08X a3=%u last2D4=%u head=%u tail=%u\n",
+                    (unsigned long long)tick, a1, a2, a3, last2D4, head, tail);
+        std::fflush(stdout);
+    }
+
+    void onDoPosEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!checkDoGate(rdram) || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t a1 = getRegU32(ctx, 5);
+        uint64_t tick = 0;
+        std::memcpy(&tick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+        std::printf("[probe] dc10 pos tick=%llu a0=%u a1=%u\n",
+                    (unsigned long long)tick, a0, a1);
+        std::fflush(stdout);
+    }
+
+    void onDoRunEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        if (!checkDoGate(rdram) || !ctx) return;
+        uint32_t a0 = getRegU32(ctx, 4);
+        uint64_t tick = 0;
+        std::memcpy(&tick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+        uint32_t head = 0, tail = 0;
+        if ((a0 & 0x1FFFFFFFu) + 0x2E0 <= 32 * 1024 * 1024) {
+            std::memcpy(&head, rdram + ((a0 + 0x228u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&tail, rdram + ((a0 + 0x22Cu) & 0x1FFFFFFFu), 4);
+        }
+        std::printf("[probe] dc10 run tick=%llu head=%u tail=%u\n",
+                    (unsigned long long)tick, head, tail);
+        std::fflush(stdout);
+    }
+
     void onBtFunctionEntry(uint32_t addr, const R5900Context *ctx, const uint8_t *rdram) {
+        if (addr == 0x003F7BA8u) { onDoProdEntry(ctx, rdram); }
+        if (addr == 0x00402888u) { onDoPosEntry(ctx, rdram); }
+        if (addr == 0x003F7A18u) { onDoRunEntry(ctx, rdram); }
         if (addr == 0x0024CB10u) { onDhVideoReadEntry(ctx, rdram); }
         if (addr == 0x0024CE28u) {
             onDc4GEntry(ctx, rdram);
@@ -6831,6 +6916,7 @@ namespace probe_ae {
     }
 
     void onCc3F7850Entry(const struct R5900Context *ctx, const uint8_t *rdram) {
+        onDoEnqEntry(ctx, rdram);
         if (!isEnabled() || !ctx || !rdram) return;
         uint32_t a0 = getRegU32(ctx, 4);
         if (a0 != 0x018BA600u) return;
