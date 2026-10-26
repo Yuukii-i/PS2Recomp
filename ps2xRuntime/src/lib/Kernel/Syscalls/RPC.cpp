@@ -25,6 +25,10 @@ extern std::atomic<uint32_t> g_trackedCurScene;
 #include <tuple>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include "probe_ae.h"
+
 
 namespace probe_ae {
     std::atomic<uint64_t> s_cid1Fd3Offset{0};
@@ -637,8 +641,9 @@ static std::vector<Cid1StreamJob> s_cid1StreamJobs;
                             for (uint32_t v = 0; v < 24; ++v) {
                                 if (s_sg2Voices[v].active) {
                                     uint64_t pos = 0;
+uint64_t vblDiff = 0;
                                     if (ceVTime) {
-                                        uint64_t vblDiff = (ceCurVbl >= s_sg2Voices[v].keyOnDeliveredVblank) ?
+                                        vblDiff = (ceCurVbl >= s_sg2Voices[v].keyOnDeliveredVblank) ?
                                             (ceCurVbl - s_sg2Voices[v].keyOnDeliveredVblank) : 0;
                                         pos = static_cast<uint64_t>(std::floor(static_cast<double>(vblDiff) * 16384.0 / 18.0)) % 0x10000u; // PCSX2: one 16 KB ring chunk per 88.6M EE cycles = 18 vblanks (EE 294.9 MHz, 4.92M cycles/vblank)
                                     } else {
@@ -646,6 +651,27 @@ static std::vector<Cid1StreamJob> s_cid1StreamJobs;
                                         pos = static_cast<uint64_t>(elapsed * 54857.0) % 0x10000u;
                                     }
                                     g_lastSg2Pos.store(static_cast<uint32_t>(pos), std::memory_order_relaxed);
+                                    if (v == 0 && probe_ae::isDcProbeEnabled() && call.rdram) {
+                                        uint32_t g74 = 0;
+                                        std::memcpy(&g74, call.rdram + ((0x772180u + 0x74u) & 0x1FFFFFFFu), 4);
+                                        if (g74 >= 195) {
+                                            static uint32_t s_dc9LastReply = 0xFFFFFFFFu;
+                                            static uint32_t s_dc9CallCount = 0;
+                                            static uint32_t s_dc9Sg2qPrinted = 0;
+                                            s_dc9CallCount++;
+                                            uint32_t wordValTmp = static_cast<uint32_t>((((pos >> 14) + 1) << 14) & 0xFFFFu);
+                                            if ((wordValTmp != s_dc9LastReply || (s_dc9CallCount % 60 == 0)) && s_dc9Sg2qPrinted < 700) {
+                                                s_dc9LastReply = wordValTmp;
+                                                s_dc9Sg2qPrinted++;
+                                                uint64_t tick = 0;
+                                                std::memcpy(&tick, call.rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+                                                uint64_t keyOnVbl = s_sg2Voices[v].keyOnDeliveredVblank;
+                                                std::printf("[probe] dc9 sg2q tick=%llu vblDiff=%llu pos=%llu reply=0x%04X keyOnVbl=%llu curVbl=%llu\n",
+                                                            (unsigned long long)tick, (unsigned long long)vblDiff, (unsigned long long)pos, wordValTmp, (unsigned long long)keyOnVbl, (unsigned long long)ceCurVbl);
+                                                std::fflush(stdout);
+                                            }
+                                        }
+                                    }
                                     uint32_t wordVal = static_cast<uint32_t>((((pos >> 14) + 1) << 14) & 0xFFFFu);
                                     uint32_t offset = 0xC0u + 4u * v;
                                     if (offset + 4u <= copyBytes) {
@@ -2198,6 +2224,17 @@ static std::vector<Cid1StreamJob> s_cid1StreamJobs;
                     g_movieSeekDone.store(true, std::memory_order_relaxed);
                     g_movieReadsCount.fetch_add(1, std::memory_order_relaxed);
                     updateFd3Offset();
+                    if (probe_ae::isDcProbeEnabled() && rdram) {
+                        uint32_t g74 = 0;
+                        std::memcpy(&g74, rdram + ((0x772180u + 0x74u) & 0x1FFFFFFFu), 4);
+                        if (g74 >= 195) {
+                            uint64_t tick = 0;
+                            std::memcpy(&tick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+                            std::printf("[probe] dc9 cid1 tick=%llu dst=0x%08X size=%u flags=0x%X\n",
+                                        (unsigned long long)tick, dstAddr, reqSize, flags);
+                            std::fflush(stdout);
+                        }
+                    }
                     ps2xSafeLog("[CID1:Seek] fd=%u dstAddr=0x%08x reqSize=%u read=%llu newOff=%llu flags=0x%x\n",
                                 fd, dstAddr, reqSize, (unsigned long long)toRead, (unsigned long long)slot.offset, flags);
                 }

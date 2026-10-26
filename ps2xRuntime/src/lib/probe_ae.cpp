@@ -6650,6 +6650,30 @@ namespace probe_ae {
     }
 
     void onCbDispEntry(const struct R5900Context *ctx, const uint8_t *rdram, CbDispPre *pre) {
+        // Task DN: dc9 disp hook (cap 900 lines when g74 >= 195)
+        if (isDcProbeEnabled() && rdram) {
+            uint32_t g74 = 0;
+            std::memcpy(&g74, rdram + ((0x772180u + 0x74u) & 0x1FFFFFFFu), 4);
+            if (g74 >= 195) {
+                static std::atomic<uint32_t> s_dc9DispCount{0};
+                if (s_dc9DispCount.fetch_add(1, std::memory_order_relaxed) < 900) {
+                    uint64_t tick = 0;
+                    std::memcpy(&tick, rdram + (0x696FD0u & 0x1FFFFFFFu), 8);
+                    uint32_t a0 = getRegU32(ctx, 4);
+                    uint32_t a1 = getRegU32(ctx, 5);
+                    uint32_t a2 = getRegU32(ctx, 6);
+                    uint32_t a3 = getRegU32(ctx, 7);
+                    uint32_t n58 = 0, f50 = 0, i60 = 0;
+                    std::memcpy(&n58, rdram + ((0x772180u + 0x58u) & 0x1FFFFFFFu), 4);
+                    std::memcpy(&f50, rdram + ((0x772180u + 0x50u) & 0x1FFFFFFFu), 4);
+                    std::memcpy(&i60, rdram + ((0x772180u + 0x60u) & 0x1FFFFFFFu), 4);
+                    std::printf("[probe] dc9 disp tick=%llu cmd=%u a0=0x%08X a2=0x%08X a3=0x%08X g74=%u n58=%u f50=%u i60=%u\n",
+                                (unsigned long long)tick, a1, a0, a2, a3, g74, n58, f50, i60);
+                    std::fflush(stdout);
+                }
+            }
+        }
+
         if (!ctx || !pre) return;
         pre->a0 = getRegU32(ctx, 4);
         pre->a1 = getRegU32(ctx, 5);
