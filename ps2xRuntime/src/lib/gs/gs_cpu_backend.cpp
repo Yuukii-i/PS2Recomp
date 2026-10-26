@@ -1664,7 +1664,7 @@ static inline bool isSpriteFastEnabled() {
     static int s_val = -1;
     if (s_val == -1) {
         const char *env = std::getenv("PS2X_GS_SPRITE_FAST");
-        s_val = (env && (env[0] == '0' || env[0] == 'f' || env[0] == 'F')) ? 0 : 1;
+        s_val = (env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) ? 1 : 0;
     }
     return s_val == 1;
 }
@@ -1921,10 +1921,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         float cqFy = 0.0f;
         std::vector<int> cqU0_tab;
         std::vector<int> cqU1_tab;
-        const uint16_t minU = static_cast<uint16_t>(ctx.clamp >> 8) & 0x3FFu;
-        const uint16_t maxU = static_cast<uint16_t>(ctx.clamp >> 18) & 0x3FFu;
-        const uint16_t minV = static_cast<uint16_t>(ctx.clamp >> 28) & 0x3FFu;
-        const uint16_t maxV = static_cast<uint16_t>(ctx.clamp >> 38) & 0x3FFu;
+        const uint16_t minU = static_cast<uint16_t>((ctx.clamp >> 4) & 0x3FFu);
+        const uint16_t maxU = static_cast<uint16_t>((ctx.clamp >> 14) & 0x3FFu);
+        const uint16_t minV = static_cast<uint16_t>((ctx.clamp >> 24) & 0x3FFu);
+        const uint16_t maxV = static_cast<uint16_t>((ctx.clamp >> 34) & 0x3FFu);
 
         if (state.prim.fst && state.linearFilter &&
             tex.psm == GS_PSM_CT32 && fpsm == GS_PSM_CT32 &&
@@ -2186,6 +2186,31 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
             const bool maskAlpha = (ctx.frame.fbmsk == 0xFF000000u);
             const bool isFyZero = (cqFy == 0.0f);
 
+            static std::atomic<uint32_t> s_crDumpLogged{0};
+            static auto s_crLastSec = std::chrono::steady_clock::now();
+            auto nowCr = std::chrono::steady_clock::now();
+            bool allowCrDump = false;
+            uint32_t crLogIdx = s_crDumpLogged.load(std::memory_order_relaxed);
+            if (crLogIdx < 6u)
+            {
+                allowCrDump = (s_crDumpLogged.fetch_add(1u, std::memory_order_relaxed) < 6u);
+            }
+            else if (std::chrono::duration_cast<std::chrono::seconds>(nowCr - s_crLastSec).count() >= 1)
+            {
+                s_crLastSec = nowCr;
+                allowCrDump = true;
+            }
+
+            // Precompute fast path result into temporary buffer for verification and shift analysis
+            const int numCols = drawX1 - drawX0 + 1;
+            const int numRows = drawY1 - drawY0 + 1;
+            std::vector<uint32_t> fastBuf(numCols * numRows);
+            std::vector<uint32_t> rawC00Buf(numCols * numRows);
+            std::vector<uint32_t> rawC10Buf(numCols * numRows);
+
+            int firstRowV0 = 0, firstRowV1 = 0;
+            int firstColU0 = 0, firstColU1 = 0;
+
             for (int y = drawY0; y <= drawY1; ++y)
             {
                 float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
@@ -2197,6 +2222,14 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 int rowV0 = wrapTextureCoordinate(sv0, texH, wrapV, minV, maxV);
                 int rowV1 = wrapTextureCoordinate(sv1, texH, wrapV, minV, maxV);
 
+                if (y == drawY0)
+                {
+                    firstRowV0 = rowV0;
+                    firstRowV1 = rowV1;
+                    firstColU0 = cqU0_tab[0];
+                    firstColU1 = cqU1_tab[0];
+                }
+
                 for (int x = drawX0; x <= drawX1; ++x)
                 {
                     const int colIdx = x - drawX0;
@@ -2205,6 +2238,9 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
 
                     const uint32_t c00 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU0, rowV0);
                     const uint32_t c10 = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, tapU1, rowV0);
+                    const int bufIdx = (y - drawY0) * numCols + colIdx;
+                    rawC00Buf[bufIdx] = c00;
+                    rawC10Buf[bufIdx] = c10;
 
                     uint8_t r_out, g_out, b_out;
                     if (isFyZero)
@@ -2231,44 +2267,137 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                             static_cast<uint8_t>((c01 >> 16) & 0xFFu), static_cast<uint8_t>((c11 >> 16) & 0xFFu), cqFx, cqFy);
                     }
 
+                    fastBuf[bufIdx] = static_cast<uint32_t>(r_out) |
+                                      (static_cast<uint32_t>(g_out) << 8) |
+                                      (static_cast<uint32_t>(b_out) << 16);
+                }
+            }
+
+            if (allowCrDump)
+            {
+                // Generic SampleTexture instrument for (drawX0, drawY0)
+                float gen_tx = (static_cast<float>(drawX0 - unclippedX0) + 0.5f) / spriteW;
+                float gen_ty = (static_cast<float>(drawY0 - unclippedY0) + 0.5f) / spriteH;
+                float gen_texUf = u0f + (u1f - u0f) * gen_tx;
+                float gen_texVf = v0f + (v1f - v0f) * gen_ty;
+                const int gen_fixedU = static_cast<int>((gen_texUf * 16.0f) + 0.5f);
+                const int gen_fixedV = static_cast<int>((gen_texVf * 16.0f) + 0.5f);
+                const uint16_t gen_sampleU = static_cast<uint16_t>(clampInt(gen_fixedU, 0, 0xFFFF));
+                const uint16_t gen_sampleV = static_cast<uint16_t>(clampInt(gen_fixedV, 0, 0xFFFF));
+                float gen_u = static_cast<float>(gen_sampleU) / 16.0f;
+                float gen_v = static_cast<float>(gen_sampleV) / 16.0f;
+                float gen_subU = gen_u - 0.5f;
+                float gen_subV = gen_v - 0.5f;
+                int gen_u0 = static_cast<int>(std::floor(gen_subU));
+                int gen_v0 = static_cast<int>(std::floor(gen_subV));
+                float gen_fx = gen_subU - static_cast<float>(gen_u0);
+                float gen_fy = gen_subV - static_cast<float>(gen_v0);
+
+                probe_ae::bhLog("[probe] cr spr x=(%d,%d)-(%d,%d) uv0raw=(%u,%u) uv1raw=(%u,%u) u0f=%.2f v0f=%.2f fx=%.3f fy=%.3f tbp0=0x%x tbw=%u texW=%d texH=%d wrapU=%u wrapV=%u minV=%u maxV=%u row0=%d row1=%d col0=%d col1=%d gen_u=%.2f gen_v=%.2f gen_fx=%.3f gen_fy=%.3f gen_x0=%d gen_y0=%d\n",
+                                x0, y0, x1, y1, (unsigned)v0.u, (unsigned)v0.v, (unsigned)v1.u, (unsigned)v1.v,
+                                u0f, v0f, cqFx, cqFy, (unsigned)tex.tbp0, (unsigned)tex.tbw, texW, texH,
+                                (unsigned)wrapU, (unsigned)wrapV, (unsigned)minV, (unsigned)maxV,
+                                firstRowV0, firstRowV1, firstColU0, firstColU1,
+                                gen_u, gen_v, gen_fx, gen_fy, gen_u0, gen_v0);
+            }
+
+            // Compare fast result vs generic destination pixels
+            struct MismInfo { int x, y; uint32_t fastVal, genVal, c00, c10; };
+            std::vector<MismInfo> misms;
+
+            for (int y = drawY0; y <= drawY1; ++y)
+            {
+                for (int x = drawX0; x <= drawX1; ++x)
+                {
+                    const int colIdx = x - drawX0;
+                    const int bufIdx = (y - drawY0) * numCols + colIdx;
+                    const uint32_t fastRgb = fastBuf[bufIdx];
                     const uint32_t got = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+
                     bool mismatch = false;
-                    if (maskAlpha)
+                    if ((fastRgb & 0xFFu) != (got & 0xFFu) ||
+                        ((fastRgb >> 8) & 0xFFu) != ((got >> 8) & 0xFFu) ||
+                        ((fastRgb >> 16) & 0xFFu) != ((got >> 16) & 0xFFu))
                     {
-                        // Alpha masked: compare RGB only
-                        if ((static_cast<uint32_t>(r_out) != (got & 0xFFu)) ||
-                            (static_cast<uint32_t>(g_out) != ((got >> 8) & 0xFFu)) ||
-                            (static_cast<uint32_t>(b_out) != ((got >> 16) & 0xFFu)))
-                        {
-                            mismatch = true;
-                        }
-                    }
-                    else
-                    {
-                        uint32_t expected = static_cast<uint32_t>(r_out) |
-                                            (static_cast<uint32_t>(g_out) << 8) |
-                                            (static_cast<uint32_t>(b_out) << 16) | 0xFF000000u;
-                        if (expected != got)
-                        {
-                            mismatch = true;
-                        }
+                        mismatch = true;
                     }
 
                     if (mismatch)
                     {
                         spriteMatch = false;
                         s_cqMismPx.fetch_add(1u, std::memory_order_relaxed);
-                        uint32_t logged = s_cqMismLogged.fetch_add(1u, std::memory_order_relaxed);
-                        if (logged < 5u)
+                        if (allowCrDump)
                         {
-                            uint32_t expRgb = static_cast<uint32_t>(r_out) |
-                                              (static_cast<uint32_t>(g_out) << 8) |
-                                              (static_cast<uint32_t>(b_out) << 16);
-                            probe_ae::bhLog("[probe] cq sprite mism x=%d y=%d exp=0x%08X got=0x%08X\n", x, y, expRgb, got);
+                            misms.push_back({x, y, fastRgb, got, rawC00Buf[bufIdx], rawC10Buf[bufIdx]});
                         }
                     }
                 }
             }
+
+            // Shift analysis on central 64x64 block
+            if (allowCrDump && numCols >= 64 && numRows >= 64)
+            {
+                int startCX = (numCols - 64) / 2;
+                int startCY = (numRows - 64) / 2;
+                int bestDx = 0, bestDy = 0;
+                int maxMatches = -1;
+                int zeroShiftMatch = 0;
+
+                for (int dy = -3; dy <= 3; ++dy)
+                {
+                    for (int dx = -3; dx <= 3; ++dx)
+                    {
+                        int matches = 0;
+                        for (int cy = 0; cy < 64; ++cy)
+                        {
+                            int fyIdx = startCY + cy;
+                            int gy = drawY0 + fyIdx + dy;
+                            if (gy < drawY0 || gy > drawY1) continue;
+
+                            for (int cx = 0; cx < 64; ++cx)
+                            {
+                                int fxIdx = startCX + cx;
+                                int gx = drawX0 + fxIdx + dx;
+                                if (gx < drawX0 || gx > drawX1) continue;
+
+                                uint32_t fastPixel = fastBuf[fyIdx * numCols + fxIdx];
+                                uint32_t genPixel = ReadVramUnlocked(fpsm, fbp, fbw, gx, gy);
+                                if ((fastPixel & 0xFFFFFFu) == (genPixel & 0xFFFFFFu))
+                                {
+                                    matches++;
+                                }
+                            }
+                        }
+                        if (dx == 0 && dy == 0)
+                        {
+                            zeroShiftMatch = matches;
+                        }
+                        if (matches > maxMatches)
+                        {
+                            maxMatches = matches;
+                            bestDx = dx;
+                            bestDy = dy;
+                        }
+                    }
+                }
+
+                probe_ae::bhLog("[probe] cr shift best_dx=%d best_dy=%d match=%d/4096 zero_shift_match=%d/4096\n",
+                                bestDx, bestDy, maxMatches, zeroShiftMatch);
+
+                // Print 12 mismatching pixels spread across the sprite
+                if (!misms.empty())
+                {
+                    const size_t numMisms = misms.size();
+                    const size_t step = std::max<size_t>(1, numMisms / 12);
+                    for (size_t i = 0; i < numMisms && i < step * 12; i += step)
+                    {
+                        const auto &m = misms[i];
+                        probe_ae::bhLog("[probe] cr mism x=%d y=%d fast=0x%08X gen=0x%08X c00=0x%08X c10=0x%08X\n",
+                                        m.x, m.y, m.fastVal, m.genVal, m.c00, m.c10);
+                    }
+                }
+            }
+
             if (spriteMatch)
             {
                 s_cqFastOk.fetch_add(1u, std::memory_order_relaxed);
