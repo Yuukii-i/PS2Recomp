@@ -3014,13 +3014,25 @@ namespace probe_ae {
             return false;
         }
 
-        uint64_t hash = 0xCBF29CE484222325ULL;
-        for (uint32_t i = 0; i < 0xE00u; ++i) {
-            hash ^= vuCode[i];
-            hash *= 0x100000001B3ULL;
-        }
+        static std::atomic<uint32_t> s_mscalHashCounter{0};
+        static uint64_t s_cachedMscalHash = 0;
+        static bool s_cachedMscalMatch = false;
 
-        bool match = (hash == 0xF72A6639E95D7AC8ULL);
+        uint64_t hash;
+        bool match;
+        if ((s_mscalHashCounter.fetch_add(1u, std::memory_order_relaxed) & 1023u) == 0u || s_cachedMscalHash == 0) {
+            hash = 0xCBF29CE484222325ULL;
+            for (uint32_t i = 0; i < 0xE00u; ++i) {
+                hash ^= vuCode[i];
+                hash *= 0x100000001B3ULL;
+            }
+            match = (hash == 0xF72A6639E95D7AC8ULL);
+            s_cachedMscalHash = hash;
+            s_cachedMscalMatch = match;
+        } else {
+            hash = s_cachedMscalHash;
+            match = s_cachedMscalMatch;
+        }
 
         static std::mutex s_sigMutex;
         static std::vector<uint64_t> s_loggedSignatures;
