@@ -138,6 +138,23 @@ static uint32_t s_egEntryDataWords[281][4]; // qw 440..720 (281 qw)
 static uint32_t s_egTotalPairs = 0;
 static std::vector<EePacket> s_egCurRunPackets;
 
+// =========================================================================
+// Task EH: VU1 store recording & dumps
+// =========================================================================
+extern "C" void ps2_vif1_dumpEhRing();
+extern "C" void ps2_vif1_dumpEhShapes();
+
+struct EhStoreRecord {
+    uint32_t pair;
+    uint32_t pc;
+    uint32_t qw;
+    uint32_t words[4];
+    const char *kind;
+};
+static EhStoreRecord s_ehStores[1024];
+static uint32_t s_ehStoreCount = 0;
+static thread_local uint32_t s_ehCurLowerInstr = 0;
+
 struct VdCandidateEntry {
     bool valid = false;
     uint32_t pc = 0;
@@ -928,6 +945,38 @@ void VU1Interpreter::queueP(float value, uint32_t latency)
 
 void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask)
 {
+    if (s_egCurRunTraced && s_egTotalPairs < 700u)
+    {
+        uint32_t qw = (address / 16u) & 0x3FFu;
+        if (qw >= 440u && qw <= 720u && s_ehStoreCount < 1024u)
+        {
+            const char *kind = "SQ";
+            uint32_t op = (s_ehCurLowerInstr >> 25) & 0x7Fu;
+            if (op == 0x01u) kind = "SQ";
+            else if (op == 0x05u) kind = "ISW";
+            else if (op == 0x00u) {
+                uint32_t fn = s_ehCurLowerInstr & 0x3Fu;
+                if (fn == 0x35u) kind = "SQI";
+                else if (fn == 0x37u) kind = "SQD";
+                else if (fn == 0x3Fu) kind = "ISWR";
+            }
+            uint32_t finalWords[4]{};
+            if (m_activeVuData && (qw + 1u) * 16u <= m_activeVuDataSize) {
+                std::memcpy(finalWords, m_activeVuData + qw * 16u, 16);
+            }
+            for (uint32_t c = 0; c < 4u; ++c) {
+                if ((laneMask & laneForComponent(c)) != 0u) {
+                    finalWords[c] = words[c];
+                }
+            }
+            auto &rec = s_ehStores[s_ehStoreCount++];
+            rec.pair = s_egTotalPairs;
+            rec.pc = m_state.pc;
+            rec.qw = qw;
+            std::memcpy(rec.words, finalWords, sizeof(finalWords));
+            rec.kind = kind;
+        }
+    }
     for (PendingStore &store : m_storePipeline)
     {
         if (!store.valid)
@@ -1996,6 +2045,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             {
                 s_egCurRunTraced = true;
                 s_egTraceCount = 0;
+                s_ehStoreCount = 0;
                 std::memcpy(s_egEntryVf, m_state.vf, sizeof(s_egEntryVf));
                 std::memcpy(s_egEntryVi, m_state.vi, sizeof(s_egEntryVi));
                 s_egEntryTop = top;
@@ -2177,6 +2227,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (decoded.upperUsage.accWrite != 0u)
             std::memcpy(oldAcc, m_state.acc, sizeof(oldAcc));
 
+        s_ehCurLowerInstr = decoded.lower;
         if (decoded.iBit)
         {
             execUpper(decoded.upper);
@@ -2633,6 +2684,24 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                     for (uint32_t q = 0; q < pkt.qwCount; ++q) {
                         std::printf("[probe] eg out pkt=%u qw=%u w=%08X %08X %08X %08X\n",
                                     static_cast<unsigned>(p), q, pkt.words[q][0], pkt.words[q][1], pkt.words[q][2], pkt.words[q][3]);
+                    }
+                }
+                for (uint32_t i = 0; i < s_ehStoreCount; ++i) {
+                    const auto &st = s_ehStores[i];
+                    std::printf("[probe] eh store pair=%u pc=0x%03X qw=%u w=%08X %08X %08X %08X kind=%s\n",
+                                st.pair, st.pc, st.qw, st.words[0], st.words[1], st.words[2], st.words[3], st.kind);
+                }
+                ps2_vif1_dumpEhRing();
+                ps2_vif1_dumpEhShapes();
+                for (uint32_t q = 440u; q <= 720u; ++q) {
+                    if (vuData && (q + 1u) * 16u <= dataSize) {
+                        uint32_t wCur[4];
+                        std::memcpy(wCur, vuData + q * 16u, 16);
+                        const auto &wEntry = s_egEntryDataWords[q - 440u];
+                        if (std::memcmp(wCur, wEntry, 16) != 0) {
+                            std::printf("[probe] eh data_after qw=%u w=%08X %08X %08X %08X\n",
+                                        q, wCur[0], wCur[1], wCur[2], wCur[3]);
+                        }
                     }
                 }
                 std::fflush(stdout);
