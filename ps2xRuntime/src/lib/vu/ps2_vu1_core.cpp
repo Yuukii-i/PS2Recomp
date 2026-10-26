@@ -2052,5 +2052,80 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         probe_ae::onBaRunEnd(instrsThisRun, loopNs);
         probe_ae::onBbRunEnd(vuData, dataSize);
     }
+    
+    if (probe_ae::isDcProbeEnabled()) {
+        uint64_t cyclesConsumed = (m_cycle > tRunStartCycle) ? (m_cycle - tRunStartCycle) : 0;
+        bool hitCap = (m_cycle >= budgetEnd);
+        bool endedEbit = programEnded;
+        bool otherEnd = (!hitCap && !endedEbit);
+
+        {
+            std::lock_guard<std::mutex> lock(s_dyMutex);
+            s_dyCalls++;
+            if (s_dyCurIsMscnt) s_dyMscnt++;
+            if (endedEbit) s_dyEndedEbit++;
+            if (hitCap) s_dyHitCap++;
+            if (otherEnd) s_dyOther++;
+            s_dyTotalInstrs += instrsThisRun;
+            s_dyTotalCycles += cyclesConsumed;
+            if (instrsThisRun > s_dyMaxInstrs) s_dyMaxInstrs = instrsThisRun;
+            if (cyclesConsumed > s_dyMaxCycles) s_dyMaxCycles = static_cast<uint32_t>(cyclesConsumed);
+
+            auto &pcStat = s_dyPcStats[s_dyCurStartPc];
+            pcStat.calls++;
+            if (hitCap) pcStat.hitCap++;
+            pcStat.totalCycles += cyclesConsumed;
+            pcStat.totalInstrs += instrsThisRun;
+        }
+
+        uint64_t vsyncTick = 0;
+        uint8_t *ram = memory ? memory->getRDRAM() : nullptr;
+        if (ram) {
+            std::memcpy(&vsyncTick, ram + (0x696FD0u & 0x1FFFFFFFu), 8);
+        }
+
+        if (hitCap && vsyncTick > 0 && !s_dyCappedDumped) {
+            s_dyCappedDumped = true;
+            std::printf("[probe] dc14 capped start=0x%08X top=%u itop=%u\n", s_dyCurStartPc, s_dyCurTop, s_dyCurItop);
+
+            // PC histogram of last 4096 instruction pairs
+            std::unordered_map<uint32_t, uint32_t> pcHist;
+            for (uint32_t i = 0; i < 4096; ++i) {
+                pcHist[s_dyLastPcs[i]]++;
+            }
+            std::vector<std::pair<uint32_t, uint32_t>> histVec(pcHist.begin(), pcHist.end());
+            std::sort(histVec.begin(), histVec.end(), [](const auto &a, const auto &b) {
+                return a.second > b.second;
+            });
+
+            size_t histLimit = std::min<size_t>(12u, histVec.size());
+            for (size_t i = 0; i < histLimit; ++i) {
+                std::printf("[probe] dc14 capped_pc pc=0x%08X n=%u\n", histVec[i].first, histVec[i].second);
+            }
+
+            // VI registers vi01..vi15 and Q/P
+            std::string viStr;
+            for (int r = 1; r < 16; ++r) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%s%d", (r > 1 ? " " : ""), m_state.vi[r]);
+                viStr += buf;
+            }
+            std::printf("[probe] dc14 capped_regs vi=%s q=%.4f p=%.4f\n", viStr.c_str(), m_state.q, m_state.p);
+
+            // 8 instruction pairs around hottest PC
+            uint32_t hotPc = histVec.empty() ? s_dyCurStartPc : histVec[0].first;
+            uint32_t basePc = (hotPc >= 32u) ? (hotPc - 32u) : 0u;
+            for (int i = 0; i < 8; ++i) {
+                uint32_t pairPc = basePc + i * 8u;
+                if (pairPc + 8u <= codeSize) {
+                    uint32_t upper = *reinterpret_cast<const uint32_t *>(vuCode + pairPc + 4u);
+                    uint32_t lower = *reinterpret_cast<const uint32_t *>(vuCode + pairPc + 0u);
+                    std::printf("[probe] dc14 capped_pairs pc=0x%08X upper=0x%08X lower=0x%08X\n", pairPc, upper, lower);
+                }
+            }
+            std::fflush(stdout);
+        }
+    }
+
     probe_ae::onBxOrigRunEnd();
 }
