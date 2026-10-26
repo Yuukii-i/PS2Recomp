@@ -6944,6 +6944,53 @@ namespace probe_ae {
     static uint32_t s_dc3Irq2Delivered = 0;
     static uint32_t s_dc3Irq2Dropped = 0;
 
+    
+    // =========================================================================
+    // Task DI: Telemetry & Event Ring
+    // =========================================================================
+    extern "C" uint32_t ps2_getSg2Pos();
+
+    struct DiEvent {
+        char kind[16];
+        uint32_t a0, a1, a2, a3;
+        uint64_t tick;
+        uint32_t n58;
+        uint32_t g74;
+    };
+    static std::mutex s_diMutex;
+    static DiEvent s_diEvents[32];
+    static uint64_t s_diEventTotal = 0;
+    static std::atomic<uint32_t> s_diRingCalls{0};
+    static std::atomic<uint32_t> s_diVideoCalls{0};
+    static std::atomic<uint32_t> s_diDispCalls{0};
+    static std::atomic<uint32_t> s_diPumpCalls{0};
+    static std::atomic<uint32_t> s_diFCallsSec{0};
+    static bool s_diFEverStarted = false;
+    static uint32_t s_diFZeroSecConsecutive = 0;
+    static bool s_diStallDumped = false;
+
+    static void recordDiEvent(const char *kind, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, const uint8_t *rdram) {
+        if (!isDcProbeEnabled()) return;
+        const uint8_t *ram = rdram ? rdram : s_cachedRdram;
+        uint32_t n58 = 0, g74 = 0;
+        uint64_t tick = 0;
+        if (ram) {
+            std::memcpy(&n58, ram + ((0x772180u + 0x58u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&g74, ram + ((0x772180u + 0x74u) & 0x1FFFFFFFu), 4);
+            std::memcpy(&tick, ram + (0x696FD0u & 0x1FFFFFFFu), 8);
+        }
+        std::lock_guard<std::mutex> lock(s_diMutex);
+        uint32_t slot = static_cast<uint32_t>(s_diEventTotal % 32);
+        s_diEventTotal++;
+        DiEvent &ev = s_diEvents[slot];
+        std::strncpy(ev.kind, kind, sizeof(ev.kind) - 1);
+        ev.kind[sizeof(ev.kind) - 1] = '\0';
+        ev.a0 = a0; ev.a1 = a1; ev.a2 = a2; ev.a3 = a3;
+        ev.tick = tick;
+        ev.n58 = n58;
+        ev.g74 = g74;
+    }
+
     static void dumpDcStatsLocked() {
         std::vector<std::pair<uint32_t, uint32_t>> raSorted(s_dcRaCounts.begin(), s_dcRaCounts.end());
         std::sort(raSorted.begin(), raSorted.end(), [](const auto &a, const auto &b) {
@@ -7019,6 +7066,66 @@ namespace probe_ae {
               s_dc3Irq3Accepted, s_dc3Irq3Delivered, s_dc3Irq3Dropped, s_dc3Handler31a3e8Calls);
         dcLog("[probe] dc3 irq2 accepted=%u delivered=%u coalesced_dropped=%u\n",
               s_dc3Irq2Accepted, s_dc3Irq2Delivered, s_dc3Irq2Dropped);
+
+        // Task DI: 1. dc5 ctx per second
+        {
+            uint32_t st = 0, b50 = 0, n58 = 0, i60 = 0, i64 = 0, g74 = 0, p70 = 0, rdy = 0;
+            uint64_t vbl = 0;
+            if (ram) {
+                std::memcpy(&st, ram + ((0x772180u + 0x08u) & 0x1FFFFFFFu), 4);
+                std::memcpy(&b50, ram + ((0x772180u + 0x50u) & 0x1FFFFFFFu), 4);
+                std::memcpy(&n58, ram + ((0x772180u + 0x58u) & 0x1FFFFFFFu), 4);
+                std::memcpy(&i60, ram + ((0x772180u + 0x60u) & 0x1FFFFFFFu), 4);
+                std::memcpy(&i64, ram + ((0x772180u + 0x64u) & 0x1FFFFFFFu), 4);
+                std::memcpy(&g74, ram + ((0x772180u + 0x74u) & 0x1FFFFFFFu), 4);
+                std::memcpy(&p70, ram + ((0x772180u + 0x70u) & 0x1FFFFFFFu), 4);
+                uint32_t p4c = 0;
+                std::memcpy(&p4c, ram + ((0x772180u + 0x4Cu) & 0x1FFFFFFFu), 4);
+                if (p4c != 0 && (p4c & 0x1FFFFFFFu) + 0x14u <= PS2_RAM_SIZE) {
+                    std::memcpy(&rdy, ram + (((p4c & 0x1FFFFFFFu) + 0x10u) & 0x1FFFFFFFu), 4);
+                }
+                std::memcpy(&vbl, ram + (0x696FD0u & 0x1FFFFFFFu), 8);
+            }
+            uint32_t sg2pos = ps2_getSg2Pos();
+            dcLog("[probe] dc5 ctx st=%u b50=%u n58=%u i60=%u i64=%u g74=%u p70=%u rdy=%u sg2pos=%u vbl=%llu\n",
+                  st, b50, n58, i60, i64, g74, p70, rdy, sg2pos, (unsigned long long)vbl);
+        }
+
+        // Task DI: 2. dc5 rdcnt per second
+        {
+            uint32_t ringCnt = s_diRingCalls.exchange(0, std::memory_order_relaxed);
+            uint32_t videoCnt = s_diVideoCalls.exchange(0, std::memory_order_relaxed);
+            uint32_t dispCnt = s_diDispCalls.exchange(0, std::memory_order_relaxed);
+            uint32_t pumpCnt = s_diPumpCalls.exchange(0, std::memory_order_relaxed);
+            dcLog("[probe] dc5 rdcnt ring=%u video=%u disp=%u pump=%u\n",
+                  ringCnt, videoCnt, dispCnt, pumpCnt);
+        }
+
+        // Task DI: 3. Stall dump when F==0 for 3 consecutive seconds after F>0
+        {
+            uint32_t fCalls = s_diFCallsSec.exchange(0, std::memory_order_relaxed);
+            if (fCalls > 0) {
+                s_diFEverStarted = true;
+                s_diFZeroSecConsecutive = 0;
+            } else if (s_diFEverStarted) {
+                s_diFZeroSecConsecutive++;
+                if (s_diFZeroSecConsecutive >= 3 && !s_diStallDumped) {
+                    s_diStallDumped = true;
+                    dcLog("[probe] dc5 STALL\n");
+                    std::lock_guard<std::mutex> lock(s_diMutex);
+                    uint64_t total = s_diEventTotal;
+                    uint64_t count = (total < 32) ? total : 32;
+                    uint64_t start = total - count;
+                    for (uint64_t i = 0; i < count; ++i) {
+                        uint64_t idx = start + i;
+                        const DiEvent &ev = s_diEvents[idx % 32];
+                        dcLog("[probe] dc5 ev i=%llu kind=%s a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X tick=%llu n58=%u g74=%u\n",
+                              (unsigned long long)i, ev.kind, ev.a0, ev.a1, ev.a2, ev.a3,
+                              (unsigned long long)ev.tick, ev.n58, ev.g74);
+                    }
+                }
+            }
+        }
 
         s_dc3Irq3Accepted = 0;
         s_dc3Irq3Delivered = 0;
@@ -7323,6 +7430,7 @@ namespace probe_ae {
         if (!isDcProbeEnabled()) return;
         s_dhLastFTime = std::chrono::steady_clock::now();
         s_dhFEverEntered.store(true, std::memory_order_relaxed);
+        s_diFCallsSec.fetch_add(1, std::memory_order_relaxed);
     }
 
     void onDhBzInitEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
@@ -7340,6 +7448,9 @@ namespace probe_ae {
         uint32_t a1 = getRegU32(ctx, 5);
         uint32_t a2 = getRegU32(ctx, 6);
         dhRecordEvent("dispatcher", a0, a1, a2, 0, rdram);
+        recordDiEvent("disp", a0, a1, a2, 0, rdram);
+        if (a1 == 1) s_diDispCalls.fetch_add(1, std::memory_order_relaxed);
+        if (a1 == 8) s_diPumpCalls.fetch_add(1, std::memory_order_relaxed);
     }
 
     void onDhPumpEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
@@ -7349,6 +7460,7 @@ namespace probe_ae {
         uint32_t a2 = getRegU32(ctx, 6);
         uint32_t a3 = getRegU32(ctx, 7);
         dhRecordEvent("pump", a0, a1, a2, a3, rdram);
+        recordDiEvent("pump", a0, a1, a2, a3, rdram);
     }
 
     void onDhRingReadEntry(const struct R5900Context *ctx, const uint8_t *rdram) {
@@ -7358,6 +7470,8 @@ namespace probe_ae {
         uint32_t a2 = getRegU32(ctx, 6);
         uint32_t a3 = getRegU32(ctx, 7);
         dhRecordEvent("ring_read", a0, a1, a2, a3, rdram);
+        recordDiEvent("ring", a0, a1, a2, a3, rdram);
+        s_diRingCalls.fetch_add(1, std::memory_order_relaxed);
         if (s_dhIntroMovieStarted.load(std::memory_order_relaxed)) {
             uint32_t cnt = s_dhReadLogsCount.fetch_add(1, std::memory_order_relaxed);
             if (cnt < 400) {
@@ -7380,6 +7494,8 @@ namespace probe_ae {
         uint32_t a2 = getRegU32(ctx, 6);
         uint32_t a3 = getRegU32(ctx, 7);
         dhRecordEvent("video_read", a0, a1, a2, a3, rdram);
+        recordDiEvent("video", a0, a1, a2, a3, rdram);
+        s_diVideoCalls.fetch_add(1, std::memory_order_relaxed);
         if (s_dhIntroMovieStarted.load(std::memory_order_relaxed)) {
             uint32_t cnt = s_dhReadLogsCount.fetch_add(1, std::memory_order_relaxed);
             if (cnt < 400) {
