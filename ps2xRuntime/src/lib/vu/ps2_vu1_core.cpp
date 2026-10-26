@@ -16,6 +16,98 @@
 #include <limits>
 #include <ps2_log.h>
 
+// =========================================================================
+// Task DY: VU1 program execution & cycle cap telemetry
+// =========================================================================
+#include <map>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
+#include <mutex>
+#include <atomic>
+
+namespace probe_ae {
+    bool isDcProbeEnabled();
+}
+
+struct PcStats {
+    uint32_t calls = 0;
+    uint32_t hitCap = 0;
+    uint64_t totalCycles = 0;
+    uint64_t totalInstrs = 0;
+};
+
+static std::mutex s_dyMutex;
+static uint32_t s_dyCalls = 0;
+static uint32_t s_dyMscnt = 0;
+static uint32_t s_dyEndedEbit = 0;
+static uint32_t s_dyHitCap = 0;
+static uint32_t s_dyOther = 0;
+static uint64_t s_dyTotalInstrs = 0;
+static uint64_t s_dyTotalCycles = 0;
+static uint32_t s_dyMaxInstrs = 0;
+static uint32_t s_dyMaxCycles = 0;
+static std::unordered_map<uint32_t, PcStats> s_dyPcStats;
+static uint32_t s_dySecCount = 0;
+std::atomic<uint32_t> g_diagMscalCount{0};
+
+static uint32_t s_dyLastPcs[4096];
+static uint32_t s_dyLastPcIdx = 0;
+static bool s_dyCappedDumped = false;
+
+static thread_local bool s_dyCurIsMscnt = false;
+static thread_local uint32_t s_dyCurStartPc = 0;
+static thread_local uint32_t s_dyCurTop = 0;
+static thread_local uint32_t s_dyCurItop = 0;
+
+extern "C" void ps2_vu1_dumpDyPerSec(const uint8_t *rdram) {
+    if (!probe_ae::isDcProbeEnabled()) return;
+    std::lock_guard<std::mutex> lock(s_dyMutex);
+    if (s_dyCalls == 0) return;
+    if (s_dySecCount >= 20) return;
+    s_dySecCount++;
+
+    std::printf("[probe] dc14 vu1 calls=%u mscnt=%u ended_ebit=%u hit_cap=%u other=%u instrs=%llu cycles=%llu max_instrs=%u max_cycles=%u\n",
+                s_dyCalls, s_dyMscnt, s_dyEndedEbit, s_dyHitCap, s_dyOther,
+                (unsigned long long)s_dyTotalInstrs, (unsigned long long)s_dyTotalCycles,
+                s_dyMaxInstrs, s_dyMaxCycles);
+
+    // Top 6 PCs by total cycles
+    std::vector<std::pair<uint32_t, PcStats>> pcVec(s_dyPcStats.begin(), s_dyPcStats.end());
+    std::sort(pcVec.begin(), pcVec.end(), [](const auto &a, const auto &b) {
+        return a.second.totalCycles > b.second.totalCycles;
+    });
+
+    size_t limit = std::min<size_t>(6u, pcVec.size());
+    for (size_t i = 0; i < limit; ++i) {
+        const auto &p = pcVec[i];
+        uint64_t avgC = p.second.calls ? (p.second.totalCycles / p.second.calls) : 0;
+        uint64_t avgI = p.second.calls ? (p.second.totalInstrs / p.second.calls) : 0;
+        std::printf("[probe] dc14 pc start=0x%08X calls=%u hit_cap=%u avg_cycles=%llu avg_instrs=%llu\n",
+                    p.first, p.second.calls, p.second.hitCap, (unsigned long long)avgC, (unsigned long long)avgI);
+    }
+
+    static uint32_t s_lastMscalCount = 0;
+    uint32_t curMscal = g_diagMscalCount.load(std::memory_order_relaxed);
+    uint32_t deltaMscal = curMscal - s_lastMscalCount;
+    s_lastMscalCount = curMscal;
+    std::printf("[probe] dc14 vif1 mscal_calls=%u\n", deltaMscal);
+
+    // Reset per-second stats
+    s_dyCalls = 0;
+    s_dyMscnt = 0;
+    s_dyEndedEbit = 0;
+    s_dyHitCap = 0;
+    s_dyOther = 0;
+    s_dyTotalInstrs = 0;
+    s_dyTotalCycles = 0;
+    s_dyMaxInstrs = 0;
+    s_dyMaxCycles = 0;
+    s_dyPcStats.clear();
+    std::fflush(stdout);
+}
+
+
 namespace
 {
     constexpr uint8_t laneForComponent(uint32_t component)
@@ -1665,6 +1757,12 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint32_t startPC, uint32_t top, uint32_t itop,
                              uint32_t maxCycles)
 {
+    s_dyCurIsMscnt = false;
+    s_dyCurStartPc = startPC;
+    g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
+    s_dyCurTop = top;
+    s_dyCurItop = itop;
+
     if (probe_ae::handleMovieHleMscal(startPC, vuCode, codeSize, vuData, dataSize, top, gs, memory))
     {
         return;
@@ -1730,6 +1828,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
 
     s_currentRunXgkickNs = 0;
     const auto tRunStart = std::chrono::steady_clock::now();
+    const uint64_t tRunStartCycle = m_cycle;
     uint32_t instrsThisRun = 0;
 
     const int previousRoundingMode = std::fegetround();
@@ -1743,6 +1842,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             break;
 
         const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
+        if (probe_ae::isDcProbeEnabled()) { uint32_t idx = s_dyLastPcIdx++; s_dyLastPcs[idx & 4095u] = m_state.pc; }
         instrsThisRun++;
         if (probe_ae::isEnabled())
         {

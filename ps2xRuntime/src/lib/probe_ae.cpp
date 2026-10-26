@@ -33,6 +33,8 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA
 #include <chrono>
 #include <unordered_set>
 #include <set>
+extern "C" void ps2_vu1_dumpDyPerSec(const uint8_t *rdram);
+
 namespace probe_ae {
     extern std::atomic<uint32_t> s_duDecodesSinceLastPresent;
     extern std::atomic<uint32_t> s_duDecodesThisSec;
@@ -7439,6 +7441,7 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
             dcLog("[probe] dc5 rdcnt ring=%u video=%u disp=%u pump=%u\n",
                   ringCnt, videoCnt, dispCnt, pumpCnt);
         dcLog("[probe] dc12 sched preempt_policy=EeScheduler::checkCheckpoint on requestPreemptionIfHigher or timeslice expiry\n");
+        ps2_vu1_dumpDyPerSec(ram);
         // Task DU: dc13 rate
         {
             uint32_t p = s_duPresentsThisSec.exchange(0, std::memory_order_relaxed);
