@@ -1803,6 +1803,12 @@ static std::atomic<uint64_t> s_cxPageUs{0};
 static auto s_cxLastSecLog = std::chrono::steady_clock::now();
 static std::unordered_set<uint64_t> s_cxLoggedSignatures;
 
+// Task CZ counters
+static std::atomic<uint64_t> s_czAtePass{0};
+static std::atomic<uint64_t> s_czAteFailFolded{0};
+static std::atomic<uint64_t> s_czRejected{0};
+static auto s_czLastSecLog = std::chrono::steady_clock::now();
+
 static inline bool isPageFastEnabled() {
     static int s_val = -1;
     if (s_val == -1) {
@@ -1897,24 +1903,32 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
     if (!state.prim.tme && isRectPageAligned && fpsm == GS_PSM_CT32 &&
         !state.prim.fge && !state.dthe && isPageFastEnabled() && !isSpriteVerifyEnabled())
     {
-        const bool ateOff = (ctx.test & 0x1u) == 0u;
-        const uint8_t atst = static_cast<uint8_t>((ctx.test >> 1) & 0x7u);
-        const bool atePasses = ateOff || (atst == 1u);
         const uint32_t ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
         const bool ztstAlways = ((ctx.test & (1u << 16)) == 0u) || (ztestMethod == 1u);
         const bool dateOff = ((ctx.test >> 14) & 1u) == 0u;
 
-        if (atePasses && ztstAlways && dateOff && (!state.prim.abe) && ((ctx.fba & 1ull) == 0ull))
+        if (ztstAlways && dateOff && (!state.prim.abe) && ((ctx.fba & 1ull) == 0ull))
         {
-            const bool zDepthSupported = (!ctx.zbuf.zmask) ? (zpsm == GS_PSM_Z32) : true;
-            if (zDepthSupported)
+            const PixelWriteMask pwm = classifyAlphaTest(ctx.test, a, static_cast<uint8_t>(fpsm));
+            const bool atePass = passesAlphaTest(ctx.test, a);
+
+            const bool canFill = (pwm.writeDepth ? (zpsm == GS_PSM_Z32 || ctx.zbuf.zmask) : true);
+
+            if (canFill)
             {
+                if (atePass) s_czAtePass.fetch_add(1u, std::memory_order_relaxed);
+                else s_czAteFailFolded.fetch_add(1u, std::memory_order_relaxed);
+
                 const uint32_t fillCol = static_cast<uint32_t>(r) |
                                          (static_cast<uint32_t>(g) << 8u) |
                                          (static_cast<uint32_t>(b) << 16u) |
                                          (static_cast<uint32_t>(a) << 24u);
                 const uint32_t rawFbMsk = ctx.frame.fbmsk;
-                const bool writeDepth = !ctx.zbuf.zmask;
+                const bool writeDepth = pwm.writeDepth && !ctx.zbuf.zmask;
+                const bool writeRgb = pwm.writeRgb;
+                const bool writeAlpha = pwm.writeAlpha;
+                const bool writesFb = pwm.writesFramebuffer();
+
                 uint32_t* vramWords = reinterpret_cast<uint32_t*>(m_vram);
                 const size_t maxVramWords = m_vramSize / sizeof(uint32_t);
 
@@ -1932,8 +1946,11 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                     uint32_t zPageRowBase = (startPageRow + py) * fbw;
                     for (int px = 0; px < pagesX; ++px)
                     {
-                        uint32_t dstPageId = dstPageBase + dstPageRowBase + (startPageCol + px);
-                        if ((dstPageId + 1u) * 2048u > maxVramWords) { pagesInBounds = false; break; }
+                        if (writesFb)
+                        {
+                            uint32_t dstPageId = dstPageBase + dstPageRowBase + (startPageCol + px);
+                            if ((dstPageId + 1u) * 2048u > maxVramWords) { pagesInBounds = false; break; }
+                        }
                         if (writeDepth)
                         {
                             uint32_t zPageId = zPageBase + zPageRowBase + (startPageCol + px);
@@ -1955,18 +1972,33 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                         uint32_t zPageRowBase = (startPageRow + py) * fbw;
                         for (int px = 0; px < pagesX; ++px)
                         {
-                            uint32_t dstPageId = dstPageBase + dstPageRowBase + (startPageCol + px);
-                            uint32_t* dstPagePtr = &vramWords[dstPageId * 2048u];
+                            if (writesFb)
+                            {
+                                uint32_t dstPageId = dstPageBase + dstPageRowBase + (startPageCol + px);
+                                uint32_t* dstPagePtr = &vramWords[dstPageId * 2048u];
 
-                            if (rawFbMsk == 0u)
-                            {
-                                std::fill_n(dstPagePtr, 2048, fillCol);
-                            }
-                            else
-                            {
-                                for (int i = 0; i < 2048; ++i)
+                                if (writeRgb && writeAlpha)
                                 {
-                                    dstPagePtr[i] = (fillCol & ~rawFbMsk) | (dstPagePtr[i] & rawFbMsk);
+                                    if (rawFbMsk == 0u)
+                                    {
+                                        std::fill_n(dstPagePtr, 2048, fillCol);
+                                    }
+                                    else
+                                    {
+                                        for (int i = 0; i < 2048; ++i)
+                                        {
+                                            dstPagePtr[i] = (fillCol & ~rawFbMsk) | (dstPagePtr[i] & rawFbMsk);
+                                        }
+                                    }
+                                }
+                                else if (writeRgb && !writeAlpha)
+                                {
+                                    // RGB_ONLY (AFAIL = 3): preserve destination alpha
+                                    uint32_t effMask = rawFbMsk | 0xFF000000u;
+                                    for (int i = 0; i < 2048; ++i)
+                                    {
+                                        dstPagePtr[i] = (fillCol & ~effMask) | (dstPagePtr[i] & effMask);
+                                    }
                                 }
                             }
 
@@ -1993,6 +2025,15 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                         (unsigned long long)(s_cqFastTaken.load(std::memory_order_relaxed) + s_cvFastTaken.load(std::memory_order_relaxed)),
                                         (unsigned long long)s_cqGeneric.load(std::memory_order_relaxed),
                                         (unsigned long long)pageMs);
+                    }
+
+                    if (std::chrono::duration_cast<std::chrono::seconds>(now - s_czLastSecLog).count() >= 1)
+                    {
+                        s_czLastSecLog = now;
+                        probe_ae::bhLog("[probe] cz fill ate_pass=%llu ate_fail_folded=%llu rejected=%llu\n",
+                                        (unsigned long long)s_czAtePass.load(std::memory_order_relaxed),
+                                        (unsigned long long)s_czAteFailFolded.load(std::memory_order_relaxed),
+                                        (unsigned long long)s_czRejected.load(std::memory_order_relaxed));
                     }
 
                     if (isProbe)
@@ -2026,6 +2067,14 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                     return;
                 }
             }
+            else
+            {
+                s_czRejected.fetch_add(1u, std::memory_order_relaxed);
+            }
+        }
+        else
+        {
+            s_czRejected.fetch_add(1u, std::memory_order_relaxed);
         }
     }
 
@@ -2506,10 +2555,24 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                 }
 
                                 const uint32_t srcTexel = srcPtr[i];
+                                uint8_t ca = (tex.tcc != 0u) ? static_cast<uint8_t>((srcTexel >> 24u) & 0xFFu) : v1.a;
+
+                                // Shortcut for blend 0x44 (movie blit) when source alpha is 0x80:
+                                // Formula ((Cs - Cd) * 0x80 >> 7) + Cd == (Cs - Cd) + Cd == Cs exactly.
+                                // If Modulate is identity (r=g=b=0x80) and rawFbMsk is 0, outPixel is simply srcTexel!
+                                if (state.prim.abe && cvAsel == 0 && cvBsel == 1 && cvCsel == 0 && cvDsel == 1 && ca == 0x80u && isModulateIdentity && rawFbMsk == 0u)
+                                {
+                                    dstPtr[i] = srcTexel;
+                                    if (zPtr)
+                                    {
+                                        zPtr[i] = z1;
+                                    }
+                                    continue;
+                                }
+
                                 uint8_t cr = static_cast<uint8_t>(srcTexel & 0xFFu);
                                 uint8_t cg = static_cast<uint8_t>((srcTexel >> 8u) & 0xFFu);
                                 uint8_t cb = static_cast<uint8_t>((srcTexel >> 16u) & 0xFFu);
-                                uint8_t ca = (tex.tcc != 0u) ? static_cast<uint8_t>((srcTexel >> 24u) & 0xFFu) : v1.a;
 
                                 if (isModulate && !isModulateIdentity)
                                 {
