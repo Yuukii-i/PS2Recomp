@@ -9,6 +9,15 @@ namespace ps2_stubs
 {
     namespace
     {
+        static bool isDcProbeEnabled()
+        {
+            static const bool s_enabled = []() {
+                const char *e = std::getenv("PS2X_PROBE_DC");
+                return e && std::strcmp(e, "1") == 0;
+            }();
+            return s_enabled;
+        }
+
         constexpr uint32_t kCdStreamBlocking = 1u;
         constexpr uint32_t kDvdSectorsPerSecondX1 = 675u;
         constexpr uint32_t kDvdSectorsPerSecondX4 = kDvdSectorsPerSecondX1 * 4u;
@@ -640,6 +649,15 @@ namespace ps2_stubs
 
         void finishCdStRead(uint8_t *rdram, R5900Context *ctx, const CdStReadContinuation &state, int32_t error)
         {
+            if (isDcProbeEnabled())
+            {
+                static std::atomic<uint32_t> s_dc6FinishCount{0};
+                if (s_dc6FinishCount.fetch_add(1, std::memory_order_relaxed) < 80)
+                {
+                    std::fprintf(stderr, "[probe] dc6 cdst_finish err=%d sectorsRead=%u requested=%u\n",
+                                 error, state.sectorsRead, state.requestedSectors);
+                }
+            }
             if (int32_t *errorOut = reinterpret_cast<int32_t *>(getMemPtr(rdram, state.errorAddress)); errorOut)
             {
                 *errorOut = error;
@@ -709,6 +727,15 @@ namespace ps2_stubs
                     const uint32_t buffered = bufferedCdStreamSectors(runtime);
                     const uint32_t needed = wakeSectors > buffered ? wakeSectors - buffered : 1u;
                     const uint64_t wakeTick = cdStreamWakeTickForSectors(runtime, needed);
+                    if (isDcProbeEnabled())
+                    {
+                        static std::atomic<uint32_t> s_dc6WaitCount{0};
+                        if (s_dc6WaitCount.fetch_add(1, std::memory_order_relaxed) < 40)
+                        {
+                            std::fprintf(stderr, "[probe] dc6 cdst_wait remaining=%u buffered=%u wakeTick=%llu\n",
+                                         remaining, buffered, static_cast<unsigned long long>(wakeTick));
+                        }
+                    }
                     runtime->eeScheduler().waitVSync(
                         wakeTick - 1u,
                         -1,
@@ -720,6 +747,7 @@ namespace ps2_stubs
                             }
                             continueCdStRead(rdram, &resumeContext, runtime, state);
                         });
+                    return; // resumed by the vsync continuation above; falling through finished the read twice (once with error -1)
                 }
 
                 uint32_t sectors = std::min(remaining, available);
