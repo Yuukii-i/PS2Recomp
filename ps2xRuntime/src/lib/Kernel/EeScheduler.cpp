@@ -2728,7 +2728,7 @@ namespace probe_ae {
             uint32_t pc = thSnap.pc;
             uint32_t ra = thSnap.ra;
             uint32_t wakeups = th ? th->wakeupCount : 0;
-            std::fprintf(stderr, "[probe] dc7 th id=%d entry=0x%08X prio=%d status=%s wait=%s pc=0x%08X ra=0x%08X wakeups=%u\n",
+            std::printf("[probe] dc7 th id=%d entry=0x%08X prio=%d status=%s wait=%s pc=0x%08X ra=0x%08X wakeups=%u\n",
                          thSnap.id, thSnap.entry, thSnap.currentPriority, stateStr, waitBuf, pc, ra, wakeups);
         }
 
@@ -2742,7 +2742,7 @@ namespace probe_ae {
                     waitersStr += std::to_string(sem->waiters[i]);
                 }
             }
-            std::fprintf(stderr, "[probe] dc7 sema id=%d count=%d max=%d waiters=%s\n",
+            std::printf("[probe] dc7 sema id=%d count=%d max=%d waiters=%s\n",
                          semSnap.id, semSnap.count, semSnap.maxCount, waitersStr.c_str());
         }
 
@@ -2765,7 +2765,7 @@ namespace probe_ae {
                     }
                 }
             }
-            std::fprintf(stderr, "[probe] dc7 ef id=%d bits=0x%08X waiters=%s\n",
+            std::printf("[probe] dc7 ef id=%d bits=0x%08X waiters=%s\n",
                          efSnap.id, efSnap.bits, waitersStr.c_str());
         }
     }
