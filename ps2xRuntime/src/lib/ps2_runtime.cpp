@@ -811,7 +811,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     if (currentTick >= 380)
     {
         static uint64_t s_lastPostSceaDump = 0;
-        if (currentTick >= s_lastPostSceaDump + 30 && !s_scratch.empty() && width != 0 && height != 0 && hasNonZeroPixels)
+        if (allowDumpFrames && currentTick >= s_lastPostSceaDump + 30 && !s_scratch.empty() && width != 0 && height != 0 && hasNonZeroPixels)
         {
             s_lastPostSceaDump = currentTick;
             extern void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
@@ -825,7 +825,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     if (currentTick >= 400)
     {
         static uint32_t s_lastTitleHash = 0;
-        if (frameHash != s_publogoHash && frameHash != s_lastTitleHash && !s_scratch.empty() && width != 0 && height != 0 && hasNonZeroPixels)
+        if (allowDumpFrames && frameHash != s_publogoHash && frameHash != s_lastTitleHash && !s_scratch.empty() && width != 0 && height != 0 && hasNonZeroPixels)
         {
             s_lastTitleHash = frameHash;
             extern void writeUncompressedPng(uint32_t w, uint32_t h, const uint8_t *rgba, const char *filename);
