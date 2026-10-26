@@ -911,4 +911,6 @@ namespace probe_ae {
     void onDc2VBlankProduced();
     void onDc2ThreadWake(int thid);
     void onDc2ThreadDispatch(int thid, uint32_t entryPc);
+    void onDc3IrqProduced(uint32_t cause, bool accepted);
+    void onDc3IrqDelivered(uint32_t cause, uint32_t pc);
 }

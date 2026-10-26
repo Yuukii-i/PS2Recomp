@@ -281,6 +281,7 @@ void EeScheduler::run()
                 if (invocation.kind == GuestInvocationKind::Interrupt) {
                     uint32_t cause = getRegU32(&invocation.context, 4);
                     probe_ae::onCeVblankDelivered(cause);
+                    probe_ae::onDc3IrqDelivered(cause, invocation.context.pc);
                 }
                 owner->status = EeThreadStatus::Running;
                 m_currentThreadId = owner->id;
@@ -359,6 +360,7 @@ void EeScheduler::run()
             if (invocation.kind == GuestInvocationKind::Interrupt) {
                 uint32_t cause = getRegU32(&invocation.context, 4);
                 probe_ae::onCeVblankDelivered(cause);
+                probe_ae::onDc3IrqDelivered(cause, invocation.context.pc);
             }
             if (getRegU32(&invocation.context, 29) == 0u)
             {
@@ -1581,7 +1583,9 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     if (!dmac && (cause == 2u || cause == 3u) && !matching.empty())
     {
         if (cause == 3u) probe_ae::onDc2VBlankProduced();
-        if (!probe_ae::onCeVblankProduced(cause))
+        const bool accepted = probe_ae::onCeVblankProduced(cause);
+        probe_ae::onDc3IrqProduced(cause, accepted);
+        if (!accepted)
         {
             return;
         }

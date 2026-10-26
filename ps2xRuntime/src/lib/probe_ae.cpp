@@ -6924,6 +6924,18 @@ namespace probe_ae {
     static uint32_t s_dc2VbProcessed = 0;
     static double s_dc2LateMsMax = 0.0;
 
+    // Task DE (dc3) state
+    static uint32_t s_dc3LastG686fd0 = 0;
+    static bool s_dc3HasLastG686fd0 = false;
+    static uint32_t s_dc3Irq3Accepted = 0;
+    static uint32_t s_dc3Irq3Delivered = 0;
+    static uint32_t s_dc3Irq3Dropped = 0;
+    static uint32_t s_dc3Handler31a3e8Calls = 0;
+
+    static uint32_t s_dc3Irq2Accepted = 0;
+    static uint32_t s_dc3Irq2Delivered = 0;
+    static uint32_t s_dc3Irq2Dropped = 0;
+
     static void dumpDcStatsLocked() {
         std::vector<std::pair<uint32_t, uint32_t>> raSorted(s_dcRaCounts.begin(), s_dcRaCounts.end());
         std::sort(raSorted.begin(), raSorted.end(), [](const auto &a, const auto &b) {
@@ -6975,6 +6987,38 @@ namespace probe_ae {
         // VBlank start timing
         dcLog("[probe] dc2 vb produced=%u processed_ticks=%u late_ms_max=%.2f\n",
               s_dc2VbProduced, s_dc2VbProcessed, s_dc2LateMsMax);
+
+        // Task DE (dc3) dump
+        const uint8_t *ram = s_cachedRdram;
+        uint32_t g686fd0 = 0;
+        uint32_t ctx1f8 = 0;
+        uint32_t ctx_ptr_a1src = 0;
+        if (ram) {
+            std::memcpy(&g686fd0, ram + (0x686FD0u & PS2_RAM_MASK), 4);
+            std::memcpy(&ctx1f8, ram + (0x772378u & PS2_RAM_MASK), 4);
+            std::memcpy(&ctx_ptr_a1src, ram + ((0x772180u + 0x58u) & PS2_RAM_MASK), 4);
+        }
+        uint32_t g686fd0_delta = 0;
+        if (s_dc3HasLastG686fd0) {
+            g686fd0_delta = (g686fd0 >= s_dc3LastG686fd0) ? (g686fd0 - s_dc3LastG686fd0) : (g686fd0 + (0xFFFFFFFFu - s_dc3LastG686fd0) + 1u);
+        }
+        s_dc3LastG686fd0 = g686fd0;
+        s_dc3HasLastG686fd0 = true;
+
+        dcLog("[probe] dc3 g686fd0=%u g686fd0_delta=%u ctx1f8=%u ctx_ptr_a1src=0x%08X\n",
+              g686fd0, g686fd0_delta, ctx1f8, ctx_ptr_a1src);
+        dcLog("[probe] dc3 irq3 accepted=%u delivered=%u coalesced_dropped=%u handler31a3e8_calls=%u\n",
+              s_dc3Irq3Accepted, s_dc3Irq3Delivered, s_dc3Irq3Dropped, s_dc3Handler31a3e8Calls);
+        dcLog("[probe] dc3 irq2 accepted=%u delivered=%u coalesced_dropped=%u\n",
+              s_dc3Irq2Accepted, s_dc3Irq2Delivered, s_dc3Irq2Dropped);
+
+        s_dc3Irq3Accepted = 0;
+        s_dc3Irq3Delivered = 0;
+        s_dc3Irq3Dropped = 0;
+        s_dc3Handler31a3e8Calls = 0;
+        s_dc3Irq2Accepted = 0;
+        s_dc3Irq2Delivered = 0;
+        s_dc3Irq2Dropped = 0;
 
         s_dcCalls = 0;
         s_dcRaCounts.clear();
@@ -7120,5 +7164,30 @@ namespace probe_ae {
         s_dc2CurSliceStart = now;
 
         checkDcSecDumpLocked();
+    }
+
+    void onDc3IrqProduced(uint32_t cause, bool accepted) {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        if (cause == 3u) {
+            if (accepted) s_dc3Irq3Accepted++;
+            else s_dc3Irq3Dropped++;
+        } else if (cause == 2u) {
+            if (accepted) s_dc3Irq2Accepted++;
+            else s_dc3Irq2Dropped++;
+        }
+    }
+
+    void onDc3IrqDelivered(uint32_t cause, uint32_t pc) {
+        if (!isDcProbeEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        if (cause == 3u) {
+            s_dc3Irq3Delivered++;
+            if (pc == 0x31A3E8u) {
+                s_dc3Handler31a3e8Calls++;
+            }
+        } else if (cause == 2u) {
+            s_dc3Irq2Delivered++;
+        }
     }
 }
