@@ -107,6 +107,16 @@ void diagSetLastCid1Path(const std::string &path)
 
 namespace ps2_syscalls
 {
+struct Cid1StreamJob
+{
+    int fd = -1;
+    uint32_t slotPtr = 0;
+    uint32_t seq = 0;
+};
+static std::mutex s_cid1JobsMutex;
+static std::vector<Cid1StreamJob> s_cid1StreamJobs;
+
+
     namespace
     {
         static inline bool isVerboseLog()
@@ -2598,5 +2608,42 @@ namespace probe_ae {
                 }
             }
         }
+    }
+}
+
+
+extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram)
+{
+    std::lock_guard<std::mutex> lock(ps2_syscalls::s_cid1JobsMutex);
+    std::fprintf(stderr, "[probe] dc7 cid1 jobs=%zu\n", ps2_syscalls::s_cid1StreamJobs.size());
+    for (const auto &job : ps2_syscalls::s_cid1StreamJobs)
+    {
+        uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+        if (rdram && (job.slotPtr & 0x1FFFFFFFu) + 16 <= 32 * 1024 * 1024)
+        {
+            std::memcpy(&w0, rdram + ((job.slotPtr + 0) & 0x1FFFFFFFu), 4);
+            std::memcpy(&w1, rdram + ((job.slotPtr + 4) & 0x1FFFFFFFu), 4);
+            std::memcpy(&w2, rdram + ((job.slotPtr + 8) & 0x1FFFFFFFu), 4);
+            std::memcpy(&w3, rdram + ((job.slotPtr + 12) & 0x1FFFFFFFu), 4);
+        }
+        std::fprintf(stderr, "[probe] dc7 cid1job fd=%d slot=0x%08X seq=0x%X slotw0..3=0x%08X 0x%08X 0x%08X 0x%08X\n",
+                     job.fd, job.slotPtr, job.seq, w0, w1, w2, w3);
+    }
+    if (rdram)
+    {
+        uint32_t dev30 = 0;
+        std::memcpy(&dev30, rdram + (0x771BB8u & 0x1FFFFFFFu), 4);
+        uint32_t s1_0 = 0, s1_1 = 0, s1_2 = 0, s1_3 = 0;
+        std::memcpy(&s1_0, rdram + (0x771BBCu & 0x1FFFFFFFu), 4);
+        std::memcpy(&s1_1, rdram + (0x771BC0u & 0x1FFFFFFFu), 4);
+        std::memcpy(&s1_2, rdram + (0x771BC4u & 0x1FFFFFFFu), 4);
+        std::memcpy(&s1_3, rdram + (0x771BC8u & 0x1FFFFFFFu), 4);
+        uint32_t s2_0 = 0, s2_1 = 0, s2_2 = 0, s2_3 = 0;
+        std::memcpy(&s2_0, rdram + (0x771C6Cu & 0x1FFFFFFFu), 4);
+        std::memcpy(&s2_1, rdram + (0x771C70u & 0x1FFFFFFFu), 4);
+        std::memcpy(&s2_2, rdram + (0x771C74u & 0x1FFFFFFFu), 4);
+        std::memcpy(&s2_3, rdram + (0x771C78u & 0x1FFFFFFFu), 4);
+        std::fprintf(stderr, "[probe] dc7 cid1 guest dev30=0x%08X slotBBC=0x%08X 0x%08X 0x%08X 0x%08X slotC6C=0x%08X 0x%08X 0x%08X 0x%08X\n",
+                     dev30, s1_0, s1_1, s1_2, s1_3, s2_0, s2_1, s2_2, s2_3);
     }
 }

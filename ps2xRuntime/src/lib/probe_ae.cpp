@@ -6949,6 +6949,9 @@ namespace probe_ae {
     // Task DI: Telemetry & Event Ring
     // =========================================================================
     extern "C" uint32_t ps2_getSg2Pos();
+    extern "C" void ps2_dumpDkSchedulerState();
+extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
+
 
     struct DiEvent {
         char kind[16];
@@ -7109,9 +7112,11 @@ namespace probe_ae {
                 s_diFZeroSecConsecutive = 0;
             } else if (s_diFEverStarted) {
                 s_diFZeroSecConsecutive++;
-                if (s_diFZeroSecConsecutive >= 3 && !s_diStallDumped) {
-                    s_diStallDumped = true;
-                    dcLog("[probe] dc5 STALL\n");
+                if (s_diFZeroSecConsecutive == 3 || s_diFZeroSecConsecutive == 13) {
+                    if (s_diFZeroSecConsecutive == 3) s_diStallDumped = true;
+                    dcLog("[probe] dc5 STALL (seq=%u)\n", (s_diFZeroSecConsecutive == 3 ? 1u : 2u));
+                    ps2_dumpDkSchedulerState();
+                    ps2_dumpDkCid1State(ram);
                     std::lock_guard<std::mutex> lock(s_diMutex);
                     uint64_t total = s_diEventTotal;
                     uint64_t count = (total < 32) ? total : 32;
@@ -7384,6 +7389,9 @@ namespace probe_ae {
     // Task DH: Movie stream feed deadlock diagnostics
     // =========================================================================
     extern "C" uint32_t ps2_getSg2Pos();
+    extern "C" void ps2_dumpDkSchedulerState();
+extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
+
 
     struct DhEvent {
         char name[16];

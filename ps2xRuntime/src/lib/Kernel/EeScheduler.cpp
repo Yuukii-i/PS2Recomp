@@ -2674,6 +2674,108 @@ void dumpEeDiagnostics(const EeScheduler *scheduler, uint32_t stuckPc)
 }
 
 namespace probe_ae {
+    
+    void dumpTaskDkInfo() {
+        if (!s_activeScheduler) return;
+        EeKernelSnapshot snap = s_activeScheduler->snapshot();
+
+        // 1. Threads
+        for (const auto &thSnap : snap.threads) {
+            const GuestThread *th = s_activeScheduler->thread(thSnap.id);
+            const char *stateStr = "unknown";
+            switch (thSnap.status) {
+                case EeThreadStatus::Running: stateStr = "RUNNING"; break;
+                case EeThreadStatus::Ready: stateStr = "READY"; break;
+                case EeThreadStatus::Waiting: stateStr = "WAIT"; break;
+                case EeThreadStatus::Suspended: stateStr = "SUSPEND"; break;
+                case EeThreadStatus::WaitingSuspended: stateStr = "WAIT_SUSP"; break;
+                case EeThreadStatus::Dormant: stateStr = "DORMANT"; break;
+            }
+
+            char waitBuf[128] = "none";
+            if (thSnap.status == EeThreadStatus::Waiting || thSnap.status == EeThreadStatus::WaitingSuspended) {
+                switch (thSnap.waitReason) {
+                    case EeWaitReason::Sleep: std::snprintf(waitBuf, sizeof(waitBuf), "sleep"); break;
+                    case EeWaitReason::Semaphore:
+                        std::snprintf(waitBuf, sizeof(waitBuf), "sema_%d", thSnap.waitId);
+                        break;
+                    case EeWaitReason::EventFlag:
+                        if (th) {
+                            if (auto *w = std::get_if<EeEventFlagWait>(&th->wait.payload))
+                                std::snprintf(waitBuf, sizeof(waitBuf), "ef_%d:0x%X:%u", w->id, w->bits, w->mode);
+                            else
+                                std::snprintf(waitBuf, sizeof(waitBuf), "ef_%d", thSnap.waitId);
+                        } else {
+                            std::snprintf(waitBuf, sizeof(waitBuf), "ef_%d", thSnap.waitId);
+                        }
+                        break;
+                    case EeWaitReason::VSync:
+                        if (th) {
+                            if (auto *w = std::get_if<EeVSyncWait>(&th->wait.payload))
+                                std::snprintf(waitBuf, sizeof(waitBuf), "vsync_%llu", (unsigned long long)w->afterTick);
+                            else
+                                std::snprintf(waitBuf, sizeof(waitBuf), "vsync");
+                        } else {
+                            std::snprintf(waitBuf, sizeof(waitBuf), "vsync");
+                        }
+                        break;
+                    default:
+                        std::snprintf(waitBuf, sizeof(waitBuf), "other_%u", (unsigned)thSnap.waitReason);
+                        break;
+                }
+            }
+
+            uint32_t pc = thSnap.pc;
+            uint32_t ra = thSnap.ra;
+            uint32_t wakeups = th ? th->wakeupCount : 0;
+            std::fprintf(stderr, "[probe] dc7 th id=%d entry=0x%08X prio=%d status=%s wait=%s pc=0x%08X ra=0x%08X wakeups=%u\n",
+                         thSnap.id, thSnap.entry, thSnap.currentPriority, stateStr, waitBuf, pc, ra, wakeups);
+        }
+
+        // 2. Semaphores
+        for (const auto &semSnap : snap.semaphores) {
+            std::string waitersStr;
+            const EeSemaphore *sem = s_activeScheduler->semaphore(semSnap.id);
+            if (sem) {
+                for (size_t i = 0; i < sem->waiters.size(); ++i) {
+                    if (i > 0) waitersStr += ",";
+                    waitersStr += std::to_string(sem->waiters[i]);
+                }
+            }
+            std::fprintf(stderr, "[probe] dc7 sema id=%d count=%d max=%d waiters=%s\n",
+                         semSnap.id, semSnap.count, semSnap.maxCount, waitersStr.c_str());
+        }
+
+        // 3. Event flags
+        for (const auto &efSnap : snap.eventFlags) {
+            std::string waitersStr;
+            const EeEventFlag *ef = s_activeScheduler->eventFlag(efSnap.id);
+            if (ef) {
+                for (size_t i = 0; i < ef->waiters.size(); ++i) {
+                    int waiterId = ef->waiters[i];
+                    if (i > 0) waitersStr += " ";
+                    waitersStr += std::to_string(waiterId);
+                    const GuestThread *th = s_activeScheduler->thread(waiterId);
+                    if (th) {
+                        if (auto *w = std::get_if<EeEventFlagWait>(&th->wait.payload)) {
+                            char buf[64];
+                            std::snprintf(buf, sizeof(buf), ":0x%X:%u", w->bits, w->mode);
+                            waitersStr += buf;
+                        }
+                    }
+                }
+            }
+            std::fprintf(stderr, "[probe] dc7 ef id=%d bits=0x%08X waiters=%s\n",
+                         efSnap.id, efSnap.bits, waitersStr.c_str());
+        }
+    }
+} // namespace probe_ae
+
+extern "C" void ps2_dumpDkSchedulerState() {
+    probe_ae::dumpTaskDkInfo();
+}
+namespace probe_ae {
+
     void dumpTaskASInfo(uint32_t sec, bool isFirstStuckSec) {
         if (!isEnabled() || !s_activeScheduler) return;
 
