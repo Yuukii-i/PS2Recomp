@@ -6856,4 +6856,144 @@ namespace probe_ae {
         ps2xSafeLog("[probe] ce sec vblank_delivered=%llu sg2_pos=0x%08X guest_ticks=%u\n",
                     (unsigned long long)totalDeliv, sg2_pos, guest_ticks);
     }
+
+    // =========================================================================
+    // Task DC Probes: sceGsSyncV & GS wait tracking
+    // =========================================================================
+    static std::mutex s_dcMutex;
+    static uint32_t s_dcCalls = 0;
+    static std::map<uint32_t, uint32_t> s_dcRaCounts;
+    static std::map<uint32_t, double> s_dcRaMs;
+    static uint32_t s_dcLastMode = 0;
+    static uint32_t s_dcLastA0 = 0;
+    static uint32_t s_dcRetParity0 = 0;
+    static uint32_t s_dcRetParity1 = 0;
+    static uint32_t s_dcDelta1 = 0;
+    static uint32_t s_dcDelta2 = 0;
+    static uint32_t s_dcDelta3 = 0;
+    static uint32_t s_dcDelta4p = 0;
+    static uint32_t s_dcSwapDBuff = 0;
+    static uint32_t s_dcResetPath = 0;
+    static uint32_t s_dcSyncPath = 0;
+    static uint32_t s_dcLastCtr = 0;
+    static auto s_dcLastSec = std::chrono::steady_clock::now();
+
+    static void dumpDcStatsLocked() {
+        std::vector<std::pair<uint32_t, uint32_t>> raSorted(s_dcRaCounts.begin(), s_dcRaCounts.end());
+        std::sort(raSorted.begin(), raSorted.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
+
+        std::string raHistStr;
+        const size_t raLimit = std::min<size_t>(4u, raSorted.size());
+        for (size_t i = 0; i < raLimit; ++i) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%s0x%08X:%u", (i > 0 ? " " : ""), raSorted[i].first, raSorted[i].second);
+            raHistStr += buf;
+        }
+
+        bhLog("[probe] dc syncv calls=%u ra_hist=<%s> mode=%u a0=%u ret_parity0=%u ret_parity1=%u\n",
+              s_dcCalls, raHistStr.c_str(), s_dcLastMode, s_dcLastA0, s_dcRetParity0, s_dcRetParity1);
+        ps2xSafeLog("[probe] dc syncv calls=%u ra_hist=<%s> mode=%u a0=%u ret_parity0=%u ret_parity1=%u\n",
+                    s_dcCalls, raHistStr.c_str(), s_dcLastMode, s_dcLastA0, s_dcRetParity0, s_dcRetParity1);
+
+        bhLog("[probe] dc syncv_delta hist={1:%u,2:%u,3:%u,4+:%u}\n",
+              s_dcDelta1, s_dcDelta2, s_dcDelta3, s_dcDelta4p);
+        ps2xSafeLog("[probe] dc syncv_delta hist={1:%u,2:%u,3:%u,4+:%u}\n",
+                    s_dcDelta1, s_dcDelta2, s_dcDelta3, s_dcDelta4p);
+
+        for (const auto &[ra, ms] : s_dcRaMs) {
+            bhLog("[probe] dc syncv_ms ra=0x%08X ms=%.2f\n", ra, ms);
+            ps2xSafeLog("[probe] dc syncv_ms ra=0x%08X ms=%.2f\n", ra, ms);
+        }
+
+        bhLog("[probe] dc stubs swap_dbuff=%u reset_path=%u sync_path=%u\n",
+              s_dcSwapDBuff, s_dcResetPath, s_dcSyncPath);
+        ps2xSafeLog("[probe] dc stubs swap_dbuff=%u reset_path=%u sync_path=%u\n",
+                    s_dcSwapDBuff, s_dcResetPath, s_dcSyncPath);
+
+        bhLog("[probe] dc ctr=%u\n", s_dcLastCtr);
+        ps2xSafeLog("[probe] dc ctr=%u\n", s_dcLastCtr);
+
+        s_dcCalls = 0;
+        s_dcRaCounts.clear();
+        s_dcRaMs.clear();
+        s_dcRetParity0 = 0;
+        s_dcRetParity1 = 0;
+        s_dcDelta1 = 0;
+        s_dcDelta2 = 0;
+        s_dcDelta3 = 0;
+        s_dcDelta4p = 0;
+        s_dcSwapDBuff = 0;
+        s_dcResetPath = 0;
+        s_dcSyncPath = 0;
+    }
+
+    static void checkDcSecDumpLocked() {
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_dcLastSec).count() >= 1000) {
+            s_dcLastSec = now;
+            dumpDcStatsLocked();
+        }
+    }
+
+    void onDcSyncVStart(uint32_t ra, uint32_t a0, bool interlace, const uint8_t *rdram) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        s_dcCalls++;
+        s_dcRaCounts[ra]++;
+        s_dcLastMode = interlace ? 1u : 0u;
+        s_dcLastA0 = a0;
+
+        const uint8_t *ram = rdram ? rdram : s_cachedRdram;
+        if (ram) {
+            uint32_t val = 0;
+            std::memcpy(&val, ram + (0x72D498u & PS2_RAM_MASK), 4);
+            s_dcLastCtr = val;
+        }
+
+        checkDcSecDumpLocked();
+    }
+
+    void onDcSyncVComplete(uint32_t ra, uint64_t deltaTicks, uint32_t retVal, double waitMs) {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        if ((retVal & 1u) == 0u) {
+            s_dcRetParity0++;
+        } else {
+            s_dcRetParity1++;
+        }
+
+        if (deltaTicks <= 1u) {
+            s_dcDelta1++;
+        } else if (deltaTicks == 2u) {
+            s_dcDelta2++;
+        } else if (deltaTicks == 3u) {
+            s_dcDelta3++;
+        } else {
+            s_dcDelta4p++;
+        }
+
+        s_dcRaMs[ra] += waitMs;
+
+        checkDcSecDumpLocked();
+    }
+
+    void onDcSwapDBuff() {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        s_dcSwapDBuff++;
+    }
+
+    void onDcResetPath() {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        s_dcResetPath++;
+    }
+
+    void onDcSyncPath() {
+        if (!isEnabled()) return;
+        std::lock_guard<std::mutex> lock(s_dcMutex);
+        s_dcSyncPath++;
+    }
 }

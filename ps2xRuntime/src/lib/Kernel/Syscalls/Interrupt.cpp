@@ -92,7 +92,25 @@ namespace ps2_syscalls
     void WaitVSyncTick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, int fixedResult)
     {
         EeScheduler &ee = scheduler(rdram, ctx, runtime);
-        ee.waitVSync(ee.currentVSyncTick(), fixedResult);
+        const uint64_t startTick = ee.currentVSyncTick();
+        const uint32_t ra = ctx ? getRegU32(ctx, 31) : 0u;
+        const uint32_t a0 = ctx ? getRegU32(ctx, 4) : 0u;
+        const bool interlace = (fixedResult < 0);
+        const auto t0 = std::chrono::steady_clock::now();
+
+        if (probe_ae::isEnabled()) {
+            probe_ae::onDcSyncVStart(ra, a0, interlace, rdram);
+            ee.waitVSync(startTick, fixedResult, [&ee, startTick, ra, t0](R5900Context &c) {
+                const uint64_t resumeTick = ee.currentVSyncTick();
+                const uint64_t deltaTicks = (resumeTick >= startTick) ? (resumeTick - startTick) : 0u;
+                const uint32_t ret = getRegU32(&c, 2);
+                const auto t1 = std::chrono::steady_clock::now();
+                const double waitMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                probe_ae::onDcSyncVComplete(ra, deltaTicks, ret, waitMs);
+            });
+        } else {
+            ee.waitVSync(startTick, fixedResult);
+        }
     }
 
     void SetVSyncFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

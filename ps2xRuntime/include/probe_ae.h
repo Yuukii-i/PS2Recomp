@@ -899,4 +899,11 @@ namespace probe_ae {
     void onCeTickSec();
     void recordMainGuestThread();
     void cgStartSamplerIfEnabled();
+
+    // Task DC Probes
+    void onDcSyncVStart(uint32_t ra, uint32_t a0, bool interlace, const uint8_t *rdram);
+    void onDcSyncVComplete(uint32_t ra, uint64_t deltaTicks, uint32_t retVal, double waitMs);
+    void onDcSwapDBuff();
+    void onDcResetPath();
+    void onDcSyncPath();
 }
