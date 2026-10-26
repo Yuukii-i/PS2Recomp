@@ -60,6 +60,19 @@ static thread_local uint32_t s_dyCurStartPc = 0;
 static thread_local uint32_t s_dyCurTop = 0;
 static thread_local uint32_t s_dyCurItop = 0;
 
+// Task DZ state
+extern "C" void ps2_vif1_dumpDzRing();
+static std::mutex s_dzMutex;
+static uint32_t s_dzNormalLogged = 0;
+static uint32_t s_dzCappedLogged = 0;
+static bool s_dzFirstCappedDumpDone = false;
+static thread_local bool s_dzPendingRun = false;
+static thread_local uint32_t s_dzPendingStartPc = 0;
+static thread_local uint32_t s_dzPendingTop = 0;
+static thread_local uint32_t s_dzPendingItop = 0;
+static thread_local int32_t s_dzPendingVi[16];
+static thread_local uint32_t s_dzPendingDataWords[32][4];
+
 extern "C" void ps2_vu1_dumpDyPerSec(const uint8_t *rdram) {
     if (!probe_ae::isDcProbeEnabled()) return;
     std::lock_guard<std::mutex> lock(s_dyMutex);
@@ -1762,6 +1775,31 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
     s_dyCurTop = top;
     s_dyCurItop = itop;
+    s_dzPendingRun = false;
+    if (probe_ae::isDcProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u) {
+        uint64_t vsyncTick = 0;
+        uint8_t *ram = memory ? memory->getRDRAM() : nullptr;
+        if (ram) {
+            std::memcpy(&vsyncTick, ram + (0x696FD0u & 0x1FFFFFFFu), 8);
+        }
+        if (vsyncTick > 600u) {
+            s_dzPendingRun = true;
+            s_dzPendingStartPc = startPC;
+            s_dzPendingTop = top;
+            s_dzPendingItop = itop;
+            std::memcpy(s_dzPendingVi, m_state.vi, sizeof(s_dzPendingVi));
+            int32_t baseQw = static_cast<int32_t>(top) - 2;
+            for (int i = 0; i < 32; ++i) {
+                int32_t q = baseQw + i;
+                uint32_t effQw = (q >= 0) ? (static_cast<uint32_t>(q) & 0x3FFu) : ((static_cast<uint32_t>(q + 1024)) & 0x3FFu);
+                if (vuData && (effQw + 1u) * 16u <= dataSize) {
+                    std::memcpy(s_dzPendingDataWords[i], vuData + effQw * 16u, 16);
+                } else {
+                    std::memset(s_dzPendingDataWords[i], 0, 16);
+                }
+            }
+        }
+    }
 
     if (probe_ae::handleMovieHleMscal(startPC, vuCode, codeSize, vuData, dataSize, top, gs, memory))
     {
@@ -2124,6 +2162,73 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 }
             }
             std::fflush(stdout);
+        }
+        if (s_dzPendingRun) {
+            s_dzPendingRun = false;
+            bool logThis = false;
+            bool isCapped = hitCap;
+            bool isFirstCapped = false;
+            {
+                std::lock_guard<std::mutex> lock(s_dzMutex);
+                if (isCapped) {
+                    if (s_dzCappedLogged < 6) {
+                        s_dzCappedLogged++;
+                        logThis = true;
+                    }
+                    if (!s_dzFirstCappedDumpDone) {
+                        s_dzFirstCappedDumpDone = true;
+                        isFirstCapped = true;
+                    }
+                } else {
+                    if (s_dzNormalLogged < 6) {
+                        s_dzNormalLogged++;
+                        logThis = true;
+                    }
+                }
+            }
+            if (logThis) {
+                std::string viStr;
+                for (int r = 1; r < 16; ++r) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%s%d", (r > 1 ? " " : ""), s_dzPendingVi[r]);
+                    viStr += buf;
+                }
+                std::printf("[probe] dc15 entry kind=%s start=0x%02X top=%u itop=%u vi=%s\n",
+                            isCapped ? "capped" : "normal", s_dzPendingStartPc, s_dzPendingTop, s_dzPendingItop, viStr.c_str());
+                int32_t baseQw = static_cast<int32_t>(s_dzPendingTop) - 2;
+                for (int i = 0; i < 32; ++i) {
+                    int32_t q = baseQw + i;
+                    uint32_t effQw = (q >= 0) ? (static_cast<uint32_t>(q) & 0x3FFu) : ((static_cast<uint32_t>(q + 1024)) & 0x3FFu);
+                    std::printf("[probe] dc15 data qw=%d w=%08X %08X %08X %08X\n",
+                                effQw, s_dzPendingDataWords[i][0], s_dzPendingDataWords[i][1],
+                                s_dzPendingDataWords[i][2], s_dzPendingDataWords[i][3]);
+                }
+                std::fflush(stdout);
+            }
+            if (isFirstCapped) {
+                // Dump VU1 code for pairs 0x000..0x200 (64 pairs)
+                for (uint32_t pc = 0x000u; pc < 0x200u; pc += 8u) {
+                    if (pc + 8u <= codeSize) {
+                        uint32_t lower = *reinterpret_cast<const uint32_t *>(vuCode + pc + 0u);
+                        uint32_t upper = *reinterpret_cast<const uint32_t *>(vuCode + pc + 4u);
+                        std::printf("[probe] dc15 code pc=0x%03X upper=0x%08X lower=0x%08X\n", pc, upper, lower);
+                    }
+                }
+                // Dump VIF1 UNPACK ring
+                ps2_vif1_dumpDzRing();
+                // Dump VIF1 registers
+                if (memory) {
+                    const auto &vr = memory->vif1_regs;
+                    uint32_t cl = vr.cycle & 0xFFu;
+                    uint32_t wl = (vr.cycle >> 8) & 0xFFu;
+                    std::printf("[probe] dc15 vif1 cl=%u wl=%u mode=%u mask=0x%08X tops=%u base=%u ofst=%u\n",
+                                cl, wl, vr.mode & 3u, vr.mask, vr.tops & 0x3FFu, vr.base & 0x3FFu, vr.ofst & 0x3FFu);
+                    std::printf("[probe] dc15 vif1_row col row=%08X %08X %08X %08X col=%08X %08X %08X %08X\n",
+                                vr.row[0], vr.row[1], vr.row[2], vr.row[3],
+                                vr.col[0], vr.col[1], vr.col[2], vr.col[3]);
+                }
+                std::fflush(stdout);
+            }
         }
     }
 

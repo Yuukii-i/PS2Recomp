@@ -7,6 +7,53 @@
 #include <map>
 #include <algorithm>
 #include <tuple>
+#include <mutex>
+
+// =========================================================================
+// Task DZ: VIF1 UNPACK ring buffer & VIF1 register dump
+// =========================================================================
+struct DzUnpackEntry {
+    uint8_t cmd;
+    uint8_t vn;
+    uint8_t vl;
+    uint8_t usn;
+    uint8_t flg;
+    uint8_t cl;
+    uint8_t wl;
+    uint8_t num;
+    uint32_t dest;
+    uint32_t src;
+    uint8_t fast;
+};
+
+static std::mutex s_dzUnpackMutex;
+static DzUnpackEntry s_dzUnpackRing[256];
+static uint32_t s_dzUnpackHead = 0;
+static uint32_t s_dzUnpackTotal = 0;
+
+static void ps2_vif1_recordDzUnpack(uint8_t cmd, uint8_t vn, uint8_t vl, uint8_t usn, uint8_t flg,
+                                    uint8_t cl, uint8_t wl, uint8_t num, uint32_t dest,
+                                    uint32_t src, uint8_t isFast)
+{
+    std::lock_guard<std::mutex> lock(s_dzUnpackMutex);
+    uint32_t idx = s_dzUnpackHead & 255u;
+    s_dzUnpackRing[idx] = {cmd, vn, vl, usn, flg, cl, wl, num, dest, src, isFast};
+    s_dzUnpackHead++;
+    s_dzUnpackTotal++;
+}
+
+extern "C" void ps2_vif1_dumpDzRing() {
+    std::lock_guard<std::mutex> lock(s_dzUnpackMutex);
+    uint32_t total = s_dzUnpackTotal;
+    uint32_t count = std::min<uint32_t>(256u, total);
+    uint32_t startIdx = total - count;
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto &e = s_dzUnpackRing[(startIdx + i) & 255u];
+        std::printf("[probe] dc15 unpack cmd=0x%02X vn=%u vl=%u usn=%u flg=%u cl=%u wl=%u num=%u dest=0x%03X src=0x%08X mode=%s\n",
+                    e.cmd, e.vn, e.vl, e.usn, e.flg, e.cl, e.wl, e.num, e.dest, e.src,
+                    e.fast ? "fast" : "generic");
+    }
+}
 
 extern void recordCompletedIntcCause(uint32_t cause);
 
@@ -1091,6 +1138,14 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
                         s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
                         executeGeneric = false;
+                        if (probe_ae::isDcProbeEnabled()) {
+                            uint32_t srcOff = (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE) ? static_cast<uint32_t>(srcBase - m_rdram) : 0u;
+                            ps2_vif1_recordDzUnpack(opcode, static_cast<uint8_t>(vn), static_cast<uint8_t>(vl),
+                                                    static_cast<uint8_t>((imm & 0x4000u) ? 1u : 0u),
+                                                    static_cast<uint8_t>((imm & 0x8000u) ? 1u : 0u),
+                                                    static_cast<uint8_t>(cl), static_cast<uint8_t>(wl),
+                                                    static_cast<uint8_t>(num), vuAddr, srcOff, 1u);
+                        }
                     }
                 } else {
                     s_ciGenericCount.fetch_add(1, std::memory_order_relaxed);
@@ -1107,6 +1162,14 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         entry.vecs += writeVectorCount;
                         entry.calls++;
                     }
+                }
+                if (executeGeneric && probe_ae::isDcProbeEnabled()) {
+                    uint32_t srcOff = (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE) ? static_cast<uint32_t>(srcBase - m_rdram) : 0u;
+                    ps2_vif1_recordDzUnpack(opcode, static_cast<uint8_t>(vn), static_cast<uint8_t>(vl),
+                                            static_cast<uint8_t>((imm & 0x4000u) ? 1u : 0u),
+                                            static_cast<uint8_t>((imm & 0x8000u) ? 1u : 0u),
+                                            static_cast<uint8_t>(cl), static_cast<uint8_t>(wl),
+                                            static_cast<uint8_t>(num), vuAddr, srcOff, 0u);
                 }
 
                 if (executeGeneric)
