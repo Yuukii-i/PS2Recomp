@@ -99,6 +99,45 @@ static std::unordered_map<uint32_t, VdRunStats> s_vdStats;
 static std::chrono::steady_clock::time_point s_vdLastWindowTime{};
 static const auto s_vdStartTime = std::chrono::steady_clock::now();
 
+// =========================================================================
+// Task EG: Instruction trace of bad VU1 pc=0x08 run
+// =========================================================================
+struct EgVfChange {
+    uint8_t reg;
+    uint32_t words[4];
+};
+struct EgViChange {
+    uint8_t reg;
+    int32_t val;
+};
+struct EgPairTrace {
+    uint32_t pc;
+    uint32_t upper;
+    uint32_t lower;
+    uint8_t numVf;
+    uint8_t numVi;
+    EgVfChange vfChanges[4];
+    EgViChange viChanges[4];
+    uint32_t qHex;
+    uint32_t mac;
+    uint32_t status;
+    uint32_t clip;
+    uint32_t pHex;
+};
+
+static EgPairTrace s_egTraces[700];
+static uint32_t s_egTraceCount = 0;
+static uint32_t s_egPc08RunCount = 0;
+static bool s_egCurRunTraced = false;
+static bool s_egDone = false;
+static float s_egEntryVf[32][4];
+static int32_t s_egEntryVi[16];
+static uint32_t s_egEntryTop = 0;
+static uint32_t s_egEntryItop = 0;
+static uint32_t s_egEntryDataWords[281][4]; // qw 440..720 (281 qw)
+static uint32_t s_egTotalPairs = 0;
+static std::vector<EePacket> s_egCurRunPackets;
+
 struct VdCandidateEntry {
     bool valid = false;
     uint32_t pc = 0;
@@ -1237,6 +1276,15 @@ void VU1Interpreter::finishXgkick()
         decodeXgkickPacketStats(m_xgkick.packet.data(), m_xgkick.totalBytes,
                                 s_vdCurRunVerts, s_vdCurRunZeroXy, s_vdCurRunOob,
                                 s_vdCurRunPrimHist);
+        if (s_egCurRunTraced && s_egCurRunPackets.size() < 2u)
+        {
+            EePacket pkt{};
+            uint32_t qwAvailable = m_xgkick.totalBytes / 16u;
+            pkt.qwCount = std::min<uint32_t>(24u, qwAvailable);
+            std::memset(pkt.words, 0, sizeof(pkt.words));
+            std::memcpy(pkt.words, m_xgkick.packet.data(), pkt.qwCount * 16u);
+            s_egCurRunPackets.push_back(pkt);
+        }
         if (!s_eeVuDone && s_eeCurRunPackets.size() < 4u)
         {
             EePacket pkt{};
@@ -1934,6 +1982,34 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     std::memset(s_vdCurRunPrimHist, 0, sizeof(s_vdCurRunPrimHist));
     s_vdHaveFirstXgkick = false;
     s_eeCurRunPackets.clear();
+    s_egCurRunTraced = false;
+    s_egCurRunPackets.clear();
+    s_egTotalPairs = 0;
+    if (!s_egDone && isVu3dProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u)
+    {
+        const auto ecNow = std::chrono::steady_clock::now();
+        const uint64_t procSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(ecNow - s_vdStartTime).count());
+        if (procSec >= 60u)
+        {
+            uint32_t rIdx = s_egPc08RunCount++;
+            if ((rIdx % 20u) == 0u)
+            {
+                s_egCurRunTraced = true;
+                s_egTraceCount = 0;
+                std::memcpy(s_egEntryVf, m_state.vf, sizeof(s_egEntryVf));
+                std::memcpy(s_egEntryVi, m_state.vi, sizeof(s_egEntryVi));
+                s_egEntryTop = top;
+                s_egEntryItop = itop;
+                for (uint32_t q = 440u; q <= 720u; ++q) {
+                    if (vuData && (q + 1u) * 16u <= dataSize) {
+                        std::memcpy(s_egEntryDataWords[q - 440u], vuData + q * 16u, 16);
+                    } else {
+                        std::memset(s_egEntryDataWords[q - 440u], 0, 16);
+                    }
+                }
+            }
+        }
+    }
     if (probe_ae::isDcProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u) {
         uint64_t vsyncTick = 0;
         uint8_t *ram = memory ? memory->getRDRAM() : nullptr;
@@ -2037,6 +2113,13 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (m_state.pc + 8u > codeSize)
             break;
 
+        float preVf[32][4];
+        int32_t preVi[16];
+        if (s_egCurRunTraced)
+        {
+            std::memcpy(preVf, m_state.vf, sizeof(preVf));
+            std::memcpy(preVi, m_state.vi, sizeof(preVi));
+        }
         const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
         if (probe_ae::isDcProbeEnabled()) { uint32_t idx = s_dyLastPcIdx++; s_dyLastPcs[idx & 4095u] = m_state.pc; }
         instrsThisRun++;
@@ -2224,6 +2307,42 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
 
         advanceOneCycle();
+        if (s_egCurRunTraced)
+        {
+            s_egTotalPairs++;
+            if (s_egTraceCount < 700u)
+            {
+                auto &t = s_egTraces[s_egTraceCount++];
+                t.pc = m_state.pc;
+                t.upper = decoded.upper;
+                t.lower = decoded.lower;
+                t.numVf = 0;
+                t.numVi = 0;
+                for (int r = 0; r < 32; ++r) {
+                    if (std::memcmp(preVf[r], m_state.vf[r], 16) != 0) {
+                        if (t.numVf < 4) {
+                            auto &ch = t.vfChanges[t.numVf++];
+                            ch.reg = static_cast<uint8_t>(r);
+                            std::memcpy(ch.words, m_state.vf[r], 16);
+                        }
+                    }
+                }
+                for (int r = 0; r < 16; ++r) {
+                    if (preVi[r] != m_state.vi[r]) {
+                        if (t.numVi < 4) {
+                            auto &ch = t.viChanges[t.numVi++];
+                            ch.reg = static_cast<uint8_t>(r);
+                            ch.val = m_state.vi[r];
+                        }
+                    }
+                }
+                std::memcpy(&t.qHex, &m_state.q, 4);
+                std::memcpy(&t.pHex, &m_state.p, 4);
+                t.mac = m_state.mac;
+                t.status = m_state.status;
+                t.clip = m_state.clip;
+            }
+        }
         if (programEnded)
             break;
     }
@@ -2463,6 +2582,61 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 std::fflush(stdout);
             }
 
+            if (!s_egDone && s_egCurRunTraced && s_vdCurRunVerts >= 30u && s_vdCurRunZeroXy >= 4u)
+            {
+                s_egDone = true;
+                s_egCurRunTraced = false;
+                std::printf("[probe] eg run_verts=%u zero_xy=%u total_pairs=%u\n", s_vdCurRunVerts, s_vdCurRunZeroXy, s_egTotalPairs);
+                for (int n = 0; n < 32; ++n) {
+                    uint32_t xw = 0, yw = 0, zw = 0, ww = 0;
+                    std::memcpy(&xw, &s_egEntryVf[n][0], 4);
+                    std::memcpy(&yw, &s_egEntryVf[n][1], 4);
+                    std::memcpy(&zw, &s_egEntryVf[n][2], 4);
+                    std::memcpy(&ww, &s_egEntryVf[n][3], 4);
+                    std::printf("[probe] eg entry vf%02d=%08X %08X %08X %08X\n", n, xw, yw, zw, ww);
+                }
+                std::string viStr;
+                for (int r = 1; r < 16; ++r) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%s%d", (r > 1 ? " " : ""), s_egEntryVi[r]);
+                    viStr += buf;
+                }
+                std::printf("[probe] eg entry vi=%s top=%u itop=%u\n", viStr.c_str(), s_egEntryTop, s_egEntryItop);
+                for (uint32_t i = 0; i < s_egTraceCount; ++i) {
+                    const auto &t = s_egTraces[i];
+                    std::string vfwStr;
+                    for (uint8_t v = 0; v < t.numVf; ++v) {
+                        char buf[64];
+                        std::snprintf(buf, sizeof(buf), "%svf%02u:%08X %08X %08X %08X", (v > 0 ? ";" : ""), t.vfChanges[v].reg,
+                                      t.vfChanges[v].words[0], t.vfChanges[v].words[1], t.vfChanges[v].words[2], t.vfChanges[v].words[3]);
+                        vfwStr += buf;
+                    }
+                    std::string viwStr;
+                    for (uint8_t v = 0; v < t.numVi; ++v) {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "%svi%02u:%d", (v > 0 ? ";" : ""), t.viChanges[v].reg, t.viChanges[v].val);
+                        viwStr += buf;
+                    }
+                    std::printf("[probe] eg pc=0x%03X up=0x%08X lo=0x%08X", t.pc, t.upper, t.lower);
+                    if (!vfwStr.empty()) std::printf(" vfw=%s", vfwStr.c_str());
+                    if (!viwStr.empty()) std::printf(" viw=%s", viwStr.c_str());
+                    std::printf(" q=0x%08X mac=0x%08X st=0x%08X clip=0x%08X\n", t.qHex, t.mac, t.status, t.clip);
+                }
+                for (uint32_t q = 440u; q <= 720u; ++q) {
+                    const auto &w = s_egEntryDataWords[q - 440u];
+                    if (w[0] != 0 || w[1] != 0 || w[2] != 0 || w[3] != 0) {
+                        std::printf("[probe] eg data qw=%u w=%08X %08X %08X %08X\n", q, w[0], w[1], w[2], w[3]);
+                    }
+                }
+                for (size_t p = 0; p < s_egCurRunPackets.size(); ++p) {
+                    const auto &pkt = s_egCurRunPackets[p];
+                    for (uint32_t q = 0; q < pkt.qwCount; ++q) {
+                        std::printf("[probe] eg out pkt=%u qw=%u w=%08X %08X %08X %08X\n",
+                                    static_cast<unsigned>(p), q, pkt.words[q][0], pkt.words[q][1], pkt.words[q][2], pkt.words[q][3]);
+                    }
+                }
+                std::fflush(stdout);
+            }
             if (s_dyCurStartPc != 0x08u && s_dyCurStartPc != 0x48u && procElapsedSec >= 60u)
             {
                 auto &cand = s_vdCandidateEntries[s_dyCurStartPc];
