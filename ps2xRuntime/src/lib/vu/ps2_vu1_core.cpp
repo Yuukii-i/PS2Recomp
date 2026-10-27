@@ -185,6 +185,44 @@ static thread_local std::vector<uint32_t> s_ekCurRunTargets;
 static thread_local uint32_t s_ekEntryVuData[1024][4];
 
 // =========================================================================
+// Task EL: Run order / staleness tracking for qw 636..699
+// =========================================================================
+struct ElLastWriter {
+    bool written = false;
+    uint64_t runId = 0;
+    uint32_t startPc = 0;
+    uint32_t pairIdx = 0;
+    bool allZero = false;
+};
+
+struct ElDrawHdr {
+    uint64_t runId = 0;
+    uint32_t top = 0;
+    uint32_t words[12][4]{};
+};
+
+static uint64_t s_elGlobalRunId = 0;
+static ElLastWriter s_elLastWriter[64];
+static bool s_elWindowOpened = false;
+static uint32_t s_elWindowRunsRemaining = 0;
+static bool s_elHdrsDumped = false;
+static std::vector<ElDrawHdr> s_elDrawHdrs;
+
+static thread_local uint64_t s_elCurRunId = 0;
+static thread_local uint32_t s_elCurRunPairs = 0;
+static thread_local uint32_t s_elCurRunStCount = 0;
+static thread_local uint32_t s_elCurRunStMinQw = 9999;
+static thread_local uint32_t s_elCurRunStMaxQw = 0;
+static thread_local uint32_t s_elCurRunRdCount = 0;
+static thread_local uint32_t s_elCurRunRdMinQw = 9999;
+static thread_local uint32_t s_elCurRunRdMaxQw = 0;
+static thread_local uint32_t s_elCurRunRdZero = 0;
+static thread_local uint32_t s_elCurRunRdNever = 0;
+static thread_local uint64_t s_elCurRunRdMinAge = 0xFFFFFFFFFFFFFFFFULL;
+static thread_local uint64_t s_elCurRunRdMaxAge = 0;
+static thread_local bool s_elCurRunHaveAge = false;
+
+// =========================================================================
 // Task EJ: No time gate + last-writer table for qw 636..700 + ei read trigger
 // =========================================================================
 static inline uint32_t getVu3dAfterSec() {
@@ -1257,6 +1295,19 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
         bool isSq = (op == 0x01u) || ((op >= 0x40u || (s_ehCurLowerInstr & 0x80000000u)) && (special == 0x35u || special == 0x37u));
         if (isSq && qw >= 636u && qw < 700u)
         {
+        if (isSq && qw >= 636u && qw < 700u)
+        {
+            auto &elW = s_elLastWriter[qw - 636u];
+            elW.written = true;
+            elW.runId = s_elCurRunId;
+            elW.startPc = s_dyCurStartPc;
+            elW.pairIdx = s_elCurRunPairs;
+            elW.allZero = (words[0] == 0 && words[1] == 0 && words[2] == 0 && words[3] == 0);
+
+            s_elCurRunStCount++;
+            if (qw < s_elCurRunStMinQw) s_elCurRunStMinQw = qw;
+            if (qw > s_elCurRunStMaxQw) s_elCurRunStMaxQw = qw;
+        }
         if (s_ekCurRunActive && isSq && qw >= 636u && qw < 700u)
         {
             s_ekCurRunSt636++;
@@ -2371,6 +2422,19 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     s_egCurRunTraced = false;
     s_egCurRunPackets.clear();
     s_egTotalPairs = 0;
+    s_elCurRunId = ++s_elGlobalRunId;
+    s_elCurRunPairs = 0;
+    s_elCurRunStCount = 0;
+    s_elCurRunStMinQw = 9999;
+    s_elCurRunStMaxQw = 0;
+    s_elCurRunRdCount = 0;
+    s_elCurRunRdMinQw = 9999;
+    s_elCurRunRdMaxQw = 0;
+    s_elCurRunRdZero = 0;
+    s_elCurRunRdNever = 0;
+    s_elCurRunRdMinAge = 0xFFFFFFFFFFFFFFFFULL;
+    s_elCurRunRdMaxAge = 0;
+    s_elCurRunHaveAge = false;
     s_ekCurRunActive = false;
     if (isVu3dProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u)
     {
@@ -2650,6 +2714,42 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 }
             }
         }
+        s_elCurRunPairs++;
+        if (isVu3dProbeEnabled())
+        {
+            uint32_t opHi = (decoded.lower >> 25) & 0x7Fu;
+            uint32_t special = (decoded.lower & 3u) | ((decoded.lower >> 4) & 0x7Cu);
+            bool isLq = (opHi == 0x00u) || ((opHi >= 0x40u || (decoded.lower & 0x80000000u)) && (special == 0x34u || special == 0x36u));
+            if (isLq)
+            {
+                EiMemOp mop = decodeEiMem(decoded.lower, m_state, vuData, dataSize);
+                if (mop.qw >= 636 && mop.qw < 700)
+                {
+                    uint32_t lq = static_cast<uint32_t>(mop.qw);
+                    s_elCurRunRdCount++;
+                    if (lq < s_elCurRunRdMinQw) s_elCurRunRdMinQw = lq;
+                    if (lq > s_elCurRunRdMaxQw) s_elCurRunRdMaxQw = lq;
+
+                    if (vuData && (lq + 1u) * 16u <= dataSize) {
+                        uint32_t lw[4];
+                        std::memcpy(lw, vuData + lq * 16u, 16);
+                        if (lw[0] == 0 && lw[1] == 0 && lw[2] == 0 && lw[3] == 0) {
+                            s_elCurRunRdZero++;
+                        }
+                    }
+
+                    const auto &elW = s_elLastWriter[lq - 636u];
+                    if (!elW.written) {
+                        s_elCurRunRdNever++;
+                    } else {
+                        uint64_t age = (s_elCurRunId >= elW.runId) ? (s_elCurRunId - elW.runId) : 0u;
+                        if (age < s_elCurRunRdMinAge) s_elCurRunRdMinAge = age;
+                        if (age > s_elCurRunRdMaxAge) s_elCurRunRdMaxAge = age;
+                        s_elCurRunHaveAge = true;
+                    }
+                }
+            }
+        }
         if (s_ekCurRunActive)
         {
             s_ekCurRunPairs++;
@@ -2864,6 +2964,61 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 s_ekCmdHist[tgt]++;
             }
 
+            bool isDrawRun = (seqStr.find("1EE0") != std::string::npos);
+            if (!s_elWindowOpened && isDrawRun && s_vdCurRunZeroXy >= 1u)
+            {
+                s_elWindowOpened = true;
+                s_elWindowRunsRemaining = 400u;
+            }
+            if (s_elWindowOpened && s_elWindowRunsRemaining > 0u)
+            {
+                if (isDrawRun && s_vdCurRunZeroXy > 0u && s_elDrawHdrs.size() < 6u)
+                {
+                    ElDrawHdr dh;
+                    dh.runId = s_elCurRunId;
+                    dh.top = s_dyCurTop;
+                    for (uint32_t q = 0; q < 12u; ++q) {
+                        uint32_t effQw = (s_dyCurTop + q) & 0x3FFu;
+                        if (vuData && (effQw + 1u) * 16u <= dataSize) {
+                            std::memcpy(dh.words[q], vuData + effQw * 16u, 16);
+                        }
+                    }
+                    s_elDrawHdrs.push_back(dh);
+                }
+
+                char stBuf[64], rdBuf[64], ageBuf[64];
+                if (s_elCurRunStCount > 0u) {
+                    std::snprintf(stBuf, sizeof(stBuf), "[%u,%u]x%u", s_elCurRunStMinQw, s_elCurRunStMaxQw, s_elCurRunStCount);
+                } else {
+                    std::snprintf(stBuf, sizeof(stBuf), "[0,0]x0");
+                }
+                if (s_elCurRunRdCount > 0u) {
+                    std::snprintf(rdBuf, sizeof(rdBuf), "[%u,%u]x%u", s_elCurRunRdMinQw, s_elCurRunRdMaxQw, s_elCurRunRdCount);
+                } else {
+                    std::snprintf(rdBuf, sizeof(rdBuf), "[0,0]x0");
+                }
+                if (s_elCurRunHaveAge) {
+                    std::snprintf(ageBuf, sizeof(ageBuf), "%llu..%llu", (unsigned long long)s_elCurRunRdMinAge, (unsigned long long)s_elCurRunRdMaxAge);
+                } else {
+                    std::snprintf(ageBuf, sizeof(ageBuf), "none");
+                }
+
+                std::printf("[probe] el run=%llu start=0x%03X seq=<%s> pairs=%u verts=%u zero_xy=%u st=%s rd=%s rd_zero=%u rd_never=%u rd_age=%s top=%u itop=%u\n",
+                            (unsigned long long)s_elCurRunId, spc, seqStr.c_str(), s_elCurRunPairs,
+                            s_vdCurRunVerts, s_vdCurRunZeroXy, stBuf, rdBuf,
+                            s_elCurRunRdZero, s_elCurRunRdNever, ageBuf, s_dyCurTop, s_dyCurItop);
+                s_elWindowRunsRemaining--;
+                if (s_elWindowRunsRemaining == 0u && !s_elHdrsDumped) {
+                    s_elHdrsDumped = true;
+                    for (const auto &h : s_elDrawHdrs) {
+                        for (uint32_t q = 0; q < 12u; ++q) {
+                            std::printf("[probe] el hdr run=%llu qw=%u w=%08X %08X %08X %08X\n",
+                                        (unsigned long long)h.runId, q, h.words[q][0], h.words[q][1], h.words[q][2], h.words[q][3]);
+                        }
+                    }
+                }
+                std::fflush(stdout);
+            }
             if (s_ekSeenHdrSequences.size() < 30u && s_ekSeenHdrSequences.insert(seqStr).second) {
                 for (uint32_t q = 0; q < 12u; ++q) {
                     uint32_t effQw = (s_dyCurTop + q) & 0x3FFu;
@@ -2879,6 +3034,22 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             auto &o = s_ekOtherStats[spc];
             o.runs++;
             o.cycles += (m_cycle > tRunStartCycle) ? (m_cycle - tRunStartCycle) : 0u;
+        }
+        if (spc != 0x08u && s_elWindowOpened && s_elWindowRunsRemaining > 0u)
+        {
+            std::printf("[probe] el run=%llu start=0x%03X pairs=%u\n",
+                        (unsigned long long)s_elCurRunId, spc, s_elCurRunPairs);
+            s_elWindowRunsRemaining--;
+            if (s_elWindowRunsRemaining == 0u && !s_elHdrsDumped) {
+                s_elHdrsDumped = true;
+                for (const auto &h : s_elDrawHdrs) {
+                    for (uint32_t q = 0; q < 12u; ++q) {
+                        std::printf("[probe] el hdr run=%llu qw=%u w=%08X %08X %08X %08X\n",
+                                    (unsigned long long)h.runId, q, h.words[q][0], h.words[q][1], h.words[q][2], h.words[q][3]);
+                    }
+                }
+            }
+            std::fflush(stdout);
         }
     }
     m_state.cycles = m_cycle;
