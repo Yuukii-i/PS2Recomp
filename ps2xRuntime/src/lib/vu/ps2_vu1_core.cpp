@@ -1492,27 +1492,35 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
         uint32_t qw = (address / 16u) & 0x3FFu;
         ps2_fe_recordVuStore(qw, m_state.pc);
         {
-            // Task FF: regs + source vectors when the table-fill loop first stores to qw 636 / 716
-            static std::atomic<uint32_t> s_ffCount{0};
-            if ((qw == 636u || qw == 716u) && s_ffCount.fetch_add(1, std::memory_order_relaxed) < 12u)
+            // Task FF: run-length log of which program (pc) stores into the 636..698 / 716..778 tables, with run id
+            static uint32_t s_ffLastKey = 0xFFFFFFFFu;
+            static uint32_t s_ffRepeat = 0;
+            static uint32_t s_ffLines = 0;
+            const uint32_t region = (qw >= 636u && qw <= 698u) ? 1u : ((qw >= 716u && qw <= 778u) ? 2u : 0u);
+            if (region != 0u)
             {
-                std::printf("[probe] ff store qw=%u pc=0x%X vi=", qw, m_state.pc);
-                for (int r = 0; r < 16; ++r)
-                    std::printf("%d ", m_state.vi[r]);
-                std::printf("q=%08X\n", *reinterpret_cast<const uint32_t *>(&m_state.q));
-                for (int r : {1, 2, 3, 4, 5, 6, 7, 10, 25})
+                const uint32_t key = (region << 24) | (m_state.pc & 0xFFFFu);
+                static uint64_t s_ffLastRun = ~0ull;
+                if (key != s_ffLastKey || s_elCurRunId != s_ffLastRun)
                 {
-                    const uint32_t *w = reinterpret_cast<const uint32_t *>(m_state.vf[r]);
-                    std::printf("[probe] ff vf%d=%08X %08X %08X %08X\n", r, w[0], w[1], w[2], w[3]);
+                    if (s_ffRepeat > 0u && s_ffLines < 400u)
+                    {
+                        std::printf("[probe] ff wr_end x%u\n", s_ffRepeat);
+                    }
+                    s_ffLastKey = key;
+                    s_ffLastRun = s_elCurRunId;
+                    s_ffRepeat = 0;
+                    if (s_ffLines++ < 400u)
+                    {
+                        const uint32_t *vf = reinterpret_cast<const uint32_t *>(m_state.vf[6]);
+                        const uint32_t *vf5 = reinterpret_cast<const uint32_t *>(m_state.vf[5]);
+                        std::printf("[probe] ff wr run=%llu region=%u pc=0x%X qw=%u vi1=%d vi5=%d vf6=%08X %08X %08X %08X vf5=%08X %08X %08X %08X\n",
+                                    (unsigned long long)s_elCurRunId, region, m_state.pc, qw, m_state.vi[1], m_state.vi[5],
+                                    vf[0], vf[1], vf[2], vf[3], vf5[0], vf5[1], vf5[2], vf5[3]);
+                        std::fflush(stdout);
+                    }
                 }
-                const uint32_t src = static_cast<uint32_t>(m_state.vi[1]) & 0x3FFu;
-                for (uint32_t k = 0; k < 6u && m_activeVuData && (src + k + 1u) * 16u <= m_activeVuDataSize; ++k)
-                {
-                    uint32_t w[4];
-                    std::memcpy(w, m_activeVuData + (src + k) * 16u, 16);
-                    std::printf("[probe] ff src qw=%u %08X %08X %08X %08X\n", src + k, w[0], w[1], w[2], w[3]);
-                }
-                std::fflush(stdout);
+                ++s_ffRepeat;
             }
         }
         if (qw >= 235u && qw <= 244u && ps2_vif1_getEuMatchedCount() >= 6u)
