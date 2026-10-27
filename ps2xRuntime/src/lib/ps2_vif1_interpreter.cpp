@@ -149,6 +149,16 @@ extern "C" void ps2x_probeEvent(const char *msg)
 
 extern "C" void ps2x_probeDump()
 {
+    std::lock_guard<std::mutex> lock(s_epMutex);
+    uint64_t total = s_epTotalEvents;
+    uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(64ULL, total));
+    uint64_t start = (total > 64ULL) ? (total - 64ULL) : 0ULL;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        uint32_t idx = static_cast<uint32_t>((start + i) % 64ULL);
+        std::printf("[probe] ep ev %u: %s\n", i, s_epRing[idx]);
+    }
+    std::fflush(stdout);
 }
 
 static void recordEpEvent(const char *fmt, ...)
@@ -988,9 +998,27 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if ((imm & 0x8000u) != 0u)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
 
-            recordEpEvent("UNPACK cmd=0x%02X dest=%u num=%u cl=%u wl=%u flg=%u tops=%u",
+            const uint8_t *srcBaseAt974 = (pos <= sizeBytes) ? (data + pos) : nullptr;
+            uint32_t srcRdram = 0xFFFFFFFFu;
+            if (m_rdram && srcBaseAt974 && srcBaseAt974 >= m_rdram && srcBaseAt974 < m_rdram + PS2_RAM_SIZE)
+            {
+                srcRdram = static_cast<uint32_t>(srcBaseAt974 - m_rdram);
+            }
+            uint32_t w0[4]{0, 0, 0, 0};
+            uint32_t avail = (pos <= sizeBytes) ? (sizeBytes - pos) : 0u;
+            if (avail >= 16u && srcBaseAt974)
+            {
+                std::memcpy(w0, srcBaseAt974, 16);
+            }
+            else if (avail > 0u && srcBaseAt974)
+            {
+                std::memcpy(w0, srcBaseAt974, avail);
+            }
+
+            recordEpEvent("UNPACK cmd=0x%02X dest=%u num=%u cl=%u wl=%u flg=%u tops=%u src=0x%08X w0=%08X %08X %08X %08X",
                           opcode, vuAddr, writeVectorCount,
-                          cl, wl, (imm & 0x8000u) ? 1u : 0u, vif1_regs.tops & 0x3FFu);
+                          cl, wl, (imm & 0x8000u) ? 1u : 0u, vif1_regs.tops & 0x3FFu,
+                          srcRdram, w0[0], w0[1], w0[2], w0[3]);
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
             if (cl == 0u && probe_ae::isDcProbeEnabled())
@@ -1643,139 +1671,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     }
                 }
                     // Task EO: Check if UNPACK wrote any quadword in VU qw 0..1023 with a lane that is NaN/Inf/0x7FFFFFFF/|f|>1e15
-                    // Task EQ: UNPACK cmd 0x6C (V4-32) bad projection matrix / lane check
-                    if (opcode == 0x6Cu && isVu3dProbeEnabled())
-                    {
-                        s_eqTotalV4_32.fetch_add(1, std::memory_order_relaxed);
-
-                        uint32_t addr = (uint32_t)imm & 0x3FFu;
-                        uint32_t flg = (imm & 0x8000u) ? 1u : 0u;
-                        uint32_t tops = vif1_regs.tops & 0x3FFu;
-                        uint32_t eff = (addr + (flg ? tops : 0u)) & 0x3FFu;
-
-                        uint32_t firstBadQw = 0xFFFFFFFFu;
-                        uint32_t firstBadWords[4]{};
-
-                        auto isBadVal = [](uint32_t w) -> bool {
-                            if (w == 0x7F7FFFFFu || w == 0xFF7FFFFFu || w == 0xFF7FFFFEu)
-                                return true;
-                            float f = 0.0f;
-                            std::memcpy(&f, &w, 4);
-                            if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e30f)
-                                return true;
-                            return false;
-                        };
-
-                        for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
-                        {
-                            uint32_t q = 0;
-                            if (cl >= wl)
-                            {
-                                uint32_t cyclePos = writeIndex % wl;
-                                q = (eff + (writeIndex / wl) * cl + cyclePos) & 0x3FFu;
-                            }
-                            else
-                            {
-                                q = (eff + writeIndex) & 0x3FFu;
-                            }
-                            if (q >= 0x400u) continue;
-                            uint32_t dw[4]{};
-                            std::memcpy(dw, m_vu1Data + q * 16u, 16);
-
-                            if (isBadVal(dw[0]) || isBadVal(dw[1]))
-                            {
-                                firstBadQw = q;
-                                std::memcpy(firstBadWords, dw, 16);
-                                break;
-                            }
-                        }
-
-                        if (firstBadQw != 0xFFFFFFFFu)
-                        {
-                            s_eqBadCount.fetch_add(1, std::memory_order_relaxed);
-                            uint32_t prIdx = s_eqPrintCount.fetch_add(1, std::memory_order_relaxed);
-                            if (prIdx < 30u)
-                            {
-                                char srcBuf[32];
-                                bool isCopied = true;
-                                uint32_t srcRdram = 0xFFFFFFFFu;
-                                if (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE)
-                                {
-                                    srcRdram = static_cast<uint32_t>(srcBase - m_rdram);
-                                    std::snprintf(srcBuf, sizeof(srcBuf), "0x%08X", srcRdram);
-                                    isCopied = false;
-                                }
-                                else
-                                {
-                                    std::snprintf(srcBuf, sizeof(srcBuf), "copied");
-                                }
-
-                                std::printf("[probe] eq unpack src=%s dest=%d eff=%d num=%d tops=%d first=%08X %08X %08X %08X\n",
-                                            srcBuf,
-                                            static_cast<int>(addr),
-                                            static_cast<int>(eff),
-                                            static_cast<int>(writeVectorCount),
-                                            static_cast<int>(tops),
-                                            firstBadWords[0], firstBadWords[1], firstBadWords[2], firstBadWords[3]);
-
-                                if (!isCopied && srcRdram != 0xFFFFFFFFu && m_rdram)
-                                {
-                                    uint32_t rdIdx = s_eqRdramPrintCount.fetch_add(1, std::memory_order_relaxed);
-                                    if (rdIdx < 6u)
-                                    {
-                                        if (srcRdram + 64u <= PS2_RAM_SIZE)
-                                        {
-                                            char hex64[129];
-                                            for (uint32_t b = 0; b < 64u; ++b)
-                                            {
-                                                std::snprintf(hex64 + b * 2, 3, "%02X", m_rdram[srcRdram + b]);
-                                            }
-                                            std::printf("[probe] eq rdram 0x%08X %s tag=n/a\n", srcRdram, hex64);
-                                        }
-                                    }
-                                }
-                                std::fflush(stdout);
-                            }
-                        }
-                    }
             }
 
             auto now = std::chrono::steady_clock::now();
-            if (s_erLastCountsTime == std::chrono::steady_clock::time_point{}) {
-                s_erLastCountsTime = now;
-            } else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_erLastCountsTime).count() >= 5) {
-                s_erLastCountsTime = now;
-                std::vector<std::pair<uint8_t, uint32_t>> dropPairs;
-                std::vector<std::pair<uint8_t, uint32_t>> takenPairs;
-                for (uint8_t op = 0; op < 128; ++op)
-                {
-                    uint32_t d = s_erDropped[op].load(std::memory_order_relaxed);
-                    if (d > 0) dropPairs.push_back({op, d});
-                    uint32_t t = s_erTaken[op].load(std::memory_order_relaxed);
-                    if (t > 0) takenPairs.push_back({op, t});
-                }
-                std::sort(dropPairs.begin(), dropPairs.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
-                std::sort(takenPairs.begin(), takenPairs.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
-
-                std::string dropStr;
-                for (size_t i = 0; i < std::min<size_t>(5u, dropPairs.size()); ++i)
-                {
-                    char b[32];
-                    std::snprintf(b, sizeof(b), "%s0x%02X:%u", (i > 0 ? "," : ""), dropPairs[i].first, dropPairs[i].second);
-                    dropStr += b;
-                }
-
-                std::string takenStr;
-                for (size_t i = 0; i < std::min<size_t>(5u, takenPairs.size()); ++i)
-                {
-                    char b[32];
-                    std::snprintf(b, sizeof(b), "%s0x%02X:%u", (i > 0 ? "," : ""), takenPairs[i].first, takenPairs[i].second);
-                    takenStr += b;
-                }
-
-                std::printf("[probe] er counts drop(%s) taken(%s)\n", dropStr.c_str(), takenStr.c_str());
-                std::fflush(stdout);
-            }
             if (std::chrono::duration_cast<std::chrono::seconds>(now - s_ciLastSecLog).count() >= 1) {
                 s_ciLastSecLog = now;
                 char buf[256];
@@ -1820,52 +1718,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 if (isVu3dProbeEnabled())
                 {
                     s_erDropped[opcode & 0x7Fu].fetch_add(1, std::memory_order_relaxed);
-                    uint32_t drIdx = s_erDropPrintCount.fetch_add(1, std::memory_order_relaxed);
-                    if (drIdx < 40u)
-                    {
-                        const uint8_t *srcBase = data + pos;
-                        uint32_t srcBase_rdram = 0xFFFFFFFFu;
-                        if (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE)
-                        {
-                            srcBase_rdram = static_cast<uint32_t>(srcBase - m_rdram);
-                        }
-                        std::printf("[probe] er drop cmd=0x%02X num=%u dest=%u pos=%u totalBytes=%u sizeBytes=%u m_vu1Data=%d cl=%u wl=%u srcBase_rdram=0x%08X\n",
-                                    opcode,
-                                    (num == 0u) ? 256u : static_cast<uint32_t>(num),
-                                    vuAddr,
-                                    pos,
-                                    totalBytes,
-                                    sizeBytes,
-                                    m_vu1Data ? 1 : 0,
-                                    cl, wl,
-                                    srcBase_rdram);
-                        std::fflush(stdout);
-                    }
-                    if (s_erCurrentChunk && !s_erCurrentChunkReported)
-                    {
-                        uint32_t cIdx = s_erChunkReportCount.fetch_add(1, std::memory_order_relaxed);
-                        if (cIdx < 10u)
-                        {
-                            s_erCurrentChunkReported = true;
-                            uint32_t w[4]{0, 0, 0, 0};
-                            if (s_erCurrentChunkSize >= 16u)
-                            {
-                                std::memcpy(w, s_erCurrentChunk, 16);
-                            }
-                            else if (s_erCurrentChunkSize > 0u)
-                            {
-                                std::memcpy(w, s_erCurrentChunk, s_erCurrentChunkSize);
-                            }
-                            uint32_t cSrc = 0xFFFFFFFFu;
-                            if (m_rdram && s_erCurrentChunk >= m_rdram && s_erCurrentChunk < m_rdram + PS2_RAM_SIZE)
-                            {
-                                cSrc = static_cast<uint32_t>(s_erCurrentChunk - m_rdram);
-                            }
-                            std::printf("[probe] er chunk size=%u start_pos=%u src=0x%08X w0..3=%08X %08X %08X %08X caller=processVIF1Data tag=n/a\n",
-                                        s_erCurrentChunkSize, 0u, cSrc, w[0], w[1], w[2], w[3]);
-                            std::fflush(stdout);
-                        }
-                    }
                 }
             }
             pos += totalBytes;
