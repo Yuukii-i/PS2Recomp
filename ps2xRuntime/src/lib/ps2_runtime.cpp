@@ -58,6 +58,7 @@ namespace {
 #include <sstream>
 #include <mutex>
 #include <cstdarg>
+#include <cmath>
 extern "C" uint32_t ps2_getDuDecodesSinceLast();
 extern "C" void ps2_onDuPresent();
 
@@ -3749,6 +3750,46 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
                        exception == EXCEPTION_TLB_REFILL);
 }
 
+// =========================================================================
+// Task EW: VU0 microprogram vcallms probe & VU0 micro memory monitoring
+// =========================================================================
+static inline bool isVu3dProbeEnabled()
+{
+    static int s_vu3d = -1;
+    if (s_vu3d == -1)
+    {
+        const char *v = std::getenv("PS2X_PROBE_VU3D");
+        s_vu3d = (v && std::strcmp(v, "1") == 0) ? 1 : 0;
+    }
+    return s_vu3d == 1;
+}
+
+static std::atomic<uint64_t> s_ewTotalCalls{0};
+static std::atomic<uint64_t> s_ewBadCalls{0};
+static std::atomic<uint64_t> s_ewIdleCalls{0};
+static std::atomic<uint32_t> s_ewSanePrintCount{0};
+static std::atomic<uint32_t> s_ewBadPrintCount{0};
+static std::atomic<uint32_t> s_ewVu0CodePrintCount{0};
+static uint32_t s_ewLastVu0CodeHash = 0;
+static bool s_ewHasVu0CodeHash = false;
+static std::mutex s_ewMutex;
+static std::chrono::steady_clock::time_point s_ewLastCountsTime{};
+
+static inline bool isBadExitLane(uint32_t w)
+{
+    if (w == 0x7F7FFFFFu || w == 0xFF7FFFFFu || w == 0xFF7FFFFEu)
+    {
+        return true;
+    }
+    float f = 0.0f;
+    std::memcpy(&f, &w, sizeof(f));
+    if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e20f)
+    {
+        return true;
+    }
+    return false;
+}
+
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
     (void)rdram;
@@ -3757,19 +3798,218 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     uint8_t *const vu0Data = m_memory.getVU0Data();
     const uint32_t startPC = address & ~0x7u;
 
+    const bool probeOn = isVu3dProbeEnabled();
+    uint32_t vu0NonzeroWords = 0;
+    uint32_t vu0TotalWords = PS2_VU0_CODE_SIZE / 4u;
+    uint32_t vu0First8[8]{};
+
+    if (probeOn && vu0Code)
+    {
+        const uint32_t *codeWords = reinterpret_cast<const uint32_t *>(vu0Code);
+        for (uint32_t i = 0; i < 8u && i < vu0TotalWords; ++i)
+        {
+            vu0First8[i] = codeWords[i];
+        }
+        uint32_t h = 2166136261u;
+        for (uint32_t i = 0; i < vu0TotalWords; ++i)
+        {
+            uint32_t w = codeWords[i];
+            if (w != 0u)
+            {
+                vu0NonzeroWords++;
+            }
+            h ^= (w & 0xFFu); h *= 16777619u;
+            h ^= ((w >> 8) & 0xFFu); h *= 16777619u;
+            h ^= ((w >> 16) & 0xFFu); h *= 16777619u;
+            h ^= ((w >> 24) & 0xFFu); h *= 16777619u;
+        }
+
+        std::unique_lock<std::mutex> lock(s_ewMutex);
+        if (!s_ewHasVu0CodeHash || h != s_ewLastVu0CodeHash)
+        {
+            s_ewHasVu0CodeHash = true;
+            s_ewLastVu0CodeHash = h;
+            if (s_ewVu0CodePrintCount.load(std::memory_order_relaxed) < 10u)
+            {
+                s_ewVu0CodePrintCount.fetch_add(1, std::memory_order_relaxed);
+                std::printf("[probe] ew vu0code hash=%08X first8=%08X %08X %08X %08X %08X %08X %08X %08X nonzero_words=%u of %u\n",
+                            h,
+                            vu0First8[0], vu0First8[1], vu0First8[2], vu0First8[3],
+                            vu0First8[4], vu0First8[5], vu0First8[6], vu0First8[7],
+                            vu0NonzeroWords, vu0TotalWords);
+                std::fflush(stdout);
+            }
+        }
+    }
+
+    alignas(16) uint32_t inVf[8][4]{};
+    uint32_t raVal = 0;
+    uint64_t callIndex = 0;
+
+    if (probeOn && startPC == 0u)
+    {
+        callIndex = s_ewTotalCalls.fetch_add(1, std::memory_order_relaxed) + 1u;
+        raVal = ctx ? getRegU32(ctx, 31) : 0u;
+        if (ctx)
+        {
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(inVf[i]), _mm_castps_si128(ctx->vu0_vf[4u + i]));
+            }
+        }
+    }
+
+    int seededIdle = 0;
     if (!vu0Code || !vu0Data || startPC + 8u > PS2_VU0_CODE_SIZE)
     {
         seedVu0IdleSuccess(ctx);
-        return;
+        seededIdle = 1;
+    }
+    else
+    {
+        m_vu0.reset();
+        copyVu0ContextToState(ctx, m_vu0.state());
+        m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
+                      vu0Data, PS2_VU0_DATA_SIZE,
+                      m_gs, &m_memory,
+                      startPC, 0u, ctx->vu0_itop, 4096);
+        copyVu0StateToContext(m_vu0.state(), ctx);
     }
 
-    m_vu0.reset();
-    copyVu0ContextToState(ctx, m_vu0.state());
-    m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
-                  vu0Data, PS2_VU0_DATA_SIZE,
-                  m_gs, &m_memory,
-                  startPC, 0u, ctx->vu0_itop, 4096);
-    copyVu0StateToContext(m_vu0.state(), ctx);
+    if (probeOn && startPC == 0u)
+    {
+        if (seededIdle)
+        {
+            s_ewIdleCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        alignas(16) uint32_t outVf[4][4]{};
+        if (ctx)
+        {
+            for (uint32_t i = 0; i < 4u; ++i)
+            {
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(outVf[i]), _mm_castps_si128(ctx->vu0_vf[8u + i]));
+            }
+        }
+
+        bool isBad = false;
+        for (uint32_t i = 0; i < 4u; ++i)
+        {
+            for (uint32_t l = 0; l < 4u; ++l)
+            {
+                if (isBadExitLane(outVf[i][l]))
+                {
+                    isBad = true;
+                    break;
+                }
+            }
+            if (isBad) break;
+        }
+
+        if (isBad)
+        {
+            s_ewBadCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        bool shouldPrint = false;
+        if (isBad)
+        {
+            if (s_ewBadPrintCount.fetch_add(1, std::memory_order_relaxed) < 6u)
+            {
+                shouldPrint = true;
+            }
+        }
+        else
+        {
+            if (s_ewSanePrintCount.fetch_add(1, std::memory_order_relaxed) < 6u)
+            {
+                shouldPrint = true;
+            }
+        }
+
+        if (shouldPrint)
+        {
+            char inWordsBuf[32 * 9 + 1];
+            char *pIn = inWordsBuf;
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                for (uint32_t l = 0; l < 4u; ++l)
+                {
+                    pIn += std::snprintf(pIn, 10, (i == 0 && l == 0) ? "%08X" : " %08X", inVf[i][l]);
+                }
+            }
+
+            char outWordsBuf[16 * 9 + 1];
+            char *pOut = outWordsBuf;
+            for (uint32_t i = 0; i < 4u; ++i)
+            {
+                for (uint32_t l = 0; l < 4u; ++l)
+                {
+                    pOut += std::snprintf(pOut, 10, (i == 0 && l == 0) ? "%08X" : " %08X", outVf[i][l]);
+                }
+            }
+
+            const int vu0codeNonzero = (vu0NonzeroWords > 0u) ? 1 : 0;
+
+            std::printf("[probe] ew vcallms#%llu ra=0x%08X in vf4..vf11=%s out vf8..vf11=%s vu0code_nonzero=%d seededIdle=%d\n",
+                        (unsigned long long)callIndex,
+                        raVal,
+                        inWordsBuf,
+                        outWordsBuf,
+                        vu0codeNonzero,
+                        seededIdle);
+
+            if (ctx)
+            {
+                alignas(16) uint32_t vf0Words[4]{};
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(vf0Words), _mm_castps_si128(ctx->vu0_vf[0]));
+
+                alignas(16) uint32_t extraVf[4][4]{};
+                for (uint32_t i = 0; i < 4u; ++i)
+                {
+                    _mm_storeu_si128(reinterpret_cast<__m128i *>(extraVf[i]), _mm_castps_si128(ctx->vu0_vf[12u + i]));
+                }
+
+                char extraWordsBuf[16 * 9 + 1];
+                char *pExtra = extraWordsBuf;
+                for (uint32_t i = 0; i < 4u; ++i)
+                {
+                    for (uint32_t l = 0; l < 4u; ++l)
+                    {
+                        pExtra += std::snprintf(pExtra, 10, (i == 0 && l == 0) ? "%08X" : " %08X", extraVf[i][l]);
+                    }
+                }
+
+                std::printf("[probe] ew extra vf0=%08X %08X %08X %08X vf12..vf15=%s\n",
+                            vf0Words[0], vf0Words[1], vf0Words[2], vf0Words[3],
+                            extraWordsBuf);
+            }
+            std::fflush(stdout);
+        }
+    }
+
+    if (probeOn)
+    {
+        auto now = std::chrono::steady_clock::now();
+        static std::mutex s_ewCountsMutex;
+        std::unique_lock<std::mutex> countsLock(s_ewCountsMutex, std::try_to_lock);
+        if (countsLock.owns_lock())
+        {
+            if (s_ewLastCountsTime == std::chrono::steady_clock::time_point{})
+            {
+                s_ewLastCountsTime = now;
+            }
+            else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_ewLastCountsTime).count() >= 5)
+            {
+                s_ewLastCountsTime = now;
+                std::printf("[probe] ew counts calls=%llu bad=%llu idle=%llu\n",
+                            (unsigned long long)s_ewTotalCalls.load(std::memory_order_relaxed),
+                            (unsigned long long)s_ewBadCalls.load(std::memory_order_relaxed),
+                            (unsigned long long)s_ewIdleCalls.load(std::memory_order_relaxed));
+                std::fflush(stdout);
+            }
+        }
+    }
 }
 
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
