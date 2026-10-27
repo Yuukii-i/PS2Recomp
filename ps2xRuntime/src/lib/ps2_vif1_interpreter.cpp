@@ -711,6 +711,34 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         uint8_t num = (cmd >> 16) & 0xFF;
         const bool irq = (cmd & 0x80000000u) != 0u;
 
+        if (m_vu1Data && isVu3dProbeEnabled())
+        {
+            // Task FI2: who changes VU1 data qw 476..479 (raw DMA-chain-looking words)? attribute to previous VIFcode
+            static uint32_t s_fiShadow[16];
+            static uint32_t s_fiPrevCmd = 0, s_fiPrevPos = 0, s_fiPrevSize = 0;
+            static const uint8_t *s_fiPrevData = nullptr;
+            static std::atomic<uint32_t> s_fiLines{0};
+            uint32_t cur[16];
+            std::memcpy(cur, m_vu1Data + 476u * 16u, sizeof(cur));
+            if (std::memcmp(cur, s_fiShadow, sizeof(cur)) != 0)
+            {
+                if (s_fiLines.fetch_add(1, std::memory_order_relaxed) < 40u)
+                {
+                    const bool inRdram = m_rdram && s_fiPrevData >= m_rdram && s_fiPrevData < m_rdram + PS2_RAM_SIZE;
+                    std::printf("[probe] fi chg prev_cmd=0x%08X prev_pos=%u chunk_size=%u chunk_rdram=0x%08X now_cmd=0x%08X now_pos=%u qw476=%08X %08X %08X %08X qw477=%08X %08X %08X %08X\n",
+                                s_fiPrevCmd, s_fiPrevPos, s_fiPrevSize,
+                                inRdram ? static_cast<uint32_t>(s_fiPrevData - m_rdram) : 0xFFFFFFFFu, cmd, pos_cmd,
+                                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7]);
+                    std::fflush(stdout);
+                }
+                std::memcpy(s_fiShadow, cur, sizeof(cur));
+            }
+            s_fiPrevCmd = cmd;
+            s_fiPrevPos = pos_cmd;
+            s_fiPrevSize = sizeBytes;
+            s_fiPrevData = data;
+        }
+
         struct VcScopeGuard {
             uint32_t pos_cmd;
             uint32_t cmd;
