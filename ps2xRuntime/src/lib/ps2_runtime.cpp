@@ -3846,6 +3846,19 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
+    if (ctx && (targetPc == 0x003B127Cu || targetPc == 0x003B2448u || targetPc == 0x00254638u || targetPc == 0x0025464Cu))
+    {
+        // Task FM: batch builders take a2 = vertex count; PCSX2 shows a2=4 at every call seen so far
+        static std::atomic<uint32_t> s_fmCount{0};
+        if (s_fmCount.fetch_add(1, std::memory_order_relaxed) < 60u)
+        {
+            std::printf("[probe] fm call tgt=0x%X ra=0x%X a0=0x%X a1=0x%X a2=0x%X a3=0x%X t0=0x%X t1=0x%X t2=0x%X t3=0x%X s3=0x%X s4=0x%X fp=0x%X sp=0x%X\n",
+                        targetPc, getRegU32(ctx, 31), getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 7),
+                        getRegU32(ctx, 8), getRegU32(ctx, 9), getRegU32(ctx, 10), getRegU32(ctx, 11),
+                        getRegU32(ctx, 19), getRegU32(ctx, 20), getRegU32(ctx, 30), getRegU32(ctx, 29));
+            std::fflush(stdout);
+        }
+    }
     // vf0 is hardwired {0,0,0,1}; contexts built via R5900Context() start with it zeroed. (Hack Ledger: HW-faithful backstop)
     if (ctx)
         ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
