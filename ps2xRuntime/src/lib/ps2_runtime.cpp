@@ -3847,6 +3847,24 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
+    if (rdram && targetPc == 0x003B45E8u)
+    {
+        // Task FQ: dump EE RAM at the 1st and 2000th model draw, to diff against a PCSX2 savestate (eeMemory.bin)
+        static std::atomic<uint32_t> s_fqDraws{0};
+        const uint32_t n = s_fqDraws.fetch_add(1, std::memory_order_relaxed);
+        if (n == 0u || n == 2000u)
+        {
+            char path[64];
+            std::snprintf(path, sizeof(path), "logs/ram_ours_%u.bin", n);
+            if (FILE *f = std::fopen(path, "wb"))
+            {
+                std::fwrite(rdram, 1, PS2_RAM_SIZE, f);
+                std::fclose(f);
+                std::printf("[probe] fq ramdump %s draw#%u\n", path, n);
+                std::fflush(stdout);
+            }
+        }
+    }
     if (ctx && ((targetPc >= 0x003B1000u && targetPc < 0x003B2600u) || (targetPc >= 0x00254500u && targetPc < 0x00254900u) || targetPc == 0x003BA680u || targetPc == 0x003B45E8u || targetPc == 0x003BA090u))
     {
         // Task FM: batch builders take a2 = vertex count; PCSX2 shows a2=4 at every call seen so far
