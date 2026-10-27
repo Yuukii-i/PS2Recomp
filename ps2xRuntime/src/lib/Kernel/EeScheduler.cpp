@@ -687,6 +687,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     }
 
     target->context = R5900Context{};
+    target->context.vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // vf0 is hardwired {0,0,0,1}
     target->context.pc = target->entry;
     target->arg = arg;
     target->suspendCount = 0;
