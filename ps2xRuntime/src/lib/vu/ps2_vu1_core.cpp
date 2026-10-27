@@ -2712,6 +2712,142 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
+// =========================================================================
+// Task FC: VU1 C80 10-qw matrix block audit
+// =========================================================================
+extern "C" bool ps2_vif1_findLastUnpackForQw(uint32_t qw, uint32_t *outDest, uint32_t *outNum, uint32_t *outSrc);
+
+struct FcC80State {
+    bool active = false;
+    uint32_t vi13 = 0;
+    uint32_t dst = 0;
+    uint32_t copied = 0;
+    uint32_t top = 0;
+    uint32_t mscal_pc = 0;
+};
+
+static thread_local FcC80State s_fcC80;
+static std::atomic<uint32_t> s_fcTotal{0};
+static std::atomic<uint32_t> s_fcFlaggedNonfinite{0};
+static std::atomic<uint32_t> s_fcFlaggedBig{0};
+static std::atomic<uint32_t> s_fcZeroRows{0};
+static std::atomic<uint32_t> s_fcFlaggedPrinted{0};
+static std::atomic<uint32_t> s_fcUnflaggedPrinted{0};
+static std::chrono::steady_clock::time_point s_fcLastSummaryTime{};
+
+static void processFcC80Completion(const uint8_t *vuData, uint32_t dataSize)
+{
+    if (!s_fcC80.active || !vuData)
+    {
+        s_fcC80.active = false;
+        return;
+    }
+    s_fcC80.active = false;
+
+    uint32_t evNum = s_fcTotal.fetch_add(1, std::memory_order_relaxed) + 1u;
+    uint32_t n = std::min(s_fcC80.copied, 10u);
+
+    uint32_t block[10][4]{};
+    bool eventNonfinite = false;
+    bool eventBig = false;
+    bool eventZeroRow = false;
+
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        uint32_t q = (s_fcC80.dst + i) & 0x3FFu;
+        if ((q + 1u) * 16u <= dataSize)
+        {
+            std::memcpy(block[i], vuData + q * 16u, 16);
+        }
+
+        // Check zero row: all 4 words 0 in qw index 0..3
+        if (i < 4u && block[i][0] == 0u && block[i][1] == 0u && block[i][2] == 0u && block[i][3] == 0u)
+        {
+            eventZeroRow = true;
+        }
+
+        for (int l = 0; l < 4; ++l)
+        {
+            uint32_t w = block[i][l];
+            // Nonfinite: exp == 0xFF
+            if (((w >> 23) & 0xFFu) == 0xFFu)
+            {
+                eventNonfinite = true;
+            }
+            else
+            {
+                float f = 0.0f;
+                std::memcpy(&f, &w, 4);
+                if (std::fabs(f) > 1e7f)
+                {
+                    eventBig = true;
+                }
+            }
+        }
+    }
+
+    if (eventNonfinite) s_fcFlaggedNonfinite.fetch_add(1, std::memory_order_relaxed);
+    if (eventBig) s_fcFlaggedBig.fetch_add(1, std::memory_order_relaxed);
+    if (eventZeroRow) s_fcZeroRows.fetch_add(1, std::memory_order_relaxed);
+
+    bool isFlagged = (eventNonfinite || eventBig || eventZeroRow);
+
+    bool shouldPrint = false;
+    if (isFlagged)
+    {
+        if (s_fcFlaggedPrinted.fetch_add(1, std::memory_order_relaxed) < 20u)
+        {
+            shouldPrint = true;
+        }
+    }
+    else
+    {
+        if (s_fcUnflaggedPrinted.fetch_add(1, std::memory_order_relaxed) < 6u)
+        {
+            shouldPrint = true;
+        }
+    }
+
+    if (shouldPrint)
+    {
+        std::string flagStr;
+        if (eventNonfinite) flagStr += (flagStr.empty() ? "NF" : "|NF");
+        if (eventBig) flagStr += (flagStr.empty() ? "BIG" : "|BIG");
+        if (eventZeroRow) flagStr += (flagStr.empty() ? "ZR" : "|ZR");
+        if (flagStr.empty()) flagStr = "OK";
+
+        char srcStr[32];
+        uint32_t uDest = 0, uNum = 0, uSrc = 0;
+        bool hasSrc = ps2_vif1_findLastUnpackForQw(s_fcC80.vi13, &uDest, &uNum, &uSrc);
+        if (!hasSrc)
+        {
+            hasSrc = ps2_vif1_findLastUnpackForQw(s_fcC80.dst, &uDest, &uNum, &uSrc);
+        }
+        if (hasSrc && uSrc != 0u)
+        {
+            std::snprintf(srcStr, sizeof(srcStr), "src=0x%08X", uSrc);
+        }
+        else
+        {
+            std::snprintf(srcStr, sizeof(srcStr), "src=?");
+        }
+
+        std::string qwStr;
+        for (uint32_t q = 0; q < 10u; ++q)
+        {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), " qw%u=%08X %08X %08X %08X",
+                          q, block[q][0], block[q][1], block[q][2], block[q][3]);
+            qwStr += buf;
+        }
+
+        std::printf("[probe] fc blk ev=%u flag=%s vi13=%u dst=%u top=%u mscal_pc=0x%03X %s%s\n",
+                    evNum, flagStr.c_str(), s_fcC80.vi13, s_fcC80.dst, s_fcC80.top,
+                    s_fcC80.mscal_pc, srcStr, qwStr.c_str());
+        std::fflush(stdout);
+    }
+}
+
 void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                          uint8_t *vuData, uint32_t dataSize,
                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
@@ -2737,8 +2873,18 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (m_state.pc + 8u > codeSize)
             break;
 
+        if (s_fcC80.active && (m_state.pc < 0xC80u || m_state.pc > 0xCB8u))
+        {
+            processFcC80Completion(vuData, dataSize);
+        }
+
         if (m_state.pc == 0xC80u && isVu3dProbeEnabled())
         {
+            if (s_fcC80.active)
+            {
+                processFcC80Completion(vuData, dataSize);
+            }
+
             uint32_t vi13Val = static_cast<uint32_t>(m_state.vi[13]);
             uint32_t vi12Val = static_cast<uint32_t>(m_state.vi[12]);
             uint32_t qwIdx = (vi13Val - 1u) & 0x3FFu;
@@ -2751,6 +2897,17 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             std::snprintf(evBuf, sizeof(evBuf), "C80 vi13=%u vi12=%u end=0x%X start=0x%X",
                           vi13Val, vi12Val, qwWords[1], qwWords[2]);
             ps2x_probeEvent(evBuf);
+
+            uint32_t dst = qwWords[2];
+            uint32_t end = qwWords[1];
+            uint32_t copied = (end >= dst) ? (end - dst) : 0u;
+
+            s_fcC80.active = true;
+            s_fcC80.vi13 = vi13Val;
+            s_fcC80.dst = dst;
+            s_fcC80.copied = copied;
+            s_fcC80.top = s_dyCurTop;
+            s_fcC80.mscal_pc = s_dyCurStartPc;
 
             if (vi13Val == 235u)
             {
@@ -3256,6 +3413,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             std::fflush(stdout);
         }
     }
+    if (s_fcC80.active && (m_stopRequested || m_state.pc + 8u > codeSize || m_state.pc < 0xC80u || m_state.pc > 0xCB8u))
+    {
+        processFcC80Completion(vuData, dataSize);
+    }
     if (isVu3dProbeEnabled())
     {
         uint32_t spc = (s_dyCurStartPc & 0x7FFFFFFF);
@@ -3693,6 +3854,19 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                     }
                     std::memcpy(cand.outWords, s_vdFirstXgkickWords, sizeof(cand.outWords));
                 }
+            }
+
+            if (s_fcLastSummaryTime == std::chrono::steady_clock::time_point{})
+                s_fcLastSummaryTime = now;
+            else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_fcLastSummaryTime).count() >= 1)
+            {
+                s_fcLastSummaryTime = now;
+                std::printf("[probe] fc c80 total=%u flagged_nonfinite=%u flagged_big=%u zero_rows=%u\n",
+                            s_fcTotal.load(std::memory_order_relaxed),
+                            s_fcFlaggedNonfinite.load(std::memory_order_relaxed),
+                            s_fcFlaggedBig.load(std::memory_order_relaxed),
+                            s_fcZeroRows.load(std::memory_order_relaxed));
+                std::fflush(stdout);
             }
 
             if (s_eoLastCountTime == std::chrono::steady_clock::time_point{})

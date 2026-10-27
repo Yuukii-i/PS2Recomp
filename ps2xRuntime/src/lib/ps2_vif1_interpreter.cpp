@@ -60,6 +60,24 @@ extern "C" void ps2_vif1_dumpDzRingCount(uint32_t maxCount, const char *prefix) 
 extern "C" void ps2_vif1_dumpDzRing() {
     ps2_vif1_dumpDzRingCount(256u, "[probe] dc15 unpack");
 }
+
+extern "C" bool ps2_vif1_findLastUnpackForQw(uint32_t qw, uint32_t *outDest, uint32_t *outNum, uint32_t *outSrc) {
+    std::lock_guard<std::mutex> lock(s_dzUnpackMutex);
+    uint32_t total = s_dzUnpackTotal;
+    uint32_t count = std::min<uint32_t>(256u, total);
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t idx = (s_dzUnpackHead - 1u - i) & 255u;
+        const auto &e = s_dzUnpackRing[idx];
+        uint32_t numQw = e.num ? static_cast<uint32_t>(e.num) : 256u;
+        if (qw >= e.dest && qw < e.dest + numQw) {
+            if (outDest) *outDest = e.dest;
+            if (outNum) *outNum = e.num;
+            if (outSrc) *outSrc = e.src;
+            return true;
+        }
+    }
+    return false;
+}
 // =========================================================================
 // Task EH: VU1 unpack ring for qw 440..720 & shape counters
 // =========================================================================
@@ -1436,7 +1454,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
                         s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
                         executeGeneric = false;
-                        if (probe_ae::isDcProbeEnabled()) {
+                        if (probe_ae::isDcProbeEnabled() || isVu3dProbeEnabled()) {
                             uint32_t srcOff = (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE) ? static_cast<uint32_t>(srcBase - m_rdram) : 0u;
                             ps2_vif1_recordDzUnpack(opcode, static_cast<uint8_t>(vn), static_cast<uint8_t>(vl),
                                                     static_cast<uint8_t>((imm & 0x4000u) ? 1u : 0u),
@@ -1461,7 +1479,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         entry.calls++;
                     }
                 }
-                if (executeGeneric && probe_ae::isDcProbeEnabled()) {
+                if (executeGeneric && (probe_ae::isDcProbeEnabled() || isVu3dProbeEnabled())) {
                     uint32_t srcOff = (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE) ? static_cast<uint32_t>(srcBase - m_rdram) : 0u;
                     ps2_vif1_recordDzUnpack(opcode, static_cast<uint8_t>(vn), static_cast<uint8_t>(vl),
                                             static_cast<uint8_t>((imm & 0x4000u) ? 1u : 0u),
