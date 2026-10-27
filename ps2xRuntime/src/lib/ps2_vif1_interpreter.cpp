@@ -111,6 +111,15 @@ extern "C" uint32_t ps2_vif1_getEoUnpackBadCount() {
     return s_eoUnpackBadCount.load(std::memory_order_relaxed);
 }
 
+// =========================================================================
+// Task EQ: UNPACK V4-32 bad constant detection & RDRAM source tracking
+// =========================================================================
+static std::atomic<uint32_t> s_eqTotalV4_32{0};
+static std::atomic<uint32_t> s_eqBadCount{0};
+static std::atomic<uint32_t> s_eqPrintCount{0};
+static std::atomic<uint32_t> s_eqRdramPrintCount{0};
+static std::chrono::steady_clock::time_point s_eqLastCountsTime{};
+
 static std::mutex s_epMutex;
 static char s_epRing[64][128];
 static uint64_t s_epTotalEvents = 0;
@@ -127,16 +136,6 @@ extern "C" void ps2x_probeEvent(const char *msg)
 
 extern "C" void ps2x_probeDump()
 {
-    std::lock_guard<std::mutex> lock(s_epMutex);
-    uint64_t total = s_epTotalEvents;
-    uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(64ULL, total));
-    uint64_t start = (total > 64ULL) ? (total - 64ULL) : 0ULL;
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        uint32_t idx = static_cast<uint32_t>((start + i) % 64ULL);
-        std::printf("[probe] ep ev %u: %s\n", i, s_epRing[idx]);
-    }
-    std::fflush(stdout);
 }
 
 static void recordEpEvent(const char *fmt, ...)
@@ -1623,52 +1622,113 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     }
                 }
                     // Task EO: Check if UNPACK wrote any quadword in VU qw 0..1023 with a lane that is NaN/Inf/0x7FFFFFFF/|f|>1e15
-                    if (isVu3dProbeEnabled())
+                    // Task EQ: UNPACK cmd 0x6C (V4-32) bad projection matrix / lane check
+                    if (opcode == 0x6Cu && isVu3dProbeEnabled())
                     {
+                        s_eqTotalV4_32.fetch_add(1, std::memory_order_relaxed);
+
+                        uint32_t addr = (uint32_t)imm & 0x3FFu;
+                        uint32_t flg = (imm & 0x8000u) ? 1u : 0u;
+                        uint32_t tops = vif1_regs.tops & 0x3FFu;
+                        uint32_t eff = (addr + (flg ? tops : 0u)) & 0x3FFu;
+
                         uint32_t firstBadQw = 0xFFFFFFFFu;
-                        uint32_t destAfter[4]{};
+                        uint32_t firstBadWords[4]{};
+
+                        auto isBadVal = [](uint32_t w) -> bool {
+                            if (w == 0x7F7FFFFFu || w == 0xFF7FFFFFu || w == 0xFF7FFFFEu)
+                                return true;
+                            float f = 0.0f;
+                            std::memcpy(&f, &w, 4);
+                            if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e30f)
+                                return true;
+                            return false;
+                        };
+
                         for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
                         {
-                            const uint32_t cyclePos = writeIndex % wl;
                             uint32_t q = 0;
                             if (cl >= wl)
                             {
-                                q = (vuAddr + (writeIndex / wl) * cl + cyclePos) & 0x3FFu;
+                                uint32_t cyclePos = writeIndex % wl;
+                                q = (eff + (writeIndex / wl) * cl + cyclePos) & 0x3FFu;
                             }
                             else
                             {
-                                q = (vuAddr + writeIndex) & 0x3FFu;
+                                q = (eff + writeIndex) & 0x3FFu;
                             }
                             if (q >= 0x400u) continue;
                             uint32_t dw[4]{};
                             std::memcpy(dw, m_vu1Data + q * 16u, 16);
-                            bool isBad = false;
-                            for (int l = 0; l < 4; ++l)
-                            {
-                                if (dw[l] == 0x7FFFFFFFu) { isBad = true; break; }
-                                float f = 0.0f;
-                                std::memcpy(&f, &dw[l], 4);
-                                if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e15f)
-                                {
-                                    isBad = true;
-                                    break;
-                                }
-                            }
-                            if (isBad)
+
+                            if (isBadVal(dw[0]) || isBadVal(dw[1]))
                             {
                                 firstBadQw = q;
-                                std::memcpy(destAfter, dw, 16);
+                                std::memcpy(firstBadWords, dw, 16);
                                 break;
                             }
                         }
+
                         if (firstBadQw != 0xFFFFFFFFu)
                         {
-                            s_eoUnpackBadCount.fetch_add(1, std::memory_order_relaxed);
+                            s_eqBadCount.fetch_add(1, std::memory_order_relaxed);
+                            uint32_t prIdx = s_eqPrintCount.fetch_add(1, std::memory_order_relaxed);
+                            if (prIdx < 30u)
+                            {
+                                char srcBuf[32];
+                                bool isCopied = true;
+                                uint32_t srcRdram = 0xFFFFFFFFu;
+                                if (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE)
+                                {
+                                    srcRdram = static_cast<uint32_t>(srcBase - m_rdram);
+                                    std::snprintf(srcBuf, sizeof(srcBuf), "0x%08X", srcRdram);
+                                    isCopied = false;
+                                }
+                                else
+                                {
+                                    std::snprintf(srcBuf, sizeof(srcBuf), "copied");
+                                }
+
+                                std::printf("[probe] eq unpack src=%s dest=%d eff=%d num=%d tops=%d first=%08X %08X %08X %08X\n",
+                                            srcBuf,
+                                            static_cast<int>(addr),
+                                            static_cast<int>(eff),
+                                            static_cast<int>(writeVectorCount),
+                                            static_cast<int>(tops),
+                                            firstBadWords[0], firstBadWords[1], firstBadWords[2], firstBadWords[3]);
+
+                                if (!isCopied && srcRdram != 0xFFFFFFFFu && m_rdram)
+                                {
+                                    uint32_t rdIdx = s_eqRdramPrintCount.fetch_add(1, std::memory_order_relaxed);
+                                    if (rdIdx < 6u)
+                                    {
+                                        if (srcRdram + 64u <= PS2_RAM_SIZE)
+                                        {
+                                            char hex64[129];
+                                            for (uint32_t b = 0; b < 64u; ++b)
+                                            {
+                                                std::snprintf(hex64 + b * 2, 3, "%02X", m_rdram[srcRdram + b]);
+                                            }
+                                            std::printf("[probe] eq rdram 0x%08X %s tag=n/a\n", srcRdram, hex64);
+                                        }
+                                    }
+                                }
+                                std::fflush(stdout);
+                            }
                         }
                     }
             }
 
             auto now = std::chrono::steady_clock::now();
+            if (s_eqLastCountsTime == std::chrono::steady_clock::time_point{}) {
+                s_eqLastCountsTime = now;
+            } else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_eqLastCountsTime).count() >= 5) {
+                s_eqLastCountsTime = now;
+                std::printf("[probe] eq counts bad=%u total_v4_32=%u\n",
+                            s_eqBadCount.load(std::memory_order_relaxed),
+                            s_eqTotalV4_32.load(std::memory_order_relaxed));
+                std::fflush(stdout);
+            }
             if (std::chrono::duration_cast<std::chrono::seconds>(now - s_ciLastSecLog).count() >= 1) {
                 s_ciLastSecLog = now;
                 char buf[256];
