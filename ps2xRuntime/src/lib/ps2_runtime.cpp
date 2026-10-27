@@ -3847,7 +3847,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
-    if (ctx && ((targetPc >= 0x003B1000u && targetPc < 0x003B2600u) || (targetPc >= 0x00254500u && targetPc < 0x00254900u)))
+    if (ctx && ((targetPc >= 0x003B1000u && targetPc < 0x003B2600u) || (targetPc >= 0x00254500u && targetPc < 0x00254900u) || targetPc == 0x003BA680u || targetPc == 0x003B45E8u || targetPc == 0x003BA090u))
     {
         // Task FM: batch builders take a2 = vertex count; PCSX2 shows a2=4 at every call seen so far
         static std::atomic<uint32_t> s_fmCount{0};
@@ -3857,7 +3857,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         {
             std::lock_guard<std::mutex> fmLock(s_fmMutex);
             uint32_t &seen = s_fmSeen[targetPc ^ ((getRegU32(ctx, 6) > 4u) ? 0x80000000u : 0u)];
-            if (seen++ < 2u)
+            static std::map<uint32_t, uint32_t> s_fmLib;
+            const bool fmLibTgt = (targetPc == 0x003BA680u || targetPc == 0x003B45E8u || targetPc == 0x003BA090u);
+            if (fmLibTgt ? (s_fmLib[targetPc]++ < 16u) : (seen++ < 2u))
                 fmPrint = true;
         }
         if (fmPrint && s_fmCount.fetch_add(1, std::memory_order_relaxed) < 200u)
