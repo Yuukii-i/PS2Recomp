@@ -1350,6 +1350,23 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+            {
+                // Task FU: first sighting of each (channel, MOD, direction, TTE) DMA combination + periodic counts
+                static std::mutex s_fuMutex;
+                static std::map<uint32_t, uint32_t> s_fuSeen;
+                const uint32_t fuKey = (channelBase & 0xFFFF00u) | (((value >> 2u) & 3u) << 4u) | (value & 1u) | (((value >> 6u) & 1u) << 1u);
+                std::lock_guard<std::mutex> fuLock(s_fuMutex);
+                uint32_t &fuCount = s_fuSeen[fuKey];
+                if (fuCount == 0u || (fuCount % 20000u) == 0u)
+                {
+                    std::printf("[probe] fu dma ch=0x%08X chcr=0x%08X mod=%u dir=%u tte=%u madr=0x%08X tadr=0x%08X qwc=%u count=%u\n",
+                                channelBase, value, (value >> 2u) & 3u, value & 1u, (value >> 6u) & 1u,
+                                m_ioRegisters[channelBase + 0x10u], m_ioRegisters[channelBase + 0x30u],
+                                m_ioRegisters[channelBase + 0x20u] & 0xFFFFu, fuCount);
+                    std::fflush(stdout);
+                }
+                ++fuCount;
+            }
 
             if (tryProcessScratchpadDma(channelBase, value))
             {
