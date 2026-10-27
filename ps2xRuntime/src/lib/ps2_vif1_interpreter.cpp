@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <tuple>
 #include <mutex>
+#include <cstdarg>
 
 // =========================================================================
 // Task DZ: VIF1 UNPACK ring buffer & VIF1 register dump
@@ -102,16 +103,51 @@ static std::atomic<uint64_t> s_ehFastUsed[4][4][2]{};
 static std::atomic<bool> s_ehShapeSeen[4][4][2]{};
 
 // =========================================================================
-// Task EN/EO: VIF1 UNPACK source tracking & bad data detection
+// Task EN/EO/EP: VIF1 UNPACK source tracking & Event Ring Buffer
 // =========================================================================
 static std::atomic<uint32_t> s_eoUnpackBadCount{0};
-static std::atomic<uint32_t> s_eo2UnpackPrintCount{0};
-static std::atomic<uint32_t> s_eo2RdramPrintCount{0};
-static std::atomic<uint32_t> s_eo2VifCodePrintCount{0};
-static uint32_t s_vifRecentCodes[3] = {0, 0, 0};
 
 extern "C" uint32_t ps2_vif1_getEoUnpackBadCount() {
     return s_eoUnpackBadCount.load(std::memory_order_relaxed);
+}
+
+static std::mutex s_epMutex;
+static char s_epRing[64][128];
+static uint64_t s_epTotalEvents = 0;
+
+extern "C" void ps2x_probeEvent(const char *msg)
+{
+    if (!isVu3dProbeEnabled() || !msg) return;
+    std::lock_guard<std::mutex> lock(s_epMutex);
+    uint32_t idx = static_cast<uint32_t>(s_epTotalEvents % 64ULL);
+    std::strncpy(s_epRing[idx], msg, sizeof(s_epRing[idx]) - 1);
+    s_epRing[idx][sizeof(s_epRing[idx]) - 1] = '\0';
+    s_epTotalEvents++;
+}
+
+extern "C" void ps2x_probeDump()
+{
+    std::lock_guard<std::mutex> lock(s_epMutex);
+    uint64_t total = s_epTotalEvents;
+    uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(64ULL, total));
+    uint64_t start = (total > 64ULL) ? (total - 64ULL) : 0ULL;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        uint32_t idx = static_cast<uint32_t>((start + i) % 64ULL);
+        std::printf("[probe] ep ev %u: %s\n", i, s_epRing[idx]);
+    }
+    std::fflush(stdout);
+}
+
+static void recordEpEvent(const char *fmt, ...)
+{
+    if (!isVu3dProbeEnabled()) return;
+    char buf[128];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    ps2x_probeEvent(buf);
 }
 
 static void ps2_vif1_recordEhUnpack(uint8_t cmd, uint8_t vn, uint8_t vl, uint8_t usn, uint8_t flg,
@@ -588,10 +624,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         pos += 4;
         uint32_t pos_payload = pos;
 
-        s_vifRecentCodes[0] = s_vifRecentCodes[1];
-        s_vifRecentCodes[1] = s_vifRecentCodes[2];
-        s_vifRecentCodes[2] = cmd;
-
         uint8_t opcode = (cmd >> 24) & 0x7F;
         uint16_t imm = cmd & 0xFFFF;
         uint8_t num = (cmd >> 16) & 0xFF;
@@ -656,12 +688,14 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.ofst = imm & 0x3FFu;
             vif1_regs.tops = vif1_regs.base & 0x3FFu;
             vif1_regs.stat &= ~(1u << 7); // clear DBF
+            recordEpEvent("OFFSET val=0x%X tops=%u", imm & 0x3FFu, vif1_regs.tops & 0x3FFu);
             continue;
         }
         else if (opcode == VIF_BASE)
         {
             // BASE only updates the base register. TOPS changes on OFFSET/MSCAL.
             vif1_regs.base = imm & 0x3FFu;
+            recordEpEvent("BASE val=0x%X", imm & 0x3FFu);
             continue;
         }
         else if (opcode == VIF_ITOP)
@@ -723,6 +757,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
+            recordEpEvent("%s pc=0x%03X top=%u itop=%u tops=%u",
+                          (opcode == VIF_MSCAL ? "MSCAL" : "MSCALF"),
+                          startPC, runTop, runItop, vif1_regs.tops & 0x3FFu);
+
 #if defined(PS2X_PROBE_AE) || 1
             if (probe_ae::isEnabled()) {
                 probe_ae::onBbVif1Mscal(startPC, runItop, runTop, runTop,
@@ -758,6 +796,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             else
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
+
+            recordEpEvent("MSCNT top=%u itop=%u tops=%u",
+                          runTop, runItop, vif1_regs.tops & 0x3FFu);
 
             probe_ae::flushMovieBatch(nullptr, this);
             if (m_vu1MscntCallback) {
@@ -803,6 +844,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             uint32_t destAddr = (uint32_t)imm * 8u;
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
+            recordEpEvent("MPG addr=0x%X num=%u", destAddr, instructionCount);
             if (m_vu1Code && destAddr < PS2_VU1_CODE_SIZE && mpgBytes > 0)
             {
                 uint32_t copyBytes = mpgBytes;
@@ -929,6 +971,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             uint32_t vuAddr = (uint32_t)imm & 0x3FFu;
             if ((imm & 0x8000u) != 0u)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
+
+            recordEpEvent("UNPACK cmd=0x%02X dest=%u num=%u cl=%u wl=%u flg=%u tops=%u",
+                          opcode, vuAddr, writeVectorCount,
+                          cl, wl, (imm & 0x8000u) ? 1u : 0u, vif1_regs.tops & 0x3FFu);
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
             if (cl == 0u && probe_ae::isDcProbeEnabled())
@@ -1618,61 +1664,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         if (firstBadQw != 0xFFFFFFFFu)
                         {
                             s_eoUnpackBadCount.fetch_add(1, std::memory_order_relaxed);
-                            uint32_t prIdx = s_eo2UnpackPrintCount.fetch_add(1, std::memory_order_relaxed);
-                            if (prIdx < 80u)
-                            {
-                                char srcBuf[32];
-                                bool isCopied = true;
-                                uint32_t srcRdram = 0xFFFFFFFFu;
-                                if (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE)
-                                {
-                                    srcRdram = static_cast<uint32_t>(srcBase - m_rdram);
-                                    std::snprintf(srcBuf, sizeof(srcBuf), "0x%08X", srcRdram);
-                                    isCopied = false;
-                                }
-                                else
-                                {
-                                    std::snprintf(srcBuf, sizeof(srcBuf), "copied");
-                                }
-
-                                std::printf("[probe] eo2 unpack src=%s vn=%d vl=%d usn=%d flg=%d addr=%d num=%d cl=%d wl=%d mask=%08X mode=%d qw0..3=%08X %08X %08X %08X\n",
-                                            srcBuf,
-                                            static_cast<int>(vn), static_cast<int>(vl),
-                                            (imm & 0x4000u) ? 1 : 0,
-                                            (imm & 0x8000u) ? 1 : 0,
-                                            static_cast<int>(imm & 0x3FFu),
-                                            static_cast<int>(num),
-                                            static_cast<int>(cl), static_cast<int>(wl),
-                                            vif1_regs.mask,
-                                            static_cast<int>(vif1_regs.mode & 3u),
-                                            destAfter[0], destAfter[1], destAfter[2], destAfter[3]);
-
-                                if (!isCopied && srcRdram != 0xFFFFFFFFu && m_rdram)
-                                {
-                                    uint32_t rdIdx = s_eo2RdramPrintCount.fetch_add(1, std::memory_order_relaxed);
-                                    if (rdIdx < 8u)
-                                    {
-                                        if (srcRdram + 64u <= PS2_RAM_SIZE)
-                                        {
-                                            char hex64[129];
-                                            for (uint32_t b = 0; b < 64u; ++b)
-                                            {
-                                                std::snprintf(hex64 + b * 2, 3, "%02X", m_rdram[srcRdram + b]);
-                                            }
-                                            std::printf("[probe] eo2 rdram 0x%08X %s\n", srcRdram, hex64);
-                                        }
-                                    }
-                                }
-
-                                uint32_t vcIdx = s_eo2VifCodePrintCount.fetch_add(1, std::memory_order_relaxed);
-                                if (vcIdx < 12u)
-                                {
-                                    std::printf("[probe] eo2 vifcode cur=0x%08X prev1=0x%08X prev2=0x%08X\n",
-                                                s_vifRecentCodes[2], s_vifRecentCodes[1], s_vifRecentCodes[0]);
-                                }
-
-                                std::fflush(stdout);
-                            }
                         }
                     }
             }

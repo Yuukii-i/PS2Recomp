@@ -16,6 +16,9 @@
 #include <limits>
 #include <ps2_log.h>
 
+extern "C" void ps2x_probeEvent(const char *msg);
+extern "C" void ps2x_probeDump();
+
 // =========================================================================
 // Task DY: VU1 program execution & cycle cap telemetry
 // =========================================================================
@@ -1350,6 +1353,29 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
                     std::printf("[probe] eo vustore pc=0x%03X qw=%u w=%08X %08X %08X %08X run=%llu seq=<%s>\n",
                                 m_state.pc, qw, words[0], words[1], words[2], words[3],
                                 (unsigned long long)s_elCurRunId, seqSoFar.c_str());
+                    std::fflush(stdout);
+                }
+
+                static std::atomic<uint32_t> s_epDumpCount{0};
+                uint32_t epIdx = s_epDumpCount.fetch_add(1, std::memory_order_relaxed);
+                if (epIdx < 3u)
+                {
+                    ps2x_probeDump();
+                    uint32_t vi13Val = static_cast<uint32_t>(m_state.vi[13]);
+                    uint32_t vi12Val = static_cast<uint32_t>(m_state.vi[12]);
+                    uint32_t dWords[4][4]{};
+                    for (int o = -2; o <= 1; ++o) {
+                        uint32_t q = (vi13Val + o) & 0x3FFu;
+                        if (m_activeVuData && (q + 1u) * 16u <= m_activeVuDataSize) {
+                            std::memcpy(dWords[o + 2], m_activeVuData + q * 16u, 16);
+                        }
+                    }
+                    std::printf("[probe] ep vu vi13=%u vi12=%u qw[vi13-2]=%08X %08X %08X %08X qw[vi13-1]=%08X %08X %08X %08X qw[vi13]=%08X %08X %08X %08X qw[vi13+1]=%08X %08X %08X %08X\n",
+                                vi13Val, vi12Val,
+                                dWords[0][0], dWords[0][1], dWords[0][2], dWords[0][3],
+                                dWords[1][0], dWords[1][1], dWords[1][2], dWords[1][3],
+                                dWords[2][0], dWords[2][1], dWords[2][2], dWords[2][3],
+                                dWords[3][0], dWords[3][1], dWords[3][2], dWords[3][3]);
                     std::fflush(stdout);
                 }
             }
@@ -2691,6 +2717,22 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         commitReadyPipelines();
         if (m_state.pc + 8u > codeSize)
             break;
+
+        if (m_state.pc == 0xC80u && isVu3dProbeEnabled())
+        {
+            uint32_t vi13Val = static_cast<uint32_t>(m_state.vi[13]);
+            uint32_t vi12Val = static_cast<uint32_t>(m_state.vi[12]);
+            uint32_t qwIdx = (vi13Val - 1u) & 0x3FFu;
+            uint32_t qwWords[4]{};
+            if (vuData && (qwIdx + 1u) * 16u <= dataSize)
+            {
+                std::memcpy(qwWords, vuData + qwIdx * 16u, 16);
+            }
+            char evBuf[128];
+            std::snprintf(evBuf, sizeof(evBuf), "C80 vi13=%u vi12=%u end=0x%X start=0x%X",
+                          vi13Val, vi12Val, qwWords[1], qwWords[2]);
+            ps2x_probeEvent(evBuf);
+        }
 
         float preVf[32][4];
         int32_t preVi[16];
