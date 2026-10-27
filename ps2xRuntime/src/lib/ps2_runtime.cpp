@@ -3852,7 +3852,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         // Task FQ: dump EE RAM at the 1st and 2000th model draw, to diff against a PCSX2 savestate (eeMemory.bin)
         static std::atomic<uint32_t> s_fqDraws{0};
         const uint32_t n = s_fqDraws.fetch_add(1, std::memory_order_relaxed);
-        if (n == 0u || n == 2000u)
+        if (n == 0u || n == 60u || n == 300u || n == 1200u)
         {
             char path[64];
             std::snprintf(path, sizeof(path), "logs/ram_ours_%u.bin", n);
