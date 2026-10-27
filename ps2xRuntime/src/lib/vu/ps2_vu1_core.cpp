@@ -153,9 +153,113 @@ static uint32_t s_eoVuStorePrintCount = 0;
 static std::chrono::steady_clock::time_point s_eoLastCountTime{};
 
 // =========================================================================
-// Task EM: Full instruction trace of draw run C80,3160... with >=5 zero_xy
+// Task FD: Full instruction trace of draw run <C80,070,1EE0,000> with >=20 zero_xy
 // =========================================================================
-static EgPairTrace s_emTraces[2000];
+static const char *getLowerOpName(uint32_t lower)
+{
+    if (lower == 0u || lower == 0x8000033Cu) return "NOP";
+    uint32_t opHi = (lower >> 25) & 0x7Fu;
+    switch (opHi)
+    {
+    case 0x00: return "LQ";
+    case 0x01: return "SQ";
+    case 0x04: return "ILW";
+    case 0x05: return "ISW";
+    case 0x08: return "IADDIU";
+    case 0x09: return "ISUBIU";
+    case 0x10: return "FCEQ";
+    case 0x11: return "FCSET";
+    case 0x12: return "FCAND";
+    case 0x13: return "FCOR";
+    case 0x14: return "FSEQ";
+    case 0x15: return "FSSET";
+    case 0x16: return "FSAND";
+    case 0x17: return "FSOR";
+    case 0x18: return "FMEQ";
+    case 0x1A: return "FMAND";
+    case 0x1B: return "FMOR";
+    case 0x1C: return "FCGET";
+    case 0x20: return "B";
+    case 0x21: return "BAL";
+    case 0x24: return "JR";
+    case 0x25: return "JALR";
+    case 0x28: return "IBEQ";
+    case 0x29: return "IBNE";
+    case 0x2C: return "IBLTZ";
+    case 0x2D: return "IBGTZ";
+    case 0x2E: return "IBLEZ";
+    case 0x2F: return "IBGEZ";
+    case 0x40:
+    default:
+        break;
+    }
+
+    if (opHi >= 0x40u || (lower & 0x80000000u))
+    {
+        uint32_t opLo = lower & 0x3Fu;
+        if (opLo < 0x3Cu)
+        {
+            switch (opLo)
+            {
+            case 0x30: return "IADD";
+            case 0x31: return "ISUB";
+            case 0x32: return "IADDI";
+            case 0x34: return "IAND";
+            case 0x35: return "IOR";
+            default: break;
+            }
+        }
+        else
+        {
+            const uint8_t funct2 = static_cast<uint8_t>((lower & 0x3u) | ((lower >> 4) & 0x7Cu));
+            switch (funct2)
+            {
+            case 0x30: return "MOVE";
+            case 0x31: return "MR32";
+            case 0x34: return "LQI";
+            case 0x35: return "SQI";
+            case 0x36: return "LQD";
+            case 0x37: return "SQD";
+            case 0x38: return "DIV";
+            case 0x39: return "SQRT";
+            case 0x3A: return "RSQRT";
+            case 0x3B: return "WAITQ";
+            case 0x3C: return "MTIR";
+            case 0x3D: return "MFIR";
+            case 0x3E: return "ILWR";
+            case 0x3F: return "ISWR";
+            case 0x40: return "RNEXT";
+            case 0x41: return "RGET";
+            case 0x42: return "RINIT";
+            case 0x43: return "RXOR";
+            case 0x64: return "MFP";
+            case 0x68: return "XTOP";
+            case 0x69: return "XITOP";
+            case 0x6C: return "XGKICK";
+            case 0x70: return "ESADD";
+            case 0x71: return "ERSADD";
+            case 0x72: return "ELENG";
+            case 0x73: return "ERLENG";
+            case 0x74: return "EATANxy";
+            case 0x75: return "EATANxz";
+            case 0x76: return "ESUM";
+            case 0x77: return "ERSQRT";
+            case 0x78: return "ESQRT";
+            case 0x79: return "ESIN";
+            case 0x7A: return "ERCPR";
+            case 0x7B: return "WAITP";
+            case 0x7C: return "EATAN";
+            case 0x7D: return "EEXP";
+            default: break;
+            }
+        }
+    }
+
+    return "OTHER";
+}
+
+static EgPairTrace s_emFirstTraces[1000];
+static EgPairTrace s_emTailRing[1000];
 static uint32_t s_emTraceCount = 0;
 static bool s_emDone = false;
 static bool s_emCurRunCandidate = false;
@@ -171,6 +275,7 @@ static float s_emEntryQ = 0.0f;
 static float s_emEntryP = 0.0f;
 static uint32_t s_emEntryVuData[1024][4];
 static std::vector<EePacket> s_emCurRunPackets;
+static std::map<std::string, uint32_t> s_emLowOpHist;
 
 // =========================================================================
 // Task EH: VU1 store recording & dumps
@@ -2541,11 +2646,13 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     if (isVu3dProbeEnabled() && !s_emDone && (startPC & 0x7FFFFFFF) == 0x08u)
     {
         s_emCurRunCandidate = true;
+        s_emRecording = true;
         s_emCurRunPairs = 0;
         s_emTraceCount = 0;
         s_emLastPairPc = 0xFFFFFFFFu;
         s_emCurRunTargets.clear();
         s_emCurRunPackets.clear();
+        s_emLowOpHist.clear();
         std::memcpy(s_emEntryVf, m_state.vf, sizeof(s_emEntryVf));
         std::memcpy(s_emEntryVi, m_state.vi, sizeof(s_emEntryVi));
         s_emEntryTop = top;
@@ -2961,7 +3068,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
 
         float preVf[32][4];
         int32_t preVi[16];
-        if (s_egCurRunTraced || (s_emRecording && s_emTraceCount < 2000u))
+        if (s_egCurRunTraced || s_emRecording)
         {
             std::memcpy(preVf, m_state.vf, sizeof(preVf));
             std::memcpy(preVi, m_state.vi, sizeof(preVi));
@@ -3077,12 +3184,13 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             if (s_emLastPairPc == 0x038u)
             {
                 s_emCurRunTargets.push_back(m_state.pc);
-                if (!s_emRecording && s_emCurRunTargets.size() >= 2u)
+                if (s_emCurRunTargets.size() == 1u && s_emCurRunTargets[0] != 0xC80u)
                 {
-                    if (s_emCurRunTargets[0] == 0xC80u && s_emCurRunTargets[1] == 0x3160u)
-                    {
-                        s_emRecording = true;
-                    }
+                    s_emRecording = false;
+                }
+                else if (s_emCurRunTargets.size() == 2u && s_emCurRunTargets[1] != 0x070u)
+                {
+                    s_emRecording = false;
                 }
             }
             s_emLastPairPc = m_state.pc;
@@ -3299,9 +3407,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 t.clip = m_state.clip;
             }
         }
-        if (s_emRecording && s_emTraceCount < 2000u)
+        if (s_emRecording)
         {
-            auto &t = s_emTraces[s_emTraceCount++];
+            if (decoded.iBit) {
+                s_emLowOpHist["I_IMM"]++;
+            } else {
+                s_emLowOpHist[getLowerOpName(decoded.lower)]++;
+            }
+
+            EgPairTrace t{};
             t.pc = m_state.pc;
             t.upper = decoded.upper;
             t.lower = decoded.lower;
@@ -3330,6 +3444,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             t.mac = m_state.mac;
             t.status = m_state.status;
             t.clip = m_state.clip;
+
+            if (s_emTraceCount < 1000u) {
+                s_emFirstTraces[s_emTraceCount] = t;
+            }
+            s_emTailRing[s_emTraceCount % 1000u] = t;
+            s_emTraceCount++;
         }
         if (programEnded)
             break;
@@ -3346,7 +3466,13 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     if (s_emCurRunCandidate)
     {
         s_emCurRunCandidate = false;
-        if (!s_emDone && s_emRecording && s_vdCurRunZeroXy >= 5u)
+        bool has070 = false, has1EE0 = false;
+        for (uint32_t tgt : s_emCurRunTargets) {
+            if (tgt == 0x070u) has070 = true;
+            if (tgt == 0x1EE0u) has1EE0 = true;
+        }
+
+        if (!s_emDone && s_emRecording && has070 && has1EE0 && s_vdCurRunZeroXy >= 20u)
         {
             s_emDone = true;
             s_emRecording = false;
@@ -3360,9 +3486,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 std::printf("[probe] en entry vf%02d=%08X %08X %08X %08X\n", n, w[0], w[1], w[2], w[3]);
             }
             std::string viStr;
-            for (int r = 1; r < 16; ++r) {
+            for (int r = 0; r < 16; ++r) {
                 char buf[32];
-                std::snprintf(buf, sizeof(buf), "%s%d", (r > 1 ? " " : ""), s_emEntryVi[r]);
+                std::snprintf(buf, sizeof(buf), "%s%d", (r > 0 ? " " : ""), s_emEntryVi[r]);
                 viStr += buf;
             }
             uint32_t qHex = 0, pHex = 0;
@@ -3371,8 +3497,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             std::printf("[probe] en entry vi=%s top=%u itop=%u q=0x%08X p=0x%08X\n",
                         viStr.c_str(), s_emEntryTop, s_emEntryItop, qHex, pHex);
 
-            for (uint32_t i = 0; i < s_emTraceCount; ++i) {
-                const auto &t = s_emTraces[i];
+            auto printTrace = [](const EgPairTrace &t) {
                 std::string vfwStr;
                 for (uint8_t v = 0; v < t.numVf; ++v) {
                     char buf[64];
@@ -3390,6 +3515,64 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 if (!vfwStr.empty()) std::printf(" vfw=%s", vfwStr.c_str());
                 if (!viwStr.empty()) std::printf(" viw=%s", viwStr.c_str());
                 std::printf(" q=0x%08X mac=0x%08X st=0x%08X clip=0x%08X\n", t.qHex, t.mac, t.status, t.clip);
+            };
+
+            if (s_emTraceCount <= 2000u)
+            {
+                uint32_t firstLimit = std::min(s_emTraceCount, 1000u);
+                for (uint32_t i = 0; i < firstLimit; ++i) {
+                    printTrace(s_emFirstTraces[i]);
+                }
+                for (uint32_t i = 1000u; i < s_emTraceCount; ++i) {
+                    printTrace(s_emTailRing[i % 1000u]);
+                }
+            }
+            else
+            {
+                for (uint32_t i = 0; i < 1000u; ++i) {
+                    printTrace(s_emFirstTraces[i]);
+                }
+                std::printf("[probe] en pc gap skipped %u pairs (pairs>2000 kept first 1000 + last 1000)\n",
+                            s_emTraceCount - 2000u);
+                uint32_t tailStart = s_emTraceCount - 1000u;
+                for (uint32_t i = 0; i < 1000u; ++i) {
+                    printTrace(s_emTailRing[(tailStart + i) % 1000u]);
+                }
+            }
+
+            // Lower opcode histogram
+            std::vector<std::pair<std::string, uint32_t>> sortedOps(s_emLowOpHist.begin(), s_emLowOpHist.end());
+            std::sort(sortedOps.begin(), sortedOps.end(), [](const auto &a, const auto &b) {
+                return a.second > b.second;
+            });
+            std::string lowOpStr;
+            for (const auto &p : sortedOps) {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%s%s=%u", (lowOpStr.empty() ? "" : " "), p.first.c_str(), p.second);
+                lowOpStr += buf;
+            }
+            std::printf("[probe] en lowop %s\n", lowOpStr.c_str());
+
+            // 16 qw of VU1 data at vi13 and xtop(vi12)
+            auto dump16Qw = [&](const char *tag, uint32_t baseQw) {
+                for (uint32_t q = 0; q < 16u; ++q) {
+                    uint32_t eff = (baseQw + q) & 0x3FFu;
+                    uint32_t w[4]{};
+                    if (vuData && (eff + 1u) * 16u <= dataSize) {
+                        std::memcpy(w, vuData + eff * 16u, 16);
+                    }
+                    std::printf("[probe] en data_%s qw=%u off=%u w=%08X %08X %08X %08X\n",
+                                tag, eff, q, w[0], w[1], w[2], w[3]);
+                }
+            };
+
+            dump16Qw("vi13", static_cast<uint32_t>(m_state.vi[13]) & 0x3FFu);
+            if ((static_cast<uint32_t>(s_emEntryVi[13]) & 0x3FFu) != (static_cast<uint32_t>(m_state.vi[13]) & 0x3FFu)) {
+                dump16Qw("entry_vi13", static_cast<uint32_t>(s_emEntryVi[13]) & 0x3FFu);
+            }
+            dump16Qw("xtop_vi12", static_cast<uint32_t>(m_state.vi[12]) & 0x3FFu);
+            if ((static_cast<uint32_t>(s_emEntryVi[12]) & 0x3FFu) != (static_cast<uint32_t>(m_state.vi[12]) & 0x3FFu)) {
+                dump16Qw("entry_xtop_vi12", static_cast<uint32_t>(s_emEntryVi[12]) & 0x3FFu);
             }
 
             auto checkPrintQw = [](uint32_t q) {
@@ -3405,13 +3588,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
 
             for (size_t p = 0; p < s_emCurRunPackets.size(); ++p) {
                 const auto &pkt = s_emCurRunPackets[p];
-                for (uint32_t q = 0; q < pkt.qwCount; ++q) {
+                uint32_t limit = std::min<uint32_t>(40u, pkt.qwCount);
+                for (uint32_t q = 0; q < limit; ++q) {
                     std::printf("[probe] en out pkt=%u qw=%u w=%08X %08X %08X %08X\n",
                                 static_cast<unsigned>(p), q, pkt.words[q][0], pkt.words[q][1], pkt.words[q][2], pkt.words[q][3]);
                 }
             }
             std::fflush(stdout);
         }
+        s_emRecording = false;
     }
     if (s_fcC80.active && (m_stopRequested || m_state.pc + 8u > codeSize || m_state.pc < 0xC80u || m_state.pc > 0xCB8u))
     {
