@@ -3566,7 +3566,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             if (tgt == 0x1EE0u) has1EE0 = true;
         }
 
-        if (!s_emDone && s_emRecording && has070 && has1EE0 && s_vdCurRunVerts >= 50u && ++s_fwSkip > 400u)
+        if (!s_emDone && s_emRecording && has070 && has1EE0 && s_vdCurRunVerts >= 15u && ++s_fwSkip > 150u)
         {
             s_emDone = true;
             s_emRecording = false;
