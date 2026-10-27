@@ -1752,6 +1752,21 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
         return false;
 
     const uint32_t mode = (chcr >> 2u) & 0x3u;
+    {
+        // Task FS: log every scratchpad DMA (the normal-mode path only handles MOD=0)
+        static std::atomic<uint32_t> s_fsCount{0};
+        static std::atomic<uint32_t> s_fsNonNormal{0};
+        if (mode != 0u)
+            s_fsNonNormal.fetch_add(1, std::memory_order_relaxed);
+        if (s_fsCount.fetch_add(1, std::memory_order_relaxed) < 80u || (mode != 0u && s_fsNonNormal.load(std::memory_order_relaxed) < 40u))
+        {
+            std::printf("[probe] fs spr dma ch=%s chcr=0x%08X mode=%u madr=0x%08X tadr=0x%08X sadr=0x%08X qwc=%u handled=%s\n",
+                        channelBase == 0x1000D000u ? "fromSPR" : (channelBase == 0x1000D400u ? "toSPR" : "other"), chcr, mode,
+                        m_ioRegisters[channelBase + 0x10u], m_ioRegisters[channelBase + 0x30u], m_ioRegisters[channelBase + 0x80u],
+                        m_ioRegisters[channelBase + 0x20u] & 0xFFFFu, mode == 0u ? "normal" : "NO(returns false)");
+            std::fflush(stdout);
+        }
+    }
     if (mode != 0u)
         return false;
 
