@@ -1497,6 +1497,35 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
             static uint32_t s_ffLastKey = 0xFFFFFFFFu;
             static uint32_t s_ffRepeat = 0;
             static uint32_t s_ffLines = 0;
+            {
+                // Task FY: snapshot VU1 memory + registers at the 200th/600th store to qw 636 (table fill) for offline checking
+                static uint32_t s_fyCount = 0;
+                if (qw == 636u)
+                {
+                    ++s_fyCount;
+                    if (s_fyCount == 200u || s_fyCount == 600u)
+                    {
+                        char path[64];
+                        std::snprintf(path, sizeof(path), "logs/vu1_fill_%u.bin", s_fyCount);
+                        if (FILE *ff = std::fopen(path, "wb"))
+                        {
+                            if (m_activeVuData)
+                                std::fwrite(m_activeVuData, 1, m_activeVuDataSize < 16384u ? m_activeVuDataSize : 16384u, ff);
+                            std::fclose(ff);
+                        }
+                        std::printf("[probe] fy fill snapshot #%u pc=0x%X vi=", s_fyCount, m_state.pc);
+                        for (int r = 0; r < 16; ++r)
+                            std::printf("%d ", m_state.vi[r]);
+                        std::printf("\n");
+                        for (int r = 0; r < 32; ++r)
+                        {
+                            const uint32_t *w = reinterpret_cast<const uint32_t *>(m_state.vf[r]);
+                            std::printf("[probe] fy vf%02d=%08X %08X %08X %08X\n", r, w[0], w[1], w[2], w[3]);
+                        }
+                        std::fflush(stdout);
+                    }
+                }
+            }
             const uint32_t region = (qw >= 636u && qw <= 698u) ? 1u : ((qw >= 716u && qw <= 778u) ? 2u : 0u);
             if (region != 0u)
             {
