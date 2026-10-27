@@ -322,6 +322,7 @@ static EgPairTrace s_emFirstTraces[1000];
 static EgPairTrace s_emTailRing[1000];
 static uint32_t s_emTraceCount = 0;
 static bool s_emDone = false;
+static uint32_t s_fwSkip = 0;
 static bool s_emCurRunCandidate = false;
 static bool s_emRecording = false;
 static uint32_t s_emCurRunPairs = 0;
@@ -3565,10 +3566,17 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             if (tgt == 0x1EE0u) has1EE0 = true;
         }
 
-        if (!s_emDone && s_emRecording && has070 && has1EE0 && s_vdCurRunZeroXy >= 20u)
+        if (!s_emDone && s_emRecording && has070 && has1EE0 && s_vdCurRunVerts >= 50u && ++s_fwSkip > 400u)
         {
             s_emDone = true;
             s_emRecording = false;
+            // Task FW: raw VU1 data memory at run entry / exit for offline re-simulation
+            if (FILE *fe = std::fopen("logs/vu1_entry.bin", "wb")) { std::fwrite(s_emEntryVuData, 1, sizeof(s_emEntryVuData), fe); std::fclose(fe); }
+            if (FILE *fx = std::fopen("logs/vu1_exit.bin", "wb"))
+            {
+                if (m_activeVuData) std::fwrite(m_activeVuData, 1, m_activeVuDataSize < 16384u ? m_activeVuDataSize : 16384u, fx);
+                std::fclose(fx);
+            }
 
             std::printf("[probe] en run_verts=%u zero_xy=%u pairs=%u\n",
                         s_vdCurRunVerts, s_vdCurRunZeroXy, s_emCurRunPairs);
