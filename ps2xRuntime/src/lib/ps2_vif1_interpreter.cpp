@@ -134,14 +134,14 @@ static uint32_t s_erCurrentChunkSize = 0;
 static bool s_erCurrentChunkReported = false;
 
 static std::mutex s_epMutex;
-static char s_epRing[64][128];
+static char s_epRing[128][256];
 static uint64_t s_epTotalEvents = 0;
 
 extern "C" void ps2x_probeEvent(const char *msg)
 {
     if (!isVu3dProbeEnabled() || !msg) return;
     std::lock_guard<std::mutex> lock(s_epMutex);
-    uint32_t idx = static_cast<uint32_t>(s_epTotalEvents % 64ULL);
+    uint32_t idx = static_cast<uint32_t>(s_epTotalEvents % 128ULL);
     std::strncpy(s_epRing[idx], msg, sizeof(s_epRing[idx]) - 1);
     s_epRing[idx][sizeof(s_epRing[idx]) - 1] = '\0';
     s_epTotalEvents++;
@@ -151,11 +151,11 @@ extern "C" void ps2x_probeDump()
 {
     std::lock_guard<std::mutex> lock(s_epMutex);
     uint64_t total = s_epTotalEvents;
-    uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(64ULL, total));
-    uint64_t start = (total > 64ULL) ? (total - 64ULL) : 0ULL;
+    uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(128ULL, total));
+    uint64_t start = (total > 128ULL) ? (total - 128ULL) : 0ULL;
     for (uint32_t i = 0; i < count; ++i)
     {
-        uint32_t idx = static_cast<uint32_t>((start + i) % 64ULL);
+        uint32_t idx = static_cast<uint32_t>((start + i) % 128ULL);
         std::printf("[probe] ep ev %u: %s\n", i, s_epRing[idx]);
     }
     std::fflush(stdout);
@@ -164,7 +164,7 @@ extern "C" void ps2x_probeDump()
 static void recordEpEvent(const char *fmt, ...)
 {
     if (!isVu3dProbeEnabled()) return;
-    char buf[128];
+    char buf[256];
     va_list args;
     va_start(args, fmt);
     std::vsnprintf(buf, sizeof(buf), fmt, args);
@@ -733,6 +733,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         else if (opcode == VIF_STMOD)
         {
             vif1_regs.mode = imm & 3u;
+            recordEpEvent("STMOD mode=%u", vif1_regs.mode);
             continue;
         }
         else if (opcode == VIF_MSKPATH3)
@@ -740,6 +741,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             // VIF command docs: MSKPATH3 uses IMMEDIATE bit 15.
             const bool wasMasked = m_path3Masked;
             m_path3Masked = (imm & 0x8000u) != 0u;
+            recordEpEvent("MSKPATH3 mask=%u", (imm & 0x8000u) ? 1u : 0u);
             if (wasMasked && !m_path3Masked)
                 flushMaskedPath3Packets();
             continue;
@@ -765,6 +767,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
         {
+            recordEpEvent("FLUSH op=0x%02X", opcode);
             continue;
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
@@ -846,6 +849,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             uint32_t maskValue = 0;
             std::memcpy(&maskValue, data + pos, sizeof(maskValue));
             vif1_regs.mask = maskValue;
+            recordEpEvent("STMASK mask=0x%08X", maskValue);
             pos += 4;
             continue;
         }
@@ -854,6 +858,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (pos + 16 > sizeBytes)
                 break;
             std::memcpy(vif1_regs.row, data + pos, 16);
+            recordEpEvent("STROW row=%08X %08X %08X %08X",
+                          vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3]);
             pos += 16;
             continue;
         }
@@ -862,6 +868,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (pos + 16 > sizeBytes)
                 break;
             std::memcpy(vif1_regs.col, data + pos, 16);
+            recordEpEvent("STCOL col=%08X %08X %08X %08X",
+                          vif1_regs.col[0], vif1_regs.col[1], vif1_regs.col[2], vif1_regs.col[3]);
             pos += 16;
             continue;
         }
@@ -1015,10 +1023,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 std::memcpy(w0, srcBaseAt974, avail);
             }
 
-            recordEpEvent("UNPACK cmd=0x%02X dest=%u num=%u cl=%u wl=%u flg=%u tops=%u src=0x%08X w0=%08X %08X %08X %08X",
+            recordEpEvent("UNPACK cmd=0x%02X dest=%u num=%u cl=%u wl=%u flg=%u tops=%u src=0x%08X w0=%08X %08X %08X %08X mask=%08X mode=%u row=%08X %08X %08X %08X col=%08X %08X %08X %08X",
                           opcode, vuAddr, writeVectorCount,
                           cl, wl, (imm & 0x8000u) ? 1u : 0u, vif1_regs.tops & 0x3FFu,
-                          srcRdram, w0[0], w0[1], w0[2], w0[3]);
+                          srcRdram, w0[0], w0[1], w0[2], w0[3],
+                          vif1_regs.mask, vif1_regs.mode & 3u,
+                          vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3],
+                          vif1_regs.col[0], vif1_regs.col[1], vif1_regs.col[2], vif1_regs.col[3]);
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
             if (cl == 0u && probe_ae::isDcProbeEnabled())
@@ -1670,7 +1681,17 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                                 vif1_regs.mask, vif1_regs.row, vif1_regs.col);
                     }
                 }
-                    // Task EO: Check if UNPACK wrote any quadword in VU qw 0..1023 with a lane that is NaN/Inf/0x7FFFFFFF/|f|>1e15
+                if (m_vu1Data)
+                {
+                    uint32_t eff = vuAddr;
+                    uint32_t lastVec = (cl >= wl) ? ((eff + ((writeVectorCount - 1u) / wl) * cl + ((writeVectorCount - 1u) % wl)) & 0x3FFu) : ((eff + writeVectorCount - 1u) & 0x3FFu);
+                    uint32_t dwFirst[4]{}, dwLast[4]{};
+                    if (eff < 0x400u) std::memcpy(dwFirst, m_vu1Data + eff * 16u, 16);
+                    if (lastVec < 0x400u) std::memcpy(dwLast, m_vu1Data + lastVec * 16u, 16);
+                    recordEpEvent("UNPACK-RB eff=%u first_written_qw=%08X %08X %08X %08X last_qw=%08X %08X %08X %08X",
+                                  eff, dwFirst[0], dwFirst[1], dwFirst[2], dwFirst[3],
+                                  dwLast[0], dwLast[1], dwLast[2], dwLast[3]);
+                }
             }
 
             auto now = std::chrono::steady_clock::now();
