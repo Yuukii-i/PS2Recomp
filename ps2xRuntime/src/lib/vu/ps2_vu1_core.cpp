@@ -3594,9 +3594,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             {
                 static const char *const kFeKind[3] = {"NONE", "UNPACK", "VUSTORE"};
                 std::lock_guard<std::mutex> feLock(s_feWriterMutex);
-                for (uint32_t qw = 636u; qw < 1024u; ++qw)
+                for (uint32_t qw = 440u; qw < 1024u; ++qw)
                 {
-                    const bool inTbl = (qw <= 698u) || (qw >= 716u && qw <= 778u);
+                    const bool inTbl = (qw <= 520u) || (qw >= 636u && qw <= 698u) || (qw >= 716u && qw <= 778u);
                     const bool inConst = (qw >= 1002u);
                     if (!inTbl && !inConst)
                         continue;
