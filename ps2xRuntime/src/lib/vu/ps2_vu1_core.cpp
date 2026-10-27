@@ -1491,6 +1491,30 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
     {
         uint32_t qw = (address / 16u) & 0x3FFu;
         ps2_fe_recordVuStore(qw, m_state.pc);
+        {
+            // Task FF: regs + source vectors when the table-fill loop first stores to qw 636 / 716
+            static std::atomic<uint32_t> s_ffCount{0};
+            if ((qw == 636u || qw == 716u) && s_ffCount.fetch_add(1, std::memory_order_relaxed) < 12u)
+            {
+                std::printf("[probe] ff store qw=%u pc=0x%X vi=", qw, m_state.pc);
+                for (int r = 0; r < 16; ++r)
+                    std::printf("%d ", m_state.vi[r]);
+                std::printf("q=%08X\n", *reinterpret_cast<const uint32_t *>(&m_state.q));
+                for (int r : {1, 2, 3, 4, 5, 6, 7, 10, 25})
+                {
+                    const uint32_t *w = reinterpret_cast<const uint32_t *>(m_state.vf[r]);
+                    std::printf("[probe] ff vf%d=%08X %08X %08X %08X\n", r, w[0], w[1], w[2], w[3]);
+                }
+                const uint32_t src = static_cast<uint32_t>(m_state.vi[1]) & 0x3FFu;
+                for (uint32_t k = 0; k < 6u && m_activeVuData && (src + k + 1u) * 16u <= m_activeVuDataSize; ++k)
+                {
+                    uint32_t w[4];
+                    std::memcpy(w, m_activeVuData + (src + k) * 16u, 16);
+                    std::printf("[probe] ff src qw=%u %08X %08X %08X %08X\n", src + k, w[0], w[1], w[2], w[3]);
+                }
+                std::fflush(stdout);
+            }
+        }
         if (qw >= 235u && qw <= 244u && ps2_vif1_getEuMatchedCount() >= 6u)
         {
             if (!s_euStoreLoggedThisRun)
