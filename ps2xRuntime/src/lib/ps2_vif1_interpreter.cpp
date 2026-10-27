@@ -1766,7 +1766,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                             static_cast<uint8_t>(cl), static_cast<uint8_t>(wl),
                                             static_cast<uint8_t>((imm & 0x8000u) ? 1u : 0u),
                                             static_cast<uint16_t>(vif1_regs.tops & 0x3FFu), srcOff);
-                        if (destVec >= 600u && destVec <= 780u) {
+                        if ((destVec >= 600u && destVec <= 780u) || (destVec >= 440u && destVec <= 520u)) {
                             overlaps600_780 = true;
                         }
                         if (m_vu1Data && (destVec + 1u) * 16u <= PS2_VU1_DATA_SIZE) {
@@ -1778,7 +1778,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         }
                     }
 
-                    if (overlaps600_780 && s_feUnpackLogCount.fetch_add(1, std::memory_order_relaxed) < 60u)
+                    if (overlaps600_780 && !(vuAddr == 601u && writeVectorCount == 4u) && s_feUnpackLogCount.fetch_add(1, std::memory_order_relaxed) < 400u)
                     {
                         uint32_t dwFirst[4]{}, dwLast[4]{};
                         if (m_vu1Data) {
