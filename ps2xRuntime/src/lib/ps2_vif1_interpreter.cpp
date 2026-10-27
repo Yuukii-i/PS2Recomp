@@ -120,6 +120,19 @@ static std::atomic<uint32_t> s_eqPrintCount{0};
 static std::atomic<uint32_t> s_eqRdramPrintCount{0};
 static std::chrono::steady_clock::time_point s_eqLastCountsTime{};
 
+// =========================================================================
+// Task ER: UNPACK drop / taken tracking & chunk diagnostics
+// =========================================================================
+static std::atomic<uint32_t> s_erDropped[128]{};
+static std::atomic<uint32_t> s_erTaken[128]{};
+static std::atomic<uint32_t> s_erDropPrintCount{0};
+static std::atomic<uint32_t> s_erChunkReportCount{0};
+static std::chrono::steady_clock::time_point s_erLastCountsTime{};
+
+static const uint8_t *s_erCurrentChunk = nullptr;
+static uint32_t s_erCurrentChunkSize = 0;
+static bool s_erCurrentChunkReported = false;
+
 static std::mutex s_epMutex;
 static char s_epRing[64][128];
 static uint64_t s_epTotalEvents = 0;
@@ -597,6 +610,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     if (sizeBytes == 0u)
         return;
 
+    s_erCurrentChunk = data;
+    s_erCurrentChunkSize = sizeBytes;
+    s_erCurrentChunkReported = false;
+
     probe_ae::onBhVif1Start();
     probe_ae::onBxKick();
     uint32_t mscal0x48Count = count0x48MscalsInKick(data, sizeBytes);
@@ -1010,6 +1027,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
             else if (m_vu1Data && (totalBytes > 0 || cl == 0u) && pos + totalBytes <= sizeBytes)
             {
+                if (isVu3dProbeEnabled())
+                {
+                    s_erTaken[opcode & 0x7Fu].fetch_add(1, std::memory_order_relaxed);
+                }
                 const uint8_t *srcBase = data + pos;
 
                 static std::atomic<uint64_t> s_ciFastCount{0};
@@ -1720,13 +1741,39 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
 
             auto now = std::chrono::steady_clock::now();
-            if (s_eqLastCountsTime == std::chrono::steady_clock::time_point{}) {
-                s_eqLastCountsTime = now;
-            } else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_eqLastCountsTime).count() >= 5) {
-                s_eqLastCountsTime = now;
-                std::printf("[probe] eq counts bad=%u total_v4_32=%u\n",
-                            s_eqBadCount.load(std::memory_order_relaxed),
-                            s_eqTotalV4_32.load(std::memory_order_relaxed));
+            if (s_erLastCountsTime == std::chrono::steady_clock::time_point{}) {
+                s_erLastCountsTime = now;
+            } else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_erLastCountsTime).count() >= 5) {
+                s_erLastCountsTime = now;
+                std::vector<std::pair<uint8_t, uint32_t>> dropPairs;
+                std::vector<std::pair<uint8_t, uint32_t>> takenPairs;
+                for (uint8_t op = 0; op < 128; ++op)
+                {
+                    uint32_t d = s_erDropped[op].load(std::memory_order_relaxed);
+                    if (d > 0) dropPairs.push_back({op, d});
+                    uint32_t t = s_erTaken[op].load(std::memory_order_relaxed);
+                    if (t > 0) takenPairs.push_back({op, t});
+                }
+                std::sort(dropPairs.begin(), dropPairs.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+                std::sort(takenPairs.begin(), takenPairs.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+
+                std::string dropStr;
+                for (size_t i = 0; i < std::min<size_t>(5u, dropPairs.size()); ++i)
+                {
+                    char b[32];
+                    std::snprintf(b, sizeof(b), "%s0x%02X:%u", (i > 0 ? "," : ""), dropPairs[i].first, dropPairs[i].second);
+                    dropStr += b;
+                }
+
+                std::string takenStr;
+                for (size_t i = 0; i < std::min<size_t>(5u, takenPairs.size()); ++i)
+                {
+                    char b[32];
+                    std::snprintf(b, sizeof(b), "%s0x%02X:%u", (i > 0 ? "," : ""), takenPairs[i].first, takenPairs[i].second);
+                    takenStr += b;
+                }
+
+                std::printf("[probe] er counts drop(%s) taken(%s)\n", dropStr.c_str(), takenStr.c_str());
                 std::fflush(stdout);
             }
             if (std::chrono::duration_cast<std::chrono::seconds>(now - s_ciLastSecLog).count() >= 1) {
@@ -1767,6 +1814,59 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     s_dbGenericShapes.clear();
                 }
             }
+            }
+            else
+            {
+                if (isVu3dProbeEnabled())
+                {
+                    s_erDropped[opcode & 0x7Fu].fetch_add(1, std::memory_order_relaxed);
+                    uint32_t drIdx = s_erDropPrintCount.fetch_add(1, std::memory_order_relaxed);
+                    if (drIdx < 40u)
+                    {
+                        const uint8_t *srcBase = data + pos;
+                        uint32_t srcBase_rdram = 0xFFFFFFFFu;
+                        if (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE)
+                        {
+                            srcBase_rdram = static_cast<uint32_t>(srcBase - m_rdram);
+                        }
+                        std::printf("[probe] er drop cmd=0x%02X num=%u dest=%u pos=%u totalBytes=%u sizeBytes=%u m_vu1Data=%d cl=%u wl=%u srcBase_rdram=0x%08X\n",
+                                    opcode,
+                                    (num == 0u) ? 256u : static_cast<uint32_t>(num),
+                                    vuAddr,
+                                    pos,
+                                    totalBytes,
+                                    sizeBytes,
+                                    m_vu1Data ? 1 : 0,
+                                    cl, wl,
+                                    srcBase_rdram);
+                        std::fflush(stdout);
+                    }
+                    if (s_erCurrentChunk && !s_erCurrentChunkReported)
+                    {
+                        uint32_t cIdx = s_erChunkReportCount.fetch_add(1, std::memory_order_relaxed);
+                        if (cIdx < 10u)
+                        {
+                            s_erCurrentChunkReported = true;
+                            uint32_t w[4]{0, 0, 0, 0};
+                            if (s_erCurrentChunkSize >= 16u)
+                            {
+                                std::memcpy(w, s_erCurrentChunk, 16);
+                            }
+                            else if (s_erCurrentChunkSize > 0u)
+                            {
+                                std::memcpy(w, s_erCurrentChunk, s_erCurrentChunkSize);
+                            }
+                            uint32_t cSrc = 0xFFFFFFFFu;
+                            if (m_rdram && s_erCurrentChunk >= m_rdram && s_erCurrentChunk < m_rdram + PS2_RAM_SIZE)
+                            {
+                                cSrc = static_cast<uint32_t>(s_erCurrentChunk - m_rdram);
+                            }
+                            std::printf("[probe] er chunk size=%u start_pos=%u src=0x%08X w0..3=%08X %08X %08X %08X caller=processVIF1Data tag=n/a\n",
+                                        s_erCurrentChunkSize, 0u, cSrc, w[0], w[1], w[2], w[3]);
+                            std::fflush(stdout);
+                        }
+                    }
+                }
             }
             pos += totalBytes;
 
