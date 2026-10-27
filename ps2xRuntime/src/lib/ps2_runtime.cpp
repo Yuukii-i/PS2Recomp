@@ -3846,6 +3846,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
+    // vf0 is hardwired {0,0,0,1}; contexts built via R5900Context() start with it zeroed. (Hack Ledger: HW-faithful backstop)
+    if (ctx)
+        ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
     if (targetPc >= 0x00120000u && targetPc < 0x0013F800u)
     {
         static uint32_t s_range120kBranchHitCount = 0;
