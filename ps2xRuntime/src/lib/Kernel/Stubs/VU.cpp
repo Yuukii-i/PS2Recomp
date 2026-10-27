@@ -1,5 +1,212 @@
 #include "Common.h"
 #include "VU.h"
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
+#include <string>
+#include <algorithm>
+
+extern "C" void ps2x_probeBadStore(uint32_t addr, uint64_t lo, uint64_t hi, uint32_t pc, uint32_t ra);
+extern "C" void ps2x_recordHleCall(const char *msg);
+extern "C" void ps2x_dumpHleRing();
+
+namespace ps2_stubs {
+namespace {
+
+static inline bool isVu3dProbeEnabled()
+{
+    static int s_vu3d = -1;
+    if (s_vu3d == -1)
+    {
+        const char *v = std::getenv("PS2X_PROBE_VU3D");
+        s_vu3d = (v && std::strcmp(v, "1") == 0) ? 1 : 0;
+    }
+    return s_vu3d == 1;
+}
+
+static inline bool isBadHleWord(uint32_t w)
+{
+    if (w == 0xFFFFFFFFu || w == 0x7FFFFFFFu || w == 0x7F7FFFFFu || w == 0xFF7FFFFFu || w == 0xFF7FFFFEu)
+        return true;
+    uint32_t exp = (w >> 23) & 0xFFu;
+    if (exp == 0xFFu)
+        return true;
+    float f = 0.0f;
+    std::memcpy(&f, &w, 4);
+    if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e20f)
+        return true;
+    return false;
+}
+
+static std::mutex s_hleRingMutex;
+static char s_hleRing[8][512];
+static uint64_t s_hleRingTotal = 0;
+
+} // namespace
+} // namespace ps2_stubs
+
+extern "C" void ps2x_recordHleCall(const char *msg)
+{
+    std::lock_guard<std::mutex> lock(ps2_stubs::s_hleRingMutex);
+    uint32_t idx = static_cast<uint32_t>(ps2_stubs::s_hleRingTotal % 8ULL);
+    std::strncpy(ps2_stubs::s_hleRing[idx], msg, sizeof(ps2_stubs::s_hleRing[idx]) - 1);
+    ps2_stubs::s_hleRing[idx][sizeof(ps2_stubs::s_hleRing[idx]) - 1] = '\0';
+    ps2_stubs::s_hleRingTotal++;
+}
+
+extern "C" void ps2x_dumpHleRing()
+{
+    std::lock_guard<std::mutex> lock(ps2_stubs::s_hleRingMutex);
+    uint64_t total = ps2_stubs::s_hleRingTotal;
+    uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(8ULL, total));
+    uint64_t start = (total > 8ULL) ? (total - 8ULL) : 0ULL;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        uint32_t idx = static_cast<uint32_t>((start + i) % 8ULL);
+        std::printf("[probe] ex prev_hle[%u]: %s\n", i, ps2_stubs::s_hleRing[idx]);
+    }
+}
+
+namespace ps2_stubs {
+namespace {
+
+static std::unordered_map<std::string, uint32_t> s_stubCallCounts;
+static std::mutex s_stubStatsMutex;
+static std::atomic<uint32_t> s_badHlePrintCount{0};
+static std::atomic<bool> s_sawFirstBadFromSane{false};
+
+template <typename F>
+static void auditVu0Stub(const char *name, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, F &&fn)
+{
+    if (!isVu3dProbeEnabled())
+    {
+        fn();
+        return;
+    }
+
+    const uint32_t a0 = ctx ? getRegU32(ctx, 4) : 0u;
+    const uint32_t a1 = ctx ? getRegU32(ctx, 5) : 0u;
+    const uint32_t a2 = ctx ? getRegU32(ctx, 6) : 0u;
+    const uint32_t a3 = ctx ? getRegU32(ctx, 7) : 0u;
+    const uint32_t ra = ctx ? getRegU32(ctx, 31) : 0u;
+
+    bool isMatrix = (std::strstr(name, "Matrix") != nullptr && std::strcmp(name, "sceVu0ApplyMatrix") != 0);
+    const uint32_t wordCount = isMatrix ? 16u : 4u;
+
+    uint32_t inWords[32]{};
+    uint32_t inCount = 0;
+    if (rdram && a1 < PS2_RAM_SIZE)
+    {
+        const uint32_t *p1 = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, a1));
+        if (p1)
+        {
+            uint32_t n = std::min(wordCount, (PS2_RAM_SIZE - (a1 & 0x01FFFFFFu)) / 4u);
+            for (uint32_t i = 0; i < n; ++i) inWords[inCount++] = p1[i];
+        }
+    }
+    if (rdram && a2 < PS2_RAM_SIZE && inCount < 32u)
+    {
+        const uint32_t *p2 = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, a2));
+        if (p2)
+        {
+            uint32_t n = std::min(wordCount, (PS2_RAM_SIZE - (a2 & 0x01FFFFFFu)) / 4u);
+            for (uint32_t i = 0; i < n && inCount < 32u; ++i) inWords[inCount++] = p2[i];
+        }
+    }
+
+    bool inBad = false;
+    for (uint32_t i = 0; i < inCount; ++i)
+    {
+        if (isBadHleWord(inWords[i])) { inBad = true; break; }
+    }
+
+    fn();
+
+    uint32_t outWords[16]{};
+    uint32_t outCount = 0;
+    if (rdram && a0 < PS2_RAM_SIZE)
+    {
+        const uint32_t *p0 = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, a0));
+        if (p0)
+        {
+            uint32_t n = std::min(wordCount, (PS2_RAM_SIZE - (a0 & 0x01FFFFFFu)) / 4u);
+            for (uint32_t i = 0; i < n; ++i) outWords[outCount++] = p0[i];
+        }
+    }
+
+    bool outBad = false;
+    for (uint32_t i = 0; i < outCount; ++i)
+    {
+        if (isBadHleWord(outWords[i])) { outBad = true; break; }
+    }
+
+    bool isFirstBadFromSane = false;
+    if (!inBad && outBad)
+    {
+        bool expected = false;
+        if (s_sawFirstBadFromSane.compare_exchange_strong(expected, true))
+        {
+            isFirstBadFromSane = true;
+        }
+    }
+
+    uint32_t callNum = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_stubStatsMutex);
+        callNum = ++s_stubCallCounts[name];
+    }
+
+    bool shouldPrint = false;
+    if (callNum <= 6u)
+    {
+        shouldPrint = true;
+    }
+    else if (inBad || outBad)
+    {
+        if (s_badHlePrintCount.fetch_add(1, std::memory_order_relaxed) < 60u)
+        {
+            shouldPrint = true;
+        }
+    }
+
+    char inStr[32 * 9 + 1];
+    char *pIn = inStr;
+    for (uint32_t i = 0; i < inCount; ++i)
+    {
+        pIn += std::snprintf(pIn, 10, (i == 0) ? "%08X" : " %08X", inWords[i]);
+    }
+    if (inCount == 0) std::snprintf(inStr, sizeof(inStr), "none");
+
+    char outStr[16 * 9 + 1];
+    char *pOut = outStr;
+    for (uint32_t i = 0; i < outCount; ++i)
+    {
+        pOut += std::snprintf(pOut, 10, (i == 0) ? "%08X" : " %08X", outWords[i]);
+    }
+    if (outCount == 0) std::snprintf(outStr, sizeof(outStr), "none");
+
+    char logBuf[512];
+    std::snprintf(logBuf, sizeof(logBuf),
+                  "[probe] ex hle %s ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X in=%s out=%s%s%s%s",
+                  name, ra, a0, a1, a2, a3, inStr, outStr,
+                  inBad ? " IN_BAD" : "",
+                  outBad ? " OUT_BAD" : "",
+                  isFirstBadFromSane ? " OUT_BAD_FROM_SANE" : "");
+
+    ps2x_recordHleCall(logBuf);
+
+    if (shouldPrint)
+    {
+        std::printf("%s\n", logBuf);
+        std::fflush(stdout);
+    }
+}
+
+} // namespace
+} // namespace ps2_stubs
 
 namespace ps2_stubs
 {
@@ -19,6 +226,22 @@ namespace ps2_stubs
 
         bool writeVuVec4f(uint8_t *rdram, uint32_t addr, const float (&in)[4])
         {
+            uint32_t phys = addr & 0x01FFFFFFu;
+            if (phys >= 0x785AF0u && phys < 0x785C20u)
+            {
+                uint32_t words[4];
+                std::memcpy(words, in, 16);
+                for (int i = 0; i < 4; ++i)
+                {
+                    if (isBadHleWord(words[i]))
+                    {
+                        uint64_t lo = static_cast<uint64_t>(words[0]) | (static_cast<uint64_t>(words[1]) << 32);
+                        uint64_t hi = static_cast<uint64_t>(words[2]) | (static_cast<uint64_t>(words[3]) << 32);
+                        ps2x_probeBadStore(addr, lo, hi, 0, 0);
+                        break;
+                    }
+                }
+            }
             uint8_t *ptr = getMemPtr(rdram, addr);
             if (!ptr)
             {
@@ -63,6 +286,23 @@ namespace ps2_stubs
 
         bool writeVuMatrix4f(uint8_t *rdram, uint32_t addr, const float (&in)[16])
         {
+            uint32_t phys = addr & 0x01FFFFFFu;
+            if (phys >= 0x785AF0u && phys < 0x785C20u)
+            {
+                uint32_t words[16];
+                std::memcpy(words, in, 64);
+                for (int i = 0; i < 16; ++i)
+                {
+                    if (isBadHleWord(words[i]))
+                    {
+                        uint32_t qw = i / 4;
+                        uint64_t lo = static_cast<uint64_t>(words[qw * 4]) | (static_cast<uint64_t>(words[qw * 4 + 1]) << 32);
+                        uint64_t hi = static_cast<uint64_t>(words[qw * 4 + 2]) | (static_cast<uint64_t>(words[qw * 4 + 3]) << 32);
+                        ps2x_probeBadStore(addr + qw * 16u, lo, hi, 0, 0);
+                        break;
+                    }
+                }
+            }
             uint8_t *ptr = getMemPtr(rdram, addr);
             if (!ptr)
             {
@@ -193,6 +433,7 @@ namespace ps2_stubs
 
     void sceVu0AddVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0AddVector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t lhsAddr = getRegU32(ctx, 5);
         const uint32_t rhsAddr = getRegU32(ctx, 6);
@@ -206,10 +447,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ApplyMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ApplyMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t matrixAddr = getRegU32(ctx, 5);
         const uint32_t srcAddr = getRegU32(ctx, 6);
@@ -227,10 +470,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0CameraMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0CameraMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t eyeAddr = getRegU32(ctx, 5);
         const uint32_t fwdAddr = getRegU32(ctx, 6);
@@ -276,10 +521,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ClampVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ClampVector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const float lo = ctx ? ctx->f[12] : 0.0f;
@@ -297,10 +544,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ClipAll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ClipAll", rdram, ctx, runtime, [&]() {
         const uint32_t loAddr = getRegU32(ctx, 4);
         const uint32_t hiAddr = getRegU32(ctx, 5);
         const uint32_t matAddr = getRegU32(ctx, 6);
@@ -330,10 +579,12 @@ namespace ps2_stubs
             }
         }
         setReturnS32(ctx, result);
+        });
     }
 
     void sceVu0ClipScreen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ClipScreen", rdram, ctx, runtime, [&]() {
         const uint32_t vAddr = getRegU32(ctx, 4);
         float v[4]{};
         int32_t code = 0;
@@ -342,10 +593,12 @@ namespace ps2_stubs
             code = screenClipCode(v);
         }
         setReturnS32(ctx, code);
+        });
     }
 
     void sceVu0ClipScreen3(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ClipScreen3", rdram, ctx, runtime, [&]() {
         const uint32_t v0Addr = getRegU32(ctx, 4);
         const uint32_t v1Addr = getRegU32(ctx, 5);
         const uint32_t v2Addr = getRegU32(ctx, 6);
@@ -364,10 +617,12 @@ namespace ps2_stubs
             code |= screenClipCode(v2);
         }
         setReturnS32(ctx, code);
+        });
     }
 
     void sceVu0CopyMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0CopyMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         uint8_t *dst = getMemPtr(rdram, dstAddr);
@@ -377,10 +632,12 @@ namespace ps2_stubs
             std::memcpy(dst, src, sizeof(float) * 16u);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0CopyVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0CopyVector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         uint8_t *dst = getMemPtr(rdram, dstAddr);
@@ -390,10 +647,12 @@ namespace ps2_stubs
             std::memcpy(dst, src, sizeof(float) * 4u);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0CopyVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0CopyVectorXYZ", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         uint8_t *dst = getMemPtr(rdram, dstAddr);
@@ -403,10 +662,12 @@ namespace ps2_stubs
             std::memcpy(dst, src, sizeof(float) * 3u);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0DivVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0DivVector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const float divisor = ctx ? ctx->f[12] : 1.0f;
@@ -421,10 +682,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0DivVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0DivVectorXYZ", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const float divisor = ctx ? ctx->f[12] : 1.0f;
@@ -439,10 +702,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0DropShadowMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0DropShadowMatrix", rdram, ctx, runtime, [&]() {
         // Two documented drop-shadow modes reconstructed from behavior; not
         // claimed bit-exact to a specific SDK build.
         const uint32_t dstAddr = getRegU32(ctx, 4);
@@ -500,19 +765,23 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ecossin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ecossin", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const float angle = ctx ? ctx->f[12] : 0.0f;
         float out[4] = {std::cos(angle), std::sin(angle), 0.0f, 0.0f};
         (void)writeVuVec4f(rdram, dstAddr, out);
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0FTOI0Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0FTOI0Vector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float src[4]{};
@@ -526,10 +795,12 @@ namespace ps2_stubs
             (void)writeVuVec4i(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0FTOI4Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0FTOI4Vector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float src[4]{};
@@ -543,10 +814,12 @@ namespace ps2_stubs
             (void)writeVuVec4i(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0InnerProduct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0InnerProduct", rdram, ctx, runtime, [&]() {
         const uint32_t lhsAddr = getRegU32(ctx, 4);
         const uint32_t rhsAddr = getRegU32(ctx, 5);
         float lhs[4]{}, rhs[4]{};
@@ -563,10 +836,12 @@ namespace ps2_stubs
         uint32_t raw = 0u;
         std::memcpy(&raw, &dot, sizeof(raw));
         setReturnU32(ctx, raw);
+        });
     }
 
     void sceVu0InterVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0InterVector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t aAddr = getRegU32(ctx, 5);
         const uint32_t bAddr = getRegU32(ctx, 6);
@@ -582,10 +857,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0InterVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0InterVectorXYZ", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t aAddr = getRegU32(ctx, 5);
         const uint32_t bAddr = getRegU32(ctx, 6);
@@ -601,10 +878,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0InversMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0InversMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float in[16]{}, out[16]{};
@@ -614,10 +893,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ITOF0Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ITOF0Vector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         int32_t src[4]{};
@@ -631,10 +912,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ITOF12Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ITOF12Vector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         int32_t src[4]{};
@@ -648,10 +931,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ITOF4Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ITOF4Vector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         int32_t src[4]{};
@@ -665,10 +950,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0LightColorMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0LightColorMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t c0Addr = getRegU32(ctx, 5);
         const uint32_t c1Addr = getRegU32(ctx, 6);
@@ -689,10 +976,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0MulMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0MulMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t m0Addr = getRegU32(ctx, 5);
         const uint32_t m1Addr = getRegU32(ctx, 6);
@@ -706,10 +995,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0MulVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0MulVector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t lhsAddr = getRegU32(ctx, 5);
         const uint32_t rhsAddr = getRegU32(ctx, 6);
@@ -723,31 +1014,42 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0Normalize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0Normalize", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float src[4]{}, out[4]{};
         if (readVuVec4f(rdram, srcAddr, src))
         {
-            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]) + (src[3] * src[3]));
-            if (len > 1.0e-6f)
+            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]));
+            if (len > 0.0f)
             {
                 const float invLen = 1.0f / len;
-                for (int i = 0; i < 4; ++i)
-                {
-                    out[i] = src[i] * invLen;
-                }
+                out[0] = src[0] * invLen;
+                out[1] = src[1] * invLen;
+                out[2] = src[2] * invLen;
+                out[3] = 0.0f;
+            }
+            else
+            {
+                out[0] = 0.0f;
+                out[1] = 0.0f;
+                out[2] = 0.0f;
+                out[3] = 0.0f;
             }
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0NormalLightMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0NormalLightMatrix", rdram, ctx, runtime, [&]() {
         // Rows = normalize(-light); the 4x4 is transposed so directions occupy
         // columns (one ApplyMatrix then yields per-light N.L).
         const uint32_t dstAddr = getRegU32(ctx, 4);
@@ -784,10 +1086,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0OuterProduct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0OuterProduct", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t lhsAddr = getRegU32(ctx, 5);
         const uint32_t rhsAddr = getRegU32(ctx, 6);
@@ -801,10 +1105,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0RotMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0RotMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const uint32_t rotAddr = getRegU32(ctx, 6);
@@ -818,10 +1124,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, afterX);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0RotMatrixX(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0RotMatrixX", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const float angle = ctx ? ctx->f[12] : 0.0f;
@@ -839,10 +1147,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0RotMatrixY(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0RotMatrixY", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const float angle = ctx ? ctx->f[12] : 0.0f;
@@ -860,10 +1170,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0RotMatrixZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0RotMatrixZ", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const float angle = ctx ? ctx->f[12] : 0.0f;
@@ -881,10 +1193,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0RotTransPers(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0RotTransPers", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t matAddr = getRegU32(ctx, 5);
         const uint32_t vAddr = getRegU32(ctx, 6);
@@ -897,10 +1211,12 @@ namespace ps2_stubs
             (void)writeVuVec4i(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0RotTransPersN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0RotTransPersN", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t matAddr = getRegU32(ctx, 5);
         uint32_t vAddr = getRegU32(ctx, 6);
@@ -923,10 +1239,12 @@ namespace ps2_stubs
             }
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ScaleVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ScaleVector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float src[4]{}, out[4]{};
@@ -950,10 +1268,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ScaleVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ScaleVectorXYZ", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const float scale = ctx ? ctx->f[12] : 0.0f;
@@ -967,10 +1287,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0SubVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0SubVector", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t lhsAddr = getRegU32(ctx, 5);
         const uint32_t rhsAddr = getRegU32(ctx, 6);
@@ -984,10 +1306,12 @@ namespace ps2_stubs
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0TransMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0TransMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const uint32_t vAddr = getRegU32(ctx, 6);
@@ -1002,10 +1326,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0TransposeMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0TransposeMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float src[16]{};
@@ -1022,10 +1348,12 @@ namespace ps2_stubs
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0UnitMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0UnitMatrix", rdram, ctx, runtime, [&]() {
         const uint32_t dstAddr = getRegU32(ctx, 4); // sceVu0FMATRIX dst
         alignas(16) const float identity[16] = {
             1.0f, 0.0f, 0.0f, 0.0f,
@@ -1045,10 +1373,12 @@ namespace ps2_stubs
         }
 
         setReturnS32(ctx, 0);
+        });
     }
 
     void sceVu0ViewScreenMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        auditVu0Stub("sceVu0ViewScreenMatrix", rdram, ctx, runtime, [&]() {
         // Near/far params handled by formula shape; SDK parameter names
         // not pinned. Args follow the out-of-line libvu0 register convention
         // used throughout this file: eight scalar floats in f12..f19 (p0..p7)
@@ -1099,5 +1429,6 @@ namespace ps2_stubs
         mulVuMatrix(scaleMat, projMat, out);
         (void)writeVuMatrix4f(rdram, dstAddr, out);
         setReturnS32(ctx, 0);
+        });
     }
 }

@@ -1,5 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
+extern "C" void ps2_scanCameraRegion(const char *caller, uint64_t callIndex, uint32_t ra);
 #include "probe_ae.h"
 #include <cstring>
 #include <cstdio>
@@ -1726,6 +1727,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     recordEpEvent("UNPACK-RB eff=%u first_written_qw=%08X %08X %08X %08X last_qw=%08X %08X %08X %08X",
                                   eff, dwFirst[0], dwFirst[1], dwFirst[2], dwFirst[3],
                                   dwLast[0], dwLast[1], dwLast[2], dwLast[3]);
+                }
+                if (isVu3dProbeEnabled())
+                {
+                    ps2_scanCameraRegion("unpack", 0, 0);
                 }
                 if (opcode == 0x6Cu && writeVectorCount == 10u && isVu3dProbeEnabled())
                 {

@@ -219,6 +219,143 @@ std::atomic<uint64_t> g_profEeUs{0};
 static uint64_t s_profPresentUs = 0;
 static auto g_lastSceneTransitionTime = std::chrono::steady_clock::now();
 
+// =========================================================================
+// Task EW & EX: VU0 microprogram, region scan, bad store & rings
+// =========================================================================
+static inline bool isVu3dProbeEnabled()
+{
+    static int s_vu3d = -1;
+    if (s_vu3d == -1)
+    {
+        const char *v = std::getenv("PS2X_PROBE_VU3D");
+        s_vu3d = (v && std::strcmp(v, "1") == 0) ? 1 : 0;
+    }
+    return s_vu3d == 1;
+}
+
+static inline bool isBadExitLane(uint32_t w)
+{
+    if (w == 0x7F7FFFFFu || w == 0xFF7FFFFFu || w == 0xFF7FFFFEu)
+    {
+        return true;
+    }
+    float f = 0.0f;
+    std::memcpy(&f, &w, sizeof(f));
+    if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e20f)
+    {
+        return true;
+    }
+    return false;
+}
+
+static uint8_t *s_exGlobalRdram = nullptr;
+
+static std::mutex s_vcallmsRingMutex;
+static char s_vcallmsRing[8][512];
+static uint64_t s_vcallmsRingTotal = 0;
+
+extern "C" void ps2x_recordVcallmsCall(const char *msg)
+{
+    std::lock_guard<std::mutex> lock(s_vcallmsRingMutex);
+    uint32_t idx = static_cast<uint32_t>(s_vcallmsRingTotal % 8ULL);
+    std::strncpy(s_vcallmsRing[idx], msg, sizeof(s_vcallmsRing[idx]) - 1);
+    s_vcallmsRing[idx][sizeof(s_vcallmsRing[idx]) - 1] = '\0';
+    s_vcallmsRingTotal++;
+}
+
+extern "C" void ps2x_dumpVcallmsRing()
+{
+    std::lock_guard<std::mutex> lock(s_vcallmsRingMutex);
+    uint64_t total = s_vcallmsRingTotal;
+    uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(8ULL, total));
+    uint64_t start = (total > 8ULL) ? (total - 8ULL) : 0ULL;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        uint32_t idx = static_cast<uint32_t>((start + i) % 8ULL);
+        std::printf("[probe] ex prev_vcallms[%u]: %s\n", i, s_vcallmsRing[idx]);
+    }
+}
+
+static void dumpCameraRegion76(uint8_t *rdram)
+{
+    if (!rdram) return;
+    std::printf("[probe] ex dump 0x785AF0..0x785C20 (76 words):\n");
+    const uint32_t *w = reinterpret_cast<const uint32_t *>(rdram + 0x00785AF0u);
+    for (uint32_t line = 0; line < 19u; ++line)
+    {
+        uint32_t addr = 0x00785AF0u + line * 16u;
+        std::printf("[probe] ex dump line=%02u 0x%08X: %08X %08X %08X %08X\n",
+                    line, addr, w[line * 4 + 0], w[line * 4 + 1], w[line * 4 + 2], w[line * 4 + 3]);
+    }
+    std::fflush(stdout);
+}
+
+extern "C" void ps2x_dumpHleRing();
+
+extern "C" void ps2x_probeBadStore(uint32_t addr, uint64_t lo, uint64_t hi, uint32_t pc, uint32_t ra)
+{
+    if (!isVu3dProbeEnabled()) return;
+    static std::atomic<uint32_t> s_badStoreCount{0};
+    uint32_t idx = s_badStoreCount.fetch_add(1, std::memory_order_relaxed);
+    if (idx < 60u)
+    {
+        std::printf("[probe] ex badstore addr=0x%08X val=0x%016llX_0x%016llX pc=0x%08X ra=0x%08X\n",
+                    addr, (unsigned long long)hi, (unsigned long long)lo, pc, ra);
+        if (idx == 0u)
+        {
+            dumpCameraRegion76(s_exGlobalRdram);
+            ps2x_dumpHleRing();
+            ps2x_dumpVcallmsRing();
+        }
+        std::fflush(stdout);
+    }
+}
+
+extern "C" void ps2_scanCameraRegion(const char *caller, uint64_t callIndex, uint32_t ra)
+{
+    if (!isVu3dProbeEnabled() || !s_exGlobalRdram) return;
+    const uint32_t *w = reinterpret_cast<const uint32_t *>(s_exGlobalRdram + 0x00785AF0u);
+    for (uint32_t i = 0; i < 76u; ++i)
+    {
+        if (isBadExitLane(w[i]))
+        {
+            static std::atomic<uint32_t> s_firstBadPrinted{0};
+            if (s_firstBadPrinted.fetch_add(1, std::memory_order_relaxed) < 10u)
+            {
+                std::printf("[probe] ex first_bad caller=%s call#=%llu ra=0x%08X off=0x%X addr=0x%08X val=0x%08X\n",
+                            caller ? caller : "unknown", (unsigned long long)callIndex, ra, i * 4u, 0x00785AF0u + i * 4u, w[i]);
+                std::fflush(stdout);
+            }
+            break;
+        }
+    }
+}
+
+static void dumpRegionSnapshot(uint64_t callIndex)
+{
+    if (!s_exGlobalRdram) return;
+    for (uint32_t line = 0; line < 19u; ++line)
+    {
+        uint32_t addr = 0x00785AF0u + line * 16u;
+        const uint32_t *w = reinterpret_cast<const uint32_t *>(s_exGlobalRdram + addr);
+        std::printf("[probe] ex snap call=%llu line=%u addr=0x%08X qw=%08X %08X %08X %08X\n",
+                    (unsigned long long)callIndex, line, addr, w[0], w[1], w[2], w[3]);
+    }
+    std::fflush(stdout);
+}
+
+static std::atomic<uint64_t> s_ewTotalCalls{0};
+static std::atomic<uint64_t> s_ewBadCalls{0};
+static std::atomic<uint64_t> s_ewIdleCalls{0};
+static std::atomic<uint32_t> s_ewSanePrintCount{0};
+static std::atomic<uint32_t> s_ewBadPrintCount{0};
+static std::atomic<uint32_t> s_ewVu0CodePrintCount{0};
+static uint32_t s_ewLastVu0CodeHash = 0;
+static bool s_ewHasVu0CodeHash = false;
+static std::mutex s_ewMutex;
+static std::chrono::steady_clock::time_point s_ewLastCountsTime{};
+
+
 static void initStderrRedirection()
 {
     static bool s_init = false;
@@ -1145,6 +1282,37 @@ PS2Runtime::PS2Runtime()
 
     m_loadedModules.clear();
     m_guestHeapBlocks.clear();
+    s_exGlobalRdram = m_memory.getRDRAM();
+
+    if (isVu3dProbeEnabled())
+    {
+        static bool s_fpuTestDone = false;
+        if (!s_fpuTestDone)
+        {
+            s_fpuTestDone = true;
+            auto p_f = [](const char *op, const char *in_str, float val) {
+                uint32_t u = std::bit_cast<uint32_t>(val);
+                std::printf("[probe] ex fpu %s in=%s out=0x%08X\n", op, in_str, u);
+            };
+            auto p_i = [](const char *op, const char *in_str, int32_t val) {
+                uint32_t u = static_cast<uint32_t>(val);
+                std::printf("[probe] ex fpu %s in=%s out=0x%08X\n", op, in_str, u);
+            };
+
+            p_f("div.s", "0/0", FPU_DIV_S(0.0f, 0.0f));
+            p_f("div.s", "1/0", FPU_DIV_S(1.0f, 0.0f));
+            p_f("div.s", "-1/0", FPU_DIV_S(-1.0f, 0.0f));
+            p_f("sqrt.s", "0", FPU_SQRT_S(0.0f));
+            p_f("sqrt.s", "-1", FPU_SQRT_S(-1.0f));
+            p_f("rsqrt.s", "1/sqrt(0)", FPU_RSQRT_S(1.0f, 0.0f));
+            p_f("mul.s", "1e30*1e30", FPU_MUL_S(1e30f, 1e30f));
+            p_f("add.s", "1e30+1e30", FPU_ADD_S(1e30f, 1e30f));
+            p_i("cvt.w.s", "1e20", FPU_CVT_W_S(1e20f));
+            p_i("cvt.w.s", "NaN", FPU_CVT_W_S(std::numeric_limits<float>::quiet_NaN()));
+            p_f("cvt.s.w", "0x7FFFFFFF", FPU_CVT_S_W(0x7FFFFFFF));
+            std::fflush(stdout);
+        }
+    }
     m_guestHeapBase = kGuestHeapDefaultBase;
     m_guestHeapEnd = kGuestHeapDefaultBase;
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
@@ -3750,46 +3918,6 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
                        exception == EXCEPTION_TLB_REFILL);
 }
 
-// =========================================================================
-// Task EW: VU0 microprogram vcallms probe & VU0 micro memory monitoring
-// =========================================================================
-static inline bool isVu3dProbeEnabled()
-{
-    static int s_vu3d = -1;
-    if (s_vu3d == -1)
-    {
-        const char *v = std::getenv("PS2X_PROBE_VU3D");
-        s_vu3d = (v && std::strcmp(v, "1") == 0) ? 1 : 0;
-    }
-    return s_vu3d == 1;
-}
-
-static std::atomic<uint64_t> s_ewTotalCalls{0};
-static std::atomic<uint64_t> s_ewBadCalls{0};
-static std::atomic<uint64_t> s_ewIdleCalls{0};
-static std::atomic<uint32_t> s_ewSanePrintCount{0};
-static std::atomic<uint32_t> s_ewBadPrintCount{0};
-static std::atomic<uint32_t> s_ewVu0CodePrintCount{0};
-static uint32_t s_ewLastVu0CodeHash = 0;
-static bool s_ewHasVu0CodeHash = false;
-static std::mutex s_ewMutex;
-static std::chrono::steady_clock::time_point s_ewLastCountsTime{};
-
-static inline bool isBadExitLane(uint32_t w)
-{
-    if (w == 0x7F7FFFFFu || w == 0xFF7FFFFFu || w == 0xFF7FFFFEu)
-    {
-        return true;
-    }
-    float f = 0.0f;
-    std::memcpy(&f, &w, sizeof(f));
-    if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e20f)
-    {
-        return true;
-    }
-    return false;
-}
-
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
     (void)rdram;
@@ -3846,9 +3974,15 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     uint32_t raVal = 0;
     uint64_t callIndex = 0;
 
+    if (rdram) s_exGlobalRdram = rdram;
     if (probeOn && startPC == 0u)
     {
         callIndex = s_ewTotalCalls.fetch_add(1, std::memory_order_relaxed) + 1u;
+        if (callIndex == 1u || callIndex == 1000u || callIndex == 2000u)
+        {
+            dumpRegionSnapshot(callIndex);
+        }
+        ps2_scanCameraRegion("vcallms", callIndex, raVal);
         raVal = ctx ? getRegU32(ctx, 31) : 0u;
         if (ctx)
         {
@@ -3951,13 +4085,18 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 
             const int vu0codeNonzero = (vu0NonzeroWords > 0u) ? 1 : 0;
 
-            std::printf("[probe] ew vcallms#%llu ra=0x%08X in vf4..vf11=%s out vf8..vf11=%s vu0code_nonzero=%d seededIdle=%d\n",
-                        (unsigned long long)callIndex,
-                        raVal,
-                        inWordsBuf,
-                        outWordsBuf,
-                        vu0codeNonzero,
-                        seededIdle);
+            char ewBuf[512];
+            std::snprintf(ewBuf, sizeof(ewBuf),
+                          "[probe] ew vcallms#%llu ra=0x%08X in vf4..vf11=%s out vf8..vf11=%s vu0code_nonzero=%d seededIdle=%d",
+                          (unsigned long long)callIndex,
+                          raVal,
+                          inWordsBuf,
+                          outWordsBuf,
+                          vu0codeNonzero,
+                          seededIdle);
+            ps2x_recordVcallmsCall(ewBuf);
+
+            std::printf("%s\n", ewBuf);
 
             if (ctx)
             {
