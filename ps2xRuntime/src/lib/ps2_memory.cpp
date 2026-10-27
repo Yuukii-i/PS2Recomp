@@ -1767,6 +1767,110 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
             std::fflush(stdout);
         }
     }
+    if (mode == 1u)
+    {
+        // Task FT: scratchpad chain mode.
+        //  fromSPR (ch8, destination chain): tags live in SPR at SADR; each tag = {QWC, ID, ADDR=dest in main memory};
+        //                                    QWC qwords follow the tag in SPR and go to ADDR. ID 7 (end) stops.
+        //  toSPR   (ch9, source chain):      tags live in main memory at TADR (cnt/next/ref/refs/refe/end); data goes to SPR at SADR.
+        const bool fromSpr = channelBase == kSprFromChannel;
+        uint32_t sadr = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
+        uint32_t tadr = m_ioRegisters[channelBase + 0x30u];
+        auto sprWrap = [](uint32_t v) { return v & (PS2_SCRATCHPAD_SIZE - 1u); };
+        auto sprRead32 = [&](uint32_t off) { uint32_t v = 0u; std::memcpy(&v, m_scratchpad + sprWrap(off), sizeof(v)); return v; };
+        uint32_t lastMadr = m_ioRegisters[channelBase + 0x10u];
+        for (uint32_t tagIndex = 0; tagIndex < 4096u; ++tagIndex)
+        {
+            uint32_t tagLo = 0u, tagAddr = 0u;
+            if (fromSpr)
+            {
+                tagLo = sprRead32(sadr);
+                tagAddr = sprRead32(sadr + 4u);
+                sadr = sprWrap(sadr + 16u);
+            }
+            else
+            {
+                uint32_t tagOff = 0u;
+                try { tagOff = translateAddress(tadr); }
+                catch (const std::exception &) { break; }
+                if (tagOff + 16u > PS2_RAM_SIZE) break;
+                std::memcpy(&tagLo, m_rdram + tagOff, 4);
+                std::memcpy(&tagAddr, m_rdram + tagOff + 4, 4);
+            }
+            const uint32_t tagQwc = tagLo & 0xFFFFu;
+            const uint32_t tagId = (tagLo >> 28) & 0x7u;
+            const uint32_t bytes = tagQwc * 16u;
+            {
+                static std::atomic<uint32_t> s_ftTags{0};
+                if (s_ftTags.fetch_add(1, std::memory_order_relaxed) < 60u)
+                {
+                    std::printf("[probe] ft spr chain ch=%s tag=%08X addr=%08X id=%u qwc=%u madr_reg=0x%08X sadr=0x%X tadr=0x%08X\n",
+                                fromSpr ? "fromSPR" : "toSPR", tagLo, tagAddr, tagId, tagQwc,
+                                m_ioRegisters[channelBase + 0x10u], sadr, tadr);
+                    std::fflush(stdout);
+                }
+            }
+            uint32_t mainAddr = 0u;   // main-memory address of the data
+            uint32_t nextTadr = tadr + 16u;
+            if (fromSpr)
+            {
+                mainAddr = tagAddr & 0x7FFFFFF0u;
+            }
+            else
+            {
+                switch (tagId)
+                {
+                case 0: mainAddr = tagAddr & 0x7FFFFFF0u; break;                       // refe
+                case 1: mainAddr = tadr + 16u; nextTadr = mainAddr + bytes; break;     // cnt
+                case 2: mainAddr = tadr + 16u; nextTadr = tagAddr & 0x7FFFFFF0u; break; // next
+                case 3:
+                case 4: mainAddr = tagAddr & 0x7FFFFFF0u; break;                       // ref / refs
+                case 7: mainAddr = tadr + 16u; break;                                  // end
+                default: mainAddr = tadr + 16u; nextTadr = mainAddr + bytes; break;    // call/ret unsupported: treat as cnt
+                }
+            }
+            if (bytes != 0u)
+            {
+                uint32_t mainOff = 0u;
+                try { mainOff = translateAddress(mainAddr); }
+                catch (const std::exception &) { break; }
+                if (mainOff > PS2_RAM_SIZE || bytes > PS2_RAM_SIZE - mainOff) break;
+                uint32_t done = 0u;
+                while (done < bytes)
+                {
+                    const uint32_t chunk = std::min(bytes - done, PS2_SCRATCHPAD_SIZE - sprWrap(sadr + done));
+                    if (fromSpr)
+                    {
+                        std::memcpy(m_rdram + mainOff + done, m_scratchpad + sprWrap(sadr + done), chunk);
+                        markModified(mainOff + done, chunk);
+                    }
+                    else
+                    {
+                        std::memcpy(m_scratchpad + sprWrap(sadr + done), m_rdram + mainOff + done, chunk);
+                    }
+                    done += chunk;
+                }
+                lastMadr = mainAddr + bytes;
+                sadr = sprWrap(sadr + bytes);
+            }
+            if (fromSpr)
+            {
+                if (tagId == 7u) break;
+            }
+            else
+            {
+                tadr = nextTadr;
+                if (tagId == 7u || tagId == 0u) break;
+            }
+        }
+        m_ioRegisters[channelBase + 0x10u] = lastMadr & 0x7FFFFFF0u;
+        m_ioRegisters[channelBase + 0x20u] = 0u;
+        m_ioRegisters[channelBase + 0x80u] = sadr & 0x3FF0u;
+        if (!fromSpr)
+            m_ioRegisters[channelBase + 0x30u] = tadr;
+        completeDmacChannel(channelBase, fromSpr ? 8u : 9u);
+        return true;
+    }
     if (mode != 0u)
         return false;
 
