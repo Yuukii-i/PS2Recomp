@@ -57,6 +57,7 @@ namespace {
 #include <unordered_map>
 #include <sstream>
 #include <mutex>
+#include <map>
 #include <cstdarg>
 #include <cmath>
 extern "C" uint32_t ps2_getDuDecodesSinceLast();
@@ -3846,11 +3847,20 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
-    if (ctx && (targetPc == 0x003B127Cu || targetPc == 0x003B2448u || targetPc == 0x00254638u || targetPc == 0x0025464Cu))
+    if (ctx && ((targetPc >= 0x003B1000u && targetPc < 0x003B2600u) || (targetPc >= 0x00254500u && targetPc < 0x00254900u)))
     {
         // Task FM: batch builders take a2 = vertex count; PCSX2 shows a2=4 at every call seen so far
         static std::atomic<uint32_t> s_fmCount{0};
-        if (s_fmCount.fetch_add(1, std::memory_order_relaxed) < 60u)
+        static std::mutex s_fmMutex;
+        static std::map<uint32_t, uint32_t> s_fmSeen;
+        bool fmPrint = false;
+        {
+            std::lock_guard<std::mutex> fmLock(s_fmMutex);
+            uint32_t &seen = s_fmSeen[targetPc ^ ((getRegU32(ctx, 6) > 4u) ? 0x80000000u : 0u)];
+            if (seen++ < 2u)
+                fmPrint = true;
+        }
+        if (fmPrint && s_fmCount.fetch_add(1, std::memory_order_relaxed) < 200u)
         {
             std::printf("[probe] fm call tgt=0x%X ra=0x%X a0=0x%X a1=0x%X a2=0x%X a3=0x%X t0=0x%X t1=0x%X t2=0x%X t3=0x%X s3=0x%X s4=0x%X fp=0x%X sp=0x%X\n",
                         targetPc, getRegU32(ctx, 31), getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 7),
