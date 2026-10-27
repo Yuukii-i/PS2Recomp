@@ -722,7 +722,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             std::memcpy(cur, m_vu1Data + 476u * 16u, sizeof(cur));
             if (std::memcmp(cur, s_fiShadow, sizeof(cur)) != 0)
             {
-                if (s_fiLines.fetch_add(1, std::memory_order_relaxed) < 40u)
+                if ((cur[1] > 0x1000u && cur[1] < 0x2000000u) && s_fiLines.fetch_add(1, std::memory_order_relaxed) < 40u)
                 {
                     const bool inRdram = m_rdram && s_fiPrevData >= m_rdram && s_fiPrevData < m_rdram + PS2_RAM_SIZE;
                     std::printf("[probe] fi chg prev_cmd=0x%08X prev_pos=%u chunk_size=%u chunk_rdram=0x%08X now_cmd=0x%08X now_pos=%u qw476=%08X %08X %08X %08X qw477=%08X %08X %08X %08X\n",
