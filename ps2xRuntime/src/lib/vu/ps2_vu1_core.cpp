@@ -156,6 +156,35 @@ static uint32_t s_ehStoreCount = 0;
 static thread_local uint32_t s_ehCurLowerInstr = 0;
 
 // =========================================================================
+// Task EK: VU1 program 0x08 command-sequence census
+// =========================================================================
+struct EkSeqStats {
+    uint32_t runs = 0;
+    uint64_t totalPairs = 0;
+    uint64_t verts = 0;
+    uint64_t zeroXy = 0;
+    uint64_t st636 = 0;
+    uint64_t st636Zero = 0;
+};
+struct EkOtherStats {
+    uint32_t runs = 0;
+    uint64_t cycles = 0;
+};
+
+static std::unordered_map<std::string, EkSeqStats> s_ekSeqStats;
+static std::map<uint32_t, uint32_t> s_ekCmdHist;
+static std::map<uint32_t, EkOtherStats> s_ekOtherStats;
+static std::set<std::string> s_ekSeenHdrSequences;
+
+static thread_local bool s_ekCurRunActive = false;
+static thread_local uint32_t s_ekCurRunPairs = 0;
+static thread_local uint32_t s_ekCurRunSt636 = 0;
+static thread_local uint32_t s_ekCurRunSt636Zero = 0;
+static thread_local uint32_t s_ekLastPairPc = 0xFFFFFFFFu;
+static thread_local std::vector<uint32_t> s_ekCurRunTargets;
+static thread_local uint32_t s_ekEntryVuData[1024][4];
+
+// =========================================================================
 // Task EJ: No time gate + last-writer table for qw 636..700 + ei read trigger
 // =========================================================================
 static inline uint32_t getVu3dAfterSec() {
@@ -1228,6 +1257,14 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
         bool isSq = (op == 0x01u) || ((op >= 0x40u || (s_ehCurLowerInstr & 0x80000000u)) && (special == 0x35u || special == 0x37u));
         if (isSq && qw >= 636u && qw < 700u)
         {
+        if (s_ekCurRunActive && isSq && qw >= 636u && qw < 700u)
+        {
+            s_ekCurRunSt636++;
+            if (words[0] == 0 && words[1] == 0 && words[2] == 0 && words[3] == 0)
+            {
+                s_ekCurRunSt636Zero++;
+            }
+        }
             auto &lw = s_eiLastWriter[qw - 636u];
             lw.written = true;
             lw.pc = m_state.pc;
@@ -2334,6 +2371,19 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     s_egCurRunTraced = false;
     s_egCurRunPackets.clear();
     s_egTotalPairs = 0;
+    s_ekCurRunActive = false;
+    if (isVu3dProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u)
+    {
+        s_ekCurRunActive = true;
+        s_ekCurRunPairs = 0;
+        s_ekCurRunSt636 = 0;
+        s_ekCurRunSt636Zero = 0;
+        s_ekLastPairPc = 0xFFFFFFFFu;
+        s_ekCurRunTargets.clear();
+        if (vuData && dataSize >= 16384u) {
+            std::memcpy(s_ekEntryVuData, vuData, 16384);
+        }
+    }
     s_eiCurRunActive = false;
     if (isVu3dProbeEnabled() && (startPC & 0x7FFFFFFF) == 0x08u && (!s_eiHitDone || !s_eiReadDone))
     {
@@ -2600,6 +2650,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 }
             }
         }
+        if (s_ekCurRunActive)
+        {
+            s_ekCurRunPairs++;
+            if (s_ekLastPairPc == 0x038u)
+            {
+                s_ekCurRunTargets.push_back(m_state.pc);
+            }
+            s_ekLastPairPc = m_state.pc;
+        }
         s_ehCurLowerInstr = decoded.lower;
         if (decoded.iBit)
         {
@@ -2778,6 +2837,49 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         m_state.haltAfterDelaySlot = false;
         m_pendingHaltD = false;
         m_pendingHaltT = false;
+    }
+    if (isVu3dProbeEnabled())
+    {
+        uint32_t spc = (s_dyCurStartPc & 0x7FFFFFFF);
+        if (s_ekCurRunActive)
+        {
+            s_ekCurRunActive = false;
+            std::string seqStr;
+            for (size_t i = 0; i < s_ekCurRunTargets.size(); ++i) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "%s%03X", (i > 0 ? "," : ""), s_ekCurRunTargets[i]);
+                seqStr += buf;
+            }
+            if (seqStr.empty()) seqStr = "NONE";
+
+            auto &st = s_ekSeqStats[seqStr];
+            st.runs++;
+            st.totalPairs += s_ekCurRunPairs;
+            st.verts += s_vdCurRunVerts;
+            st.zeroXy += s_vdCurRunZeroXy;
+            st.st636 += s_ekCurRunSt636;
+            st.st636Zero += s_ekCurRunSt636Zero;
+
+            for (uint32_t tgt : s_ekCurRunTargets) {
+                s_ekCmdHist[tgt]++;
+            }
+
+            if (s_ekSeenHdrSequences.size() < 30u && s_ekSeenHdrSequences.insert(seqStr).second) {
+                for (uint32_t q = 0; q < 12u; ++q) {
+                    uint32_t effQw = (s_dyCurTop + q) & 0x3FFu;
+                    const auto &w = s_ekEntryVuData[effQw];
+                    std::printf("[probe] ek hdr seq=<%s> qw=%u w=%08X %08X %08X %08X\n",
+                                seqStr.c_str(), q, w[0], w[1], w[2], w[3]);
+                }
+                std::fflush(stdout);
+            }
+        }
+        else if (spc == 0x000u || spc == 0x040u || spc == 0x4B0u || spc == 0x348u)
+        {
+            auto &o = s_ekOtherStats[spc];
+            o.runs++;
+            o.cycles += (m_cycle > tRunStartCycle) ? (m_cycle - tRunStartCycle) : 0u;
+        }
     }
     m_state.cycles = m_cycle;
     if (useVuRounding && previousRoundingMode != -1)
@@ -3124,6 +3226,35 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                                 p.second.primHist[6], (p.second.primHist[1] + p.second.primHist[2]), p.second.primHist[0]);
                 }
                 std::fflush(stdout);
+                if (isVu3dProbeEnabled())
+                {
+                    std::vector<std::pair<std::string, EkSeqStats>> sortedSeqs(s_ekSeqStats.begin(), s_ekSeqStats.end());
+                    std::sort(sortedSeqs.begin(), sortedSeqs.end(), [](const auto &a, const auto &b) {
+                        return a.second.runs > b.second.runs;
+                    });
+                    size_t limitSeqs = std::min<size_t>(12u, sortedSeqs.size());
+                    for (size_t i = 0; i < limitSeqs; ++i) {
+                        const auto &sq = sortedSeqs[i];
+                        uint64_t avgPairs = sq.second.runs ? (sq.second.totalPairs / sq.second.runs) : 0;
+                        std::printf("[probe] ek seq=<%s> runs=%u avg_pairs=%llu verts=%llu zero_xy=%llu st636=%llu st636_zero=%llu\n",
+                                    sq.first.c_str(), sq.second.runs, (unsigned long long)avgPairs,
+                                    (unsigned long long)sq.second.verts, (unsigned long long)sq.second.zeroXy,
+                                    (unsigned long long)sq.second.st636, (unsigned long long)sq.second.st636Zero);
+                    }
+                    s_ekSeqStats.clear();
+
+                    for (const auto &cmd : s_ekCmdHist) {
+                        std::printf("[probe] ek cmd pc=0x%03X count=%u\n", cmd.first, cmd.second);
+                    }
+                    s_ekCmdHist.clear();
+
+                    for (const auto &oth : s_ekOtherStats) {
+                        uint64_t avgCyc = oth.second.runs ? (oth.second.cycles / oth.second.runs) : 0;
+                        std::printf("[probe] ek other pc=0x%03X runs=%u avg_cyc=%llu\n",
+                                    oth.first, oth.second.runs, (unsigned long long)avgCyc);
+                    }
+                    s_ekOtherStats.clear();
+                }
                 s_vdStats.clear();
             }
 
