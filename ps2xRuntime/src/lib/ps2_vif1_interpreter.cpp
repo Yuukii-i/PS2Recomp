@@ -133,6 +133,14 @@ static const uint8_t *s_erCurrentChunk = nullptr;
 static uint32_t s_erCurrentChunkSize = 0;
 static bool s_erCurrentChunkReported = false;
 
+// =========================================================================
+// Task EU: UNPACK 0x6C dest=235 num=10 src/dst comparison
+// =========================================================================
+static std::atomic<uint32_t> s_euUnpackCount{0};
+extern "C" uint32_t ps2_vif1_getEuMatchedCount() {
+    return s_euUnpackCount.load(std::memory_order_relaxed);
+}
+
 static std::mutex s_epMutex;
 static char s_epRing[128][256];
 static uint64_t s_epTotalEvents = 0;
@@ -1691,6 +1699,33 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     recordEpEvent("UNPACK-RB eff=%u first_written_qw=%08X %08X %08X %08X last_qw=%08X %08X %08X %08X",
                                   eff, dwFirst[0], dwFirst[1], dwFirst[2], dwFirst[3],
                                   dwLast[0], dwLast[1], dwLast[2], dwLast[3]);
+                }
+                if (opcode == 0x6Cu && vuAddr == 235u && writeVectorCount == 10u && isVu3dProbeEnabled())
+                {
+                    uint32_t euIdx = s_euUnpackCount.fetch_add(1, std::memory_order_relaxed);
+                    if (euIdx < 6u)
+                    {
+                        const char *pathStr = executeGeneric ? "generic" : "fast";
+                        for (uint32_t i = 0; i < 10u; ++i)
+                        {
+                            uint32_t sw[4]{0, 0, 0, 0};
+                            if (pos + (i + 1u) * 16u <= sizeBytes)
+                            {
+                                std::memcpy(sw, srcBase + i * 16u, 16);
+                            }
+                            std::printf("[probe] eu src10 i=%u %08X %08X %08X %08X\n", i, sw[0], sw[1], sw[2], sw[3]);
+                        }
+                        for (uint32_t i = 0; i < 10u; ++i)
+                        {
+                            uint32_t dw[4]{0, 0, 0, 0};
+                            if (m_vu1Data)
+                            {
+                                std::memcpy(dw, m_vu1Data + (235u + i) * 16u, 16);
+                            }
+                            std::printf("[probe] eu dst10 eff=235 path=%s i=%u %08X %08X %08X %08X\n", pathStr, i, dw[0], dw[1], dw[2], dw[3]);
+                        }
+                        std::fflush(stdout);
+                    }
                 }
             }
 

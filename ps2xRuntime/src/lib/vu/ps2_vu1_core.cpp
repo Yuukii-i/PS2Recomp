@@ -18,6 +18,8 @@
 
 extern "C" void ps2x_probeEvent(const char *msg);
 extern "C" void ps2x_probeDump();
+extern "C" uint32_t ps2_vif1_getEuMatchedCount();
+static thread_local bool s_euStoreLoggedThisRun = false;
 
 // =========================================================================
 // Task DY: VU1 program execution & cycle cap telemetry
@@ -1322,6 +1324,21 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
     if (isVu3dProbeEnabled())
     {
         uint32_t qw = (address / 16u) & 0x3FFu;
+        if (qw >= 235u && qw <= 244u && ps2_vif1_getEuMatchedCount() >= 6u)
+        {
+            if (!s_euStoreLoggedThisRun)
+            {
+                s_euStoreLoggedThisRun = true;
+                static std::atomic<uint32_t> s_euVuStorePrintCount{0};
+                uint32_t stIdx = s_euVuStorePrintCount.fetch_add(1, std::memory_order_relaxed);
+                if (stIdx < 20u)
+                {
+                    std::printf("[probe] eu vustore pc=0x%X qw=%u w=%08X %08X %08X %08X\n",
+                                m_state.pc, qw, words[0], words[1], words[2], words[3]);
+                    std::fflush(stdout);
+                }
+            }
+        }
         uint32_t op = (s_ehCurLowerInstr >> 25) & 0x7Fu;
         uint32_t special = (s_ehCurLowerInstr & 3u) | ((s_ehCurLowerInstr >> 4) & 0x7Cu);
         bool isSq = (op == 0x01u) || ((op >= 0x40u || (s_ehCurLowerInstr & 0x80000000u)) && (special == 0x35u || special == 0x37u));
@@ -2702,6 +2719,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     m_activeVuDataSize = dataSize;
     m_activeGs = &gs;
     m_activeMemory = memory;
+    s_euStoreLoggedThisRun = false;
 
     s_currentRunXgkickNs = 0;
     const auto tRunStart = std::chrono::steady_clock::now();
@@ -2732,6 +2750,25 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             std::snprintf(evBuf, sizeof(evBuf), "C80 vi13=%u vi12=%u end=0x%X start=0x%X",
                           vi13Val, vi12Val, qwWords[1], qwWords[2]);
             ps2x_probeEvent(evBuf);
+
+            if (vi13Val == 235u)
+            {
+                static std::atomic<uint32_t> s_euC80PrintCount{0};
+                uint32_t cIdx = s_euC80PrintCount.fetch_add(1, std::memory_order_relaxed);
+                if (cIdx < 6u)
+                {
+                    for (uint32_t i = 0; i < 10u; ++i)
+                    {
+                        uint32_t vw[4]{0, 0, 0, 0};
+                        if (vuData && (235u + i + 1u) * 16u <= dataSize)
+                        {
+                            std::memcpy(vw, vuData + (235u + i) * 16u, 16);
+                        }
+                        std::printf("[probe] eu vu10 i=%u %08X %08X %08X %08X\n", i, vw[0], vw[1], vw[2], vw[3]);
+                    }
+                    std::fflush(stdout);
+                }
+            }
         }
 
         float preVf[32][4];
