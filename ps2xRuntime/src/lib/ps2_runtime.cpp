@@ -1312,6 +1312,35 @@ PS2Runtime::PS2Runtime()
             p_f("cvt.s.w", "0x7FFFFFFF", FPU_CVT_S_W(0x7FFFFFFF));
             std::fflush(stdout);
         }
+
+        static bool s_eyTestDone = false;
+        if (!s_eyTestDone)
+        {
+            s_eyTestDone = true;
+            __m128 test_vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+            __m128 test_vf2 = _mm_castsi128_ps(_mm_set1_epi32(0x12345678));
+
+            // 0x169144: vsub.xzw $vf2, $vf0, $vf0
+            {
+                __m128 res = PS2_VSUB(test_vf0, test_vf0);
+                __m128i mask = _mm_set_epi32(-1, -1, 0, -1);
+                test_vf2 = PS2_VBLEND(test_vf2, res, _mm_castsi128_ps(mask));
+            }
+
+            // 0x16915c: vaddw.y $vf2, $vf0, $vf0w
+            {
+                __m128 res = PS2_VADD(test_vf0, _mm_shuffle_ps(test_vf0, test_vf0, _MM_SHUFFLE(3, 3, 3, 3)));
+                __m128i mask = _mm_set_epi32(0, 0, -1, 0);
+                test_vf2 = _mm_blendv_ps(test_vf2, res, _mm_castsi128_ps(mask));
+            }
+
+            alignas(16) uint32_t outWords[4]{};
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(outWords), _mm_castps_si128(test_vf2));
+
+            std::printf("[probe] ey vuop vf2=%08X %08X %08X %08X\n",
+                        outWords[0], outWords[1], outWords[2], outWords[3]);
+            std::fflush(stdout);
+        }
     }
     m_guestHeapBase = kGuestHeapDefaultBase;
     m_guestHeapEnd = kGuestHeapDefaultBase;
@@ -3757,6 +3786,66 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     EeProfilerScope eeScope;
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+
+    if (isVu3dProbeEnabled())
+    {
+        if (targetPc == 0x002540E4u || targetPc == 0x00359EFCu || targetPc == 0x00254280u)
+        {
+            static std::atomic<uint32_t> s_eyTgtCount_2540E4{0};
+            static std::atomic<uint32_t> s_eyTgtCount_359EFC{0};
+            static std::atomic<uint32_t> s_eyTgtCount_254280{0};
+
+            uint32_t count = 0;
+            if (targetPc == 0x002540E4u) count = s_eyTgtCount_2540E4.fetch_add(1, std::memory_order_relaxed);
+            else if (targetPc == 0x00359EFCu) count = s_eyTgtCount_359EFC.fetch_add(1, std::memory_order_relaxed);
+            else if (targetPc == 0x00254280u) count = s_eyTgtCount_254280.fetch_add(1, std::memory_order_relaxed);
+
+            if (count < 40u)
+            {
+                alignas(16) uint32_t a3w[4]{};
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(a3w), ctx->r[7]);
+
+                alignas(16) uint32_t vf0w[4]{}, vf1w[4]{}, vf2w[4]{};
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(vf0w), _mm_castps_si128(ctx->vu0_vf[0]));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(vf1w), _mm_castps_si128(ctx->vu0_vf[1]));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(vf2w), _mm_castps_si128(ctx->vu0_vf[2]));
+
+                uint32_t f12w = std::bit_cast<uint32_t>(ctx->f[12]);
+
+                std::printf("[probe] ey call tgt=0x%X a3w=%08X %08X %08X %08X vf0=%08X %08X %08X %08X vf1=%08X %08X %08X %08X vf2=%08X %08X %08X %08X f12=%08X\n",
+                            targetPc,
+                            a3w[0], a3w[1], a3w[2], a3w[3],
+                            vf0w[0], vf0w[1], vf0w[2], vf0w[3],
+                            vf1w[0], vf1w[1], vf1w[2], vf1w[3],
+                            vf2w[0], vf2w[1], vf2w[2], vf2w[3],
+                            f12w);
+                std::fflush(stdout);
+            }
+        }
+
+        if (isCall)
+        {
+            alignas(16) uint32_t curVf0[4]{};
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(curVf0), _mm_castps_si128(ctx->vu0_vf[0]));
+            if (curVf0[0] != 0u || curVf0[1] != 0u || curVf0[2] != 0u || curVf0[3] != 0x3F800000u)
+            {
+                static std::atomic<uint64_t> s_eyClobberedTotal{0};
+                static std::atomic<uint32_t> s_eyClobberedPrints{0};
+                uint64_t total = s_eyClobberedTotal.fetch_add(1, std::memory_order_relaxed);
+                if ((total % 100ULL) == 0ULL)
+                {
+                    uint32_t p = s_eyClobberedPrints.fetch_add(1, std::memory_order_relaxed);
+                    if (p < 30u)
+                    {
+                        uint32_t ra = getRegU32(ctx, 31);
+                        std::printf("[probe] ey vf0 CLOBBERED words=%08X %08X %08X %08X tgt=0x%X ra=0x%X\n",
+                                    curVf0[0], curVf0[1], curVf0[2], curVf0[3], targetPc, ra);
+                        std::fflush(stdout);
+                    }
+                }
+            }
+        }
+    }
     if (targetPc >= 0x00120000u && targetPc < 0x0013F800u)
     {
         static uint32_t s_range120kBranchHitCount = 0;
