@@ -13,6 +13,9 @@ namespace probe_ae {
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <vector>
+#include <cstdlib>
+#include <chrono>
 
 std::atomic<uint64_t> g_hostPresentSeq{0};
 namespace
@@ -716,6 +719,62 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    // Task FV: capture ~3 game frames of GIF traffic into logs/ours.gs (PCSX2 GS-dump format) for replay in PCSX2.
+    {
+        extern std::atomic<uint64_t> g_gsFrameKicks;
+        static const bool s_fvOn = []() { const char *v = std::getenv("PS2X_GSDUMP"); return v && v[0] == '1'; }();
+        static std::vector<uint8_t> s_fvBuf;
+        static bool s_fvDone = false;
+        static uint64_t s_fvStartKick = 0;
+        static bool s_fvStarted = false;
+        static uint64_t s_fvLastKick = 0;
+        static auto s_fvT0 = std::chrono::steady_clock::now();
+        if (s_fvOn && !s_fvDone && data && sizeBytes >= 16)
+        {
+            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_fvT0).count();
+            const uint64_t kick = g_gsFrameKicks.load(std::memory_order_relaxed);
+            if (!s_fvStarted && secs > 45.0)
+            {
+                s_fvStarted = true;
+                s_fvStartKick = kick;
+                s_fvLastKick = kick;
+            }
+            if (s_fvStarted)
+            {
+                if (kick != s_fvLastKick)
+                {
+                    s_fvBuf.push_back(1u); s_fvBuf.push_back(0u);  // VSync, field 0
+                    s_fvLastKick = kick;
+                }
+                const uint8_t hdr[6] = {0u, 3u, static_cast<uint8_t>(sizeBytes), static_cast<uint8_t>(sizeBytes >> 8),
+                                        static_cast<uint8_t>(sizeBytes >> 16), static_cast<uint8_t>(sizeBytes >> 24)};
+                s_fvBuf.insert(s_fvBuf.end(), hdr, hdr + 6);
+                s_fvBuf.insert(s_fvBuf.end(), data, data + sizeBytes);
+                if (kick >= s_fvStartKick + 3u || s_fvBuf.size() > (48u << 20))
+                {
+                    s_fvBuf.push_back(1u); s_fvBuf.push_back(0u);
+                    s_fvDone = true;
+                    std::vector<uint8_t> prelude;
+                    if (FILE *pf = std::fopen("pcsx2dumps/prelude.bin", "rb"))
+                    {
+                        std::fseek(pf, 0, SEEK_END); const long pl = std::ftell(pf); std::fseek(pf, 0, SEEK_SET);
+                        prelude.resize(static_cast<size_t>(pl));
+                        if (std::fread(prelude.data(), 1, prelude.size(), pf) != prelude.size()) prelude.clear();
+                        std::fclose(pf);
+                    }
+                    if (FILE *of = std::fopen("logs/ours.gs", "wb"))
+                    {
+                        std::fwrite(prelude.data(), 1, prelude.size(), of);
+                        std::fwrite(s_fvBuf.data(), 1, s_fvBuf.size(), of);
+                        std::fclose(of);
+                    }
+                    std::printf("[probe] fv gsdump written prelude=%zu stream=%zu bytes kicks=%llu..%llu\n", prelude.size(), s_fvBuf.size(),
+                                static_cast<unsigned long long>(s_fvStartKick), static_cast<unsigned long long>(kick));
+                    std::fflush(stdout);
+                }
+            }
+        }
+    }
     const bool probeActive = probe_ae::isEnabled();
     std::chrono::steady_clock::time_point tLockWaitStart;
     if (probeActive) {
