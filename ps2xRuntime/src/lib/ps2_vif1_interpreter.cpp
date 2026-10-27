@@ -1,5 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
+extern "C" bool ps2_fk_lookup(uint32_t chainSize, uint32_t pos, uint32_t *outSrc, uint32_t *outBytes, uint32_t *outBufOff);
 extern "C" void ps2_scanCameraRegion(const char *caller, uint64_t callIndex, uint32_t ra);
 extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint16_t dest, uint16_t num,
                                     uint8_t cl, uint8_t wl, uint8_t flg, uint16_t tops, uint32_t src_ea);
@@ -729,6 +730,14 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                 s_fiPrevCmd, s_fiPrevPos, s_fiPrevSize,
                                 inRdram ? static_cast<uint32_t>(s_fiPrevData - m_rdram) : 0xFFFFFFFFu, cmd, pos_cmd,
                                 cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7]);
+                    for (uint32_t probePos : {s_fiPrevPos + 4u, s_fiPrevPos + 4u + 16u * 40u, s_fiPrevPos + 4u + 16u * 79u})
+                    {
+                        uint32_t spSrc = 0, spBytes = 0, spOff = 0;
+                        if (ps2_fk_lookup(s_fiPrevSize, probePos, &spSrc, &spBytes, &spOff))
+                            std::printf("[probe] fi span pos=%u src=0x%08X span_bytes=%u span_off=%u\n", probePos, spSrc, spBytes, spOff);
+                        else
+                            std::printf("[probe] fi span pos=%u src=? (no span)\n", probePos);
+                    }
                     std::fflush(stdout);
                 }
                 std::memcpy(s_fiShadow, cur, sizeof(cur));

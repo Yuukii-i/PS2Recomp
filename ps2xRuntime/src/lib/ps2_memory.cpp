@@ -403,6 +403,36 @@ bool PS2Memory::initialize(size_t ramSize)
     }
 }
 
+// Task FK2: map VIF1 chain-buffer offsets to guest source addresses (probe only)
+#include <mutex>
+#include <map>
+#include <cstdlib>
+static std::mutex s_fkSpanMutex;
+static std::map<uint32_t, std::vector<probe_ae::AySpan>> s_fkSpansBySize;
+static void ps2_fk_setSpans(uint32_t chainSize, const std::vector<probe_ae::AySpan> &spans)
+{
+    std::lock_guard<std::mutex> lock(s_fkSpanMutex);
+    s_fkSpansBySize[chainSize] = spans;
+}
+extern "C" bool ps2_fk_lookup(uint32_t chainSize, uint32_t pos, uint32_t *outSrc, uint32_t *outBytes, uint32_t *outBufOff)
+{
+    std::lock_guard<std::mutex> lock(s_fkSpanMutex);
+    auto it = s_fkSpansBySize.find(chainSize);
+    if (it == s_fkSpansBySize.end())
+        return false;
+    for (const auto &sp : it->second)
+    {
+        if (sp.byteCount != 8u && pos >= sp.bufOffset && pos < sp.bufOffset + sp.byteCount)
+        {
+            *outSrc = sp.srcGuestAddr + (pos - sp.bufOffset);
+            *outBytes = sp.byteCount;
+            *outBufOff = sp.bufOffset;
+            return true;
+        }
+    }
+    return false;
+}
+
 void PS2Memory::resetEeTimers() noexcept
 {
     m_eeTimers = {};
@@ -1644,6 +1674,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     }
 #endif
 
+                    if (channelBase == 0x10009000u && !chainBuf.empty())
+                    {
+                        static const bool s_fkOn = []() { const char *v = std::getenv("PS2X_PROBE_VU3D"); return v && v[0] == '1'; }();
+                        if (s_fkOn)
+                            ps2_fk_setSpans(static_cast<uint32_t>(chainBuf.size()), aySpans);
+                    }
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
                     m_ioRegisters[channelBase + 0x40] = asr0;
                     m_ioRegisters[channelBase + 0x50] = asr1;
