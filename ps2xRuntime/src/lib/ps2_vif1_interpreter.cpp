@@ -101,6 +101,17 @@ static std::atomic<uint64_t> s_ehHandledFalse[4][4][2]{};
 static std::atomic<uint64_t> s_ehFastUsed[4][4][2]{};
 static std::atomic<bool> s_ehShapeSeen[4][4][2]{};
 
+// =========================================================================
+// Task EN: VIF1 UNPACK source tracking & NaN matrix detection
+// =========================================================================
+static std::atomic<uint32_t> s_eoUnpackBadCount{0};
+static std::atomic<uint32_t> s_eoUnpackPrintCount{0};
+static std::atomic<uint32_t> s_eoRdramPrintCount{0};
+
+extern "C" uint32_t ps2_vif1_getEoUnpackBadCount() {
+    return s_eoUnpackBadCount.load(std::memory_order_relaxed);
+}
+
 static void ps2_vif1_recordEhUnpack(uint8_t cmd, uint8_t vn, uint8_t vl, uint8_t usn, uint8_t flg,
                                     uint8_t cl, uint8_t wl, uint8_t num, uint32_t dest,
                                     uint32_t src, uint8_t isFast,
@@ -1559,6 +1570,91 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                                 vif1_regs.mask, vif1_regs.row, vif1_regs.col);
                     }
                 }
+                    // Task EN: Check if UNPACK wrote any quadword in qw 970..1011 or 476..520
+                    if (isVu3dProbeEnabled()) {
+                    bool inTargetRange = (vuAddr <= 1011u && lastVec >= 970u) || (vuAddr <= 520u && lastVec >= 476u);
+                    if (inTargetRange)
+                    {
+                        uint32_t firstBadQw = 0xFFFFFFFFu;
+                        uint32_t destAfter[4]{};
+                        for (uint32_t q = vuAddr; q <= static_cast<uint32_t>(lastVec) && q < 0x400u; ++q)
+                        {
+                            if ((q >= 970u && q <= 1011u) || (q >= 476u && q <= 520u))
+                            {
+                                uint32_t dw[4]{};
+                                std::memcpy(dw, m_vu1Data + q * 16u, 16);
+                                bool isBad = false;
+                                for (int l = 0; l < 4; ++l) {
+                                    if (dw[l] == 0x7FFFFFFFu) { isBad = true; break; }
+                                    float f = 0.0f;
+                                    std::memcpy(&f, &dw[l], 4);
+                                    if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e15f) {
+                                        isBad = true;
+                                        break;
+                                    }
+                                }
+                                if (isBad)
+                                {
+                                    firstBadQw = q;
+                                    std::memcpy(destAfter, dw, 16);
+                                    break;
+                                }
+                            }
+                        }
+                        if (firstBadQw != 0xFFFFFFFFu)
+                        {
+                            s_eoUnpackBadCount.fetch_add(1, std::memory_order_relaxed);
+                            uint32_t prIdx = s_eoUnpackPrintCount.fetch_add(1, std::memory_order_relaxed);
+                            if (prIdx < 60u)
+                            {
+                                char srcBuf[32];
+                                bool isCopied = true;
+                                uint32_t srcRdram = 0xFFFFFFFFu;
+                                if (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE)
+                                {
+                                    srcRdram = static_cast<uint32_t>(srcBase - m_rdram);
+                                    std::snprintf(srcBuf, sizeof(srcBuf), "0x%08X", srcRdram);
+                                    isCopied = false;
+                                }
+                                else
+                                {
+                                    std::snprintf(srcBuf, sizeof(srcBuf), "copied");
+                                }
+
+                                char srcDataHex[65];
+                                uint32_t capBytes = std::min<uint32_t>(32u, sizeBytes > pos ? (sizeBytes - pos) : 0u);
+                                for (uint32_t b = 0; b < 32u; ++b) {
+                                    uint8_t byteVal = (b < capBytes) ? srcBase[b] : 0u;
+                                    std::snprintf(srcDataHex + b * 2, 3, "%02X", byteVal);
+                                }
+
+                                std::printf("[probe] eo unpack cmd=0x%02X fmt=%u/%u dest=%u num=%u cl=%u wl=%u flg=%u src=%s tag=n/a srcdata=%s dest_after=%08X %08X %08X %08X\n",
+                                            opcode, vn, vl, firstBadQw, num, cl, wl,
+                                            (imm & 0x8000u) ? 1u : 0u,
+                                            srcBuf, srcDataHex,
+                                            destAfter[0], destAfter[1], destAfter[2], destAfter[3]);
+
+                                if (!isCopied && srcRdram != 0xFFFFFFFFu && m_rdram)
+                                {
+                                    uint32_t rdIdx = s_eoRdramPrintCount.fetch_add(1, std::memory_order_relaxed);
+                                    if (rdIdx < 6u)
+                                    {
+                                        uint32_t baseAddr = (srcRdram >= 32u) ? (srcRdram - 32u) : 0u;
+                                        if (baseAddr + 64u <= PS2_RAM_SIZE)
+                                        {
+                                            char hex64[129];
+                                            for (uint32_t b = 0; b < 64u; ++b) {
+                                                std::snprintf(hex64 + b * 2, 3, "%02X", m_rdram[baseAddr + b]);
+                                            }
+                                            std::printf("[probe] eo rdram 0x%08X %s\n", baseAddr, hex64);
+                                        }
+                                    }
+                                }
+                                std::fflush(stdout);
+                            }
+                        }
+                    }
+                    }
             }
 
             auto now = std::chrono::steady_clock::now();

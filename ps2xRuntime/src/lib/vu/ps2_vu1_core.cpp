@@ -139,6 +139,14 @@ static uint32_t s_egTotalPairs = 0;
 static std::vector<EePacket> s_egCurRunPackets;
 
 // =========================================================================
+// Task EN: VU1 store detection into qw 970..1011 & 5s count reporting
+// =========================================================================
+extern "C" uint32_t ps2_vif1_getEoUnpackBadCount();
+static uint32_t s_eoVuStoreBadCount = 0;
+static uint32_t s_eoVuStorePrintCount = 0;
+static std::chrono::steady_clock::time_point s_eoLastCountTime{};
+
+// =========================================================================
 // Task EM: Full instruction trace of draw run C80,3160... with >=5 zero_xy
 // =========================================================================
 static EgPairTrace s_emTraces[2000];
@@ -1308,13 +1316,44 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
             rec.kind = kind;
         }
     }
+    if (isVu3dProbeEnabled())
     {
         uint32_t qw = (address / 16u) & 0x3FFu;
         uint32_t op = (s_ehCurLowerInstr >> 25) & 0x7Fu;
         uint32_t special = (s_ehCurLowerInstr & 3u) | ((s_ehCurLowerInstr >> 4) & 0x7Cu);
         bool isSq = (op == 0x01u) || ((op >= 0x40u || (s_ehCurLowerInstr & 0x80000000u)) && (special == 0x35u || special == 0x37u));
-        if (isSq && qw >= 636u && qw < 700u)
+        bool isStore = isSq || (op == 0x05u) || ((op >= 0x40u || (s_ehCurLowerInstr & 0x80000000u)) && special == 0x3Fu);
+        if (isStore && qw >= 970u && qw <= 1011u)
         {
+            bool isBad = false;
+            for (int l = 0; l < 4; ++l) {
+                if (words[l] == 0x7FFFFFFFu) { isBad = true; break; }
+                float f = 0.0f;
+                std::memcpy(&f, &words[l], 4);
+                if (std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e15f) {
+                    isBad = true;
+                    break;
+                }
+            }
+            if (isBad)
+            {
+                s_eoVuStoreBadCount++;
+                if (s_eoVuStorePrintCount < 20u)
+                {
+                    s_eoVuStorePrintCount++;
+                    std::string seqSoFar;
+                    for (size_t i = 0; i < s_ekCurRunTargets.size(); ++i) {
+                        char buf[16];
+                        std::snprintf(buf, sizeof(buf), "%s%03X", (i > 0 ? "," : ""), s_ekCurRunTargets[i]);
+                        seqSoFar += buf;
+                    }
+                    std::printf("[probe] eo vustore pc=0x%03X qw=%u w=%08X %08X %08X %08X run=%llu seq=<%s>\n",
+                                m_state.pc, qw, words[0], words[1], words[2], words[3],
+                                (unsigned long long)s_elCurRunId, seqSoFar.c_str());
+                    std::fflush(stdout);
+                }
+            }
+        }
         if (isSq && qw >= 636u && qw < 700u)
         {
             auto &elW = s_elLastWriter[qw - 636u];
@@ -1336,6 +1375,8 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
                 s_ekCurRunSt636Zero++;
             }
         }
+        if (isSq && qw >= 636u && qw < 700u)
+        {
             auto &lw = s_eiLastWriter[qw - 636u];
             lw.written = true;
             lw.pc = m_state.pc;
@@ -3544,6 +3585,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 }
             }
 
+            if (s_eoLastCountTime == std::chrono::steady_clock::time_point{})
+                s_eoLastCountTime = now;
+            else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_eoLastCountTime).count() >= 5)
+            {
+                s_eoLastCountTime = now;
+                std::printf("[probe] eo counts unpack_bad=%u vustore_bad=%u\n",
+                            ps2_vif1_getEoUnpackBadCount(), s_eoVuStoreBadCount);
+                std::fflush(stdout);
+            }
             if (s_vdLastWindowTime == std::chrono::steady_clock::time_point{})
                 s_vdLastWindowTime = now;
             else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_vdLastWindowTime).count() >= 3)
