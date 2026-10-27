@@ -14,12 +14,72 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <ps2_log.h>
+
+// =========================================================================
+// Task FE: VU1 data writer tagging (UNPACK & VUSTORE) for qw 636..698 / 716..778
+// =========================================================================
+enum class FeWriterKind : uint8_t {
+    NONE = 0,
+    UNPACK = 1,
+    VUSTORE = 2
+};
+
+struct FeWriterTag {
+    FeWriterKind kind = FeWriterKind::NONE;
+    uint32_t ev = 0;
+    uint8_t cmd = 0;
+    uint16_t dest = 0;
+    uint16_t num = 0;
+    uint8_t cl = 0;
+    uint8_t wl = 0;
+    uint8_t flg = 0;
+    uint16_t tops = 0;
+    uint32_t src_ea = 0;
+    uint32_t pc = 0;
+};
+
+static std::mutex s_feWriterMutex;
+static FeWriterTag s_feWriter[1024];
+
+extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint16_t dest, uint16_t num,
+                                    uint8_t cl, uint8_t wl, uint8_t flg, uint16_t tops, uint32_t src_ea)
+{
+    if (qw < 1024u)
+    {
+        std::lock_guard<std::mutex> lock(s_feWriterMutex);
+        auto &w = s_feWriter[qw];
+        w.kind = FeWriterKind::UNPACK;
+        w.ev = ev;
+        w.cmd = cmd;
+        w.dest = dest;
+        w.num = num;
+        w.cl = cl;
+        w.wl = wl;
+        w.flg = flg;
+        w.tops = tops;
+        w.src_ea = src_ea;
+        w.pc = 0;
+    }
+}
+
+extern "C" void ps2_fe_recordVuStore(uint32_t qw, uint32_t pc)
+{
+    if (qw < 1024u)
+    {
+        std::lock_guard<std::mutex> lock(s_feWriterMutex);
+        auto &w = s_feWriter[qw];
+        w.kind = FeWriterKind::VUSTORE;
+        w.pc = pc;
+    }
+}
 
 extern "C" void ps2x_probeEvent(const char *msg);
 extern "C" void ps2x_probeDump();
 extern "C" uint32_t ps2_vif1_getEuMatchedCount();
 extern "C" void ps2_vif1_dumpEvBuffers();
+extern "C" void ps2_fe_recordVuStore(uint32_t qw, uint32_t pc);
 static thread_local bool s_euStoreLoggedThisRun = false;
 
 // =========================================================================
@@ -1430,6 +1490,7 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
     if (isVu3dProbeEnabled())
     {
         uint32_t qw = (address / 16u) & 0x3FFu;
+        ps2_fe_recordVuStore(qw, m_state.pc);
         if (qw >= 235u && qw <= 244u && ps2_vif1_getEuMatchedCount() >= 6u)
         {
             if (!s_euStoreLoggedThisRun)
@@ -3497,7 +3558,31 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             std::printf("[probe] en entry vi=%s top=%u itop=%u q=0x%08X p=0x%08X\n",
                         viStr.c_str(), s_emEntryTop, s_emEntryItop, qHex, pHex);
 
-            auto printTrace = [](const EgPairTrace &t) {
+            // Task FE: VU1 data table (entry snapshot) with last-writer tags
+            {
+                static const char *const kFeKind[3] = {"NONE", "UNPACK", "VUSTORE"};
+                std::lock_guard<std::mutex> feLock(s_feWriterMutex);
+                for (uint32_t qw = 636u; qw < 1024u; ++qw)
+                {
+                    const bool inTbl = (qw <= 698u) || (qw >= 716u && qw <= 778u);
+                    const bool inConst = (qw >= 1002u);
+                    if (!inTbl && !inConst)
+                        continue;
+                    const uint32_t *d = s_emEntryVuData[qw];
+                    if (inConst)
+                    {
+                        std::printf("[probe] fe const qw=%u %08X %08X %08X %08X\n", qw, d[0], d[1], d[2], d[3]);
+                        continue;
+                    }
+                    const FeWriterTag &w = s_feWriter[qw];
+                    std::printf("[probe] fe tbl qw=%u %08X %08X %08X %08X writer=%s/ev%u/dest%u/num%u/src0x%08X/pc%X\n",
+                                qw, d[0], d[1], d[2], d[3], kFeKind[static_cast<uint32_t>(w.kind) & 3u], w.ev,
+                                static_cast<uint32_t>(w.dest), static_cast<uint32_t>(w.num), w.src_ea, w.pc);
+                }
+                std::fflush(stdout);
+            }
+
+            auto printTrace =[](const EgPairTrace &t) {
                 std::string vfwStr;
                 for (uint8_t v = 0; v < t.numVf; ++v) {
                     char buf[64];

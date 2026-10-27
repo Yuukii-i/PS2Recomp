@@ -1,6 +1,8 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
 extern "C" void ps2_scanCameraRegion(const char *caller, uint64_t callIndex, uint32_t ra);
+extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint16_t dest, uint16_t num,
+                                    uint8_t cl, uint8_t wl, uint8_t flg, uint16_t tops, uint32_t src_ea);
 #include "probe_ae.h"
 #include <cstring>
 #include <cstdio>
@@ -1749,6 +1751,57 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 if (isVu3dProbeEnabled())
                 {
                     ps2_scanCameraRegion("unpack", 0, 0);
+
+                    uint32_t srcOff = (srcRdram != 0xFFFFFFFFu) ? srcRdram : 0u;
+                    static std::atomic<uint32_t> s_feUnpackEv{0};
+                    static std::atomic<uint32_t> s_feUnpackLogCount{0};
+                    uint32_t evNum = s_feUnpackEv.fetch_add(1, std::memory_order_relaxed) + 1u;
+                    uint32_t nonzeroQw = 0;
+                    bool overlaps600_780 = false;
+                    for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex) {
+                        uint32_t destVec = (cl >= wl) ? ((vuAddr + (writeIndex / wl) * cl + (writeIndex % wl)) & 0x3FFu)
+                                                      : ((vuAddr + writeIndex) & 0x3FFu);
+                        ps2_fe_recordUnpack(destVec, evNum, opcode, static_cast<uint16_t>(vuAddr),
+                                            static_cast<uint16_t>(writeVectorCount),
+                                            static_cast<uint8_t>(cl), static_cast<uint8_t>(wl),
+                                            static_cast<uint8_t>((imm & 0x8000u) ? 1u : 0u),
+                                            static_cast<uint16_t>(vif1_regs.tops & 0x3FFu), srcOff);
+                        if (destVec >= 600u && destVec <= 780u) {
+                            overlaps600_780 = true;
+                        }
+                        if (m_vu1Data && (destVec + 1u) * 16u <= PS2_VU1_DATA_SIZE) {
+                            uint32_t qwW[4];
+                            std::memcpy(qwW, m_vu1Data + destVec * 16u, 16);
+                            if (qwW[0] != 0u || qwW[1] != 0u || qwW[2] != 0u || qwW[3] != 0u) {
+                                nonzeroQw++;
+                            }
+                        }
+                    }
+
+                    if (overlaps600_780 && s_feUnpackLogCount.fetch_add(1, std::memory_order_relaxed) < 60u)
+                    {
+                        uint32_t dwFirst[4]{}, dwLast[4]{};
+                        if (m_vu1Data) {
+                            uint32_t eff = vuAddr & 0x3FFu;
+                            uint32_t lastVec = (cl >= wl) ? ((vuAddr + ((writeVectorCount - 1u) / wl) * cl + ((writeVectorCount - 1u) % wl)) & 0x3FFu)
+                                                          : ((vuAddr + writeVectorCount - 1u) & 0x3FFu);
+                            if ((eff + 1u) * 16u <= PS2_VU1_DATA_SIZE) std::memcpy(dwFirst, m_vu1Data + eff * 16u, 16);
+                            if ((lastVec + 1u) * 16u <= PS2_VU1_DATA_SIZE) std::memcpy(dwLast, m_vu1Data + lastVec * 16u, 16);
+                        }
+                        char srcBuf[32];
+                        if (srcOff != 0u) {
+                            std::snprintf(srcBuf, sizeof(srcBuf), "src=0x%08X", srcOff);
+                        } else {
+                            std::snprintf(srcBuf, sizeof(srcBuf), "src=?");
+                        }
+                        std::printf("[probe] fe unpack ev=%u cmd=0x%02X dest=%u num=%u cl=%u wl=%u flg=%u tops=%u %s nonzero_qw=%u/%u first_qw=%08X_%08X_%08X_%08X last_qw=%08X_%08X_%08X_%08X\n",
+                                    evNum, opcode, vuAddr, writeVectorCount, cl, wl,
+                                    (imm & 0x8000u) ? 1u : 0u, vif1_regs.tops & 0x3FFu,
+                                    srcBuf, nonzeroQw, writeVectorCount,
+                                    dwFirst[0], dwFirst[1], dwFirst[2], dwFirst[3],
+                                    dwLast[0], dwLast[1], dwLast[2], dwLast[3]);
+                        std::fflush(stdout);
+                    }
                 }
                 if (opcode == 0x6Cu && writeVectorCount == 10u && isVu3dProbeEnabled())
                 {
