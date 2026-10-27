@@ -19,6 +19,7 @@
 extern "C" void ps2x_probeEvent(const char *msg);
 extern "C" void ps2x_probeDump();
 extern "C" uint32_t ps2_vif1_getEuMatchedCount();
+extern "C" void ps2_vif1_dumpEvBuffers();
 static thread_local bool s_euStoreLoggedThisRun = false;
 
 // =========================================================================
@@ -2753,20 +2754,50 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
 
             if (vi13Val == 235u)
             {
-                static std::atomic<uint32_t> s_euC80PrintCount{0};
-                uint32_t cIdx = s_euC80PrintCount.fetch_add(1, std::memory_order_relaxed);
-                if (cIdx < 6u)
+                uint32_t vw10[10][4]{};
+                bool hasBad = false;
+                for (uint32_t i = 0; i < 10u; ++i)
                 {
-                    for (uint32_t i = 0; i < 10u; ++i)
+                    if (vuData && (235u + i + 1u) * 16u <= dataSize)
                     {
-                        uint32_t vw[4]{0, 0, 0, 0};
-                        if (vuData && (235u + i + 1u) * 16u <= dataSize)
+                        std::memcpy(vw10[i], vuData + (235u + i) * 16u, 16);
+                        for (int l = 0; l < 4; ++l)
                         {
-                            std::memcpy(vw, vuData + (235u + i) * 16u, 16);
+                            uint32_t w = vw10[i][l];
+                            if (w == 0x7F7FFFFFu || w == 0xFF7FFFFFu || w == 0xFF7FFFFEu)
+                            {
+                                hasBad = true;
+                                break;
+                            }
+                            float f = 0.0f;
+                            std::memcpy(&f, &w, 4);
+                            if (std::isnan(f) || std::isinf(f))
+                            {
+                                hasBad = true;
+                                break;
+                            }
                         }
-                        std::printf("[probe] eu vu10 i=%u %08X %08X %08X %08X\n", i, vw[0], vw[1], vw[2], vw[3]);
                     }
-                    std::fflush(stdout);
+                    if (hasBad) break;
+                }
+
+                if (hasBad)
+                {
+                    static std::atomic<uint32_t> s_evBadPrintCount{0};
+                    uint32_t bIdx = s_evBadPrintCount.fetch_add(1, std::memory_order_relaxed);
+                    if (bIdx < 3u)
+                    {
+                        const auto now = std::chrono::steady_clock::now();
+                        uint64_t ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - s_vdStartTime).count());
+                        std::printf("[probe] ev bad hit #%u at ms=%llu\n", bIdx + 1u, (unsigned long long)ms);
+                        for (uint32_t i = 0; i < 10u; ++i)
+                        {
+                            std::printf("[probe] ev vu10 i=%u %08X %08X %08X %08X\n",
+                                        i, vw10[i][0], vw10[i][1], vw10[i][2], vw10[i][3]);
+                        }
+                        ps2_vif1_dumpEvBuffers();
+                        std::fflush(stdout);
+                    }
                 }
             }
         }

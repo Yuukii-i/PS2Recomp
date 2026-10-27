@@ -134,11 +134,38 @@ static uint32_t s_erCurrentChunkSize = 0;
 static bool s_erCurrentChunkReported = false;
 
 // =========================================================================
-// Task EU: UNPACK 0x6C dest=235 num=10 src/dst comparison
+// Task EU/EV: Snapshot buffers for UNPACK 0x6C dest=235 num=10
 // =========================================================================
 static std::atomic<uint32_t> s_euUnpackCount{0};
 extern "C" uint32_t ps2_vif1_getEuMatchedCount() {
     return s_euUnpackCount.load(std::memory_order_relaxed);
+}
+
+static uint32_t s_evSrc10[10][4]{};
+static uint32_t s_evDst10[10][4]{};
+static uint32_t s_evEffDest = 0;
+static uint32_t s_evSrcRdram = 0xFFFFFFFFu;
+static bool s_evPathFast = false;
+static std::atomic<uint32_t> s_evN235{0};
+static std::mutex s_evMutex;
+
+extern "C" void ps2_vif1_dumpEvBuffers()
+{
+    std::lock_guard<std::mutex> lock(s_evMutex);
+    uint32_t n = s_evN235.load(std::memory_order_relaxed);
+    const char *pathStr = s_evPathFast ? "fast" : "generic";
+    std::printf("[probe] ev info n235=%u eff=%u src=0x%08X path=%s\n", n, s_evEffDest, s_evSrcRdram, pathStr);
+    for (uint32_t i = 0; i < 10u; ++i)
+    {
+        std::printf("[probe] ev src10 n=%u i=%u %08X %08X %08X %08X\n",
+                    n, i, s_evSrc10[i][0], s_evSrc10[i][1], s_evSrc10[i][2], s_evSrc10[i][3]);
+    }
+    for (uint32_t i = 0; i < 10u; ++i)
+    {
+        std::printf("[probe] ev dst10 path=%s i=%u %08X %08X %08X %08X\n",
+                    pathStr, i, s_evDst10[i][0], s_evDst10[i][1], s_evDst10[i][2], s_evDst10[i][3]);
+    }
+    std::fflush(stdout);
 }
 
 static std::mutex s_epMutex;
@@ -1700,31 +1727,31 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                   eff, dwFirst[0], dwFirst[1], dwFirst[2], dwFirst[3],
                                   dwLast[0], dwLast[1], dwLast[2], dwLast[3]);
                 }
-                if (opcode == 0x6Cu && vuAddr == 235u && writeVectorCount == 10u && isVu3dProbeEnabled())
+                if (opcode == 0x6Cu && writeVectorCount == 10u && isVu3dProbeEnabled())
                 {
-                    uint32_t euIdx = s_euUnpackCount.fetch_add(1, std::memory_order_relaxed);
-                    if (euIdx < 6u)
+                    if (vuAddr == 235u)
                     {
-                        const char *pathStr = executeGeneric ? "generic" : "fast";
+                        std::lock_guard<std::mutex> lock(s_evMutex);
+                        s_evEffDest = vuAddr;
+                        s_evPathFast = !executeGeneric;
+                        s_evSrcRdram = (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE) ? static_cast<uint32_t>(srcBase - m_rdram) : 0xFFFFFFFFu;
                         for (uint32_t i = 0; i < 10u; ++i)
                         {
-                            uint32_t sw[4]{0, 0, 0, 0};
                             if (pos + (i + 1u) * 16u <= sizeBytes)
                             {
-                                std::memcpy(sw, srcBase + i * 16u, 16);
+                                std::memcpy(s_evSrc10[i], srcBase + i * 16u, 16);
                             }
-                            std::printf("[probe] eu src10 i=%u %08X %08X %08X %08X\n", i, sw[0], sw[1], sw[2], sw[3]);
-                        }
-                        for (uint32_t i = 0; i < 10u; ++i)
-                        {
-                            uint32_t dw[4]{0, 0, 0, 0};
+                            else
+                            {
+                                std::memset(s_evSrc10[i], 0, 16);
+                            }
                             if (m_vu1Data)
                             {
-                                std::memcpy(dw, m_vu1Data + (235u + i) * 16u, 16);
+                                std::memcpy(s_evDst10[i], m_vu1Data + (235u + i) * 16u, 16);
                             }
-                            std::printf("[probe] eu dst10 eff=235 path=%s i=%u %08X %08X %08X %08X\n", pathStr, i, dw[0], dw[1], dw[2], dw[3]);
                         }
-                        std::fflush(stdout);
+                        s_evN235.fetch_add(1, std::memory_order_relaxed);
+                        s_euUnpackCount.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
             }
