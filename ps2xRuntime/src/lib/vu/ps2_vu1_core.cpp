@@ -1072,8 +1072,8 @@ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
         return operand(m_state.acc[lane]);
     };
 
-    const long double q = operand(m_state.q);
-    const long double i = operand(m_state.i);
+    const auto q = [&]() { return operand(m_state.q); }; // PERF-HI lazy
+    const auto i = [&]() { return operand(m_state.i); };
 
     if (op < 0x3Cu)
     {
@@ -1092,34 +1092,34 @@ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
             switch (op)
             {
             case 0x1Cu:
-                result = vs(component) * q;
+                result = vs(component) * q();
                 break;
             case 0x1Eu:
-                result = vs(component) * i;
+                result = vs(component) * i();
                 break;
             case 0x20u:
-                result = vs(component) + q;
+                result = vs(component) + q();
                 break;
             case 0x21u:
-                result = acc(component) + vs(component) * q;
+                result = acc(component) + vs(component) * q();
                 break;
             case 0x22u:
-                result = vs(component) + i;
+                result = vs(component) + i();
                 break;
             case 0x23u:
-                result = acc(component) + vs(component) * i;
+                result = acc(component) + vs(component) * i();
                 break;
             case 0x24u:
-                result = vs(component) - q;
+                result = vs(component) - q();
                 break;
             case 0x25u:
-                result = acc(component) - vs(component) * q;
+                result = acc(component) - vs(component) * q();
                 break;
             case 0x26u:
-                result = vs(component) - i;
+                result = vs(component) - i();
                 break;
             case 0x27u:
-                result = acc(component) - vs(component) * i;
+                result = acc(component) - vs(component) * i();
                 break;
             case 0x28u:
                 result = vs(component) + vt(component);
@@ -1167,34 +1167,34 @@ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
         switch (special)
         {
         case 0x1Cu:
-            result = vs(component) * q;
+            result = vs(component) * q();
             break;
         case 0x1Eu:
-            result = vs(component) * i;
+            result = vs(component) * i();
             break;
         case 0x20u:
-            result = vs(component) + q;
+            result = vs(component) + q();
             break;
         case 0x21u:
-            result = acc(component) + vs(component) * q;
+            result = acc(component) + vs(component) * q();
             break;
         case 0x22u:
-            result = vs(component) + i;
+            result = vs(component) + i();
             break;
         case 0x23u:
-            result = acc(component) + vs(component) * i;
+            result = acc(component) + vs(component) * i();
             break;
         case 0x24u:
-            result = vs(component) - q;
+            result = vs(component) - q();
             break;
         case 0x25u:
-            result = acc(component) - vs(component) * q;
+            result = acc(component) - vs(component) * q();
             break;
         case 0x26u:
-            result = vs(component) - i;
+            result = vs(component) - i();
             break;
         case 0x27u:
-            result = acc(component) - vs(component) * i;
+            result = acc(component) - vs(component) * i();
             break;
         case 0x28u:
             result = vs(component) + vt(component);
@@ -1326,12 +1326,12 @@ static inline int vu1VerifyMode() // PS2X_VU1_VERIFY: 1 = VU1 only, 2 = VU0 only
     static const int s_mode = []() { const char *v = std::getenv("PS2X_VU1_VERIFY"); return v ? std::atoi(v) : 0; }();
     return s_mode;
 }
+static const bool s_vu1FastEnv = []() { const char *v = std::getenv("PS2X_VU1_FAST"); return v && v[0] == '1'; }(); // PERF-HI
 static inline bool vu1FastMode()
 {
     if (s_vfyFastOverride >= 0)
         return s_vfyFastOverride == 1;
-    static const bool s_on = []() { const char *v = std::getenv("PS2X_VU1_FAST"); return v && v[0] == '1'; }();
-    return s_on;
+    return s_vu1FastEnv;
 }
 
 void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
@@ -1908,6 +1908,12 @@ void VU1Interpreter::queueAccWrite(uint8_t laneMask, const float value[4], uint3
 
 void VU1Interpreter::commitReadyPipelines()
 {
+    if (!vu1FastMode()) // PERF-HI: nothing pending -> nothing to commit
+    {
+        const PipeMasks &pm = PM();
+        if ((pm.flag | pm.store | pm.vf | pm.vi | pm.acc) == 0u && !m_fdiv.valid && !m_efu[0].valid && !m_efu[1].valid)
+            return;
+    }
     if (vu1FastMode())
     {
         if (m_fdiv.valid && m_fdiv.readyCycle <= m_cycle)
@@ -3441,11 +3447,125 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     bool programEnded = false;
     // VU1 native executor (stage 1): generated per-pair functions (generated/vu1_native_*.cpp, tools/vu1gen).
     // Only for the known main image, VU1, exact scheduler mode, no probes, and never in the verifier's reference pass.
+    // PERF-HL: specialised upper-pipe path for add/sub/mul/madd/msub families (vd or ACC target) and NOP.
+    // Same maths as execUpper + normalizeFmacResult + calculateFmacProductSticky, without the per-lane decode.
+    static const auto fastUpper = [](VU1Interpreter &v, uint32_t instr) -> bool
+    {
+        const uint32_t op = instr & 0x3Fu;
+        uint32_t e = op;
+        bool toAcc = false;
+        if (op >= 0x3Cu)
+        {
+            e = (instr & 3u) | ((instr >> 4) & 0x7Cu);
+            toAcc = true;
+            if (e == 0x2Fu || e == 0x30u)
+            {
+                v.m_currentUpperInstruction = instr;
+                return true;
+            }
+        }
+        // kind: 0 add, 1 sub, 2 madd, 3 msub, 4 mul. src: 0 vt[bc], 1 q, 2 i, 3 vt[c]
+        int kind, src, bc = 0;
+        if (e <= 0x0Fu) { kind = static_cast<int>(e >> 2); src = 0; bc = static_cast<int>(e & 3u); }
+        else if (e >= 0x18u && e <= 0x1Bu) { kind = 4; src = 0; bc = static_cast<int>(e & 3u); }
+        else
+        {
+            switch (e)
+            {
+            case 0x1Cu: kind = 4; src = 1; break;
+            case 0x1Eu: kind = 4; src = 2; break;
+            case 0x20u: kind = 0; src = 1; break;
+            case 0x21u: kind = 2; src = 1; break;
+            case 0x22u: kind = 0; src = 2; break;
+            case 0x23u: kind = 2; src = 2; break;
+            case 0x24u: kind = 1; src = 1; break;
+            case 0x25u: kind = 3; src = 1; break;
+            case 0x26u: kind = 1; src = 2; break;
+            case 0x27u: kind = 3; src = 2; break;
+            case 0x28u: kind = 0; src = 3; break;
+            case 0x29u: kind = 2; src = 3; break;
+            case 0x2Au: kind = 4; src = 3; break;
+            case 0x2Cu: kind = 1; src = 3; break;
+            case 0x2Du: kind = 3; src = 3; break;
+            default: return false;
+            }
+        }
+        v.m_currentUpperInstruction = instr;
+        const uint8_t dest = static_cast<uint8_t>((instr >> 21) & 0xFu);
+        const uint32_t ft = (instr >> 16) & 0x1Fu;
+        const uint32_t fs = (instr >> 11) & 0x1Fu;
+        const uint32_t fd = (instr >> 6) & 0x1Fu;
+        const bool madd = kind == 2 || kind == 3;
+        float bval = 0.0f;
+        if (src == 0) bval = v.normalizeOperand(v.m_state.vf[ft][bc]);
+        else if (src == 1) bval = v.normalizeOperand(v.m_state.q);
+        else if (src == 2) bval = v.normalizeOperand(v.m_state.i);
+
+        const auto flagsOf = [](float &value, long double ex) -> uint8_t
+        {
+            const bool negative = std::signbit(ex);
+            const long double magnitude = std::fabs(ex);
+            uint8_t flags = negative ? 0x2u : 0u;
+            uint32_t bits = negative ? 0x80000000u : 0u;
+            if (magnitude == 0.0L)
+            {
+                flags |= 0x1u;
+                std::memcpy(&value, &bits, sizeof(value));
+            }
+            else if (magnitude > static_cast<long double>(std::numeric_limits<float>::max()))
+            {
+                flags |= 0x8u;
+                bits |= 0x7F7FFFFFu;
+                std::memcpy(&value, &bits, sizeof(value));
+            }
+            else if (magnitude < static_cast<long double>(std::numeric_limits<float>::min()))
+            {
+                flags |= 0x5u;
+                std::memcpy(&value, &bits, sizeof(value));
+            }
+            return flags;
+        };
+
+        float result[4];
+        uint8_t laneFlags[4] = {0u, 0u, 0u, 0u};
+        uint32_t extraSticky = 0u;
+        for (uint32_t c = 0; c < 4u; ++c)
+        {
+            if ((dest & laneForComponent(c)) == 0u)
+                continue;
+            const float a = v.normalizeOperand(v.m_state.vf[fs][c]);
+            const float b = src == 3 ? v.normalizeOperand(v.m_state.vf[ft][c]) : bval;
+            const float ac = madd ? v.normalizeOperand(v.m_state.acc[c]) : 0.0f;
+            float val;
+            long double ex;
+            switch (kind)
+            {
+            case 0: val = a + b; ex = static_cast<long double>(a) + static_cast<long double>(b); break;
+            case 1: val = a - b; ex = static_cast<long double>(a) - static_cast<long double>(b); break;
+            case 2: val = ac + a * b; ex = static_cast<long double>(ac) + static_cast<long double>(a) * static_cast<long double>(b); break;
+            case 3: val = ac - a * b; ex = static_cast<long double>(ac) - static_cast<long double>(a) * static_cast<long double>(b); break;
+            default: val = a * b; ex = static_cast<long double>(a) * static_cast<long double>(b); break;
+            }
+            laneFlags[c] = flagsOf(val, ex);
+            result[c] = val;
+            if (madd)
+            {
+                float pv = a * b;
+                extraSticky |= flagsOf(pv, static_cast<long double>(a) * static_cast<long double>(b)) & 0xFu;
+            }
+        }
+        v.updateFmacFlags(laneFlags, dest, extraSticky);
+        float *dst = toAcc ? v.m_state.acc : v.m_state.vf[fd];
+        for (uint32_t c = 0; c < 4u; ++c)
+            if ((dest & laneForComponent(c)) != 0u)
+                dst[c] = result[c];
+        return true;
+    };
     static const VuNativeOps vuNativeOps = {
         [](VU1Interpreter &v) { v.commitReadyPipelines(); },
         [](VU1Interpreter &v, uint64_t t) { v.advanceTo(t); },
         [](VU1Interpreter &v) { v.advanceOneCycle(); },
-        [](VU1Interpreter &v, uint32_t u) { v.execUpper(u); },
+        [](VU1Interpreter &v, uint32_t u) { if (!fastUpper(v, u)) v.execUpper(u); },
         [](VU1Interpreter &v, uint32_t l, uint8_t *d, uint32_t ds, GS &g, PS2Memory *m, uint32_t u) { v.execLower(l, d, ds, g, m, u); },
         [](VU1Interpreter &v, uint8_t r, uint8_t lanes, const float *val, uint32_t lat) { v.queueVfWrite(r, lanes, val, lat); },
         [](VU1Interpreter &v, uint8_t r, int32_t val, uint32_t lat) { v.queueViWrite(r, val, lat); },
