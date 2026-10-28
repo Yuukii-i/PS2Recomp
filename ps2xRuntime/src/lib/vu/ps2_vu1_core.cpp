@@ -3447,6 +3447,79 @@ static void processFcC80Completion(const uint8_t *vuData, uint32_t dataSize)
 }
 
 static uint64_t *s_geHistPtr = nullptr; // PROBE-GE2
+// PROBE-SIG: how repeatable is the pipeline state at branch landings? (PS2X_VU_SIGSTAT=1, run with PS2X_VU1_NATIVE=0)
+// A landing = first pair executed after a taken branch. Signature = hash of all pending timing state relative to m_cycle.
+namespace
+{
+    struct SigEntry
+    {
+        uint64_t sig;
+        uint32_t count;
+    };
+    struct SigUnit
+    {
+        std::unordered_map<uint32_t, std::vector<SigEntry>> byPc;
+        uint64_t landings = 0;
+        uint64_t pairs = 0;
+        uint64_t emptySig = 0;
+        uint64_t overflow = 0;
+    };
+    SigUnit g_sigUnits[2];
+    uint64_t g_sigNextPrint = 200000;
+    const bool g_sigStatOn = []() { const char *e = std::getenv("PS2X_VU_SIGSTAT"); return e && e[0] == '1'; }();
+
+    uint64_t sigMix(uint64_t x)
+    {
+        x += 0x9E3779B97F4A7C15ull;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+        return x ^ (x >> 31);
+    }
+
+    void sigPrint()
+    {
+        for (int u = 0; u < 2; ++u)
+        {
+            SigUnit &su = g_sigUnits[u];
+            if (su.landings == 0)
+                continue;
+            uint64_t distinct = 0, cov1 = 0, cov4 = 0, cov16 = 0;
+            struct PcRow
+            {
+                uint32_t pc;
+                uint64_t n;
+                size_t d;
+                uint64_t top;
+            };
+            std::vector<PcRow> rows;
+            for (auto &kv : su.byPc)
+            {
+                auto v = kv.second;
+                std::sort(v.begin(), v.end(), [](const SigEntry &a, const SigEntry &b) { return a.count > b.count; });
+                distinct += v.size();
+                uint64_t n = 0;
+                for (size_t i = 0; i < v.size(); ++i)
+                {
+                    n += v[i].count;
+                    if (i < 1) cov1 += v[i].count;
+                    if (i < 4) cov4 += v[i].count;
+                    if (i < 16) cov16 += v[i].count;
+                }
+                rows.push_back({kv.first, n, v.size(), v.empty() ? 0u : v[0].count});
+            }
+            std::sort(rows.begin(), rows.end(), [](const PcRow &a, const PcRow &b) { return a.n > b.n; });
+            std::printf("[probe] sig %s landings=%llu pairs/landing=%.2f pcs=%zu distinct=%llu cov_top1=%.1f%% top4=%.1f%% top16=%.1f%% empty=%.1f%% overflow=%llu\n",
+                        u ? "VU1" : "VU0", (unsigned long long)su.landings, double(su.pairs) / double(su.landings), su.byPc.size(),
+                        (unsigned long long)distinct, 100.0 * cov1 / su.landings, 100.0 * cov4 / su.landings, 100.0 * cov16 / su.landings,
+                        100.0 * su.emptySig / su.landings, (unsigned long long)su.overflow);
+            for (size_t i = 0; i < rows.size() && i < 8; ++i)
+                std::printf("[probe] sig %s pc=0x%04X n=%llu (%.1f%%) states=%zu top1=%.1f%%\n", u ? "VU1" : "VU0", rows[i].pc, (unsigned long long)rows[i].n,
+                            100.0 * rows[i].n / su.landings, rows[i].d, 100.0 * rows[i].top / rows[i].n);
+        }
+        std::fflush(stdout);
+    }
+}
+
 void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                          uint8_t *vuData, uint32_t dataSize,
                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
@@ -3652,6 +3725,62 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                             !s_emRecording && !s_eiCurRunActive && !s_ekCurRunActive && !s_fcC80.active;
     VuNativeCtx vuNativeCtx{&vuNativeOps, budgetEnd, 0u, false, vuData, dataSize, &gs, memory, codeSize};
 
+    bool sigLanded = true; // PROBE-SIG: first pair of a run counts as a landing
+    const auto sigPipelineHash = [this]() -> uint64_t
+    {
+        const uint64_t c = m_cycle;
+        uint64_t h = 0;
+        for (const auto &e : m_vfWritePipeline)
+            if (e.valid) h += sigMix((uint64_t(e.reg) << 40) ^ (uint64_t(e.laneMask) << 32) ^ (e.readyCycle - c) ^ 0x1111);
+        for (const auto &e : m_viWritePipeline)
+            if (e.valid) h += sigMix((uint64_t(e.reg) << 40) ^ (e.readyCycle - c) ^ 0x2222);
+        for (const auto &e : m_accWritePipeline)
+            if (e.valid) h += sigMix((uint64_t(e.laneMask) << 32) ^ (e.readyCycle - c) ^ 0x3333);
+        for (const auto &e : m_storePipeline)
+            if (e.valid) h += sigMix((uint64_t(e.laneMask) << 32) ^ (e.readyCycle - c) ^ 0x4444);
+        for (const auto &e : m_flagPipeline)
+            if (e.valid)
+                h += sigMix((uint64_t(e.writesMac) | (uint64_t(e.writesStatus) << 1) | (uint64_t(e.writesSticky) << 2) | (uint64_t(e.writesClip) << 3)) << 40 ^
+                            (e.readyCycle - c) ^ 0x5555);
+        if (m_fdiv.valid) h += sigMix((m_fdiv.readyCycle - c) ^ 0x6666);
+        for (const auto &e : m_efu)
+            if (e.valid) h += sigMix((e.readyCycle - c) ^ 0x7777);
+        if (m_efuResourceReady > c) h += sigMix((m_efuResourceReady - c) ^ 0x8888);
+        if (m_xgkick.active) h += sigMix(0x9999);
+        if (m_viBranchBackupValid) h += sigMix(0xAAAA);
+        return h;
+    };
+    const auto sigRecord = [&]()
+    {
+        SigUnit &su = g_sigUnits[m_unit == Unit::VU1 ? 1 : 0];
+        const uint64_t h = sigPipelineHash();
+        if (h == 0)
+            su.emptySig++;
+        auto &vec = su.byPc[m_state.pc];
+        bool found = false;
+        for (auto &e : vec)
+            if (e.sig == h)
+            {
+                ++e.count;
+                found = true;
+                break;
+            }
+        if (!found)
+        {
+            if (vec.size() < 256)
+                vec.push_back({h, 1u});
+            else
+                ++su.overflow;
+        }
+        ++su.landings;
+        const uint64_t total = g_sigUnits[0].landings + g_sigUnits[1].landings;
+        if (total >= g_sigNextPrint)
+        {
+            g_sigNextPrint *= 4;
+            sigPrint();
+        }
+    };
+
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
         if (vuNativeOn)
@@ -3775,6 +3904,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         const DecodedInstructionPair &decoded = *decodedPtr;
         if (probe_ae::isDcProbeEnabled()) { uint32_t idx = s_dyLastPcIdx++; s_dyLastPcs[idx & 4095u] = m_state.pc; }
         instrsThisRun++;
+        if (g_sigStatOn) // PROBE-SIG
+        {
+            g_sigUnits[m_unit == Unit::VU1 ? 1 : 0].pairs++;
+            if (sigLanded)
+            {
+                sigLanded = false;
+                sigRecord();
+            }
+        }
         { static uint64_t *s_h = new uint64_t[512](); s_geHistPtr = s_h; s_h[(m_state.pc >> 6) & 0x1FFu]++; } // PROBE-GE2
         if (probe_ae::isEnabled())
         {
@@ -4069,6 +4207,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             {
                 m_state.pc = m_state.branchTarget & microAddressMask();
                 m_state.branchPending = false;
+                sigLanded = true; // PROBE-SIG
             }
             else
             {
