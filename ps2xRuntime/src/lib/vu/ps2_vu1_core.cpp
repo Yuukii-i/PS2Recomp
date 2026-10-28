@@ -883,6 +883,10 @@ static inline uint32_t pmCtz(uint32_t v)
 #endif
 }
 #define PM() (s_pipeMasks[m_unit == Unit::VU1 ? 1 : 0])
+// PERF-HM: earliest cycle at which any pending write can land; push sites reset it to 0 (rescan), commit recomputes it.
+static bool s_vfyRef = false;                         // PERF-GR: true => use the original (reference) code paths, for A/B verification
+static uint64_t s_nextReady[2] = {0u, 0u};
+#define NR() (s_nextReady[m_unit == Unit::VU1 ? 1 : 0])
 
 VU1Interpreter::VU1Interpreter(Unit unit)
     : m_unit(unit)
@@ -892,14 +896,20 @@ VU1Interpreter::VU1Interpreter(Unit unit)
 
 void VU1Interpreter::resetScheduler()
 {
-    m_flagPipeline = {};
-    m_fdiv = {};
-    m_efu = {};
-    m_storePipeline = {};
-    m_vfWritePipeline = {};
-    m_viWritePipeline = {};
-    m_accWritePipeline = {};
+    // PERF-HM: entries are zeroed when committed, so with nothing pending the arrays are already clear
+    const PipeMasks &pmr = PM();
+    if (s_vfyRef || (pmr.flag | pmr.store | pmr.vf | pmr.vi | pmr.acc) != 0u || m_fdiv.valid || m_efu[0].valid || m_efu[1].valid)
+    {
+        m_flagPipeline = {};
+        m_fdiv = {};
+        m_efu = {};
+        m_storePipeline = {};
+        m_vfWritePipeline = {};
+        m_viWritePipeline = {};
+        m_accWritePipeline = {};
+    }
     PM() = {};
+    NR() = 0u;
     // PERF-GH: do not zero the 64KB packet buffer (m_xgkick = {}) on every run; only control state matters
     m_xgkick.sourceAddress = 0; m_xgkick.totalBytes = 0; m_xgkick.copiedBytes = 0; m_xgkick.currentTagEnd = 0;
     m_xgkick.cycleCredit = 0; m_xgkick.issueCycle = 0; m_xgkick.active = false; m_xgkick.currentTagEop = false;
@@ -1320,7 +1330,6 @@ uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
 // PERF-GJ: fast mode (PS2X_VU1_FAST=1) drops the per-register hazard/latency scheduler: vf/vi/acc/flag/store
 // writes land immediately; only Q/P (fdiv/efu) keep their latency. Cycle counts become ~1 per pair.
 static std::vector<uint8_t> *s_vfyCapture = nullptr; // PROBE-GV: when set, XGKICK packets are captured instead of submitted
-static bool s_vfyRef = false;                         // PERF-GR: true => use the original (reference) code paths, for A/B verification
 static int s_vfyFastOverride = -1;                    // PROBE-GV: -1 env, 0 force exact, 1 force fast
 static inline int vu1VerifyMode() // PS2X_VU1_VERIFY: 1 = VU1 only, 2 = VU0 only, 3 = both
 {
@@ -1395,7 +1404,7 @@ void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
 
     *entry = {};
     entry->valid = true;
-    PM().flag |= 1u << static_cast<uint32_t>(entry - m_flagPipeline.data());
+    PM().flag |= 1u << static_cast<uint32_t>(entry - m_flagPipeline.data()); NR() = 0u;
     entry->issueCycle = m_cycle;
     entry->readyCycle = m_cycle + kFmacLatency;
     entry->mac = mac;
@@ -1440,7 +1449,7 @@ void VU1Interpreter::queueFsset(uint16_t immediate)
         {
             entry = {};
             entry.valid = true;
-            PM().flag |= 1u << static_cast<uint32_t>(&entry - m_flagPipeline.data());
+            PM().flag |= 1u << static_cast<uint32_t>(&entry - m_flagPipeline.data()); NR() = 0u;
             entry.issueCycle = m_cycle;
             entry.readyCycle = m_cycle + kFmacLatency;
             entry.status = static_cast<uint32_t>(immediate) & 0xFC0u;
@@ -1465,7 +1474,7 @@ void VU1Interpreter::queueClip(uint32_t clip)
         {
             entry = {};
             entry.valid = true;
-            PM().flag |= 1u << static_cast<uint32_t>(&entry - m_flagPipeline.data());
+            PM().flag |= 1u << static_cast<uint32_t>(&entry - m_flagPipeline.data()); NR() = 0u;
             entry.issueCycle = m_cycle;
             entry.readyCycle = m_cycle + kFmacLatency;
             entry.clip = m_workingClip;
@@ -1495,7 +1504,7 @@ void VU1Interpreter::queueFcset(uint32_t clip)
         {
             entry = {};
             entry.valid = true;
-            PM().flag |= 1u << static_cast<uint32_t>(&entry - m_flagPipeline.data());
+            PM().flag |= 1u << static_cast<uint32_t>(&entry - m_flagPipeline.data()); NR() = 0u;
             entry.issueCycle = m_cycle;
             entry.readyCycle = m_cycle + kFmacLatency;
             entry.clip = m_workingClip;
@@ -1517,7 +1526,7 @@ void VU1Interpreter::queueQ(float value, uint32_t latency, uint32_t statusDi)
         m_state.status = (m_state.status & 0xFCFu) | di | (di << 6);
         return;
     }
-    m_fdiv.valid = true;
+    m_fdiv.valid = true; NR() = 0u;
     m_fdiv.readyCycle = m_cycle + latency;
     m_fdiv.value = value;
     m_fdiv.statusDi = statusDi & 0x30u;
@@ -1536,7 +1545,7 @@ void VU1Interpreter::queueP(float value, uint32_t latency)
     {
         if (!entry.valid)
         {
-            entry.valid = true;
+            entry.valid = true; NR() = 0u;
             entry.readyCycle = m_cycle + latency;
             entry.value = value;
             // EFU throughput is one cycle shorter than result visibility.
@@ -1802,7 +1811,7 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
         if (!store.valid)
         {
             store.valid = true;
-            PM().store |= 1u << static_cast<uint32_t>(&store - m_storePipeline.data());
+            PM().store |= 1u << static_cast<uint32_t>(&store - m_storePipeline.data()); NR() = 0u;
             store.readyCycle = m_cycle + 1u;
             store.address = address;
             store.laneMask = laneMask;
@@ -1842,7 +1851,7 @@ void VU1Interpreter::queueVfWrite(uint8_t reg, uint8_t laneMask,
         {
             write = {};
             write.valid = true;
-            PM().vf |= 1u << static_cast<uint32_t>(&write - m_vfWritePipeline.data());
+            PM().vf |= 1u << static_cast<uint32_t>(&write - m_vfWritePipeline.data()); NR() = 0u;
             write.readyCycle = m_cycle + latency;
             write.sequence = ++m_nextWriteSequence;
             write.reg = reg;
@@ -1869,7 +1878,7 @@ void VU1Interpreter::queueViWrite(uint8_t reg, int32_t value, uint32_t latency)
         {
             write = {};
             write.valid = true;
-            PM().vi |= 1u << static_cast<uint32_t>(&write - m_viWritePipeline.data());
+            PM().vi |= 1u << static_cast<uint32_t>(&write - m_viWritePipeline.data()); NR() = 0u;
             write.readyCycle = m_cycle + latency;
             write.sequence = ++m_nextWriteSequence;
             write.reg = reg;
@@ -1891,7 +1900,7 @@ void VU1Interpreter::queueAccWrite(uint8_t laneMask, const float value[4], uint3
         {
             write = {};
             write.valid = true;
-            PM().acc |= 1u << static_cast<uint32_t>(&write - m_accWritePipeline.data());
+            PM().acc |= 1u << static_cast<uint32_t>(&write - m_accWritePipeline.data()); NR() = 0u;
             write.readyCycle = m_cycle + latency;
             write.sequence = ++m_nextWriteSequence;
             write.laneMask = laneMask;
@@ -1911,9 +1920,14 @@ void VU1Interpreter::commitReadyPipelines()
 {
     if (!vu1FastMode()) // PERF-HI: nothing pending -> nothing to commit
     {
+        if (!s_vfyRef && m_cycle < NR()) // PERF-HM: nothing can land yet
+            return;
         const PipeMasks &pm = PM();
         if ((pm.flag | pm.store | pm.vf | pm.vi | pm.acc) == 0u && !m_fdiv.valid && !m_efu[0].valid && !m_efu[1].valid)
+        {
+            NR() = ~0ull;
             return;
+        }
     }
     if (vu1FastMode())
     {
@@ -2043,6 +2057,17 @@ void VU1Interpreter::commitReadyPipelines()
         }
         write = {};
     }
+
+    // PERF-HM: recompute the earliest pending ready cycle
+    uint64_t nr = ~0ull;
+    for (uint32_t mk = PM().flag; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_flagPipeline[pmCtz(mk)].readyCycle);
+    for (uint32_t mk = PM().store; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_storePipeline[pmCtz(mk)].readyCycle);
+    for (uint32_t mk = PM().vf; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_vfWritePipeline[pmCtz(mk)].readyCycle);
+    for (uint32_t mk = PM().vi; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_viWritePipeline[pmCtz(mk)].readyCycle);
+    for (uint32_t mk = PM().acc; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_accWritePipeline[pmCtz(mk)].readyCycle);
+    if (m_fdiv.valid) nr = std::min<uint64_t>(nr, m_fdiv.readyCycle);
+    for (const ScalarPipelineEntry &entry : m_efu) if (entry.valid) nr = std::min<uint64_t>(nr, entry.readyCycle);
+    NR() = nr;
 }
 
 void VU1Interpreter::progressXgkick()
@@ -3613,6 +3638,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         [](VU1Interpreter &v, uint8_t r, int32_t val, uint32_t lat) { v.queueViWrite(r, val, lat); },
         [](VU1Interpreter &v, uint8_t lanes, const float *val, uint32_t lat) { v.queueAccWrite(lanes, val, lat); },
     };
+    const bool useFastUpper = !s_vfyRef && !vu1FastMode(); // PERF-HM: interpreter loop (VU0 + non-native VU1) uses fastUpper too
     static const bool vuNativeAllowed = []() { const char *e = std::getenv("PS2X_VU1_NATIVE"); return !(e && e[0] == '0'); }();
     const bool vuNativeOn = vuNativeAllowed && (m_unit == Unit::VU1) && !s_vfyRef && decodeCacheOk && !vu1FastMode() &&
                             s_hcCurHash == kVu1NativeMainHash && codeSize == 0x4000u && !isVu3dProbeEnabled() &&
@@ -3938,7 +3964,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         s_ehCurLowerInstr = decoded.lower;
         if (decoded.iBit)
         {
-            execUpper(decoded.upper);
+            if (!(useFastUpper && fastUpper(*this, decoded.upper))) execUpper(decoded.upper); // PERF-HM
             float immediate = 0.0f;
             std::memcpy(&immediate, &decoded.lower, sizeof(immediate));
             m_state.i = normalizeOperand(immediate);
@@ -3950,7 +3976,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             std::memcpy(oldVf,
                         m_state.vf[decoded.upperVfShadowReg],
                         sizeof(oldVf));
-            execUpper(decoded.upper);
+            if (!(useFastUpper && fastUpper(*this, decoded.upper))) execUpper(decoded.upper); // PERF-HM
             std::memcpy(upperVf,
                         m_state.vf[decoded.upperVfShadowReg],
                         sizeof(upperVf));
@@ -3964,7 +3990,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
         else
         {
-            execUpper(decoded.upper);
+            if (!(useFastUpper && fastUpper(*this, decoded.upper))) execUpper(decoded.upper); // PERF-HM
             execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
         }
 
