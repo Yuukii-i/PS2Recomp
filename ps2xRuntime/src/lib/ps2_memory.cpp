@@ -407,6 +407,7 @@ bool PS2Memory::initialize(size_t ramSize)
 #include <mutex>
 #include <map>
 #include <cstdlib>
+extern "C" void ps2_gs_async_fence(); // PERF-GK (gs/ps2_gif_arbiter.cpp)
 static std::mutex s_fkSpanMutex;
 static std::map<uint32_t, std::vector<probe_ae::AySpan>> s_fkSpansBySize;
 static void ps2_fk_setSpans(uint32_t chainSize, const std::vector<probe_ae::AySpan> &spans)
@@ -2517,6 +2518,7 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
     m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
     m_seenGifCopy = true;
     m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+    ps2_gs_async_fence(); // PERF-GK: keep order vs queued GIF packets
     gs.uploadImageNative(setupRegs[0], setupRegs[1], setupRegs[2], setupRegs[3], imageData, imageBytes);
 
     m_ioRegisters[GIF_CHANNEL + 0x30u] = finalTadr;
@@ -2592,6 +2594,7 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
     const uint8_t *payload = nullptr;
     if (!resolveContiguous(tadr + 16u, payloadBytes, payload))
         return false;
+    ps2_gs_async_fence(); // PERF-GK
     if (!gs.processNativePackedGIFPacket(payload, payloadBytes))
         return false;
 

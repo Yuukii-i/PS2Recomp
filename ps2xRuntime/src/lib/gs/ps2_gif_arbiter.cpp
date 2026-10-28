@@ -3,7 +3,75 @@
 #include "probe_ae.h"
 #include "probe_ae.h"
 #include <algorithm>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+// PERF-GK: optional asynchronous GS (PS2X_GS_ASYNC=1). drain() hands the sorted packets to a worker thread that runs the
+// process function (GS rasterization) so the EE/VU1 thread no longer pays for drawing. File-static state only (no header change).
+namespace
+{
+struct GsAsyncState
+{
+    std::mutex m;
+    std::condition_variable cvWork;
+    std::condition_variable cvIdle;
+    std::deque<std::vector<uint8_t>> q;
+    size_t queuedBytes = 0;
+    bool busy = false;
+    bool started = false;
+    std::function<void(const uint8_t *, uint32_t)> fn;
+};
+
+constexpr size_t kGsAsyncMaxBytes = 8u * 1024u * 1024u;
+
+GsAsyncState &gsAsync()
+{
+    static GsAsyncState *s = new GsAsyncState(); // leaked on purpose: detached worker outlives static destruction
+    return *s;
+}
+
+bool gsAsyncEnabled()
+{
+    static const bool on = []() { const char *v = std::getenv("PS2X_GS_ASYNC"); return v && v[0] == '1'; }();
+    return on;
+}
+
+void gsAsyncWorker()
+{
+    GsAsyncState &st = gsAsync();
+    std::unique_lock<std::mutex> lock(st.m);
+    for (;;)
+    {
+        st.cvWork.wait(lock, [&] { return !st.q.empty(); });
+        std::vector<uint8_t> pkt = std::move(st.q.front());
+        st.q.pop_front();
+        st.busy = true;
+        lock.unlock();
+        st.fn(pkt.data(), static_cast<uint32_t>(pkt.size()));
+        lock.lock();
+        st.queuedBytes -= pkt.size();
+        st.busy = false;
+        st.cvIdle.notify_all();
+    }
+}
+} // namespace
+
+// Wait until every queued GIF packet has been processed (no-op when async is off).
+extern "C" void ps2_gs_async_fence()
+{
+    if (!gsAsyncEnabled())
+        return;
+    GsAsyncState &st = gsAsync();
+    std::unique_lock<std::mutex> lock(st.m);
+    if (!st.started)
+        return;
+    st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
+}
 
 GifArbiter::GifArbiter(ProcessPacketFn processFn)
     : m_processFn(std::move(processFn))
@@ -56,6 +124,30 @@ void GifArbiter::drain()
                          }
                          return pathPriority(a.pathId) < pathPriority(b.pathId);
                      });
+
+    if (gsAsyncEnabled())
+    {
+        GsAsyncState &st = gsAsync();
+        std::unique_lock<std::mutex> lock(st.m);
+        if (!st.started)
+        {
+            st.started = true;
+            st.fn = m_processFn;
+            std::thread(gsAsyncWorker).detach();
+        }
+        for (size_t i = 0; i < m_queue.size(); ++i)
+        {
+            auto &pkt = m_queue[i];
+            if (pkt.data.empty())
+                continue;
+            st.cvIdle.wait(lock, [&] { return st.queuedBytes < kGsAsyncMaxBytes; }); // backpressure
+            st.queuedBytes += pkt.data.size();
+            st.q.push_back(std::move(pkt.data));
+            st.cvWork.notify_one();
+        }
+        m_queue.clear();
+        return;
+    }
 
     for (size_t i = 0; i < m_queue.size(); ++i)
     {
