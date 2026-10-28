@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <unordered_map>
 
 #include "runtime/gs/gs_backend.h"
 #include "runtime/gs/gs_types.h"
@@ -600,7 +601,20 @@ namespace
             {
                 const uint32_t lo = tex0.cbp * 256u;
                 PageSet need;
-                pagesForBytes(need, lo, std::min(lo + 16384u, kVramSize));
+                pagesForBytes(need, lo, std::min(lo + 8192u, kVramSize));
+                {
+                    PageSet ov = gpuColor_;
+                    ov.orWith(gpuZ_);
+                    ov.andWith(need);
+                    if (ov.any())
+                    {
+                        uint32_t pg = 0;
+                        while (!ov.test(pg))
+                            ++pg;
+                        const uint32_t key = (pg << 2) | (gpuColor_.test(pg) ? 1u : 0u) | (gpuZ_.test(pg) ? 2u : 0u);
+                        ++clutDiag_[key];
+                    }
+                }
                 syncPages(need, 2);
             }
             cpu_->LoadClut(tex0, texclut);
@@ -663,7 +677,8 @@ namespace
         void Sync(GSSyncReason reason) override
         {
             std::lock_guard<std::mutex> lk(m_);
-            if (vkReady_)
+            // PERF-HX: Finish/Presentation/LocalToHost need no download here (Present and BeginTransfer sync the pages they read)
+            if (vkReady_ && (reason == GSSyncReason::DebugReadback || reason == GSSyncReason::Reset))
                 syncAll(6);
             if (ref_)
                 ref_->Sync(reason);
@@ -1288,6 +1303,7 @@ namespace
             uint32_t diffWords = 0, first = ~0u, last = 0;
             const uint32_t *a = reinterpret_cast<const uint32_t *>(host_);
             const uint32_t *r = reinterpret_cast<const uint32_t *>(refVram_.data());
+            uint64_t hist[4] = {0, 0, 0, 0};
             for (uint32_t i = 0; i < kVramSize / 4u; ++i)
                 if (a[i] != r[i])
                 {
@@ -1295,8 +1311,23 @@ namespace
                     if (first == ~0u)
                         first = i;
                     last = i;
+                    int md = 0;
+                    for (int sh = 0; sh < 32; sh += 8)
+                        md = std::max(md, std::abs(static_cast<int>((a[i] >> sh) & 0xFFu) - static_cast<int>((r[i] >> sh) & 0xFFu)));
+                    const int bucket = md <= 1 ? 0 : md <= 3 ? 1 : md <= 15 ? 2 : 3;
+                    ++hist[bucket];
+                    ++cmpHist_[bucket];
+                    if (bucket == 3 && cmpBigPrinted_ < 12u)
+                    {
+                        ++cmpBigPrinted_;
+                        std::printf("[vkcmp] big diff present#%u addr=0x%06X gpu=%08X ref=%08X page=%u\n", presents_, i * 4u, a[i], r[i], (i * 4u) >> 13);
+                    }
                 }
             ++cmpDirty_;
+            if (cmpDirty_ <= 40u || (cmpDirty_ % 50u) == 0u)
+                std::printf("[vkcmp] present#%u hist<=1/<=3/<=15/>15 = %llu/%llu/%llu/%llu (cumulative %llu/%llu/%llu/%llu)\n", presents_,
+                            (unsigned long long)hist[0], (unsigned long long)hist[1], (unsigned long long)hist[2], (unsigned long long)hist[3],
+                            (unsigned long long)cmpHist_[0], (unsigned long long)cmpHist_[1], (unsigned long long)cmpHist_[2], (unsigned long long)cmpHist_[3]);
             if (cmpDirty_ <= 40u || (cmpDirty_ % 50u) == 0u)
                 std::printf("[vkcmp] present#%u diffwords=%u first=0x%06X last=0x%06X (gpu a=%08X ref=%08X) gpuPrims=%llu cpuPrims=%llu\n", presents_,
                             diffWords, first * 4u, last * 4u, a[first], r[first], static_cast<unsigned long long>(gpuPrims_),
@@ -1322,6 +1353,14 @@ namespace
                         static_cast<unsigned long long>(syncReason_[2]), static_cast<unsigned long long>(syncReason_[3]),
                         static_cast<unsigned long long>(syncReason_[4]), static_cast<unsigned long long>(syncReason_[5]),
                         static_cast<unsigned long long>(syncReason_[6]), static_cast<unsigned long long>(syncReason_[7]), downloadBytes_ / 1048576.0);
+            if (!clutDiag_.empty())
+            {
+                std::vector<std::pair<uint32_t, uint64_t>> v(clutDiag_.begin(), clutDiag_.end());
+                std::sort(v.begin(), v.end(), [](const std::pair<uint32_t, uint64_t> &x, const std::pair<uint32_t, uint64_t> &y) { return x.second > y.second; });
+                for (size_t i = 0; i < v.size() && i < 4; ++i)
+                    std::printf("[vk] clut-sync page=%u (0x%06X) %s%s loads=%llu\n", v[i].first >> 2, (v[i].first >> 2) * 8192u,
+                                (v[i].first & 1u) ? "colour" : "", (v[i].first & 2u) ? "+z" : "", static_cast<unsigned long long>(v[i].second));
+            }
             if (compare_)
                 std::printf("[vkcmp] summary clean=%llu dirty=%llu\n", static_cast<unsigned long long>(cmpClean_), static_cast<unsigned long long>(cmpDirty_));
         }
@@ -1348,6 +1387,9 @@ namespace
         Range unfenced_;
         PageSet gpuColor_, gpuZ_, hostNewer_;
         uint64_t syncReason_[10] = {};
+        std::unordered_map<uint32_t, uint64_t> clutDiag_; // (page<<2 | colour | z<<1) -> CLUT loads that forced a sync
+        uint64_t cmpHist_[4] = {0, 0, 0, 0};              // differing words by max channel diff: <=1, <=3, <=15, >15
+        uint32_t cmpBigPrinted_ = 0;
         uint32_t primCount_ = 0, clutSlots_ = 0, stagingOff_ = 0;
         int32_t curClutSlot_ = -1;
         bool clutChanged_ = true;
