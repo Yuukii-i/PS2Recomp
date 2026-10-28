@@ -1292,6 +1292,14 @@ uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
     return extraSticky;
 }
 
+// PERF-GJ: fast mode (PS2X_VU1_FAST=1) drops the per-register hazard/latency scheduler: vf/vi/acc/flag/store
+// writes land immediately; only Q/P (fdiv/efu) keep their latency. Cycle counts become ~1 per pair.
+static inline bool vu1FastMode()
+{
+    static const bool s_on = []() { const char *v = std::getenv("PS2X_VU1_FAST"); return v && v[0] == '1'; }();
+    return s_on;
+}
+
 void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
                                      uint32_t extraSticky)
 {
@@ -1316,6 +1324,14 @@ void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
         if ((flags & 0x8u) != 0u)
             mac |= static_cast<uint32_t>(lane) << 12;
         status |= flags;
+    }
+
+    if (vu1FastMode())
+    {
+        const uint32_t current = status & 0xFu;
+        m_state.mac = mac;
+        m_state.status = (m_state.status & 0xFF0u) | current | ((current | extraSticky) << 6);
+        return;
     }
 
     FlagPipelineEntry *entry = nullptr;
@@ -1362,6 +1378,11 @@ void VU1Interpreter::applyFmacDestAcc(float *result, uint8_t dest)
 
 void VU1Interpreter::queueFsset(uint16_t immediate)
 {
+    if (vu1FastMode())
+    {
+        m_state.status = (m_state.status & 0x03Fu) | (static_cast<uint32_t>(immediate) & 0xFC0u);
+        return;
+    }
     for (FlagPipelineEntry &entry : m_flagPipeline)
     {
         if (entry.valid && entry.issueCycle == m_cycle)
@@ -1387,6 +1408,11 @@ void VU1Interpreter::queueFsset(uint16_t immediate)
 void VU1Interpreter::queueClip(uint32_t clip)
 {
     m_workingClip = ((m_workingClip << 6) | (clip & 0x3Fu)) & 0xFFFFFFu;
+    if (vu1FastMode())
+    {
+        m_state.clip = m_workingClip;
+        return;
+    }
     for (FlagPipelineEntry &entry : m_flagPipeline)
     {
         if (!entry.valid)
@@ -1406,6 +1432,11 @@ void VU1Interpreter::queueClip(uint32_t clip)
 void VU1Interpreter::queueFcset(uint32_t clip)
 {
     m_workingClip = clip & 0xFFFFFFu;
+    if (vu1FastMode())
+    {
+        m_state.clip = m_workingClip;
+        return;
+    }
     for (FlagPipelineEntry &entry : m_flagPipeline)
     {
         if (entry.valid && entry.issueCycle == m_cycle)
@@ -1691,6 +1722,21 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
             }
         }
     }
+    if (vu1FastMode())
+    {
+        if (m_activeVuData && address + 16u <= m_activeVuDataSize)
+        {
+            uint32_t cur[4];
+            std::memcpy(cur, m_activeVuData + address, sizeof(cur));
+            for (uint32_t component = 0; component < 4u; ++component)
+            {
+                if ((laneMask & laneForComponent(component)) != 0u)
+                    cur[component] = words[component];
+            }
+            std::memcpy(m_activeVuData + address, cur, sizeof(cur));
+        }
+        return;
+    }
     for (PendingStore &store : m_storePipeline)
     {
         if (!store.valid)
@@ -1781,6 +1827,25 @@ void VU1Interpreter::queueAccWrite(uint8_t laneMask, const float value[4], uint3
 
 void VU1Interpreter::commitReadyPipelines()
 {
+    if (vu1FastMode())
+    {
+        if (m_fdiv.valid && m_fdiv.readyCycle <= m_cycle)
+        {
+            m_state.q = m_fdiv.value;
+            const uint32_t currentDi = m_fdiv.statusDi & 0x30u;
+            m_state.status = (m_state.status & 0xFCFu) | currentDi | (currentDi << 6);
+            m_fdiv = {};
+        }
+        for (ScalarPipelineEntry &entry : m_efu)
+        {
+            if (entry.valid && entry.readyCycle <= m_cycle)
+            {
+                m_state.p = entry.value;
+                entry = {};
+            }
+        }
+        return;
+    }
     for (FlagPipelineEntry &entry : m_flagPipeline)
     {
         if (!entry.valid || entry.readyCycle > m_cycle)
@@ -3213,7 +3278,26 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             break;
         }
 
-        uint64_t readyCycle = calculatePairReadyCycle(decoded);
+        const auto fastReadyCycle = [&]() -> uint64_t
+        {
+            uint64_t ready = m_cycle;
+            if (decoded.lowerUsage.pipeline == PipelineFdiv && m_fdiv.valid)
+                ready = std::max(ready, m_fdiv.readyCycle);
+            if (decoded.lowerUsage.pipeline == PipelineEfu)
+                ready = std::max(ready, m_efuResourceReady);
+            if (decoded.lowerUsage.waitQ && m_fdiv.valid)
+                ready = std::max(ready, m_fdiv.readyCycle);
+            if (decoded.lowerUsage.waitP)
+            {
+                for (const ScalarPipelineEntry &entry : m_efu)
+                    if (entry.valid)
+                        ready = std::max(ready, entry.readyCycle);
+            }
+            if (decoded.lowerUsage.pipeline == PipelineXgkick && m_xgkick.active)
+                ready = std::max(ready, m_cycle + 1u);
+            return ready;
+        };
+        uint64_t readyCycle = vu1FastMode() ? fastReadyCycle() : calculatePairReadyCycle(decoded);
         while (readyCycle > m_cycle)
         {
             if (readyCycle >= budgetEnd)
@@ -3222,7 +3306,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 break;
             }
             advanceTo(readyCycle);
-            readyCycle = calculatePairReadyCycle(decoded);
+            readyCycle = vu1FastMode() ? fastReadyCycle() : calculatePairReadyCycle(decoded);
         }
         if (m_cycle >= budgetEnd)
             break;
@@ -3402,46 +3486,53 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
 
         m_viBranchBackupValid = false;
 
-        if (hasUpperWrite)
+        if (vu1FastMode())
         {
-            std::memcpy(newUpperVf, m_state.vf[upperWrite.reg], sizeof(newUpperVf));
-            std::memcpy(m_state.vf[upperWrite.reg], oldUpperVf, sizeof(oldUpperVf));
-            const uint32_t latency =
-                decoded.upperUsage.vfLatency != 0u
-                    ? decoded.upperUsage.vfLatency
-                    : decoded.upperUsage.latency;
-            queueVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
+            // PERF-GJ: results already landed in m_state; no restore/queue/hazard bookkeeping
         }
-        if (hasDistinctLowerWrite)
+        else
         {
-            std::memcpy(newLowerVf, m_state.vf[lowerWrite.reg], sizeof(newLowerVf));
-            std::memcpy(m_state.vf[lowerWrite.reg], oldLowerVf, sizeof(oldLowerVf));
-            const uint32_t latency = decoded.lowerUsage.vfLatency != 0u
-                                         ? decoded.lowerUsage.vfLatency
-                                         : decoded.lowerUsage.latency;
-            queueVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
-        }
-        if (decoded.upperUsage.accWrite != 0u)
-        {
-            std::memcpy(newAcc, m_state.acc, sizeof(newAcc));
-            std::memcpy(m_state.acc, oldAcc, sizeof(oldAcc));
-            // ACC is forwarded to the next upper instruction. Its arithmetic
-            // flags still use the normal four-cycle FMAC timeline.
-            queueAccWrite(decoded.upperUsage.accWrite, newAcc,
-                          kAccForwardLatency);
-        }
-        if (writtenVi != 0u)
-        {
-            const int32_t newVi = m_state.vi[writtenVi];
-            m_state.vi[writtenVi] = oldVi;
-            const uint32_t latency =
-                decoded.lowerUsage.viLatency != 0u
-                    ? decoded.lowerUsage.viLatency
-                    : decoded.lowerUsage.latency;
-            queueViWrite(writtenVi, newVi, latency);
-        }
+            if (hasUpperWrite)
+            {
+                std::memcpy(newUpperVf, m_state.vf[upperWrite.reg], sizeof(newUpperVf));
+                std::memcpy(m_state.vf[upperWrite.reg], oldUpperVf, sizeof(oldUpperVf));
+                const uint32_t latency =
+                    decoded.upperUsage.vfLatency != 0u
+                        ? decoded.upperUsage.vfLatency
+                        : decoded.upperUsage.latency;
+                queueVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
+            }
+            if (hasDistinctLowerWrite)
+            {
+                std::memcpy(newLowerVf, m_state.vf[lowerWrite.reg], sizeof(newLowerVf));
+                std::memcpy(m_state.vf[lowerWrite.reg], oldLowerVf, sizeof(oldLowerVf));
+                const uint32_t latency = decoded.lowerUsage.vfLatency != 0u
+                                             ? decoded.lowerUsage.vfLatency
+                                             : decoded.lowerUsage.latency;
+                queueVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
+            }
+            if (decoded.upperUsage.accWrite != 0u)
+            {
+                std::memcpy(newAcc, m_state.acc, sizeof(newAcc));
+                std::memcpy(m_state.acc, oldAcc, sizeof(oldAcc));
+                // ACC is forwarded to the next upper instruction. Its arithmetic
+                // flags still use the normal four-cycle FMAC timeline.
+                queueAccWrite(decoded.upperUsage.accWrite, newAcc,
+                              kAccForwardLatency);
+            }
+            if (writtenVi != 0u)
+            {
+                const int32_t newVi = m_state.vi[writtenVi];
+                m_state.vi[writtenVi] = oldVi;
+                const uint32_t latency =
+                    decoded.lowerUsage.viLatency != 0u
+                        ? decoded.lowerUsage.viLatency
+                        : decoded.lowerUsage.latency;
+                queueViWrite(writtenVi, newVi, latency);
+            }
 
-        markPairWrites(decoded);
+            markPairWrites(decoded);
+        }
         if (writtenVi != 0u && decoded.lowerUsage.delaysNextBranchRead)
             recordViWriteForBranch(writtenVi, oldVi);
 
