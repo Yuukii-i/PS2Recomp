@@ -2926,7 +2926,13 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
             h = (h ^ vuCode[i]) * 1099511628211ull;
         if (m_unit == Unit::VU1)
             s_hcCurHash = h;
-        if (s_hcSeen.insert(h ^ (m_unit == Unit::VU1 ? 0x1ull : 0x2ull)).second && s_hcSeen.size() <= 64u)
+        bool hcNew = false;
+        {
+            static std::mutex s_hcMutex; // PERF-HN: VU0 (EE thread) and VU1 (VIF1 worker) both rebuild decode caches
+            std::lock_guard<std::mutex> hcLock(s_hcMutex);
+            hcNew = s_hcSeen.insert(h ^ (m_unit == Unit::VU1 ? 0x1ull : 0x2ull)).second && s_hcSeen.size() <= 64u;
+        }
+        if (hcNew)
         {
             char path[128];
             std::snprintf(path, sizeof(path), "logs/vucode_u%d_%016llx.bin", m_unit == Unit::VU1 ? 1 : 0, static_cast<unsigned long long>(h));

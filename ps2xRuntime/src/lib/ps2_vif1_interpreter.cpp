@@ -1,5 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
+extern "C" bool ps2_vif1_on_worker(); // PERF-HN (ps2_memory.cpp)
 extern "C" bool ps2_fk_lookup(uint32_t chainSize, uint32_t pos, uint32_t *outSrc, uint32_t *outBytes, uint32_t *outBufOff);
 extern "C" void ps2_scanCameraRegion(const char *caller, uint64_t callIndex, uint32_t ra);
 extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint16_t dest, uint16_t num,
@@ -843,7 +844,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         {
             vif1_regs.mark = imm;
             vif1_regs.stat |= (1u << 6); // MRK
-            m_ioRegisters[0x10003C30u] = imm;
+            if (!ps2_vif1_on_worker()) // PERF-HN: m_ioRegisters is an unsynchronised map; the MARK read uses vif1_regs.mark
+                m_ioRegisters[0x10003C30u] = imm;
             recordCompletedIntcCause(5u);
 #if defined(PS2X_PROBE_AE) || 1
             if (probe_ae::isEnabled()) {

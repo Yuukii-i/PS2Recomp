@@ -1,3 +1,4 @@
+#include <functional>
 #include <atomic>
 std::atomic<uint16_t> g_hostPadButtons{0};
 #ifdef _WIN32
@@ -9,6 +10,11 @@ std::atomic<uint16_t> g_hostPadButtons{0};
 #include "diag/DiagSampler.h"
 std::atomic<uint32_t> g_diagMscalCount{0};
 std::atomic<uint32_t> g_diagGifPacketCount{0};
+// PERF-HN: async VIF1 worker glue (see ps2_memory.cpp)
+std::function<uint32_t()> g_vif1FbrstProvider;
+std::function<void()> g_vif1ApplyVpuStat;
+thread_local uint32_t g_vif1JobFbrst = ~0u;
+std::atomic<uint32_t> g_vifVpuStatBits{~0u};
 
 extern "C" {
 void push_trace(const char* msg) { (void)msg; }
@@ -1517,43 +1523,76 @@ bool PS2Runtime::syncCoreSubsystems()
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { g_diagGifPacketCount.fetch_add(1, std::memory_order_relaxed); m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
+    // PERF-HN: with PS2X_VIF1_ASYNC the MSCAL/MSCNT callbacks run on the VIF1 worker: FBRST comes from the job snapshot
+    // and the VPU_STAT stop bits reach the EE context through g_vifVpuStatBits (merged at VIF1 fences).
+    g_vif1FbrstProvider = [this]() -> uint32_t
+    {
+        R5900Context *c = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+        if (!c)
+            c = &m_cpuContext;
+        return c->vu0_fbrst & 0xFFFFu;
+    };
+    g_vif1ApplyVpuStat = [this]()
+    {
+        const uint32_t bits = g_vifVpuStatBits.load(std::memory_order_acquire);
+        if (bits == ~0u)
+            return;
+        R5900Context *c = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+        if (!c)
+            c = &m_cpuContext;
+        c->vu0_vpu_stat = (c->vu0_vpu_stat & ~0x0600u) | (bits & 0x0600u);
+    };
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
                                      g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
-                                     R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
-                                     if (!cpuContext)
+                                     const bool onWorker = g_vif1JobFbrst != ~0u;
+                                     R5900Context *cpuContext = nullptr;
+                                     uint32_t fbrst = g_vif1JobFbrst;
+                                     if (!onWorker)
                                      {
-                                         cpuContext = &m_cpuContext;
+                                         cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                         if (!cpuContext)
+                                         {
+                                             cpuContext = &m_cpuContext;
+                                         }
+                                         fbrst = cpuContext->vu0_fbrst;
                                      }
-                                     m_vu1.state().dBitEnabled =
-                                         (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
-                                     m_vu1.state().tBitEnabled =
-                                         (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
+                                     m_vu1.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
+                                     m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
                                      m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                    m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                    m_gs, &m_memory, startPC, top, itop, 65536);
-                                     cpuContext->vu0_vpu_stat =
-                                         (cpuContext->vu0_vpu_stat & ~0x0600u) |
-                                         (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
-                                         (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
+                                     const uint32_t stopBits = (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                                               (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+                                     if (onWorker)
+                                         g_vifVpuStatBits.store(stopBits, std::memory_order_release);
+                                     else
+                                         cpuContext->vu0_vpu_stat = (cpuContext->vu0_vpu_stat & ~0x0600u) | stopBits; });
     m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
                                  {
-                                     R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
-                                     if (!cpuContext)
+                                     const bool onWorker = g_vif1JobFbrst != ~0u;
+                                     R5900Context *cpuContext = nullptr;
+                                     uint32_t fbrst = g_vif1JobFbrst;
+                                     if (!onWorker)
                                      {
-                                         cpuContext = &m_cpuContext;
+                                         cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                         if (!cpuContext)
+                                         {
+                                             cpuContext = &m_cpuContext;
+                                         }
+                                         fbrst = cpuContext->vu0_fbrst;
                                      }
-                                     m_vu1.state().dBitEnabled =
-                                         (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
-                                     m_vu1.state().tBitEnabled =
-                                         (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
+                                     m_vu1.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
+                                     m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
                                      m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                   m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                   m_gs, &m_memory, top, itop, 65536);
-                                     cpuContext->vu0_vpu_stat =
-                                         (cpuContext->vu0_vpu_stat & ~0x0600u) |
-                                         (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
-                                         (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
+                                     const uint32_t stopBits = (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                                               (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+                                     if (onWorker)
+                                         g_vifVpuStatBits.store(stopBits, std::memory_order_release);
+                                     else
+                                         cpuContext->vu0_vpu_stat = (cpuContext->vu0_vpu_stat & ~0x0600u) | stopBits; });
     resetIop();
     m_vu0.reset();
     m_vu1.reset();
