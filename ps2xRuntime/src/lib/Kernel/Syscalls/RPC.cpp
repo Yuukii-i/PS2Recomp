@@ -2315,6 +2315,17 @@ uint64_t vblDiff = 0;
                             std::snprintf(hex + i * 3, 4, "%02X ", static_cast<unsigned>(src[0x20 + i]));
                         ps2xSafeLog("[probe] gw badpath guest=0x%08X len=%zu bytes@+0x20: %s\n",
                                     static_cast<unsigned>(src - rdram) + 0x20u, path.size(), hex);
+                        static bool s_gwDumped = false; // PROBE-GW2: one full RAM dump at the first bad path (diff vs PCSX2 savestate 3)
+                        if (!s_gwDumped)
+                        {
+                            s_gwDumped = true;
+                            if (FILE *gf = std::fopen("logs/ram_badpath.bin", "wb"))
+                            {
+                                std::fwrite(rdram, 1, PS2_RAM_SIZE, gf);
+                                std::fclose(gf);
+                                ps2xSafeLog("[probe] gw ram dump written logs/ram_badpath.bin\n");
+                            }
+                        }
                     }
                 }
 
