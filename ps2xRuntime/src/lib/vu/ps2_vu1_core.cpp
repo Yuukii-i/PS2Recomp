@@ -2872,6 +2872,7 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::decodeInstructionPair(con
     return decoded;
 }
 
+static uint64_t s_hcCurHash = 0; // PROBE-HC: hash of the VU1 microcode image currently loaded
 void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
                                              const PS2Memory *memory, uint64_t generation)
 {
@@ -2884,6 +2885,28 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
     m_cachedCodeSize = codeSize;
     m_cachedCodeGeneration = generation;
     m_decodedCodeCacheValid = true;
+
+    { // PROBE-HC: dump every distinct microcode image once (input for the VU1 native-region generator)
+        static std::set<uint64_t> s_hcSeen;
+        uint64_t h = 1469598103934665603ull;
+        for (uint32_t i = 0; i < codeSize; ++i)
+            h = (h ^ vuCode[i]) * 1099511628211ull;
+        if (m_unit == Unit::VU1)
+            s_hcCurHash = h;
+        if (s_hcSeen.insert(h ^ (m_unit == Unit::VU1 ? 0x1ull : 0x2ull)).second && s_hcSeen.size() <= 64u)
+        {
+            char path[128];
+            std::snprintf(path, sizeof(path), "logs/vucode_u%d_%016llx.bin", m_unit == Unit::VU1 ? 1 : 0, static_cast<unsigned long long>(h));
+            if (FILE *f = std::fopen(path, "wb"))
+            {
+                std::fwrite(vuCode, 1, codeSize, f);
+                std::fclose(f);
+            }
+            std::printf("[probe] hc vucode unit=%d hash=%016llx size=%u gen=%llu\n", m_unit == Unit::VU1 ? 1 : 0,
+                        static_cast<unsigned long long>(h), codeSize, static_cast<unsigned long long>(generation));
+            std::fflush(stdout);
+        }
+    }
 }
 
 VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPairForPc(
@@ -4238,7 +4261,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                     int best = 0;
                     for (int b = 1; b < 512; ++b) if (s_geHistPtr[b] > s_geHistPtr[best]) best = b;
                     if (s_geHistPtr[best] == 0) break;
-                    std::printf("[probe] ge2 pc=0x%04X-0x%04X pct=%.1f\n", best * 64, best * 64 + 63, 100.0 * s_geHistPtr[best] / tot);
+                    std::printf("[probe] ge2 img=%016llx pc=0x%04X-0x%04X pct=%.1f\n", static_cast<unsigned long long>(s_hcCurHash), best * 64, best * 64 + 63, 100.0 * s_geHistPtr[best] / tot);
                     s_geHistPtr[best] = 0;
                 }
                 for (int b = 0; b < 512; ++b) s_geHistPtr[b] = 0;

@@ -316,6 +316,15 @@ static std::vector<DumpedTexKey> s_dumpedTexKeys;
 
 using namespace GSInternal;
 
+// PERF-GG2: std::lround is a libm call (about 6% of GS time in bilinear texture paths). All call sites feed clampU8(), so
+// round-half-away-from-zero is only observable for x >= 0, where  (int)x + (frac >= 0.5)  is exactly lround (no x+0.5 rounding issue).
+template <typename T>
+static inline long gsRoundClamped(T x)
+{
+    const long i = static_cast<long>(x);
+    return i + ((x - static_cast<T>(i)) >= static_cast<T>(0.5) ? 1 : 0);
+}
+
 namespace
 {
     float fabsQ(float q)
@@ -595,7 +604,7 @@ namespace
     {
         const float top = static_cast<float>(c00) + (static_cast<float>(c10) - static_cast<float>(c00)) * fx;
         const float bottom = static_cast<float>(c01) + (static_cast<float>(c11) - static_cast<float>(c01)) * fx;
-        return clampU8(static_cast<int>(std::lround(top + (bottom - top) * fy)));
+        return clampU8(static_cast<int>(gsRoundClamped(top + (bottom - top) * fy)));
     }
 }
 
@@ -1832,7 +1841,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
         if (s_ecActiveWindow) s_ecScissorClip++;
         return;
     }
-    g_profPixels.fetch_add(1u, std::memory_order_relaxed);
+    g_profPixels.store(g_profPixels.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed); // PERF-GG2: single drawing thread => no locked RMW per pixel
 
     if (state.prim.fge)
     {
@@ -3232,10 +3241,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 16) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 16) & 0xFFu))) * cqFx;
                         const float topA = static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu)) +
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 24) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu))) * cqFx;
-                        tr_out = clampU8(static_cast<int>(std::lround(topR)));
-                        tg_out = clampU8(static_cast<int>(std::lround(topG)));
-                        tb_out = clampU8(static_cast<int>(std::lround(topB)));
-                        ta_out = clampU8(static_cast<int>(std::lround(topA)));
+                        tr_out = clampU8(static_cast<int>(gsRoundClamped(topR)));
+                        tg_out = clampU8(static_cast<int>(gsRoundClamped(topG)));
+                        tb_out = clampU8(static_cast<int>(gsRoundClamped(topB)));
+                        ta_out = clampU8(static_cast<int>(gsRoundClamped(topA)));
                     }
                     else
                     {
@@ -3578,10 +3587,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 16) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 16) & 0xFFu))) * cqFx;
                         const float topA = static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu)) +
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 24) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu))) * cqFx;
-                        tr_out = clampU8(static_cast<int>(std::lround(topR)));
-                        tg_out = clampU8(static_cast<int>(std::lround(topG)));
-                        tb_out = clampU8(static_cast<int>(std::lround(topB)));
-                        ta_out = clampU8(static_cast<int>(std::lround(topA)));
+                        tr_out = clampU8(static_cast<int>(gsRoundClamped(topR)));
+                        tg_out = clampU8(static_cast<int>(gsRoundClamped(topG)));
+                        tb_out = clampU8(static_cast<int>(gsRoundClamped(topB)));
+                        ta_out = clampU8(static_cast<int>(gsRoundClamped(topA)));
                     }
                     else
                     {
