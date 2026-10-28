@@ -1822,11 +1822,25 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
     reportReservedInstruction(false, 0xFFFFFFFCu);
 }
 
+// PERF-HT: PROBE-INV (logs/probe_if.log) showed no reader ever sees an in-flight vf/vi/acc write (every reader stalls to the
+// landing cycle), so these writes are applied at issue. Flags, stores and Q/P keep their delayed pipelines.
+// The verifier reference pass (s_vfyRef) keeps the delayed model; kill switch PS2X_VU_IMM=0.
+static const bool s_vuImmWrites = []() { const char *e = std::getenv("PS2X_VU_IMM"); return !(e && e[0] == '0'); }();
+
 void VU1Interpreter::queueVfWrite(uint8_t reg, uint8_t laneMask,
                                   const float value[4], uint32_t latency)
 {
     if (reg == 0u || laneMask == 0u)
         return;
+    if (s_vuImmWrites && !s_vfyRef)
+    {
+        float *dst = m_state.vf[reg];
+        if (laneMask & 8u) dst[0] = value[0];
+        if (laneMask & 4u) dst[1] = value[1];
+        if (laneMask & 2u) dst[2] = value[2];
+        if (laneMask & 1u) dst[3] = value[3];
+        return;
+    }
     PendingVfWrite *vfSlot = nullptr;
     if (!s_vfyRef)
     {
@@ -1872,6 +1886,11 @@ void VU1Interpreter::queueViWrite(uint8_t reg, int32_t value, uint32_t latency)
 {
     if (reg == 0u)
         return;
+    if (s_vuImmWrites && !s_vfyRef)
+    {
+        m_state.vi[reg] = static_cast<int16_t>(value); // same narrowing as the commit path
+        return;
+    }
     for (PendingViWrite &write : m_viWritePipeline)
     {
         if (!write.valid)
@@ -1894,6 +1913,14 @@ void VU1Interpreter::queueAccWrite(uint8_t laneMask, const float value[4], uint3
 {
     if (laneMask == 0u)
         return;
+    if (s_vuImmWrites && !s_vfyRef)
+    {
+        if (laneMask & 8u) m_state.acc[0] = value[0];
+        if (laneMask & 4u) m_state.acc[1] = value[1];
+        if (laneMask & 2u) m_state.acc[2] = value[2];
+        if (laneMask & 1u) m_state.acc[3] = value[3];
+        return;
+    }
     for (PendingAccWrite &write : m_accWritePipeline)
     {
         if (!write.valid)
@@ -3947,7 +3974,6 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 sigRecord();
             }
         }
-        { static uint64_t *s_h = new uint64_t[512](); s_geHistPtr = s_h; s_h[(m_state.pc >> 6) & 0x1FFu]++; } // PROBE-GE2
         if (probe_ae::isEnabled())
         {
             probe_ae::onBaInstruction(m_state.pc, decoded.upper, decoded.lower);
