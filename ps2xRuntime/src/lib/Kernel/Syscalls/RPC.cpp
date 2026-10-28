@@ -2303,6 +2303,20 @@ uint64_t vblDiff = 0;
                 const char *pathPtr = reinterpret_cast<const char *>(src + 0x20);
                 std::string path(pathPtr ? pathPtr : "");
                 diagSetLastCid1Path(path);
+                { // PROBE-GW: dump raw path bytes + guest address when the path has non-printable bytes
+                    bool badPath = false;
+                    for (unsigned char ch : path)
+                        if (ch < 0x20 || ch > 0x7E)
+                            badPath = true;
+                    if (badPath)
+                    {
+                        char hex[256] = {0};
+                        for (int i = 0; i < 48; ++i)
+                            std::snprintf(hex + i * 3, 4, "%02X ", static_cast<unsigned>(src[0x20 + i]));
+                        ps2xSafeLog("[probe] gw badpath guest=0x%08X len=%zu bytes@+0x20: %s\n",
+                                    static_cast<unsigned>(src - rdram) + 0x20u, path.size(), hex);
+                    }
+                }
 
                 if (bufSize < 0x104u)
                 {
