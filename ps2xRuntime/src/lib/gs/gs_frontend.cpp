@@ -181,8 +181,18 @@ namespace
 }
 
 
+std::unique_ptr<GSRasterBackend> ps2x_vk_make_backend(); // PERF-VK (ps2_vk_gs_backend.cpp)
+
+static std::unique_ptr<GSRasterBackend> makeDefaultRasterBackend()
+{
+    const char *v = std::getenv("PS2X_GS_VULKAN");
+    if (v && v[0] == '1')
+        return ps2x_vk_make_backend();
+    return std::make_unique<GSCpuBackend>();
+}
+
 GS::GS()
-    : m_backend(std::make_unique<GSCpuBackend>())
+    : m_backend(makeDefaultRasterBackend())
 {
     reset();
 }
@@ -193,7 +203,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
     m_localMemorySize = vramSize;
     m_privRegs = privRegs;
     if (!m_backend)
-        m_backend = std::make_unique<GSCpuBackend>();
+        m_backend = makeDefaultRasterBackend();
     m_backend->Initialize(vram, vramSize);
     reset();
 }
@@ -1849,7 +1859,7 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 {
     if (!backend)
-        backend = std::make_unique<GSCpuBackend>();
+        backend = makeDefaultRasterBackend();
 
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
