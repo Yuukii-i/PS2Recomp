@@ -1318,6 +1318,7 @@ uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
 // PERF-GJ: fast mode (PS2X_VU1_FAST=1) drops the per-register hazard/latency scheduler: vf/vi/acc/flag/store
 // writes land immediately; only Q/P (fdiv/efu) keep their latency. Cycle counts become ~1 per pair.
 static std::vector<uint8_t> *s_vfyCapture = nullptr; // PROBE-GV: when set, XGKICK packets are captured instead of submitted
+static bool s_vfyRef = false;                         // PERF-GR: true => use the original (reference) code paths, for A/B verification
 static int s_vfyFastOverride = -1;                    // PROBE-GV: -1 env, 0 force exact, 1 force fast
 static inline int vu1VerifyMode() // PS2X_VU1_VERIFY: 1 = VU1 only, 2 = VU0 only, 3 = both
 {
@@ -1367,12 +1368,21 @@ void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
     }
 
     FlagPipelineEntry *entry = nullptr;
-    for (FlagPipelineEntry &candidate : m_flagPipeline)
+    if (!s_vfyRef)
     {
-        if (!candidate.valid)
+        const uint32_t freeMask = ~PM().flag & ((1u << kMaxFlagEntries) - 1u);
+        if (freeMask != 0u)
+            entry = &m_flagPipeline[pmCtz(freeMask)];
+    }
+    else
+    {
+        for (FlagPipelineEntry &candidate : m_flagPipeline)
         {
-            entry = &candidate;
-            break;
+            if (!candidate.valid)
+            {
+                entry = &candidate;
+                break;
+            }
         }
     }
     if (!entry)
@@ -1806,9 +1816,27 @@ void VU1Interpreter::queueVfWrite(uint8_t reg, uint8_t laneMask,
 {
     if (reg == 0u || laneMask == 0u)
         return;
-    for (PendingVfWrite &write : m_vfWritePipeline)
+    PendingVfWrite *vfSlot = nullptr;
+    if (!s_vfyRef)
     {
-        if (!write.valid)
+        const uint32_t freeMask = ~PM().vf & ((1u << kMaxPendingVfWrites) - 1u);
+        if (freeMask != 0u)
+            vfSlot = &m_vfWritePipeline[pmCtz(freeMask)];
+    }
+    else
+    {
+        for (PendingVfWrite &w : m_vfWritePipeline)
+        {
+            if (!w.valid)
+            {
+                vfSlot = &w;
+                break;
+            }
+        }
+    }
+    if (vfSlot)
+    {
+        PendingVfWrite &write = *vfSlot;
         {
             write = {};
             write.valid = true;
@@ -2301,10 +2329,18 @@ uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &d
                     ready = std::max(ready, m_vfReady[access.reg][component]);
             }
         }
-        for (uint32_t reg = 1; reg < m_viReady.size(); ++reg)
+        if (s_vfyRef)
         {
-            if ((usage->viRead & (1u << reg)) != 0u)
-                ready = std::max(ready, m_viReady[reg]);
+            for (uint32_t reg = 1; reg < m_viReady.size(); ++reg)
+            {
+                if ((usage->viRead & (1u << reg)) != 0u)
+                    ready = std::max(ready, m_viReady[reg]);
+            }
+        }
+        else
+        {
+            for (uint32_t mk = static_cast<uint32_t>(usage->viRead) & 0xFFFEu; mk != 0u; mk &= mk - 1u)
+                ready = std::max(ready, m_viReady[pmCtz(mk)]);
         }
         for (uint32_t component = 0; component < 4u; ++component)
         {
@@ -2359,10 +2395,19 @@ void VU1Interpreter::markPairWrites(const DecodedInstructionPair &decoded)
         }
     }
 
-    for (uint32_t reg = 1; reg < m_viReady.size(); ++reg)
+    if (s_vfyRef)
     {
-        if ((decoded.lowerUsage.viWrite & (1u << reg)) != 0u)
-            m_viReady[reg] = m_cycle + (decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency : decoded.lowerUsage.latency);
+        for (uint32_t reg = 1; reg < m_viReady.size(); ++reg)
+        {
+            if ((decoded.lowerUsage.viWrite & (1u << reg)) != 0u)
+                m_viReady[reg] = m_cycle + (decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency : decoded.lowerUsage.latency);
+        }
+    }
+    else
+    {
+        const uint64_t viReadyAt = m_cycle + (decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency : decoded.lowerUsage.latency);
+        for (uint32_t mk = static_cast<uint32_t>(decoded.lowerUsage.viWrite) & 0xFFFEu; mk != 0u; mk &= mk - 1u)
+            m_viReady[pmCtz(mk)] = viReadyAt;
     }
     for (uint32_t component = 0; component < 4u; ++component)
     {
@@ -3067,6 +3112,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         std::vector<uint8_t> capA, capB;
 
         s_vfyFastOverride = 0;
+        s_vfyRef = false;
         s_vfyCapture = &capA;
         run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
         const VU1State sA = m_state;
@@ -3079,7 +3125,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         m_cycle = cyc0;
         std::memcpy(vuData, mem0.data(), dataSize);
         resetScheduler();
-        s_vfyFastOverride = 1;
+        s_vfyFastOverride = 0;
+        s_vfyRef = true;
         s_vfyCapture = &capB;
         run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
         const VU1State sB = m_state;
@@ -3150,6 +3197,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         m_cycle = cycA;
         std::memcpy(vuData, memA.data(), dataSize);
         s_vfyFastOverride = -1;
+        s_vfyRef = false;
         s_vfyCapture = nullptr;
         if (!capA.empty() && memory)
             memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));
@@ -3329,6 +3377,17 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     const uint64_t tRunStartCycle = m_cycle;
     uint32_t instrsThisRun = 0;
 
+    DecodedInstructionPair decodedFallback;
+    bool decodeCacheOk = false;
+    if (memory != nullptr &&
+        ((m_unit == Unit::VU1 && vuCode == memory->getVU1Code()) || (m_unit == Unit::VU0 && vuCode == memory->getVU0Code())))
+    {
+        (void)getDecodedInstructionPairForPc(vuCode, codeSize, memory, 0u); // validate / rebuild the cache once per run
+        const uint64_t gen = m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
+        decodeCacheOk = m_decodedCodeCacheValid && m_cachedVuCode == vuCode && m_cachedMemory == memory &&
+                        m_cachedCodeSize == codeSize && m_cachedCodeGeneration == gen;
+    }
+
     const int previousRoundingMode = std::fegetround();
     const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
     const uint64_t budgetEnd = m_cycle + maxCycles;
@@ -3432,7 +3491,17 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             std::memcpy(preVf, m_state.vf, sizeof(preVf));
             std::memcpy(preVi, m_state.vi, sizeof(preVi));
         }
-        const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
+        const DecodedInstructionPair *decodedPtr;
+        if (!s_vfyRef && decodeCacheOk && (m_state.pc & 7u) == 0u && (m_state.pc >> 3) < kMaxDecodedPairs)
+        {
+            decodedPtr = &m_decodedCodeCache[m_state.pc >> 3]; // PERF-GR: no per-pair revalidation / ~250B struct copy
+        }
+        else
+        {
+            decodedFallback = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
+            decodedPtr = &decodedFallback;
+        }
+        const DecodedInstructionPair &decoded = *decodedPtr;
         if (probe_ae::isDcProbeEnabled()) { uint32_t idx = s_dyLastPcIdx++; s_dyLastPcs[idx & 4095u] = m_state.pc; }
         instrsThisRun++;
         { static uint64_t *s_h = new uint64_t[512](); s_geHistPtr = s_h; s_h[(m_state.pc >> 6) & 0x1FFu]++; } // PROBE-GE2
@@ -3481,14 +3550,22 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
 
         uint8_t writtenVi = 0u;
         int32_t oldVi = 0;
-        for (uint32_t reg = 1; reg < 16u; ++reg)
+        if (s_vfyRef)
         {
-            if ((decoded.lowerUsage.viWrite & (1u << reg)) != 0u)
+            for (uint32_t reg = 1; reg < 16u; ++reg)
             {
-                writtenVi = static_cast<uint8_t>(reg);
-                oldVi = m_state.vi[reg];
-                break;
+                if ((decoded.lowerUsage.viWrite & (1u << reg)) != 0u)
+                {
+                    writtenVi = static_cast<uint8_t>(reg);
+                    oldVi = m_state.vi[reg];
+                    break;
+                }
             }
+        }
+        else if ((static_cast<uint32_t>(decoded.lowerUsage.viWrite) & 0xFFFEu) != 0u)
+        {
+            writtenVi = static_cast<uint8_t>(pmCtz(static_cast<uint32_t>(decoded.lowerUsage.viWrite) & 0xFFFEu));
+            oldVi = m_state.vi[writtenVi];
         }
 
         const VfAccess upperWrite = decoded.upperUsage.vfWrite;
