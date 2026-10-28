@@ -3193,6 +3193,7 @@ static void processFcC80Completion(const uint8_t *vuData, uint32_t dataSize)
     }
 }
 
+static uint64_t *s_geHistPtr = nullptr; // PROBE-GE2
 void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                          uint8_t *vuData, uint32_t dataSize,
                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
@@ -3314,6 +3315,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
         if (probe_ae::isDcProbeEnabled()) { uint32_t idx = s_dyLastPcIdx++; s_dyLastPcs[idx & 4095u] = m_state.pc; }
         instrsThisRun++;
+        { static uint64_t *s_h = new uint64_t[512](); s_geHistPtr = s_h; s_h[(m_state.pc >> 6) & 0x1FFu]++; } // PROBE-GE2
         if (probe_ae::isEnabled())
         {
             probe_ae::onBaInstruction(m_state.pc, decoded.upper, decoded.lower);
@@ -4030,6 +4032,20 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                         (unsigned long long)s_geCalls, (unsigned long long)s_geInstr, (unsigned long long)s_geCycles,
                         s_geNs / 1e6, s_geXgNs / 1e6);
             std::fflush(stdout);
+            if (s_geHistPtr)
+            {
+                uint64_t tot = 0;
+                for (int b = 0; b < 512; ++b) tot += s_geHistPtr[b];
+                for (int k = 0; k < 8 && tot; ++k)
+                {
+                    int best = 0;
+                    for (int b = 1; b < 512; ++b) if (s_geHistPtr[b] > s_geHistPtr[best]) best = b;
+                    if (s_geHistPtr[best] == 0) break;
+                    std::printf("[probe] ge2 pc=0x%04X-0x%04X pct=%.1f\n", best * 64, best * 64 + 63, 100.0 * s_geHistPtr[best] / tot);
+                    s_geHistPtr[best] = 0;
+                }
+                for (int b = 0; b < 512; ++b) s_geHistPtr[b] = 0;
+            }
             s_geNs = s_geXgNs = s_geInstr = s_geCalls = s_geCycles = 0;
             s_geT0 = geNow;
         }
