@@ -1207,15 +1207,18 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     uint32_t currentPrimIdx = s_globalPrimIndex.fetch_add(1u, std::memory_order_relaxed);
 
     // Task EC setup
-    if (s_ecStepAfterS == -1)
+    static bool s_ecCfgDone = false; // PERF-GH: -1 means "unset", so the old -1 guard re-ran getenv on every prim
+    if (!s_ecCfgDone)
     {
+        s_ecCfgDone = true;
         const char *envA = std::getenv("PS2X_GS_STEP_AFTER_S");
         s_ecStepAfterS = envA ? std::atoi(envA) : -1;
         const char *envC = std::getenv("PS2X_GS_STEP_COUNT");
         s_ecStepCount = envC ? std::atoi(envC) : 3000;
     }
-    const auto ecNow = std::chrono::steady_clock::now();
-    const uint64_t ecElapsedSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(ecNow - s_processStartTime).count());
+    const uint64_t ecElapsedSec = (s_ecStepAfterS >= 0)
+        ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - s_processStartTime).count())
+        : 0u;
     bool ecDoThisPrim = false;
     if (s_ecStepAfterS >= 0 && ecElapsedSec >= static_cast<uint64_t>(s_ecStepAfterS))
     {
