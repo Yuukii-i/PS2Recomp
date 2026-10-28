@@ -1317,8 +1317,17 @@ uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
 
 // PERF-GJ: fast mode (PS2X_VU1_FAST=1) drops the per-register hazard/latency scheduler: vf/vi/acc/flag/store
 // writes land immediately; only Q/P (fdiv/efu) keep their latency. Cycle counts become ~1 per pair.
+static std::vector<uint8_t> *s_vfyCapture = nullptr; // PROBE-GV: when set, XGKICK packets are captured instead of submitted
+static int s_vfyFastOverride = -1;                    // PROBE-GV: -1 env, 0 force exact, 1 force fast
+static inline bool vu1VerifyEnabled()
+{
+    static const bool s_on = []() { const char *v = std::getenv("PS2X_VU1_VERIFY"); return v && v[0] == '1'; }();
+    return s_on;
+}
 static inline bool vu1FastMode()
 {
+    if (s_vfyFastOverride >= 0)
+        return s_vfyFastOverride == 1;
     static const bool s_on = []() { const char *v = std::getenv("PS2X_VU1_FAST"); return v && v[0] == '1'; }();
     return s_on;
 }
@@ -2131,7 +2140,9 @@ void VU1Interpreter::finishXgkick()
     }
 
     const auto tXgkickStart = std::chrono::steady_clock::now();
-    if (m_activeMemory)
+    if (s_vfyCapture)
+        s_vfyCapture->insert(s_vfyCapture->end(), m_xgkick.packet.data(), m_xgkick.packet.data() + m_xgkick.totalBytes);
+    else if (m_activeMemory)
         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
     else if (m_activeGs)
         m_activeGs->processGIFPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
@@ -3035,6 +3046,101 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     m_state.vf[0][1] = 0.0f;
     m_state.vf[0][2] = 0.0f;
     m_state.vf[0][3] = 1.0f;
+    if (vu1VerifyEnabled()) // PROBE-GV: A/B check exact vs fast on identical input; game keeps the exact result
+    {
+        const VU1State s0 = m_state;
+        const uint32_t wc0 = m_workingClip;
+        const uint64_t cyc0 = m_cycle;
+        std::vector<uint8_t> mem0(vuData, vuData + dataSize);
+        std::vector<uint8_t> capA, capB;
+
+        s_vfyFastOverride = 0;
+        s_vfyCapture = &capA;
+        run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+        const VU1State sA = m_state;
+        const uint32_t wcA = m_workingClip;
+        const uint64_t cycA = m_cycle;
+        std::vector<uint8_t> memA(vuData, vuData + dataSize);
+
+        m_state = s0;
+        m_workingClip = wc0;
+        m_cycle = cyc0;
+        std::memcpy(vuData, mem0.data(), dataSize);
+        resetScheduler();
+        s_vfyFastOverride = 1;
+        s_vfyCapture = &capB;
+        run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+        const VU1State sB = m_state;
+
+        int badVf = -1, badVi = -1;
+        for (int r = 0; r < 32 && badVf < 0; ++r)
+            if (std::memcmp(sA.vf[r], sB.vf[r], 16) != 0) badVf = r;
+        for (int r = 0; r < 16 && badVi < 0; ++r)
+            if (sA.vi[r] != sB.vi[r]) badVi = r;
+        const bool badAcc = std::memcmp(sA.acc, sB.acc, 16) != 0;
+        const bool badQpi = std::memcmp(&sA.q, &sB.q, 4) != 0 || std::memcmp(&sA.p, &sB.p, 4) != 0 || std::memcmp(&sA.i, &sB.i, 4) != 0;
+        const bool badFlags = sA.mac != sB.mac || sA.status != sB.status || sA.clip != sB.clip;
+        int badMemQw = -1;
+        for (uint32_t q = 0; q * 16u + 16u <= dataSize && badMemQw < 0; ++q)
+            if (std::memcmp(memA.data() + q * 16u, vuData + q * 16u, 16) != 0) badMemQw = static_cast<int>(q);
+        const bool badGif = capA != capB;
+
+        static uint32_t s_gvTotal = 0, s_gvBad = 0, s_gvPrinted = 0;
+        ++s_gvTotal;
+        const bool bad = badVf >= 0 || badVi >= 0 || badAcc || badQpi || badFlags || badMemQw >= 0 || badGif;
+        if (bad)
+            ++s_gvBad;
+        if (bad && s_gvPrinted < 40u)
+        {
+            ++s_gvPrinted;
+            std::printf("[probe] gv MISMATCH #%u start=0x%X vf=%d vi=%d acc=%d qpi=%d flags=%d(mac %X/%X st %X/%X clip %X/%X) memqw=%d gif=%d(%zu/%zu)\n",
+                        s_gvPrinted, startPC & 0xFFFFu, badVf, badVi, badAcc ? 1 : 0, badQpi ? 1 : 0, badFlags ? 1 : 0,
+                        sA.mac, sB.mac, sA.status, sB.status, sA.clip, sB.clip, badMemQw, badGif ? 1 : 0, capA.size(), capB.size());
+            if (badVf >= 0)
+            {
+                uint32_t a4[4], b4[4];
+                std::memcpy(a4, sA.vf[badVf], 16);
+                std::memcpy(b4, sB.vf[badVf], 16);
+                std::printf("[probe] gv  vf%d exact=%08X %08X %08X %08X fast=%08X %08X %08X %08X\n", badVf,
+                            a4[0], a4[1], a4[2], a4[3], b4[0], b4[1], b4[2], b4[3]);
+            }
+            if (badVi >= 0)
+                std::printf("[probe] gv  vi%d exact=%d fast=%d\n", badVi, sA.vi[badVi], sB.vi[badVi]);
+            if (badMemQw >= 0)
+            {
+                uint32_t a4[4], b4[4];
+                std::memcpy(a4, memA.data() + badMemQw * 16, 16);
+                std::memcpy(b4, vuData + badMemQw * 16, 16);
+                std::printf("[probe] gv  mem qw%d exact=%08X %08X %08X %08X fast=%08X %08X %08X %08X\n", badMemQw,
+                            a4[0], a4[1], a4[2], a4[3], b4[0], b4[1], b4[2], b4[3]);
+            }
+            if (badGif)
+            {
+                size_t off = 0;
+                const size_t n = std::min(capA.size(), capB.size());
+                while (off < n && capA[off] == capB[off])
+                    ++off;
+                std::printf("[probe] gv  gif first diff at byte %zu\n", off);
+            }
+            std::fflush(stdout);
+        }
+        if ((s_gvTotal % 500u) == 0u)
+        {
+            std::printf("[probe] gv summary runs=%u mismatches=%u\n", s_gvTotal, s_gvBad);
+            std::fflush(stdout);
+        }
+
+        // keep the exact result for the game
+        m_state = sA;
+        m_workingClip = wcA;
+        m_cycle = cycA;
+        std::memcpy(vuData, memA.data(), dataSize);
+        s_vfyFastOverride = -1;
+        s_vfyCapture = nullptr;
+        if (!capA.empty() && memory)
+            memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));
+        return;
+    }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
