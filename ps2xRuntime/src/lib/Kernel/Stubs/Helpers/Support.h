@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cctype>
 #include "../IsoDisc.h"
 
@@ -1207,7 +1209,7 @@ namespace
     std::string formatPs2StringWithArgs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, const char *format, int fixedArgs)
     {
         Ps2VarArgCursor cursor(rdram, ctx, runtime, fixedArgs);
-        return formatPs2StringCore(
+        std::string gzResult = formatPs2StringCore(
             rdram,
             format,
             [&cursor]()
@@ -1216,6 +1218,18 @@ namespace
             { return cursor.nextU64(); },
             [rdram, runtime](uint32_t addr)
             { return readPs2CStringBounded(rdram, runtime, addr); });
+        { // PROBE-GZ: log path-like formatted strings (format, arg regs, result)
+            static std::atomic<uint32_t> s_gzLines{0};
+            if ((gzResult.find("player") != std::string::npos || gzResult.find("g_nrm") != std::string::npos) &&
+                s_gzLines.fetch_add(1, std::memory_order_relaxed) < 60u)
+            {
+                std::printf("[probe] gz fmt=\"%s\" a2=0x%X a3=0x%X t0=0x%X t1=0x%X t2=0x%X t3=0x%X ra=0x%X result=\"%s\"\n",
+                            format, getRegU32(ctx, 6), getRegU32(ctx, 7), getRegU32(ctx, 8), getRegU32(ctx, 9),
+                            getRegU32(ctx, 10), getRegU32(ctx, 11), getRegU32(ctx, 31), gzResult.c_str());
+                std::fflush(stdout);
+            }
+        }
+        return gzResult;
     }
 
     std::string formatPs2StringWithVaList(uint8_t *rdram, PS2Runtime *runtime, const char *format, uint32_t vaListAddr)
