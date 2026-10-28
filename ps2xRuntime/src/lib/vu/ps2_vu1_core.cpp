@@ -3501,6 +3501,46 @@ namespace
         uint64_t samples = 0;
     };
     InvUnit g_invUnits[2];
+
+    // PROBE-FLG: do flag readers (FC*/FS*/FM* lower ops) ever see an in-flight flag write? (PS2X_VU_FLG=1, PS2X_VU1_NATIVE=0)
+    // kinds: 0 clip, 1 status, 2 mac. Also counts flag writes per kind and same-pair FSSET/FCSET adjustments.
+    struct FlgUnit
+    {
+        uint64_t pairs = 0;
+        uint64_t readers[3] = {0, 0, 0};
+        uint64_t viol[3] = {0, 0, 0};
+        uint64_t statusViolDiv = 0; // status reader with a pending Q landing (Q landing rewrites status bits 4,5,10,11)
+        uint64_t fmacEntries = 0;
+        uint64_t fssetPending = 0; // FSSET issued while an fdiv is pending (order hazard with Q landing)
+        std::unordered_map<uint32_t, uint64_t> byPc[3];
+    };
+    FlgUnit g_flgUnits[2];
+    uint64_t g_flgNextPrint = 2000000;
+    const bool g_flgOn = []() { const char *e = std::getenv("PS2X_VU_FLG"); return e && e[0] == '1'; }();
+
+    void flgPrint()
+    {
+        static const char *kName[3] = {"clip", "status", "mac"};
+        for (int u = 0; u < 2; ++u)
+        {
+            FlgUnit &fu = g_flgUnits[u];
+            if (fu.pairs == 0)
+                continue;
+            std::printf("[probe] flg %s pairs=%llu fmacEntries=%llu fssetWithDiv=%llu readers clip=%llu status=%llu mac=%llu viol clip=%llu status=%llu mac=%llu statusDiv=%llu\n",
+                        u ? "VU1" : "VU0", (unsigned long long)fu.pairs, (unsigned long long)fu.fmacEntries, (unsigned long long)fu.fssetPending,
+                        (unsigned long long)fu.readers[0], (unsigned long long)fu.readers[1], (unsigned long long)fu.readers[2],
+                        (unsigned long long)fu.viol[0], (unsigned long long)fu.viol[1], (unsigned long long)fu.viol[2],
+                        (unsigned long long)fu.statusViolDiv);
+            for (int k = 0; k < 3; ++k)
+            {
+                std::vector<std::pair<uint32_t, uint64_t>> v(fu.byPc[k].begin(), fu.byPc[k].end());
+                std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+                for (size_t i = 0; i < v.size() && i < 6; ++i)
+                    std::printf("[probe] flg %s %s pc=0x%04X n=%llu\n", u ? "VU1" : "VU0", kName[k], v[i].first, (unsigned long long)v[i].second);
+            }
+        }
+        std::fflush(stdout);
+    }
     uint64_t g_invNextPrint = 2000000;
     const bool g_invOn = []() { const char *e = std::getenv("PS2X_VU_INV"); return e && e[0] == '1'; }();
 
@@ -4081,6 +4121,54 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             {
                 g_invNextPrint *= 3;
                 invPrint();
+            }
+        }
+
+        if (g_flgOn) // PROBE-FLG
+        {
+            FlgUnit &fu = g_flgUnits[m_unit == Unit::VU1 ? 1 : 0];
+            ++fu.pairs;
+            if (!decoded.iBit)
+            {
+                const uint32_t lop = (decoded.lower >> 25) & 0x7Fu;
+                int kind = -1;
+                if (lop == 0x10u || lop == 0x12u || lop == 0x13u || lop == 0x1Cu)
+                    kind = 0;
+                else if (lop == 0x14u || lop == 0x16u || lop == 0x17u)
+                    kind = 1;
+                else if (lop == 0x18u || lop == 0x1Au || lop == 0x1Bu)
+                    kind = 2;
+                if (kind >= 0)
+                {
+                    ++fu.readers[kind];
+                    bool hit = false, hitDiv = false;
+                    for (const FlagPipelineEntry &e : m_flagPipeline)
+                    {
+                        if (!e.valid)
+                            continue;
+                        if (kind == 0 && e.writesClip) hit = true;
+                        if (kind == 1 && (e.writesStatus || e.writesSticky)) hit = true;
+                        if (kind == 2 && e.writesMac) hit = true;
+                    }
+                    if (kind == 1 && m_fdiv.valid)
+                        hitDiv = true;
+                    if (hit)
+                    {
+                        ++fu.viol[kind];
+                        ++fu.byPc[kind][m_state.pc];
+                    }
+                    if (hitDiv)
+                        ++fu.statusViolDiv;
+                }
+                if (lop == 0x15u && m_fdiv.valid)
+                    ++fu.fssetPending;
+            }
+            if (decoded.upperUsage.pipeline == PipelineFmac)
+                ++fu.fmacEntries;
+            if (g_flgUnits[0].pairs + g_flgUnits[1].pairs >= g_flgNextPrint)
+            {
+                g_flgNextPrint *= 3;
+                flgPrint();
             }
         }
 
