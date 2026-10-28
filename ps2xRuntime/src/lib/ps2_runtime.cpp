@@ -2097,6 +2097,81 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     // 1. Generic config.toml stub registration
     registerConfigStubs(*this, "config.toml");
 
+    // PERF-GG1: functions the generator folded into neighbours (no table entry) were run by the slow fallback interpreter
+    // (log gz: 0x3AB9F0 ~203k entries). Exact native versions of the hot tiny ones (disassembly checked in PCSX2).
+    {
+        struct GgHost { static uint8_t *p(uint8_t *rdram, uint32_t addr) { return rdram + (addr & 0x01FFFFFFu); } };
+        // 0x003AB9F0: if (!(*(float*)0x720240 < f12)) *(q128*)a0 = *(q128*)(a1 + (a2<<4));  (delay slot a1 += a2<<4 always runs)
+        replaceFunction(0x003AB9F0u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *) {
+            const uint32_t a2s = getRegU32(ctx, 6) << 4;
+            const uint32_t a1n = getRegU32(ctx, 5) + a2s;
+            float lim = 0.0f;
+            std::memcpy(&lim, GgHost::p(rdram, 0x00720240u), 4);
+            ctx->f[0] = lim;
+            SET_GPR_S32(ctx, 6, static_cast<int32_t>(a2s));
+            SET_GPR_U32(ctx, 5, a1n);
+            if (!(lim < ctx->f[12]))
+            {
+                __m128i q = _mm_loadu_si128(reinterpret_cast<const __m128i *>(GgHost::p(rdram, a1n & ~0xFu)));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(GgHost::p(rdram, getRegU32(ctx, 4) & ~0xFu)), q);
+                ctx->r[15] = q;
+            }
+            else
+            {
+                SET_GPR_U32(ctx, 15, 0x00720240u);
+            }
+            ctx->pc = getRegU32(ctx, 31);
+        });
+        // 0x0049EAA8: f0 = f12
+        replaceFunction(0x0049EAA8u, [](uint8_t *, R5900Context *ctx, PS2Runtime *) {
+            ctx->f[0] = ctx->f[12];
+            ctx->pc = getRegU32(ctx, 31);
+        });
+        // 0x0049EAB0: f0 = f12*f12
+        replaceFunction(0x0049EAB0u, [](uint8_t *, R5900Context *ctx, PS2Runtime *) {
+            ctx->f[0] = FPU_MUL_S(ctx->f[12], ctx->f[12]);
+            ctx->pc = getRegU32(ctx, 31);
+        });
+        // 0x0049EAB8: ACC = f12+f12; f0 = ACC - f12*f12
+        replaceFunction(0x0049EAB8u, [](uint8_t *, R5900Context *ctx, PS2Runtime *) {
+            FPU_SET_ACC(ctx, FPU_ADD_S(ctx->f[12], ctx->f[12]));
+            ctx->f[0] = FPU_SUB_S(ctx->f_acc, FPU_MUL_S(ctx->f[12], ctx->f[12]));
+            ctx->pc = getRegU32(ctx, 31);
+        });
+        // 0x0049EAC4: f1 = f12*f12; f0 = (f12 - f1) * *(float*)0x6CDAA8; f1 = that float
+        replaceFunction(0x0049EAC4u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *) {
+            ctx->f[1] = FPU_MUL_S(ctx->f[12], ctx->f[12]);
+            SET_GPR_U32(ctx, 15, 0x006CDAA8u);
+            ctx->f[0] = FPU_SUB_S(ctx->f[12], ctx->f[1]);
+            float k = 0.0f;
+            std::memcpy(&k, GgHost::p(rdram, 0x006CDAA8u), 4);
+            ctx->f[1] = k;
+            ctx->f[0] = FPU_MUL_S(ctx->f[0], ctx->f[1]);
+            ctx->pc = getRegU32(ctx, 31);
+        });
+        // 0x0057F2A0: ring push into 32 entries of {a2,a3} at 0x696D88, index at 0x696E88
+        replaceFunction(0x0057F2A0u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *) {
+            uint32_t idx = 0;
+            std::memcpy(&idx, GgHost::p(rdram, 0x00696E88u), 4);
+            uint32_t next = idx + 1u;
+            const uint32_t slotAddr = (idx << 3) + 0x00696D88u;
+            const uint32_t t4 = (static_cast<int32_t>(next) < 0x20) ? 1u : 0u;
+            if (!t4)
+                next = 0u;
+            const uint32_t a2 = getRegU32(ctx, 6);
+            const uint32_t a3 = getRegU32(ctx, 7);
+            std::memcpy(GgHost::p(rdram, slotAddr + 4u), &a3, 4);
+            std::memcpy(GgHost::p(rdram, slotAddr), &a2, 4);
+            std::memcpy(GgHost::p(rdram, 0x00696E88u), &next, 4);
+            SET_GPR_U32(ctx, 11, 0x00690000u);
+            SET_GPR_U32(ctx, 15, 0x00696D88u);
+            SET_GPR_U32(ctx, 14, slotAddr);
+            SET_GPR_U32(ctx, 13, next);
+            SET_GPR_U32(ctx, 12, t4);
+            ctx->pc = getRegU32(ctx, 31);
+        });
+    }
+
     // 0x003703D4: Early exit check returning non-zero error code -> force return 0
     replaceFunction(0x003703D4u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
         const char *exdb = std::getenv("PS2X_TRACE_EXDB");
