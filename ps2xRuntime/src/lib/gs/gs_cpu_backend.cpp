@@ -600,6 +600,11 @@ namespace
         return psm == GS_PSM_T8 || psm == GS_PSM_T8H;
     }
 
+#if defined(_MSC_VER)
+    __forceinline // PERF-HO2: 4 out-of-line calls per bilinear texel were ~11% of GS time
+#else
+    inline __attribute__((always_inline))
+#endif
     uint8_t lerpChannel(uint8_t c00, uint8_t c10, uint8_t c01, uint8_t c11, float fx, float fy)
     {
         const float top = static_cast<float>(c00) + (static_cast<float>(c10) - static_cast<float>(c00)) * fx;
@@ -607,6 +612,19 @@ namespace
         return clampU8(static_cast<int>(gsRoundClamped(top + (bottom - top) * fy)));
     }
 }
+
+// PERF-HO2: per-primitive decoded-texel cache (key = wrapped u,v). Valid only inside one DrawPrimitive: epoch bumps per primitive,
+// and it is bypassed when the texture base aliases the frame/Z buffer (feedback draws).
+struct TexelCacheEntry
+{
+    uint32_t epoch;
+    int32_t u;
+    int32_t v;
+    uint32_t color;
+};
+static thread_local TexelCacheEntry t_texelCache[256];
+static thread_local uint32_t t_texelEpoch = 1u;
+static const bool s_ho2Off = []() { const char *e = std::getenv("PS2X_GS_HO2"); return e && e[0] == '0'; }(); // kill switch
 
 namespace
 {
@@ -1100,6 +1118,7 @@ GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
 
 void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 {
+    ++t_texelEpoch; // PERF-HO2
     probe_ae::onBxDrawPrimitive(batch);
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
@@ -2076,11 +2095,11 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
         texVf = t * invQ * static_cast<float>(texH);
     }
 
-    auto samplePoint = [&](int sampleU, int sampleV) -> uint32_t
-    {
-        sampleU = wrapTextureCoordinate(sampleU, texW, wrapU, minU, maxU);
-        sampleV = wrapTextureCoordinate(sampleV, texH, wrapV, minV, maxV);
+    const bool texelCacheOn = !s_ho2Off && GSInternal::framePageBaseToBlock(ctx.frame.fbp) != tex.tbp0 &&
+                              GSInternal::framePageBaseToBlock(ctx.zbuf.zbp) != tex.tbp0; // PERF-HO2
 
+    auto samplePointRaw = [&](int sampleU, int sampleV) -> uint32_t
+    {
         u32 out = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
 
         switch (tex.psm)
@@ -2104,6 +2123,23 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
         }
 
         return 0xFFFF00FFu;
+    };
+
+    auto samplePoint = [&](int sampleU, int sampleV) -> uint32_t
+    {
+        sampleU = wrapTextureCoordinate(sampleU, texW, wrapU, minU, maxU);
+        sampleV = wrapTextureCoordinate(sampleV, texH, wrapV, minV, maxV);
+        if (!texelCacheOn)
+            return samplePointRaw(sampleU, sampleV);
+        TexelCacheEntry &e = t_texelCache[static_cast<uint32_t>(sampleU + sampleV * 17) & 255u];
+        if (e.epoch == t_texelEpoch && e.u == sampleU && e.v == sampleV)
+            return e.color;
+        const uint32_t color = samplePointRaw(sampleU, sampleV);
+        e.epoch = t_texelEpoch;
+        e.u = sampleU;
+        e.v = sampleV;
+        e.color = color;
+        return color;
     };
 
     if (!state.linearFilter)
@@ -4023,10 +4059,68 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     const float invAbsDenom = 1.0f / std::fabs(denom);
     constexpr float kEdgeEpsilon = 1.0e-4f;
 
+    // PERF-HO2: exact per-row x-span. w0/w1/w2 are linear in px; solve each edge in double with a generous error margin and
+    // run the original float test only inside [xs,xe] (pixels outside provably fail it, so output is unchanged).
+    const double kd = static_cast<double>(winding) * static_cast<double>(invAbsDenom);
+    const double a0 = static_cast<double>(fy1 - fy2), b0 = static_cast<double>(fx2 - fx1);
+    const double a1 = static_cast<double>(fy2 - fy0), b1 = static_cast<double>(fx0 - fx2);
+    const double s0 = kd * a0, s1 = kd * a1, s2 = -(s0 + s1);
+    const double rx = std::max({std::fabs(static_cast<double>(fx0 - fx2)), std::fabs(static_cast<double>(fx1 - fx2)),
+                                std::fabs(static_cast<double>(minX) - fx2), std::fabs(static_cast<double>(maxX + 1) - fx2)}) + 1.0;
+    const double ry = std::max({std::fabs(static_cast<double>(fy0 - fy2)), std::fabs(static_cast<double>(fy1 - fy2)),
+                                std::fabs(static_cast<double>(minY) - fy2), std::fabs(static_cast<double>(maxY + 1) - fy2)}) + 1.0;
+    const double mg0 = 4.0e-6 * std::fabs(kd) * (std::fabs(a0) * rx + std::fabs(b0) * ry) + 1.0e-4;
+    const double mg1 = 4.0e-6 * std::fabs(kd) * (std::fabs(a1) * rx + std::fabs(b1) * ry) + 1.0e-4;
+    const double t0 = -static_cast<double>(kEdgeEpsilon) - mg0;
+    const double t1 = -static_cast<double>(kEdgeEpsilon) - mg1;
+    const double t2 = -static_cast<double>(kEdgeEpsilon) - (mg0 + mg1);
+
     for (int y = minY; y <= maxY; ++y)
     {
         float py = static_cast<float>(y) + 0.5f;
-        for (int x = minX; x <= maxX; ++x)
+        int xs = minX, xe = maxX;
+        {
+            const double dpy = static_cast<double>(py);
+            const double c0 = kd * (b0 * (dpy - fy2) - a0 * fx2);
+            const double c1 = kd * (b1 * (dpy - fy2) - a1 * fx2);
+            const double c2 = 1.0 - c0 - c1;
+            double lo = -1.0e30, hi = 1.0e30;
+            bool rowEmpty = false;
+            const double cc[3] = {c0, c1, c2};
+            const double ss[3] = {s0, s1, s2};
+            const double tt[3] = {t0, t1, t2};
+            for (int i = 0; i < 3; ++i)
+            {
+                if (std::fabs(ss[i]) < 1.0e-12)
+                {
+                    if (cc[i] < tt[i])
+                        rowEmpty = true;
+                }
+                else
+                {
+                    const double edge = (tt[i] - cc[i]) / ss[i];
+                    if (ss[i] > 0.0)
+                        lo = std::max(lo, edge);
+                    else
+                        hi = std::min(hi, edge);
+                }
+            }
+            if (s_ho2Off)
+            {
+                lo = -1.0e30;
+                hi = 1.0e30;
+                rowEmpty = false;
+            }
+            if (rowEmpty || lo > hi + 4.0)
+                continue;
+            const double dxs = std::max(static_cast<double>(minX), std::floor(lo - 0.5) - 1.0);
+            const double dxe = std::min(static_cast<double>(maxX), std::ceil(hi - 0.5) + 1.0);
+            if (dxs > dxe)
+                continue;
+            xs = static_cast<int>(dxs);
+            xe = static_cast<int>(dxe);
+        }
+        for (int x = xs; x <= xe; ++x)
         {
             float px = static_cast<float>(x) + 0.5f;
 
