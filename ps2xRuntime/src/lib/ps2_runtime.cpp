@@ -3913,6 +3913,31 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
+    if (ctx && (targetPc == 0x0034A890u || targetPc == 0x003327B0u || targetPc == 0x00350C18u || targetPc == 0x0034A7FCu)) // PROBE-GX
+    {
+        static std::atomic<uint32_t> s_gxLines{0};
+        if (s_gxLines.fetch_add(1, std::memory_order_relaxed) < 700u)
+        {
+            auto gxStr = [&](uint32_t addr) -> std::string {
+                std::string s;
+                const uint32_t p = addr & 0x01FFFFFFu;
+                if (addr < 0x00100000u || p + 48u >= PS2_RAM_SIZE)
+                    return s;
+                for (uint32_t i = 0; i < 40u; ++i)
+                {
+                    const char c = static_cast<char>(rdram[p + i]);
+                    if (c == 0)
+                        break;
+                    s.push_back((c >= 0x20 && c < 0x7F) ? c : '.');
+                }
+                return s;
+            };
+            std::printf("[probe] gx call tgt=0x%X ra=0x%X a0=0x%X a1=0x%X a2=0x%X a3=0x%X t0=0x%X a1s=\"%s\" t0s=\"%s\"\n",
+                        targetPc, getRegU32(ctx, 31), getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 7),
+                        getRegU32(ctx, 8), gxStr(getRegU32(ctx, 5)).c_str(), gxStr(getRegU32(ctx, 8)).c_str());
+            std::fflush(stdout);
+        }
+    }
     // vf0 is hardwired {0,0,0,1}; contexts built via R5900Context() start with it zeroed. (Hack Ledger: HW-faithful backstop)
     if (ctx)
         ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
