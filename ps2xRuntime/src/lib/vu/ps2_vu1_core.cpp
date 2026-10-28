@@ -3565,7 +3565,43 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         [](VU1Interpreter &v) { v.commitReadyPipelines(); },
         [](VU1Interpreter &v, uint64_t t) { v.advanceTo(t); },
         [](VU1Interpreter &v) { v.advanceOneCycle(); },
-        [](VU1Interpreter &v, uint32_t u) { if (!fastUpper(v, u)) v.execUpper(u); },
+        [](VU1Interpreter &v, uint32_t u)
+        {
+            static const bool hlCheck = []() { const char *e = std::getenv("PS2X_HL_CHECK"); return e && e[0] == '1'; }();
+            if (!hlCheck)
+            {
+                if (!fastUpper(v, u)) v.execUpper(u);
+                return;
+            }
+            const VU1State s0 = v.m_state;
+            const auto f0 = v.m_flagPipeline;
+            PipeMasks &pmv = s_pipeMasks[v.m_unit == VU1Interpreter::Unit::VU1 ? 1 : 0];
+            const uint32_t pm0 = pmv.flag;
+            const bool took = fastUpper(v, u);
+            if (!took) { v.execUpper(u); return; }
+            const VU1State s1 = v.m_state;
+            const auto f1 = v.m_flagPipeline;
+            const uint32_t pm1 = pmv.flag;
+            v.m_state = s0; v.m_flagPipeline = f0; pmv.flag = pm0;
+            v.execUpper(u);
+            static int shown = 0;
+            const bool same = std::memcmp(s1.vf, v.m_state.vf, sizeof(s1.vf)) == 0 && std::memcmp(s1.acc, v.m_state.acc, sizeof(s1.acc)) == 0 &&
+                              pm1 == pmv.flag && std::memcmp(f1.data(), v.m_flagPipeline.data(), sizeof(f1)) == 0;
+            if (!same && shown < 12)
+            {
+                ++shown;
+                std::fprintf(stderr, "[probe] hl DIFF upper=%08X dest=%X fs=%u ft=%u fd=%u pmF=%X/%X", u, (u >> 21) & 0xF, (u >> 11) & 0x1F, (u >> 16) & 0x1F, (u >> 6) & 0x1F, pm1, pmv.flag);
+                const uint32_t fd = (u >> 6) & 0x1F;
+                for (int c = 0; c < 4; ++c)
+                {
+                    uint32_t a, b, aa, ba;
+                    std::memcpy(&a, &s1.vf[fd][c], 4); std::memcpy(&b, &v.m_state.vf[fd][c], 4);
+                    std::memcpy(&aa, &s1.acc[c], 4); std::memcpy(&ba, &v.m_state.acc[c], 4);
+                    std::fprintf(stderr, " | c%d vd %08X/%08X acc %08X/%08X", c, a, b, aa, ba);
+                }
+                std::fprintf(stderr, " flagEq=%d\n", std::memcmp(f1.data(), v.m_flagPipeline.data(), sizeof(f1)) == 0);
+            }
+        },
         [](VU1Interpreter &v, uint32_t l, uint8_t *d, uint32_t ds, GS &g, PS2Memory *m, uint32_t u) { v.execLower(l, d, ds, g, m, u); },
         [](VU1Interpreter &v, uint8_t r, uint8_t lanes, const float *val, uint32_t lat) { v.queueVfWrite(r, lanes, val, lat); },
         [](VU1Interpreter &v, uint8_t r, int32_t val, uint32_t lat) { v.queueViWrite(r, val, lat); },
