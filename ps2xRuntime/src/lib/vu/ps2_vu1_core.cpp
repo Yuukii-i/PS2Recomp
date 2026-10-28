@@ -3464,6 +3464,40 @@ namespace
         uint64_t emptySig = 0;
         uint64_t overflow = 0;
     };
+    // PROBE-INV: does any pair ever read a vf/vi/acc register whose latest write is still in flight? (PS2X_VU_INV=1, PS2X_VU1_NATIVE=0)
+    // If never: vf/vi/acc writes can be applied at issue (readers always stall to the landing cycle), only flags/stores/Q/P need delay.
+    struct InvUnit
+    {
+        uint64_t pairs = 0;
+        uint64_t viol[3] = {0, 0, 0}; // vf, vi, acc
+        std::unordered_map<uint32_t, uint64_t> byPc[3];
+        uint64_t samples = 0;
+    };
+    InvUnit g_invUnits[2];
+    uint64_t g_invNextPrint = 2000000;
+    const bool g_invOn = []() { const char *e = std::getenv("PS2X_VU_INV"); return e && e[0] == '1'; }();
+
+    void invPrint()
+    {
+        static const char *kName[3] = {"vf", "vi", "acc"};
+        for (int u = 0; u < 2; ++u)
+        {
+            InvUnit &iu = g_invUnits[u];
+            if (iu.pairs == 0)
+                continue;
+            std::printf("[probe] inv %s pairs=%llu viol vf=%llu vi=%llu acc=%llu\n", u ? "VU1" : "VU0", (unsigned long long)iu.pairs,
+                        (unsigned long long)iu.viol[0], (unsigned long long)iu.viol[1], (unsigned long long)iu.viol[2]);
+            for (int k = 0; k < 3; ++k)
+            {
+                std::vector<std::pair<uint32_t, uint64_t>> v(iu.byPc[k].begin(), iu.byPc[k].end());
+                std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+                for (size_t i = 0; i < v.size() && i < 6; ++i)
+                    std::printf("[probe] inv %s %s pc=0x%04X n=%llu\n", u ? "VU1" : "VU0", kName[k], v[i].first, (unsigned long long)v[i].second);
+            }
+        }
+        std::fflush(stdout);
+    }
+
     SigUnit g_sigUnits[2];
     uint64_t g_sigNextPrint = 200000;
     const bool g_sigStatOn = []() { const char *e = std::getenv("PS2X_VU_SIGSTAT"); return e && e[0] == '1'; }();
@@ -3956,6 +3990,73 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
         if (m_cycle >= budgetEnd)
             break;
+
+        if (g_invOn) // PROBE-INV
+        {
+            InvUnit &iu = g_invUnits[m_unit == Unit::VU1 ? 1 : 0];
+            ++iu.pairs;
+            const InstructionUsage *invUsages[2] = {&decoded.upperUsage, &decoded.lowerUsage};
+            for (const InstructionUsage *usage : invUsages)
+            {
+                for (uint32_t index = 0; index < usage->vfReadCount; ++index)
+                {
+                    const VfAccess &access = usage->vfRead[index];
+                    bool hit = false;
+                    for (const PendingVfWrite &w : m_vfWritePipeline)
+                    {
+                        if (!w.valid || w.reg != access.reg)
+                            continue;
+                        for (uint32_t comp = 0; comp < 4u; ++comp)
+                        {
+                            if ((access.lanes & laneForComponent(comp)) != 0u && (w.laneMask & laneForComponent(comp)) != 0u &&
+                                m_vfLatestWrite[w.reg][comp] == w.sequence)
+                                hit = true;
+                        }
+                    }
+                    if (hit)
+                    {
+                        ++iu.viol[0];
+                        ++iu.byPc[0][m_state.pc];
+                    }
+                }
+                for (uint32_t mk = static_cast<uint32_t>(usage->viRead) & 0xFFFEu; mk != 0u; mk &= mk - 1u)
+                {
+                    const uint32_t reg = pmCtz(mk);
+                    for (const PendingViWrite &w : m_viWritePipeline)
+                    {
+                        if (w.valid && w.reg == reg && m_viLatestWrite[reg] == w.sequence)
+                        {
+                            ++iu.viol[1];
+                            ++iu.byPc[1][m_state.pc];
+                            break;
+                        }
+                    }
+                }
+                if (usage->accRead != 0u)
+                {
+                    bool hit = false;
+                    for (const PendingAccWrite &w : m_accWritePipeline)
+                    {
+                        if (!w.valid)
+                            continue;
+                        for (uint32_t comp = 0; comp < 4u; ++comp)
+                            if ((usage->accRead & laneForComponent(comp)) != 0u && (w.laneMask & laneForComponent(comp)) != 0u &&
+                                m_accLatestWrite[comp] == w.sequence)
+                                hit = true;
+                    }
+                    if (hit)
+                    {
+                        ++iu.viol[2];
+                        ++iu.byPc[2][m_state.pc];
+                    }
+                }
+            }
+            if (g_invUnits[0].pairs + g_invUnits[1].pairs >= g_invNextPrint)
+            {
+                g_invNextPrint *= 3;
+                invPrint();
+            }
+        }
 
         uint8_t writtenVi = 0u;
         int32_t oldVi = 0;
