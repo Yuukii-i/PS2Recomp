@@ -780,9 +780,13 @@ void gsGetAndResetPrimsPerFbp(std::vector<std::pair<uint32_t, uint32_t>> &out)
     }
 }
 
+extern "C" bool ps2x_vk_selftest(); // PERF-VK V0 (ps2_vk_backend.cpp)
+
 GSCpuBackend::GSCpuBackend()
 {
     using namespace GSMem;
+    if (const char *vkTest = std::getenv("PS2X_VK_SELFTEST"); vkTest && vkTest[0] == '1')
+        ps2x_vk_selftest(); // PERF-VK V0
     static std::once_flag lookupTablesOnce;
     std::call_once(lookupTablesOnce, []()
                    { InitLookupTables(); });
