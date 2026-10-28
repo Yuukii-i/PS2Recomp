@@ -7,6 +7,7 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_vu1_detail.h"
 #include "probe_ae.h"
+#include "vu1_native_api.h"
 
 #include <chrono>
 #include <algorithm>
@@ -3438,8 +3439,38 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
     const uint64_t budgetEnd = m_cycle + maxCycles;
     bool programEnded = false;
+    // VU1 native executor (stage 1): generated per-pair functions (generated/vu1_native_*.cpp, tools/vu1gen).
+    // Only for the known main image, VU1, exact scheduler mode, no probes, and never in the verifier's reference pass.
+    static const VuNativeOps vuNativeOps = {
+        [](VU1Interpreter &v) { v.commitReadyPipelines(); },
+        [](VU1Interpreter &v, uint64_t t) { v.advanceTo(t); },
+        [](VU1Interpreter &v) { v.advanceOneCycle(); },
+        [](VU1Interpreter &v, uint32_t u) { v.execUpper(u); },
+        [](VU1Interpreter &v, uint32_t l, uint8_t *d, uint32_t ds, GS &g, PS2Memory *m, uint32_t u) { v.execLower(l, d, ds, g, m, u); },
+        [](VU1Interpreter &v, uint8_t r, uint8_t lanes, const float *val, uint32_t lat) { v.queueVfWrite(r, lanes, val, lat); },
+        [](VU1Interpreter &v, uint8_t r, int32_t val, uint32_t lat) { v.queueViWrite(r, val, lat); },
+        [](VU1Interpreter &v, uint8_t lanes, const float *val, uint32_t lat) { v.queueAccWrite(lanes, val, lat); },
+    };
+    static const bool vuNativeAllowed = []() { const char *e = std::getenv("PS2X_VU1_NATIVE"); return !(e && e[0] == '0'); }();
+    const bool vuNativeOn = vuNativeAllowed && (m_unit == Unit::VU1) && !s_vfyRef && decodeCacheOk && !vu1FastMode() &&
+                            s_hcCurHash == kVu1NativeMainHash && codeSize == 0x4000u && !isVu3dProbeEnabled() &&
+                            !probe_ae::isEnabled() && !probe_ae::isDcProbeEnabled() && !s_egCurRunTraced &&
+                            !s_emRecording && !s_eiCurRunActive && !s_ekCurRunActive && !s_fcC80.active;
+    VuNativeCtx vuNativeCtx{&vuNativeOps, budgetEnd, 0u, false, vuData, dataSize, &gs, memory, codeSize};
+
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
+        if (vuNativeOn)
+        {
+            const int nativeResult = vu1NativeRun(*this, vuNativeCtx);
+            instrsThisRun += vuNativeCtx.instrs;
+            vuNativeCtx.instrs = 0u;
+            if (vuNativeCtx.programEnded)
+                programEnded = true;
+            if (nativeResult == 1)
+                break;
+            // nativeResult == 2: this pair has no native executor -> interpret it below
+        }
         commitReadyPipelines();
         if (m_state.pc + 8u > codeSize)
             break;
