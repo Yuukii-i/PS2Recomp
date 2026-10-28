@@ -3889,6 +3889,30 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             std::fflush(stdout);
         }
     }
+    if (ctx && (targetPc == 0x003B3C60u || targetPc == 0x003B45E8u)) // PROBE-FZ2
+    {
+        // Task FZ2: draw gate at 0x268724 requires free space > 0x3FFFF in the packet ring (obj at *0x64942C)
+        static std::atomic<uint32_t> s_gateCalls{0}, s_gateLow{0}, s_drawCalls{0}, s_gateLines{0};
+        if (targetPc == 0x003B45E8u)
+            s_drawCalls.fetch_add(1, std::memory_order_relaxed);
+        else if (getRegU32(ctx, 31) == 0x00268718u)
+        {
+            const uint32_t n = s_gateCalls.fetch_add(1, std::memory_order_relaxed);
+            const uint32_t obj = getRegU32(ctx, 4) & 0x01FFFFFFu;
+            uint32_t w14 = 0, w18 = 0;
+            std::memcpy(&w14, rdram + obj + 0x14, 4);
+            std::memcpy(&w18, rdram + obj + 0x18, 4);
+            const int32_t freeSp = (int32_t)((w18 & 0x0FFFFFFFu) - (w14 & 0x0FFFFFFFu));
+            if (freeSp <= 0x3FFFF)
+                s_gateLow.fetch_add(1, std::memory_order_relaxed);
+            if ((n % 25u) == 0u && s_gateLines.fetch_add(1, std::memory_order_relaxed) < 80u)
+            {
+                std::printf("[probe] fz2 gate n=%u low=%u draws=%u obj=0x%X w14=0x%X w18=0x%X free=%d\n",
+                            n, s_gateLow.load(), s_drawCalls.load(), obj, w14, w18, freeSp);
+                std::fflush(stdout);
+            }
+        }
+    }
     // vf0 is hardwired {0,0,0,1}; contexts built via R5900Context() start with it zeroed. (Hack Ledger: HW-faithful backstop)
     if (ctx)
         ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
