@@ -599,23 +599,49 @@ namespace
                 ref_->LoadClut(tex0, texclut);
             if (vkReady_)
             {
-                const uint32_t lo = tex0.cbp * 256u;
-                PageSet need;
-                pagesForBytes(need, lo, std::min(lo + 8192u, kVramSize));
+                // mirror of GSCpuBackend::LoadClut's early-outs: most calls read nothing
+                const uint32_t tp = tex0.psm;
+                const bool indexed = tp == 19 || tp == 20 || tp == 27 || tp == 36 || tp == 44;
+                bool willRead = false;
+                if (indexed)
                 {
-                    PageSet ov = gpuColor_;
-                    ov.orWith(gpuZ_);
-                    ov.andWith(need);
-                    if (ov.any())
+                    switch (tex0.cld)
                     {
-                        uint32_t pg = 0;
-                        while (!ov.test(pg))
-                            ++pg;
-                        const uint32_t key = (pg << 2) | (gpuColor_.test(pg) ? 1u : 0u) | (gpuZ_.test(pg) ? 2u : 0u);
-                        ++clutDiag_[key];
+                    case 1u: case 2u: case 3u: willRead = true; break;
+                    case 4u: willRead = (cpu_->m_clutCbp[0] != tex0.cbp); break;
+                    case 5u: willRead = (cpu_->m_clutCbp[1] != tex0.cbp); break;
+                    default: break;
                     }
                 }
-                syncPages(need, 2);
+                uint32_t effCbp = 0;
+                if (willRead)
+                {
+                    effCbp = tex0.cbp != 0u ? tex0.cbp : ((tex0.cld == 2u || tex0.cld == 4u) ? 0u : cpu_->m_clutCbp[0]);
+                    if (effCbp == 0u)
+                        willRead = false;
+                }
+                if (willRead)
+                {
+                    PageSet need;
+                    if (tex0.csm == 0u)
+                        pagesForBytes(need, effCbp * 256u, std::min(effCbp * 256u + 8192u, kVramSize)); // 16x16 CSM1 block, may straddle a page
+                    else
+                        pagesForRect(need, effCbp, std::max<uint32_t>(texclut.cbw, 1u), tex0.cpsm, texclut.cou * 16u, texclut.cou * 16u + 255u, texclut.cov, texclut.cov);
+                    {
+                        PageSet ov = gpuColor_;
+                        ov.orWith(gpuZ_);
+                        ov.andWith(need);
+                        if (ov.any())
+                        {
+                            uint32_t pg = 0;
+                            while (!ov.test(pg))
+                                ++pg;
+                            const uint32_t key = (pg << 2) | (gpuColor_.test(pg) ? 1u : 0u) | (gpuZ_.test(pg) ? 2u : 0u);
+                            ++clutDiag_[key];
+                        }
+                    }
+                    syncPages(need, 2);
+                }
             }
             cpu_->LoadClut(tex0, texclut);
             clutChanged_ = true;
@@ -1284,6 +1310,29 @@ namespace
             ++primsThisFrame_;
             ++gpuPrims_;
             pagesForRect(gpuColor_, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, bminX, bmaxX, bminY, bmaxY);
+            if (compare_)
+            {
+                ++primSerial_;
+                PageSet cp;
+                pagesForRect(cp, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, bminX, bmaxX, bminY, bmaxY);
+                for (uint32_t pg = 0; pg < 512u; ++pg)
+                    if (cp.test(pg))
+                    {
+                        PageWriter &w = lastWriter_[pg];
+                        w.serial = primSerial_;
+                        w.flags = flags;
+                        w.fpsm = ctx.frame.psm;
+                        w.tpsm = st.prim.tme ? ctx.tex0.psm : 0xFFu;
+                        w.tfx = ctx.tex0.tfx;
+                        w.tcc = ctx.tex0.tcc;
+                        w.test = static_cast<uint32_t>(ctx.test);
+                        w.alpha = static_cast<uint32_t>(ctx.alpha);
+                        w.fbmsk = ctx.frame.fbmsk;
+                        w.fbp = ctx.frame.fbp;
+                        w.fbw = ctx.frame.fbw;
+                        w.bbox[0] = bminX; w.bbox[1] = bmaxX; w.bbox[2] = bminY; w.bbox[3] = bmaxY;
+                    }
+            }
             if (!ctx.zbuf.zmask)
                 pagesForRect(gpuZ_, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, bminX, bmaxX, bminY, bmaxY);
             unfenced_.add(flo, fhi);
@@ -1304,6 +1353,8 @@ namespace
             const uint32_t *a = reinterpret_cast<const uint32_t *>(host_);
             const uint32_t *r = reinterpret_cast<const uint32_t *>(refVram_.data());
             uint64_t hist[4] = {0, 0, 0, 0};
+            static thread_local uint32_t bigPerPage[512], bigSampleAddr[512], bigSampleGpu[512], bigSampleRef[512];
+            std::memset(bigPerPage, 0, sizeof(bigPerPage));
             for (uint32_t i = 0; i < kVramSize / 4u; ++i)
                 if (a[i] != r[i])
                 {
@@ -1317,12 +1368,39 @@ namespace
                     const int bucket = md <= 1 ? 0 : md <= 3 ? 1 : md <= 15 ? 2 : 3;
                     ++hist[bucket];
                     ++cmpHist_[bucket];
-                    if (bucket == 3 && cmpBigPrinted_ < 12u)
+                    if (bucket == 3)
                     {
-                        ++cmpBigPrinted_;
-                        std::printf("[vkcmp] big diff present#%u addr=0x%06X gpu=%08X ref=%08X page=%u\n", presents_, i * 4u, a[i], r[i], (i * 4u) >> 13);
+                        const uint32_t pg = (i * 4u) >> 13;
+                        if (bigPerPage[pg]++ == 0)
+                        {
+                            bigSampleAddr[pg] = i * 4u;
+                            bigSampleGpu[pg] = a[i];
+                            bigSampleRef[pg] = r[i];
+                        }
                     }
                 }
+            if (hist[3] >= 1000u && cmpBigPrinted_ < 12u)
+            {
+                ++cmpBigPrinted_;
+                for (int rank = 0; rank < 5; ++rank)
+                {
+                    uint32_t best = 0, bestCount = 0;
+                    for (uint32_t pg = 0; pg < 512u; ++pg)
+                        if (bigPerPage[pg] > bestCount)
+                        {
+                            bestCount = bigPerPage[pg];
+                            best = pg;
+                        }
+                    if (bestCount == 0)
+                        break;
+                    const PageWriter &w = lastWriter_[best];
+                    std::printf("[vkcmp] BIG present#%u page=%u (0x%06X) words=%u sample addr=0x%06X gpu=%08X ref=%08X | last gpu writer serial=%llu flags=0x%X fpsm=%u tpsm=%u tfx=%u tcc=%u test=0x%X alpha=0x%X fbmsk=0x%X fbp=%u fbw=%u bbox=%d,%d,%d,%d\n",
+                                presents_, best, best * 8192u, bestCount, bigSampleAddr[best], bigSampleGpu[best], bigSampleRef[best],
+                                static_cast<unsigned long long>(w.serial), w.flags, w.fpsm, w.tpsm, w.tfx, w.tcc, w.test, w.alpha, w.fbmsk, w.fbp, w.fbw,
+                                w.bbox[0], w.bbox[1], w.bbox[2], w.bbox[3]);
+                    bigPerPage[best] = 0;
+                }
+            }
             ++cmpDirty_;
             if (cmpDirty_ <= 40u || (cmpDirty_ % 50u) == 0u)
                 std::printf("[vkcmp] present#%u hist<=1/<=3/<=15/>15 = %llu/%llu/%llu/%llu (cumulative %llu/%llu/%llu/%llu)\n", presents_,
@@ -1390,6 +1468,14 @@ namespace
         std::unordered_map<uint32_t, uint64_t> clutDiag_; // (page<<2 | colour | z<<1) -> CLUT loads that forced a sync
         uint64_t cmpHist_[4] = {0, 0, 0, 0};              // differing words by max channel diff: <=1, <=3, <=15, >15
         uint32_t cmpBigPrinted_ = 0;
+        struct PageWriter
+        {
+            uint64_t serial = 0;
+            uint32_t flags = 0, fpsm = 0, tpsm = 0, tfx = 0, tcc = 0, test = 0, alpha = 0, fbmsk = 0, fbp = 0, fbw = 0;
+            int bbox[4] = {0, 0, 0, 0};
+        };
+        PageWriter lastWriter_[512];
+        uint64_t primSerial_ = 0;
         uint32_t primCount_ = 0, clutSlots_ = 0, stagingOff_ = 0;
         int32_t curClutSlot_ = -1;
         bool clutChanged_ = true;
