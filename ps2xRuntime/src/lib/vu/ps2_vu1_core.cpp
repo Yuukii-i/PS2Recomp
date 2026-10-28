@@ -3590,16 +3590,16 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             if (!same && shown < 12)
             {
                 ++shown;
-                std::fprintf(stderr, "[probe] hl DIFF upper=%08X dest=%X fs=%u ft=%u fd=%u pmF=%X/%X", u, (u >> 21) & 0xF, (u >> 11) & 0x1F, (u >> 16) & 0x1F, (u >> 6) & 0x1F, pm1, pmv.flag);
+                std::printf("[probe] hl DIFF upper=%08X dest=%X fs=%u ft=%u fd=%u pmF=%X/%X", u, (u >> 21) & 0xF, (u >> 11) & 0x1F, (u >> 16) & 0x1F, (u >> 6) & 0x1F, pm1, pmv.flag);
                 const uint32_t fd = (u >> 6) & 0x1F;
                 for (int c = 0; c < 4; ++c)
                 {
                     uint32_t a, b, aa, ba;
                     std::memcpy(&a, &s1.vf[fd][c], 4); std::memcpy(&b, &v.m_state.vf[fd][c], 4);
                     std::memcpy(&aa, &s1.acc[c], 4); std::memcpy(&ba, &v.m_state.acc[c], 4);
-                    std::fprintf(stderr, " | c%d vd %08X/%08X acc %08X/%08X", c, a, b, aa, ba);
+                    std::printf(" | c%d vd %08X/%08X acc %08X/%08X", c, a, b, aa, ba);
                 }
-                std::fprintf(stderr, " flagEq=%d\n", std::memcmp(f1.data(), v.m_flagPipeline.data(), sizeof(f1)) == 0);
+                std::printf(" flagEq=%d\n", std::memcmp(f1.data(), v.m_flagPipeline.data(), sizeof(f1)) == 0);
             }
         },
         [](VU1Interpreter &v, uint32_t l, uint8_t *d, uint32_t ds, GS &g, PS2Memory *m, uint32_t u) { v.execLower(l, d, ds, g, m, u); },
