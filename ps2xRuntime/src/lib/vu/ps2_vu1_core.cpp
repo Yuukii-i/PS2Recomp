@@ -3584,9 +3584,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             const uint32_t pm1 = pmv.flag;
             v.m_state = s0; v.m_flagPipeline = f0; pmv.flag = pm0;
             v.execUpper(u);
+            const auto flagsEq = [&](const decltype(f1) &x, const decltype(f1) &y) { for (size_t k = 0; k < x.size(); ++k) if (x[k].valid != y[k].valid || (x[k].valid && (x[k].mac != y[k].mac || x[k].status != y[k].status || x[k].extraSticky != y[k].extraSticky || x[k].clip != y[k].clip || x[k].readyCycle != y[k].readyCycle || x[k].issueCycle != y[k].issueCycle || x[k].writesMac != y[k].writesMac || x[k].writesStatus != y[k].writesStatus || x[k].writesSticky != y[k].writesSticky || x[k].writesClip != y[k].writesClip))) return false; return true; };
             static int shown = 0;
             const bool same = std::memcmp(s1.vf, v.m_state.vf, sizeof(s1.vf)) == 0 && std::memcmp(s1.acc, v.m_state.acc, sizeof(s1.acc)) == 0 &&
-                              pm1 == pmv.flag && std::memcmp(f1.data(), v.m_flagPipeline.data(), sizeof(f1)) == 0;
+                              pm1 == pmv.flag && flagsEq(f1, v.m_flagPipeline);
             if (!same && shown < 12)
             {
                 ++shown;
@@ -3599,7 +3600,11 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                     std::memcpy(&aa, &s1.acc[c], 4); std::memcpy(&ba, &v.m_state.acc[c], 4);
                     std::printf(" | c%d vd %08X/%08X acc %08X/%08X", c, a, b, aa, ba);
                 }
-                std::printf(" flagEq=%d\n", std::memcmp(f1.data(), v.m_flagPipeline.data(), sizeof(f1)) == 0);
+                std::printf(" flagEq=%d", (int)flagsEq(f1, v.m_flagPipeline));
+                for (size_t k = 0; k < f1.size(); ++k)
+                    if (f1[k].valid != v.m_flagPipeline[k].valid || (f1[k].valid && (f1[k].mac != v.m_flagPipeline[k].mac || f1[k].status != v.m_flagPipeline[k].status || f1[k].extraSticky != v.m_flagPipeline[k].extraSticky)))
+                        std::printf(" | slot%zu fast mac=%X st=%X xs=%X orig mac=%X st=%X xs=%X", k, f1[k].mac, f1[k].status, f1[k].extraSticky, v.m_flagPipeline[k].mac, v.m_flagPipeline[k].status, v.m_flagPipeline[k].extraSticky);
+                std::printf("\n");
             }
         },
         [](VU1Interpreter &v, uint32_t l, uint8_t *d, uint32_t ds, GS &g, PS2Memory *m, uint32_t u) { v.execLower(l, d, ds, g, m, u); },
