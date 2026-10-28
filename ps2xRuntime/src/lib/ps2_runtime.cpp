@@ -3938,6 +3938,28 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             std::fflush(stdout);
         }
     }
+    if (ctx) // PROBE-GY: who changes the player-name record at 0x742250 / 0x742280 (log first changes with call context)
+    {
+        static uint64_t s_gyLast[3] = {0, 0, 0};
+        static std::atomic<uint32_t> s_gyLines{0};
+        static const uint32_t s_gyAddrs[3] = {0x742250u, 0x742258u, 0x742280u};
+        for (int gi = 0; gi < 3; ++gi)
+        {
+            uint64_t cur = 0;
+            std::memcpy(&cur, rdram + s_gyAddrs[gi], 8);
+            if (cur != s_gyLast[gi])
+            {
+                if (s_gyLines.fetch_add(1, std::memory_order_relaxed) < 40u)
+                {
+                    std::printf("[probe] gy change addr=0x%X old=%016llX new=%016llX tgt=0x%X src=0x%X ra=0x%X pc=0x%X prev=0x%X/0x%X\n",
+                                s_gyAddrs[gi], (unsigned long long)s_gyLast[gi], (unsigned long long)cur, targetPc, sourcePc,
+                                getRegU32(ctx, 31), ctx->pc, g_lastDistinctFns[0], g_lastDistinctFns[1]);
+                    std::fflush(stdout);
+                }
+                s_gyLast[gi] = cur;
+            }
+        }
+    }
     // vf0 is hardwired {0,0,0,1}; contexts built via R5900Context() start with it zeroed. (Hack Ledger: HW-faithful backstop)
     if (ctx)
         ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
