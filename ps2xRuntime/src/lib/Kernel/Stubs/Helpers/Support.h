@@ -796,7 +796,7 @@ namespace
               m_ctx(ctx),
               m_runtime(runtime),
               m_fixedArgs(fixedArgs),
-              m_stackBase(getRegU32(ctx, 29) + 0x10)
+              m_stackBase(getRegU32(ctx, 29)) // FIX-VARARG-STACK: EE ABI stack args start at sp+0 in 8-byte slots (verified in PCSX2 at 0x350CCC)
         {
             if (m_fixedArgs < 0)
             {
@@ -814,6 +814,15 @@ namespace
 
         uint64_t nextU64()
         {
+            if (m_slotIndex >= 8u)
+            {
+                // stack arguments occupy one 8-byte slot each
+                const uint64_t lo = readWordAtSlot(m_slotIndex);
+                uint32_t hiWord = 0;
+                (void)tryReadWordFromGuest(m_rdram, m_runtime, m_stackBase + (m_slotIndex - 8u) * 8u + 4u, hiWord);
+                ++m_slotIndex;
+                return lo | (static_cast<uint64_t>(hiWord) << 32);
+            }
             // O32 ABI aligns 64-bit variadic values on even 32-bit slots.
             if ((m_slotIndex & 1u) != 0u)
             {
@@ -835,7 +844,7 @@ namespace
             }
 
             const uint32_t stackIndex = slotIndex - 8u;
-            const uint32_t stackAddr = m_stackBase + stackIndex * 4u;
+            const uint32_t stackAddr = m_stackBase + stackIndex * 8u;
             uint32_t value = 0;
             (void)tryReadWordFromGuest(m_rdram, m_runtime, stackAddr, value);
             return value;
