@@ -2902,6 +2902,29 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
                 std::fwrite(vuCode, 1, codeSize, f);
                 std::fclose(f);
             }
+            // per-pair usage tables exactly as the scheduler sees them (input for the generator; avoids porting the decode tables)
+            std::snprintf(path, sizeof(path), "logs/vuusage_u%d_%016llx.txt", m_unit == Unit::VU1 ? 1 : 0, static_cast<unsigned long long>(h));
+            if (FILE *uf = std::fopen(path, "w"))
+            {
+                auto dumpUsage = [&](const char *tag, const InstructionUsage &u) {
+                    std::fprintf(uf, " %s r=%u:%u:%u:%u:%u w=%u:%u vir=%x viw=%x ar=%u aw=%u lat=%u vfl=%u vil=%u pipe=%u wq=%d wp=%d rc=%d wc=%d dnb=%d rsv=%d", tag,
+                                 u.vfReadCount, u.vfRead[0].reg, u.vfRead[0].lanes, u.vfRead[1].reg, u.vfRead[1].lanes,
+                                 u.vfWrite.reg, u.vfWrite.lanes, static_cast<unsigned>(u.viRead), static_cast<unsigned>(u.viWrite),
+                                 u.accRead, u.accWrite, u.latency, u.vfLatency, u.viLatency, static_cast<unsigned>(u.pipeline),
+                                 u.waitQ ? 1 : 0, u.waitP ? 1 : 0, u.readsClip ? 1 : 0, u.writesClip ? 1 : 0, u.delaysNextBranchRead ? 1 : 0, u.reserved ? 1 : 0);
+                };
+                for (uint32_t i = 0; i < pairCount; ++i)
+                {
+                    const DecodedInstructionPair &dp = m_decodedCodeCache[i];
+                    std::fprintf(uf, "P %04X %08X %08X i=%d e=%d m=%d d=%d t=%d shadow=%u supp=%u", i * 8u, dp.upper, dp.lower,
+                                 dp.iBit ? 1 : 0, dp.eBit ? 1 : 0, dp.mBit ? 1 : 0, dp.dBit ? 1 : 0, dp.tBit ? 1 : 0,
+                                 dp.upperVfShadowReg, dp.suppressedLowerVf);
+                    dumpUsage("L", dp.lowerUsage);
+                    dumpUsage("U", dp.upperUsage);
+                    std::fprintf(uf, "\n");
+                }
+                std::fclose(uf);
+            }
             std::printf("[probe] hc vucode unit=%d hash=%016llx size=%u gen=%llu\n", m_unit == Unit::VU1 ? 1 : 0,
                         static_cast<unsigned long long>(h), codeSize, static_cast<unsigned long long>(generation));
             std::fflush(stdout);
