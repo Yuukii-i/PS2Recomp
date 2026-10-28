@@ -4,8 +4,8 @@
 // fragment shader (vk/gs_draw.frag) that reads/writes a GPU copy of the 4 MB GS VRAM (storage buffer) with the exact PS2 swizzle.
 // Everything else (transfers, CLUT loads, lines/points, presentation, unsupported formats) runs on the wrapped CPU backend,
 // with the two VRAM copies synchronised by conservative byte ranges:
-//   gpuWritten_ = ranges the GPU wrote that the host copy does not have yet   (download before any CPU access that overlaps)
-//   hostDirty_  = ranges the CPU wrote that the GPU copy does not have yet    (staged + copied before the next GPU draw)
+//   gpuColor_/gpuZ_ = 8 KB pages the GPU wrote that the host copy does not have yet (downloaded only when a CPU access touches them)
+//   hostNewer_      = pages the CPU wrote that the GPU copy does not have yet       (staged + copied before the next GPU draw)
 // Env: PS2X_GS_VULKAN=1 enables it; PS2X_GS_COMPARE=1 additionally runs a reference CPU backend and reports per-present
 // VRAM mismatches ([vkcmp] lines), then resynchronises the GPU copy to the reference so errors do not accumulate.
 #include <vulkan/vulkan.h>
@@ -97,6 +97,53 @@ namespace
         }
     };
 
+    // PERF-HW: page-granular (8 KB GS page, 512 pages in 4 MB) dirty sets replace the single [lo,hi) ranges.
+    struct PageSet
+    {
+        uint64_t w[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        bool any() const
+        {
+            for (uint64_t x : w)
+                if (x)
+                    return true;
+            return false;
+        }
+        void clear()
+        {
+            for (uint64_t &x : w)
+                x = 0;
+        }
+        void setAll()
+        {
+            for (uint64_t &x : w)
+                x = ~0ull;
+        }
+        void set(uint32_t p) { w[(p >> 6) & 7u] |= 1ull << (p & 63u); }
+        bool test(uint32_t p) const { return ((w[(p >> 6) & 7u] >> (p & 63u)) & 1ull) != 0ull; }
+        void orWith(const PageSet &o)
+        {
+            for (int i = 0; i < 8; ++i)
+                w[i] |= o.w[i];
+        }
+        void andWith(const PageSet &o)
+        {
+            for (int i = 0; i < 8; ++i)
+                w[i] &= o.w[i];
+        }
+        void andNot(const PageSet &o)
+        {
+            for (int i = 0; i < 8; ++i)
+                w[i] &= ~o.w[i];
+        }
+        bool intersects(const PageSet &o) const
+        {
+            for (int i = 0; i < 8; ++i)
+                if (w[i] & o.w[i])
+                    return true;
+            return false;
+        }
+    };
+
     void pageDims(uint32_t psm, uint32_t &pw, uint32_t &ph)
     {
         switch (psm)
@@ -125,6 +172,32 @@ namespace
         }
         lo = static_cast<uint32_t>(l);
         hi = static_cast<uint32_t>(h);
+    }
+
+    // pages touched by the pixel rectangle [x0,x1]x[y0,y1] of a surface (same page id formula as the swizzle tables)
+    void pagesForRect(PageSet &out, uint32_t baseBlock, uint32_t bw, uint32_t psm, uint32_t x0, uint32_t x1, uint32_t y0, uint32_t y1)
+    {
+        uint32_t pw, ph;
+        pageDims(psm, pw, ph);
+        const uint32_t pagesPerRow = std::max(1u, (std::max(bw, 1u) * 64u) / pw);
+        const uint32_t basePage = baseBlock / 32u;
+        const uint32_t r0 = y0 / ph, r1 = y1 / ph, c0 = x0 / pw, c1 = x1 / pw;
+        if (r1 < r0 || c1 < c0 || static_cast<uint64_t>(r1 - r0 + 1u) * (c1 - c0 + 1u) > 4096u)
+        {
+            out.setAll();
+            return;
+        }
+        for (uint32_t rr = r0; rr <= r1; ++rr)
+            for (uint32_t cc = c0; cc <= c1; ++cc)
+                out.set((basePage + rr * pagesPerRow + cc) & 511u);
+    }
+
+    void pagesForBytes(PageSet &out, uint32_t lo, uint32_t hi)
+    {
+        if (hi > kVramSize)
+            hi = kVramSize;
+        for (uint32_t pg = lo >> 13; pg < ((hi + 8191u) >> 13) && pg < 512u; ++pg)
+            out.set(pg);
     }
 
     bool isFramePsm(uint32_t p) { return p == 0 || p == 1 || p == 2 || p == 10; }
@@ -483,9 +556,9 @@ namespace
                 vkReady_ = createResources();
             if (!vkReady_)
                 vkFailed_ = true;
-            gpuWritten_.clear();
-            hostDirty_.clear();
-            hostDirty_.add(0, kVramSize);
+            gpuColor_.clear();
+            gpuZ_.clear();
+            hostNewer_.setAll();
         }
 
         void Reset() override
@@ -496,8 +569,7 @@ namespace
             cpu_->Reset();
             if (ref_)
                 ref_->Reset();
-            hostDirty_.clear();
-            hostDirty_.add(0, kVramSize);
+            hostNewer_.setAll();
             clutChanged_ = true;
         }
 
@@ -527,8 +599,9 @@ namespace
             if (vkReady_)
             {
                 const uint32_t lo = tex0.cbp * 256u;
-                if (gpuWritten_.overlaps(lo, std::min(lo + 16384u, kVramSize)))
-                    syncFromGpu();
+                PageSet need;
+                pagesForBytes(need, lo, std::min(lo + 16384u, kVramSize));
+                syncPages(need, 2);
             }
             cpu_->LoadClut(tex0, texclut);
             clutChanged_ = true;
@@ -541,26 +614,23 @@ namespace
                 ref_->BeginTransfer(command);
             if (vkReady_)
             {
-                Range r;
                 const auto &bb = command.bitbltbuf;
                 const auto &tp = command.trxpos;
                 const auto &tr = command.trxreg;
                 const uint32_t dir = command.direction;
+                const uint32_t rw = std::max<uint32_t>(tr.rrw, 1u), rh = std::max<uint32_t>(tr.rrh, 1u);
                 if (dir == 0u || dir == 2u) // host->local, local->local: destination written
                 {
-                    uint32_t lo, hi;
-                    rowsRange(bb.dbp, bb.dbw, bb.dpsm, tp.dsay, static_cast<uint32_t>(tp.dsay) + std::max<uint32_t>(tr.rrh, 1u) - 1u, lo, hi);
-                    r.add(lo, hi);
-                    if (gpuWritten_.overlaps(lo, hi))
-                        syncFromGpu();
-                    hostDirty_.add(lo, hi);
+                    PageSet pg;
+                    pagesForRect(pg, bb.dbp, bb.dbw, bb.dpsm, tp.dsax, tp.dsax + rw - 1u, tp.dsay, tp.dsay + rh - 1u);
+                    syncPages(pg, 1);
+                    hostNewer_.orWith(pg);
                 }
                 if (dir == 1u || dir == 2u) // local->host, local->local: source read
                 {
-                    uint32_t lo, hi;
-                    rowsRange(bb.sbp, bb.sbw, bb.spsm, tp.ssay, static_cast<uint32_t>(tp.ssay) + std::max<uint32_t>(tr.rrh, 1u) - 1u, lo, hi);
-                    if (gpuWritten_.overlaps(lo, hi))
-                        syncFromGpu();
+                    PageSet pg;
+                    pagesForRect(pg, bb.sbp, bb.sbw, bb.spsm, tp.ssax, tp.ssax + rw - 1u, tp.ssay, tp.ssay + rh - 1u);
+                    syncPages(pg, 1);
                 }
             }
             cpu_->BeginTransfer(command);
@@ -594,7 +664,7 @@ namespace
         {
             std::lock_guard<std::mutex> lk(m_);
             if (vkReady_)
-                syncFromGpu();
+                syncAll(6);
             if (ref_)
                 ref_->Sync(reason);
             cpu_->Sync(reason);
@@ -604,7 +674,13 @@ namespace
         {
             std::lock_guard<std::mutex> lk(m_);
             if (vkReady_)
-                syncFromGpu();
+            {
+                // the CPU presenter only reads colour surfaces; Z pages stay GPU-newer unless the compare mode needs everything
+                if (compare_)
+                    syncAll(0);
+                else
+                    syncPages(gpuColor_, 0);
+            }
             if (ref_)
                 comparePresent();
             ++presents_;
@@ -620,11 +696,11 @@ namespace
                 ref_->ClearFramebuffer(context, rgba);
             if (vkReady_)
             {
-                uint32_t lo, hi;
-                rowsRange(context.frame.fbp << 5u, context.frame.fbw, context.frame.psm, 0, std::min<uint32_t>(context.scissor.y1, 2047u), lo, hi);
-                if (gpuWritten_.overlaps(lo, hi))
-                    syncFromGpu();
-                hostDirty_.add(lo, hi);
+                PageSet pg;
+                pagesForRect(pg, context.frame.fbp << 5u, context.frame.fbw, context.frame.psm, 0, std::max(context.frame.fbw, 1u) * 64u - 1u, 0,
+                             std::min<uint32_t>(context.scissor.y1, 2047u));
+                syncPages(pg, 3);
+                hostNewer_.orWith(pg);
             }
             return cpu_->ClearFramebuffer(context, rgba);
         }
@@ -645,7 +721,11 @@ namespace
             auto *self = const_cast<GSVulkanBackend *>(this);
             std::lock_guard<std::mutex> lk(self->m_);
             if (self->vkReady_)
-                self->syncFromGpu();
+            {
+                PageSet pg;
+                pagesForRect(pg, base, bw, psm, x, x, y, y);
+                self->syncPages(pg, 5);
+            }
             return cpu_->ReadVram(psm, base, bw, x, y);
         }
 
@@ -656,11 +736,10 @@ namespace
                 ref_->WriteVram(psm, base, bw, x, y, value);
             if (vkReady_)
             {
-                uint32_t lo, hi;
-                rowsRange(base, bw, psm, y, y, lo, hi);
-                if (gpuWritten_.overlaps(lo, hi))
-                    syncFromGpu();
-                hostDirty_.add(lo, hi);
+                PageSet pg;
+                pagesForRect(pg, base, bw, psm, x, x, y, y);
+                syncPages(pg, 4);
+                hostNewer_.orWith(pg);
             }
             cpu_->WriteVram(psm, base, bw, x, y, value);
         }
@@ -670,7 +749,7 @@ namespace
             auto *self = const_cast<GSVulkanBackend *>(this);
             std::lock_guard<std::mutex> lk(self->m_);
             if (self->vkReady_)
-                self->syncFromGpu();
+                self->syncAll(5);
             cpu_->SnapshotVram(out);
         }
 
@@ -802,19 +881,45 @@ namespace
             unfenced_.clear();
         }
 
-        // submit everything recorded; optionally download the GPU-written range into the host VRAM
-        void flush(bool download)
+        // contiguous runs of set pages -> (firstPage, pageCount)
+        static void pageRuns(const PageSet &set, std::vector<std::pair<uint32_t, uint32_t>> &runs)
         {
-            if (!recording_ && !(download && !gpuWritten_.empty()))
+            runs.clear();
+            uint32_t pg = 0;
+            while (pg < 512u)
+            {
+                if (!set.test(pg))
+                {
+                    ++pg;
+                    continue;
+                }
+                uint32_t e = pg;
+                while (e < 512u && set.test(e))
+                    ++e;
+                runs.emplace_back(pg, e - pg);
+                pg = e;
+            }
+        }
+
+        // submit everything recorded; optionally download the given GPU-newer pages into the host VRAM
+        void flush(const PageSet *down)
+        {
+            if (!recording_ && !down)
                 return;
             beginRecording();
             endPass();
-            const bool doDown = download && !gpuWritten_.empty();
-            if (doDown)
+            std::vector<std::pair<uint32_t, uint32_t>> runs;
+            if (down)
             {
+                pageRuns(*down, runs);
+                std::vector<VkBufferCopy> regions;
+                regions.reserve(runs.size());
+                for (const auto &run : runs)
+                    regions.push_back(VkBufferCopy{static_cast<VkDeviceSize>(run.first) * 8192u, static_cast<VkDeviceSize>(run.first) * 8192u,
+                                                   static_cast<VkDeviceSize>(run.second) * 8192u});
                 bufBarrier(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-                VkBufferCopy c{gpuWritten_.lo, gpuWritten_.lo, gpuWritten_.hi - gpuWritten_.lo};
-                vkCmdCopyBuffer(cb_, vram_.b, down_.b, 1, &c);
+                if (!regions.empty())
+                    vkCmdCopyBuffer(cb_, vram_.b, down_.b, static_cast<uint32_t>(regions.size()), regions.data());
                 VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
                 hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                 hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -841,57 +946,84 @@ namespace
                 resetRings();
                 return;
             }
-            if (doDown)
+            if (down)
             {
-                std::memcpy(host_ + gpuWritten_.lo, down_.map + gpuWritten_.lo, gpuWritten_.hi - gpuWritten_.lo);
-                gpuWritten_.clear();
-                downloadBytes_ += 0; // (kept for stats symmetry)
+                for (const auto &run : runs)
+                {
+                    const size_t off = static_cast<size_t>(run.first) * 8192u, len = static_cast<size_t>(run.second) * 8192u;
+                    std::memcpy(host_ + off, down_.map + off, len);
+                    downloadBytes_ += len;
+                }
+                gpuColor_.andNot(*down);
+                gpuZ_.andNot(*down);
             }
             syncMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             ++submits_;
             resetRings();
         }
 
-        void syncFromGpu()
+        // make the host copy of every page in `need` current (download only the GPU-newer ones among them)
+        void syncPages(const PageSet &need, int reason)
         {
             if (!vkReady_)
                 return;
-            if (gpuWritten_.empty() && !recording_)
+            PageSet todo = gpuColor_;
+            todo.orWith(gpuZ_);
+            todo.andWith(need);
+            if (!todo.any())
                 return;
             ++syncs_;
-            flush(true);
+            ++syncReason_[std::min(reason, 9)];
+            flush(&todo);
+        }
+
+        void syncAll(int reason)
+        {
+            PageSet all;
+            all.setAll();
+            syncPages(all, reason);
         }
 
         void discardGpu()
         {
             if (recording_)
-            {
-                flush(false);
-            }
-            gpuWritten_.clear();
+                flush(nullptr);
+            gpuColor_.clear();
+            gpuZ_.clear();
         }
 
-        // copy host-dirty ranges into the GPU VRAM (inside the command stream, before the next draw)
+        // copy host-newer pages into the GPU VRAM (inside the command stream, before the next draw)
         bool ensureUpload()
         {
-            if (hostDirty_.empty())
+            if (!hostNewer_.any())
                 return true;
-            const uint32_t lo = hostDirty_.lo, hi = std::min(hostDirty_.hi, kVramSize);
-            const uint32_t size = hi - lo;
-            if (stagingOff_ + size > kStagingSize)
-                flush(false);
+            std::vector<std::pair<uint32_t, uint32_t>> runs;
+            pageRuns(hostNewer_, runs);
+            uint64_t total = 0;
+            for (const auto &run : runs)
+                total += static_cast<uint64_t>(run.second) * 8192u;
+            if (stagingOff_ + total + runs.size() * 256u > kStagingSize)
+                flush(nullptr);
             if (!vkReady_)
                 return false;
             beginRecording();
             endPass();
-            std::memcpy(staging_.map + stagingOff_, host_ + lo, size);
-            VkBufferCopy c{stagingOff_, lo, size};
-            vkCmdCopyBuffer(cb_, staging_.b, vram_.b, 1, &c);
+            std::vector<VkBufferCopy> regions;
+            regions.reserve(runs.size());
+            uint32_t off = stagingOff_;
+            for (const auto &run : runs)
+            {
+                const uint32_t addr = run.first * 8192u, len = run.second * 8192u;
+                std::memcpy(staging_.map + off, host_ + addr, len);
+                regions.push_back(VkBufferCopy{off, addr, len});
+                off += (len + 255u) & ~255u;
+            }
+            vkCmdCopyBuffer(cb_, staging_.b, vram_.b, static_cast<uint32_t>(regions.size()), regions.data());
             bufBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            stagingOff_ += (size + 255u) & ~255u;
-            uploadBytes_ += size;
-            hostDirty_.clear();
+            stagingOff_ = off;
+            uploadBytes_ += total;
+            hostNewer_.clear();
             return true;
         }
 
@@ -901,14 +1033,12 @@ namespace
             if (vkReady_)
             {
                 // the CPU draw reads/writes frame, Z and textures: simplest safe rule is a full sync
-                if (!gpuWritten_.empty() || recording_)
-                    syncFromGpu();
+                syncAll(7);
                 const auto &ctx = batch.state.context;
-                uint32_t lo, hi;
-                rowsRange(ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, ctx.scissor.y0, std::min<uint32_t>(ctx.scissor.y1, 2047u), lo, hi);
-                hostDirty_.add(lo, hi);
-                rowsRange(ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, ctx.scissor.y0, std::min<uint32_t>(ctx.scissor.y1, 2047u), lo, hi);
-                hostDirty_.add(lo, hi);
+                const uint32_t sy1 = std::min<uint32_t>(ctx.scissor.y1, 2047u);
+                const uint32_t sx1 = std::min<uint32_t>(ctx.scissor.x1, 2047u);
+                pagesForRect(hostNewer_, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, ctx.scissor.x0, sx1, ctx.scissor.y0, sy1);
+                pagesForRect(hostNewer_, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, ctx.scissor.x0, sx1, ctx.scissor.y0, sy1);
             }
             ++cpuPrims_;
             cpu_->Submit(batch);
@@ -949,11 +1079,11 @@ namespace
             if (!ensureUpload()) // CPU-written data must be in GPU VRAM before this draw
                 return 8;
             if (primCount_ >= kMaxPrims)
-                flush(false);
+                flush(nullptr);
             if (clutChanged_ || curClutSlot_ < 0)
             {
                 if (clutSlots_ >= kMaxClutSlots)
-                    flush(false);
+                    flush(nullptr);
                 if (!vkReady_)
                     return 8;
                 std::memcpy(clutBuf_.map + static_cast<size_t>(clutSlots_) * 1024u, cpu_->m_clut.data(), 1024u);
@@ -1138,8 +1268,9 @@ namespace
             ++primCount_;
             ++primsThisFrame_;
             ++gpuPrims_;
-            gpuWritten_.add(flo, fhi);
-            gpuWritten_.add(zlo, zhi);
+            pagesForRect(gpuColor_, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, bminX, bmaxX, bminY, bmaxY);
+            if (!ctx.zbuf.zmask)
+                pagesForRect(gpuZ_, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, bminX, bmaxX, bminY, bmaxY);
             unfenced_.add(flo, fhi);
             unfenced_.add(zlo, zhi);
             return 0;
@@ -1172,8 +1303,7 @@ namespace
                             static_cast<unsigned long long>(cpuPrims_));
             // resynchronise: GPU copy follows the reference so errors do not accumulate
             std::memcpy(host_, refVram_.data(), kVramSize);
-            hostDirty_.clear();
-            hostDirty_.add(0, kVramSize);
+            hostNewer_.setAll();
         }
 
         void maybePrintStats()
@@ -1187,6 +1317,11 @@ namespace
                         static_cast<unsigned long long>(fallback_[3]), static_cast<unsigned long long>(fallback_[4]), static_cast<unsigned long long>(fallback_[5]),
                         static_cast<unsigned long long>(fallback_[6]), static_cast<unsigned long long>(fallback_[7]), static_cast<unsigned long long>(fallback_[8]),
                         compare_ ? "" : "");
+            std::printf("[vk] syncs by reason present=%llu transfer=%llu clut=%llu clear=%llu writevram=%llu readvram=%llu sync=%llu cpudraw=%llu download_MB=%.1f\n",
+                        static_cast<unsigned long long>(syncReason_[0]), static_cast<unsigned long long>(syncReason_[1]),
+                        static_cast<unsigned long long>(syncReason_[2]), static_cast<unsigned long long>(syncReason_[3]),
+                        static_cast<unsigned long long>(syncReason_[4]), static_cast<unsigned long long>(syncReason_[5]),
+                        static_cast<unsigned long long>(syncReason_[6]), static_cast<unsigned long long>(syncReason_[7]), downloadBytes_ / 1048576.0);
             if (compare_)
                 std::printf("[vkcmp] summary clean=%llu dirty=%llu\n", static_cast<unsigned long long>(cmpClean_), static_cast<unsigned long long>(cmpDirty_));
         }
@@ -1210,7 +1345,9 @@ namespace
         uint32_t *primMap_ = nullptr;
         bool recording_ = false, inPass_ = false;
 
-        Range gpuWritten_, hostDirty_, unfenced_;
+        Range unfenced_;
+        PageSet gpuColor_, gpuZ_, hostNewer_;
+        uint64_t syncReason_[10] = {};
         uint32_t primCount_ = 0, clutSlots_ = 0, stagingOff_ = 0;
         int32_t curClutSlot_ = -1;
         bool clutChanged_ = true;
