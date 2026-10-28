@@ -1498,6 +1498,13 @@ void VU1Interpreter::queueQ(float value, uint32_t latency, uint32_t statusDi)
 {
     uint32_t ignoredFlags = 0u;
     value = normalizeResult(value, ignoredFlags);
+    if (vu1FastMode()) // PERF-GJ2: stalls are not modelled in fast mode, so Q must land immediately (log gp: stale Q => texcoord diffs)
+    {
+        m_state.q = value;
+        const uint32_t di = statusDi & 0x30u;
+        m_state.status = (m_state.status & 0xFCFu) | di | (di << 6);
+        return;
+    }
     m_fdiv.valid = true;
     m_fdiv.readyCycle = m_cycle + latency;
     m_fdiv.value = value;
@@ -1508,6 +1515,11 @@ void VU1Interpreter::queueP(float value, uint32_t latency)
 {
     uint32_t ignoredFlags = 0u;
     value = normalizeResult(value, ignoredFlags);
+    if (vu1FastMode()) // PERF-GJ2
+    {
+        m_state.p = value;
+        return;
+    }
     for (ScalarPipelineEntry &entry : m_efu)
     {
         if (!entry.valid)
