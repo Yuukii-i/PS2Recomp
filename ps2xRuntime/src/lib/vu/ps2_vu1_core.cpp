@@ -1319,10 +1319,10 @@ uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
 // writes land immediately; only Q/P (fdiv/efu) keep their latency. Cycle counts become ~1 per pair.
 static std::vector<uint8_t> *s_vfyCapture = nullptr; // PROBE-GV: when set, XGKICK packets are captured instead of submitted
 static int s_vfyFastOverride = -1;                    // PROBE-GV: -1 env, 0 force exact, 1 force fast
-static inline bool vu1VerifyEnabled()
+static inline int vu1VerifyMode() // PS2X_VU1_VERIFY: 1 = VU1 only, 2 = VU0 only, 3 = both
 {
-    static const bool s_on = []() { const char *v = std::getenv("PS2X_VU1_VERIFY"); return v && v[0] == '1'; }();
-    return s_on;
+    static const int s_mode = []() { const char *v = std::getenv("PS2X_VU1_VERIFY"); return v ? std::atoi(v) : 0; }();
+    return s_mode;
 }
 static inline bool vu1FastMode()
 {
@@ -3046,7 +3046,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     m_state.vf[0][1] = 0.0f;
     m_state.vf[0][2] = 0.0f;
     m_state.vf[0][3] = 1.0f;
-    if (vu1VerifyEnabled()) // PROBE-GV: A/B check exact vs fast on identical input; game keeps the exact result
+    if ((vu1VerifyMode() & (m_unit == Unit::VU1 ? 1 : 2)) != 0) // PROBE-GV: A/B check exact vs fast on identical input; game keeps the exact result
     {
         const VU1State s0 = m_state;
         const uint32_t wc0 = m_workingClip;
@@ -3085,7 +3085,9 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             if (std::memcmp(memA.data() + q * 16u, vuData + q * 16u, 16) != 0) badMemQw = static_cast<int>(q);
         const bool badGif = capA != capB;
 
-        static uint32_t s_gvTotal = 0, s_gvBad = 0, s_gvPrinted = 0;
+        static uint32_t s_gvTotalU[2] = {0, 0}, s_gvBadU[2] = {0, 0}, s_gvPrintedU[2] = {0, 0};
+        const int gvU = (m_unit == Unit::VU1) ? 1 : 0;
+        uint32_t &s_gvTotal = s_gvTotalU[gvU], &s_gvBad = s_gvBadU[gvU], &s_gvPrinted = s_gvPrintedU[gvU];
         ++s_gvTotal;
         const bool bad = badVf >= 0 || badVi >= 0 || badAcc || badQpi || badFlags || badMemQw >= 0 || badGif;
         if (bad)
@@ -3093,8 +3095,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         if (bad && s_gvPrinted < 40u)
         {
             ++s_gvPrinted;
-            std::printf("[probe] gv MISMATCH #%u start=0x%X vf=%d vi=%d acc=%d qpi=%d flags=%d(mac %X/%X st %X/%X clip %X/%X) memqw=%d gif=%d(%zu/%zu)\n",
-                        s_gvPrinted, startPC & 0xFFFFu, badVf, badVi, badAcc ? 1 : 0, badQpi ? 1 : 0, badFlags ? 1 : 0,
+            std::printf("[probe] gv MISMATCH u%d #%u start=0x%X vf=%d vi=%d acc=%d qpi=%d flags=%d(mac %X/%X st %X/%X clip %X/%X) memqw=%d gif=%d(%zu/%zu)\n",
+                        gvU, s_gvPrinted, startPC & 0xFFFFu, badVf, badVi, badAcc ? 1 : 0, badQpi ? 1 : 0, badFlags ? 1 : 0,
                         sA.mac, sB.mac, sA.status, sB.status, sA.clip, sB.clip, badMemQw, badGif ? 1 : 0, capA.size(), capB.size());
             if (badVf >= 0)
             {
@@ -3126,7 +3128,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         }
         if ((s_gvTotal % 500u) == 0u)
         {
-            std::printf("[probe] gv summary runs=%u mismatches=%u\n", s_gvTotal, s_gvBad);
+            std::printf("[probe] gv summary u%d runs=%u mismatches=%u\n", gvU, s_gvTotal, s_gvBad);
             std::fflush(stdout);
         }
 
