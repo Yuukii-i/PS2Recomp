@@ -888,6 +888,88 @@ static bool s_vfyRef = false;                         // PERF-GR: true => use th
 static uint64_t s_nextReady[2] = {0u, 0u};
 #define NR() (s_nextReady[m_unit == Unit::VU1 ? 1 : 0])
 
+// PERF-HV: flag writes are applied at issue. PROBE-FLG (logs/probe_ij.log): status is never read by VU code, FC*/FM* readers see
+// in-flight writes only at a few pcs; all flag latencies are 4 so landing order == issue order. MAC and CLIP keep a tiny history
+// ring (issue cycle, value) so a reader gets the value of the newest write that has landed (issue + 4 <= cycle); STATUS is applied
+// immediately (disjoint from the delayed Q-landing bits 4,5,10,11; FSSET/FMAC same-pair rule handled by s_flgStatusUndo).
+// Reference (verifier) pass and PS2X_VU_IMMF=0 keep the delayed FlagPipelineEntry model.
+namespace
+{
+    struct FlgRing
+    {
+        uint64_t cyc[8];
+        uint32_t val[8];
+        uint32_t base;
+        uint8_t head;
+        uint8_t count;
+    };
+    FlgRing s_flgMac[2], s_flgClip[2];
+    struct FlgStatusUndo
+    {
+        uint64_t cyc;
+        uint32_t old;
+        bool valid;
+    };
+    FlgStatusUndo s_flgStatusUndo[2];
+    const bool s_vuImmFlags = []() { const char *e = std::getenv("PS2X_VU_IMMF"); return !(e && e[0] == '0'); }();
+
+    inline void flgPush(FlgRing &ring, uint64_t cycle, uint32_t v)
+    {
+        if (ring.count == 8u)
+            ring.base = ring.val[ring.head]; // overwriting the oldest entry: it has certainly landed
+        else
+            ++ring.count;
+        ring.cyc[ring.head] = cycle;
+        ring.val[ring.head] = v;
+        ring.head = static_cast<uint8_t>((ring.head + 1u) & 7u);
+    }
+    inline void flgPushOrReplace(FlgRing &ring, uint64_t cycle, uint32_t v)
+    {
+        if (ring.count != 0u)
+        {
+            const uint32_t newest = (ring.head + 7u) & 7u;
+            if (ring.cyc[newest] == cycle)
+            {
+                ring.val[newest] = v;
+                return;
+            }
+        }
+        flgPush(ring, cycle, v);
+    }
+    inline uint32_t flgVisible(const FlgRing &ring, uint64_t cycle)
+    {
+        for (uint32_t i = 0; i < ring.count; ++i)
+        {
+            const uint32_t idx = (ring.head + 7u - i) & 7u;
+            if (ring.cyc[idx] + 4u <= cycle)
+                return ring.val[idx];
+        }
+        return ring.base;
+    }
+    inline uint32_t flgNewest(const FlgRing &ring)
+    {
+        return ring.count ? ring.val[(ring.head + 7u) & 7u] : ring.base;
+    }
+    inline void flgInit(FlgRing &ring, uint32_t base)
+    {
+        ring.base = base;
+        ring.head = 0;
+        ring.count = 0;
+    }
+    // called before a FC*/FS*/FM* lower op executes: expose the value visible at this cycle
+    inline void flgSyncReader(VU1State &st, uint32_t unit, uint64_t cycle, uint32_t lower)
+    {
+        const uint32_t op = (lower >> 25) & 0x7Fu;
+        if (op < 0x10u || op > 0x1Cu)
+            return;
+        if (op == 0x10u || op == 0x12u || op == 0x13u || op == 0x1Cu)
+            st.clip = flgVisible(s_flgClip[unit], cycle);
+        else if (op == 0x18u || op == 0x1Au || op == 0x1Bu)
+            st.mac = flgVisible(s_flgMac[unit], cycle);
+    }
+}
+
+
 VU1Interpreter::VU1Interpreter(Unit unit)
     : m_unit(unit)
 {
@@ -922,6 +1004,12 @@ void VU1Interpreter::resetScheduler()
     m_nextWriteSequence = 0;
     m_efuResourceReady = 0;
     m_workingClip = m_state.clip;
+    {
+        const uint32_t u = m_unit == Unit::VU1 ? 1u : 0u; // PERF-HV
+        flgInit(s_flgMac[u], m_state.mac);
+        flgInit(s_flgClip[u], m_state.clip);
+        s_flgStatusUndo[u].valid = false;
+    }
     m_viBranchBackupValue = 0;
     m_viBranchBackupReg = 0;
     m_viBranchBackupValid = false;
@@ -1378,6 +1466,16 @@ void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
         return;
     }
 
+    if (s_vuImmFlags && !s_vfyRef)
+    {
+        const uint32_t u = m_unit == Unit::VU1 ? 1u : 0u;
+        flgPush(s_flgMac[u], m_cycle, mac);
+        s_flgStatusUndo[u] = {m_cycle, m_state.status, true};
+        const uint32_t current = status & 0xFu;
+        m_state.status = (m_state.status & 0xFF0u) | current | ((current | extraSticky) << 6);
+        return;
+    }
+
     FlagPipelineEntry *entry = nullptr;
     if (!s_vfyRef)
     {
@@ -1437,6 +1535,17 @@ void VU1Interpreter::queueFsset(uint16_t immediate)
         m_state.status = (m_state.status & 0x03Fu) | (static_cast<uint32_t>(immediate) & 0xFC0u);
         return;
     }
+    if (s_vuImmFlags && !s_vfyRef)
+    {
+        FlgStatusUndo &undo = s_flgStatusUndo[m_unit == Unit::VU1 ? 1u : 0u];
+        if (undo.valid && undo.cyc == m_cycle)
+        {
+            m_state.status = undo.old; // FSSET suppresses the status write of an FMAC op issued in the same pair
+            undo.valid = false;
+        }
+        m_state.status = (m_state.status & 0x03Fu) | (static_cast<uint32_t>(immediate) & 0xFC0u);
+        return;
+    }
     for (FlagPipelineEntry &entry : m_flagPipeline)
     {
         if (entry.valid && entry.issueCycle == m_cycle)
@@ -1468,6 +1577,11 @@ void VU1Interpreter::queueClip(uint32_t clip)
         m_state.clip = m_workingClip;
         return;
     }
+    if (s_vuImmFlags && !s_vfyRef)
+    {
+        flgPush(s_flgClip[m_unit == Unit::VU1 ? 1u : 0u], m_cycle, m_workingClip);
+        return;
+    }
     for (FlagPipelineEntry &entry : m_flagPipeline)
     {
         if (!entry.valid)
@@ -1491,6 +1605,12 @@ void VU1Interpreter::queueFcset(uint32_t clip)
     if (vu1FastMode())
     {
         m_state.clip = m_workingClip;
+        return;
+    }
+    if (s_vuImmFlags && !s_vfyRef)
+    {
+        // FCSET replaces a CLIP write issued in the same pair
+        flgPushOrReplace(s_flgClip[m_unit == Unit::VU1 ? 1u : 0u], m_cycle, m_workingClip);
         return;
     }
     for (FlagPipelineEntry &entry : m_flagPipeline)
@@ -2368,6 +2488,15 @@ void VU1Interpreter::flushPipelines()
 {
     while (pipelinesPending())
         advanceOneCycle();
+    if (s_vuImmFlags && !s_vfyRef) // PERF-HV: everything has landed -> architectural flags = newest writes
+    {
+        const uint32_t u = m_unit == Unit::VU1 ? 1u : 0u;
+        m_state.mac = flgNewest(s_flgMac[u]);
+        m_state.clip = flgNewest(s_flgClip[u]);
+        flgInit(s_flgMac[u], m_state.mac);
+        flgInit(s_flgClip[u], m_state.clip);
+        s_flgStatusUndo[u].valid = false;
+    }
 }
 
 uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &decoded) const
@@ -3813,7 +3942,11 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 std::printf("\n");
             }
         },
-        [](VU1Interpreter &v, uint32_t l, uint8_t *d, uint32_t ds, GS &g, PS2Memory *m, uint32_t u) { v.execLower(l, d, ds, g, m, u); },
+        [](VU1Interpreter &v, uint32_t l, uint8_t *d, uint32_t ds, GS &g, PS2Memory *m, uint32_t u)
+        {
+            if (s_vuImmFlags && !s_vfyRef && (u >> 31) == 0u) flgSyncReader(v.m_state, v.m_unit == Unit::VU1 ? 1u : 0u, v.m_cycle, l); // PERF-HV
+            v.execLower(l, d, ds, g, m, u);
+        },
         [](VU1Interpreter &v, uint8_t r, uint8_t lanes, const float *val, uint32_t lat) { v.queueVfWrite(r, lanes, val, lat); },
         [](VU1Interpreter &v, uint8_t r, int32_t val, uint32_t lat) { v.queueViWrite(r, val, lat); },
         [](VU1Interpreter &v, uint8_t lanes, const float *val, uint32_t lat) { v.queueAccWrite(lanes, val, lat); },
@@ -4342,6 +4475,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             std::memcpy(m_state.vf[decoded.upperVfShadowReg],
                         oldVf,
                         sizeof(oldVf));
+            if (s_vuImmFlags && !s_vfyRef) flgSyncReader(m_state, m_unit == Unit::VU1 ? 1u : 0u, m_cycle, decoded.lower); // PERF-HV
             execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
             std::memcpy(m_state.vf[decoded.upperVfShadowReg],
                         upperVf,
@@ -4350,6 +4484,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         else
         {
             if (!(useFastUpper && fastUpper(*this, decoded.upper))) execUpper(decoded.upper); // PERF-HM
+            if (s_vuImmFlags && !s_vfyRef) flgSyncReader(m_state, m_unit == Unit::VU1 ? 1u : 0u, m_cycle, decoded.lower); // PERF-HV
             execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
         }
 
