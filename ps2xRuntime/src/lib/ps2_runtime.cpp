@@ -3895,7 +3895,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         static std::atomic<uint32_t> s_gateCalls{0}, s_gateLow{0}, s_drawCalls{0}, s_gateLines{0};
         if (targetPc == 0x003B45E8u)
             s_drawCalls.fetch_add(1, std::memory_order_relaxed);
-        else if (getRegU32(ctx, 31) == 0x00268718u)
+        else if (([&]{ uint32_t gp = 0; std::memcpy(&gp, rdram + 0x64942Cu, 4); return (gp & 0x01FFFFFFu) == (getRegU32(ctx, 4) & 0x01FFFFFFu); })())
         {
             const uint32_t n = s_gateCalls.fetch_add(1, std::memory_order_relaxed);
             const uint32_t obj = getRegU32(ctx, 4) & 0x01FFFFFFu;
