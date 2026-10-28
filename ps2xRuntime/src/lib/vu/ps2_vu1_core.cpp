@@ -3874,6 +3874,26 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);
 
+    { // PROBE-GE: per-second VU1 time budget
+        static uint64_t s_geNs = 0, s_geXgNs = 0, s_geInstr = 0, s_geCalls = 0, s_geCycles = 0;
+        static std::chrono::steady_clock::time_point s_geT0 = std::chrono::steady_clock::now();
+        const auto geNow = std::chrono::steady_clock::now();
+        s_geNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(geNow - tRunStart).count());
+        s_geXgNs += s_currentRunXgkickNs;
+        s_geInstr += instrsThisRun;
+        s_geCycles += (m_cycle > tRunStartCycle) ? (m_cycle - tRunStartCycle) : 0u;
+        ++s_geCalls;
+        if (geNow - s_geT0 >= std::chrono::seconds(1))
+        {
+            std::printf("[probe] ge vu1 calls=%llu instrs=%llu cycles=%llu run_ms=%.1f xgkick_ms=%.1f\n",
+                        (unsigned long long)s_geCalls, (unsigned long long)s_geInstr, (unsigned long long)s_geCycles,
+                        s_geNs / 1e6, s_geXgNs / 1e6);
+            std::fflush(stdout);
+            s_geNs = s_geXgNs = s_geInstr = s_geCalls = s_geCycles = 0;
+            s_geT0 = geNow;
+        }
+    }
+
     if (probe_ae::isEnabled() || probe_ae::isMovieHleVerify())
     {
         const auto tRunEnd = std::chrono::steady_clock::now();
