@@ -1,6 +1,9 @@
 #include "Common.h"
 #include "LibC.h"
 #include "ps2_log.h"
+#include <atomic>
+#include <cstdio>
+#include <cstring>
 
 namespace ps2_stubs
 {
@@ -93,6 +96,48 @@ namespace ps2_stubs
         uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
         uint32_t size = getRegU32(ctx, 6);     // $a2
         size = sanitizeMemTransferSize(size, "memcpy");
+
+        // PERF/FIX-MEMCPY-OVERLAP: the guest libc memcpy (0x42B16C) is a strictly forward copy (16B blocks when both
+        // pointers are 16B aligned and n>=32, then 8B blocks, then bytes). With overlapping ranges (dst inside the source)
+        // that replicates data (run-length style); host ::memcpy does not. Reproduce the guest algorithm in that case.
+        if (size != 0u && destAddr > srcAddr && destAddr < srcAddr + size)
+        {
+            uint8_t *hd = getMemPtr(rdram, destAddr);
+            const uint8_t *hs = getConstMemPtr(rdram, srcAddr);
+            if (hd && hs && guestContiguousBytes(destAddr) >= size && guestContiguousBytes(srcAddr) >= size)
+            {
+                static std::atomic<uint32_t> s_overlapLog{0};
+                if (s_overlapLog.fetch_add(1, std::memory_order_relaxed) < 40u)
+                    std::printf("[probe] gy memcpy overlap dst=0x%X src=0x%X n=%u ra=0x%X\n", destAddr, srcAddr, size, getRegU32(ctx, 31));
+                uint32_t n = size;
+                uint8_t *d = hd;
+                const uint8_t *s = hs;
+                if (n >= 32u && (((srcAddr | destAddr) & 0xFu) == 0u))
+                {
+                    while (n >= 32u)
+                    {
+                        uint8_t q[16];
+                        std::memcpy(q, s, 16); std::memcpy(d, q, 16); s += 16; d += 16;
+                        std::memcpy(q, s, 16); std::memcpy(d, q, 16); s += 16; d += 16;
+                        n -= 32u;
+                    }
+                    while (n >= 8u)
+                    {
+                        uint8_t q[8];
+                        std::memcpy(q, s, 8); std::memcpy(d, q, 8); s += 8; d += 8;
+                        n -= 8u;
+                    }
+                }
+                while (n != 0u)
+                {
+                    *d++ = *s++;
+                    --n;
+                }
+                ps2TraceGuestRangeWrite(rdram, destAddr, size, "memcpy", ctx);
+                ctx->r[2] = ctx->r[4];
+                return;
+            }
+        }
 
         uint32_t copied = 0u;
         uint32_t curDst = destAddr;
