@@ -1,5 +1,6 @@
 #if defined(_MSC_VER)
 #include <intrin.h>
+#include <immintrin.h>
 #endif
 #include "runtime/ps2_vu1.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
@@ -3542,8 +3543,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             {
             case 0: val = a + b; ex = static_cast<long double>(a) + static_cast<long double>(b); break;
             case 1: val = a - b; ex = static_cast<long double>(a) - static_cast<long double>(b); break;
-            case 2: val = ac + a * b; ex = static_cast<long double>(ac) + static_cast<long double>(a) * static_cast<long double>(b); break;
-            case 3: val = ac - a * b; ex = static_cast<long double>(ac) - static_cast<long double>(a) * static_cast<long double>(b); break;
+            case 2: val = _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(ac))); ex = static_cast<long double>(ac) + static_cast<long double>(a) * static_cast<long double>(b); break;
+            case 3: val = _mm_cvtss_f32(_mm_fnmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(ac))); ex = static_cast<long double>(ac) - static_cast<long double>(a) * static_cast<long double>(b); break;
             default: val = a * b; ex = static_cast<long double>(a) * static_cast<long double>(b); break;
             }
             laneFlags[c] = flagsOf(val, ex);
