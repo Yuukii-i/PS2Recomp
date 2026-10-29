@@ -3062,6 +3062,7 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::decodeInstructionPair(con
 }
 
 static uint64_t s_hcCurHash = 0; // PROBE-HC: hash of the VU1 microcode image currently loaded
+static uint64_t s_hcUnitHash[2] = {0, 0}; // PROBE-BLK: image hash per unit (VU0 and VU1 both rebuild through the same code)
 void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
                                              const PS2Memory *memory, uint64_t generation)
 {
@@ -3082,6 +3083,7 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
             h = (h ^ vuCode[i]) * 1099511628211ull;
         if (m_unit == Unit::VU1)
             s_hcCurHash = h;
+            s_hcUnitHash[m_unit == Unit::VU1 ? 1 : 0] = h;
         bool hcNew = false;
         {
             static std::mutex s_hcMutex; // PERF-HN: VU0 (EE thread) and VU1 (VIF1 worker) both rebuild decode caches
@@ -3638,6 +3640,8 @@ namespace
     struct BlkRec
     {
         std::vector<uint32_t> issue;
+        std::string exitText;
+        bool xgEntry = false;
         uint64_t exitHash = 0;
         uint64_t count = 0;
         uint64_t bad = 0;
@@ -3646,8 +3650,8 @@ namespace
     struct BlkUnit
     {
         std::unordered_map<uint64_t, BlkRec> recs; // key = (pc << 48) ^ entryHash
-        uint64_t blocks = 0, pairs = 0, pairsXgActive = 0, blocksXgEntry = 0, inconsistent = 0, abandoned = 0;
-        FILE *file = nullptr;
+        uint64_t blocks = 0, pairs = 0, pairsXgActive = 0, blocksXgEntry = 0, inconsistent = 0, inconsistentNoXg = 0, abandoned = 0;
+        std::unordered_map<uint64_t, FILE *> files; // one file per microcode image
     };
     BlkUnit g_blkUnits[2];
     uint64_t g_blkNextPrint = 2000000;
@@ -4737,32 +4741,36 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 uint64_t exitHash = 0;
                 std::string exitText;
                 blkSnapshot(exitHash, &exitText);
-                const uint64_t key = (uint64_t(blkStartPc) << 48) ^ blkEntryHash;
+                const uint64_t imageHash = s_hcUnitHash[m_unit == Unit::VU1 ? 1 : 0];
+                const uint64_t key = (uint64_t(blkStartPc) << 48) ^ blkEntryHash ^ (imageHash * 0x9E3779B97F4A7C15ull);
                 auto it = bu.recs.find(key);
                 if (it == bu.recs.end())
                 {
                     BlkRec rec;
                     rec.issue = blkIssue;
+                    rec.exitText = exitText;
+                    rec.xgEntry = blkXgEntry;
                     rec.exitHash = exitHash;
                     rec.count = 1;
                     rec.nexts[m_state.pc] = 1;
                     if (bu.recs.size() < 8192)
                         bu.recs.emplace(key, std::move(rec));
-                    if (!bu.file)
+                    FILE *&bf = bu.files[imageHash];
+                    if (!bf)
                     {
                         char path[160];
-                        std::snprintf(path, sizeof(path), "logs/vublk_u%d_%016llx.txt", m_unit == Unit::VU1 ? 1 : 0, static_cast<unsigned long long>(s_hcCurHash));
-                        bu.file = std::fopen(path, "w");
+                        std::snprintf(path, sizeof(path), "logs/vublk2_u%d_%016llx.txt", m_unit == Unit::VU1 ? 1 : 0, static_cast<unsigned long long>(imageHash));
+                        bf = std::fopen(path, "w");
                     }
-                    if (bu.file)
+                    if (bf)
                     {
-                        std::fprintf(bu.file, "B pc=%04X sig=%016llx exitsig=%016llx n=%zu xg=%d next=%04X\n", blkStartPc, (unsigned long long)blkEntryHash,
+                        std::fprintf(bf, "B pc=%04X sig=%016llx exitsig=%016llx n=%zu xg=%d next=%04X\n", blkStartPc, (unsigned long long)blkEntryHash,
                                      (unsigned long long)exitHash, blkIssue.size(), blkXgEntry ? 1 : 0, m_state.pc);
-                        std::fprintf(bu.file, "  entry: %s\n  issue:", blkEntryText.c_str());
+                        std::fprintf(bf, "  entry: %s\n  issue:", blkEntryText.c_str());
                         for (uint32_t o : blkIssue)
-                            std::fprintf(bu.file, " %u", o);
-                        std::fprintf(bu.file, "\n  exit: %s\n", exitText.c_str());
-                        std::fflush(bu.file);
+                            std::fprintf(bf, " %u", o);
+                        std::fprintf(bf, "\n  exit: %s\n", exitText.c_str());
+                        std::fflush(bf);
                     }
                 }
                 else
@@ -4774,10 +4782,14 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                     {
                         ++rec.bad;
                         ++bu.inconsistent;
-                        if (bu.inconsistent <= 6)
-                            std::printf("[probe] blk INCONSISTENT pc=%04X entry=%016llx exit %016llx vs %016llx n=%zu vs %zu\n", blkStartPc,
-                                        (unsigned long long)blkEntryHash, (unsigned long long)rec.exitHash, (unsigned long long)exitHash,
-                                        rec.issue.size(), blkIssue.size());
+                        if (!blkXgEntry)
+                        {
+                            ++bu.inconsistentNoXg;
+                            if (bu.inconsistentNoXg <= 6)
+                                std::printf("[probe] blk INCONSISTENT(noXg) pc=%04X entry=%016llx exit %016llx vs %016llx n=%zu vs %zu\n  was: %s\n  now: %s\n  entry: %s\n",
+                                            blkStartPc, (unsigned long long)blkEntryHash, (unsigned long long)rec.exitHash, (unsigned long long)exitHash,
+                                            rec.issue.size(), blkIssue.size(), rec.exitText.c_str(), exitText.c_str(), blkEntryText.c_str());
+                        }
                     }
                 }
                 if (g_blkUnits[0].blocks + g_blkUnits[1].blocks >= g_blkNextPrint)
@@ -4788,9 +4800,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                         BlkUnit &b2 = g_blkUnits[u];
                         if (b2.blocks == 0)
                             continue;
-                        std::printf("[probe] blk %s blocks=%llu pairs=%llu pairs/block=%.2f distinct=%zu inconsistent=%llu abandoned=%llu xgActivePairs=%.1f%% xgEntryBlocks=%.1f%%\n",
+                        std::printf("[probe] blk %s blocks=%llu pairs=%llu pairs/block=%.2f distinct=%zu inconsistent(all)=%llu inconsistent(noXgEntry)=%llu abandoned=%llu xgActivePairs=%.1f%% xgEntryBlocks=%.1f%%\n",
                                     u ? "VU1" : "VU0", (unsigned long long)b2.blocks, (unsigned long long)b2.pairs, double(b2.pairs) / double(b2.blocks),
-                                    b2.recs.size(), (unsigned long long)b2.inconsistent, (unsigned long long)b2.abandoned,
+                                    b2.recs.size(), (unsigned long long)b2.inconsistent, (unsigned long long)b2.inconsistentNoXg, (unsigned long long)b2.abandoned,
                                     100.0 * b2.pairsXgActive / std::max<uint64_t>(b2.pairs, 1), 100.0 * b2.blocksXgEntry / b2.blocks);
                     }
                     std::fflush(stdout);
