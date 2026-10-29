@@ -40,6 +40,10 @@ namespace GSMem
 
 #include "vk/ps2_vk_shaders.inc"
 
+#include <atomic>
+#include <intrin.h>
+extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
+
 namespace
 {
     constexpr uint32_t kVramSize = 4u * 1024u * 1024u;
@@ -711,16 +715,53 @@ namespace
             cpu_->Sync(reason);
         }
 
+        // PERF-JD: PS2X_PRESENT_NARROW=1 downloads only the pages the CPU presenter can read (display frames of both CRTs, the two context frames and
+        // the preferred source) instead of every GPU-newer colour page. Rows are bounded by the display height (DH+1), widths by FBW*64.
+        static bool presentNarrow()
+        {
+            static const bool on = []() { const char *e = std::getenv("PS2X_PRESENT_NARROW"); return e && e[0] == '1'; }();
+            return on;
+        }
+
+        static void addPresentPages(PageSet &out, const GSPresentationRequest &rq)
+        {
+            auto rowsOf = [](uint64_t display64) -> uint32_t {
+                const uint32_t dh = static_cast<uint32_t>((display64 >> 44) & 0x07FFu) + 1u;
+                return std::min(dh, 1024u);
+            };
+            const uint32_t rows = std::max(448u, std::max(rowsOf(rq.display1), rowsOf(rq.display2)));
+            auto addFrame = [&](uint32_t fbp, uint32_t fbw, uint32_t psm, uint32_t dby) {
+                if (fbw == 0u)
+                    return;
+                pagesForRect(out, fbp << 5u, fbw, psm, 0u, fbw * 64u - 1u, dby, dby + rows - 1u);
+            };
+            for (uint64_t d : {rq.dispfb1, rq.dispfb2})
+                addFrame(static_cast<uint32_t>(d & 0x1FFu), static_cast<uint32_t>((d >> 9) & 0x3Fu), static_cast<uint32_t>((d >> 15) & 0x1Fu),
+                         static_cast<uint32_t>((d >> 43) & 0x7FFu));
+            for (const GSFrameReg &f : rq.contextFrames)
+                addFrame(f.fbp, f.fbw, f.psm, 0u);
+            if (rq.hasPreferredSource)
+                addFrame(rq.preferredSource.fbp, rq.preferredSource.fbw, rq.preferredSource.psm, 0u);
+        }
+
         PresentationFrame Present(const GSPresentationRequest &request) override
         {
             std::lock_guard<std::mutex> lk(m_);
             if (vkReady_)
             {
                 // the CPU presenter only reads colour surfaces; Z pages stay GPU-newer unless the compare mode needs everything
+                const uint64_t pj0 = __rdtsc(); // PERF-JD
                 if (compare_)
                     syncAll(0);
+                else if (presentNarrow())
+                {
+                    PageSet need;
+                    addPresentPages(need, request);
+                    syncPages(need, 0);
+                }
                 else
                     syncPages(gpuColor_, 0);
+                g_presTicks[3].fetch_add(__rdtsc() - pj0, std::memory_order_relaxed);
             }
             if (ref_)
                 comparePresent();

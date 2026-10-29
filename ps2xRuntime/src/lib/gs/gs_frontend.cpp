@@ -16,8 +16,11 @@ namespace probe_ae {
 #include <vector>
 #include <cstdlib>
 #include <chrono>
+#include <intrin.h>
 
 std::atomic<uint64_t> g_hostPresentSeq{0};
+// PERF-JD: rdtsc ticks per stage of the vblank present latch: 0 total, 1 Flush+Sync, 2 backend Present, 3 Vk syncPages (in Present), 4 VRAM snapshot, 5 CPU de-swizzle, 7 count
+std::atomic<uint64_t> g_presTicks[8]{};
 namespace
 {
     static inline bool isVerboseLog()
@@ -629,13 +632,17 @@ void GS::latchHostPresentationFrame()
     }
 
     PresentationFrame frame{};
+    const uint64_t pjStart = __rdtsc(); // PERF-JD
     {
         std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
         if (m_backend)
         {
             m_backend->Flush();
             m_backend->Sync(GSSyncReason::Presentation);
+            const uint64_t pjMid = __rdtsc();
             frame = m_backend->Present(request);
+            g_presTicks[1].fetch_add(pjMid - pjStart, std::memory_order_relaxed);
+            g_presTicks[2].fetch_add(__rdtsc() - pjMid, std::memory_order_relaxed);
         }
     }
 
@@ -661,6 +668,30 @@ void GS::latchHostPresentationFrame()
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
         g_hostPresentSeq.fetch_add(1, std::memory_order_release);
+    }
+
+    // PERF-JD: every 128 latches print the average ms per latch for each stage
+    g_presTicks[0].fetch_add(__rdtsc() - pjStart, std::memory_order_relaxed);
+    if ((g_presTicks[7].fetch_add(1, std::memory_order_relaxed) + 1u) % 128u == 0u)
+    {
+        static uint64_t s_prev[6]{};
+        static uint64_t s_prevTsc = __rdtsc();
+        static auto s_prevT = std::chrono::steady_clock::now();
+        const uint64_t nowTsc = __rdtsc();
+        const auto nowT = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(nowT - s_prevT).count();
+        const double ticksPerMs = ms > 0.0 ? static_cast<double>(nowTsc - s_prevTsc) / ms : 1.0;
+        double v[6];
+        for (int i = 0; i < 6; ++i)
+        {
+            const uint64_t cur = g_presTicks[i].load(std::memory_order_relaxed);
+            v[i] = static_cast<double>(cur - s_prev[i]) / ticksPerMs / 128.0;
+            s_prev[i] = cur;
+        }
+        std::fprintf(stderr, "[present] n=128 window_ms=%.0f per-latch ms: total=%.2f flushsync=%.2f present=%.2f vksync=%.2f snapshot=%.2f deswizzle=%.2f\n",
+                     ms, v[0], v[1], v[2], v[3], v[4], v[5]);
+        s_prevTsc = nowTsc;
+        s_prevT = nowT;
     }
 }
 

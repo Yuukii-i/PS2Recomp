@@ -23,7 +23,9 @@ namespace probe_ae {
 #include <fstream>
 
 #include <chrono>
+#include <intrin.h>
 
+extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
 std::atomic<uint64_t> g_profGsUs{0};
 std::atomic<uint64_t> g_profXferUs{0};
 std::atomic<uint64_t> g_profPrims{0};
@@ -4786,13 +4788,17 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
     // Snapshot local memory under the backend lock, then perform the expensive
     // display conversion without holding the producer-side raster lock.
     thread_local std::vector<uint8_t> snapshot;
+    const uint64_t pj0 = __rdtsc(); // PERF-JD
     SnapshotVram(snapshot);
     if (snapshot.empty())
         return {};
 
     thread_local GSCpuBackend snapshotBackend;
     snapshotBackend.Initialize(snapshot.data(), static_cast<uint32_t>(snapshot.size()));
+    const uint64_t pj1 = __rdtsc();
     PresentationFrame frame = snapshotBackend.PresentFromLocalMemory(request);
+    g_presTicks[4].fetch_add(pj1 - pj0, std::memory_order_relaxed);
+    g_presTicks[5].fetch_add(__rdtsc() - pj1, std::memory_order_relaxed);
     if (probe_ae::isEnabled())
     {
         static uint32_t s_frameCounter = 0;
