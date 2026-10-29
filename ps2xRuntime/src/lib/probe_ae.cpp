@@ -2020,7 +2020,7 @@ namespace probe_ae {
             s_tried = true;
             std::error_code ec;
             std::filesystem::create_directories("logs", ec);
-            s_file = std::fopen("logs/probe_bh_sink.txt", "a");
+            s_file = std::fopen("logs/probe_bh_sink.txt", "w"); // PROBE-IL: one run per file (was "a")
         }
         return s_file;
     }

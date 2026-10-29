@@ -117,6 +117,12 @@ namespace probe_ae {
         if (!initOk && initErr == ERROR_INVALID_PARAMETER) {
             initOk = TRUE;
         }
+        if (!initOk) {
+            // PROBE-IL: invading the process sometimes fails (0xC0000004 while enumerating modules); load just the exe instead
+            initOk = SymInitialize(hProc, searchPath, FALSE);
+            if (initOk)
+                initOk = SymLoadModuleEx(hProc, NULL, exePath, NULL, exeBase, 0, NULL, 0) != 0 || GetLastError() == ERROR_SUCCESS;
+        }
         SymSetSearchPath(hProc, searchPath);
 
         bhLog("[prof2] syminit ok=%d err=%lu exe=%s pdb_exists=%d base=0x%llX\n",
@@ -496,14 +502,14 @@ namespace probe_ae {
                         DWORD tid = pair.first;
                         const CgThreadAgg &tagg = pair.second;
                         double threadPct = (static_cast<double>(tagg.totalSamples) * 100.0) / static_cast<double>(totalProcessSamples);
-                        if (threadPct > 5.0) {
+                        if (threadPct > 1.0) { // PROBE-IL: was 5% (driver threads in Vulkan runs hid the workers)
                             std::vector<std::pair<std::string, uint64_t>> sortedLeaf(tagg.leafCounts.begin(), tagg.leafCounts.end());
                             std::sort(sortedLeaf.begin(), sortedLeaf.end(), [](const std::pair<std::string, uint64_t> &a, const std::pair<std::string, uint64_t> &b) {
                                 return a.second > b.second;
                             });
 
                             std::string topStr;
-                            size_t limit = (std::min)(size_t(12), sortedLeaf.size());
+                            size_t limit = (std::min)(size_t(30), sortedLeaf.size()); // PROBE-IL: was 12 (30 fits bhLog's 4 KB line)
                             for (size_t i = 0; i < limit; ++i) {
                                 double symPct = (static_cast<double>(sortedLeaf[i].second) * 100.0) / static_cast<double>(tagg.totalSamples);
                                 char sbuf[128];
