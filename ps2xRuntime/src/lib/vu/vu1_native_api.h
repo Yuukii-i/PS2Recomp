@@ -19,6 +19,7 @@ struct VuNativeOps
     void (*qVf)(VU1Interpreter &, uint8_t reg, uint8_t lanes, const float *value, uint32_t latency);
     void (*qVi)(VU1Interpreter &, uint8_t reg, int32_t value, uint32_t latency);
     void (*qAcc)(VU1Interpreter &, uint8_t lanes, const float *value, uint32_t latency);
+    void (*xgProgress)(VU1Interpreter &); // PERF-IC: progressXgkick (called only while a transfer is active)
 };
 
 struct VuNativeCtx
@@ -32,6 +33,7 @@ struct VuNativeCtx
     GS *gs;
     PS2Memory *memory;
     uint32_t codeSize;
+    const uint64_t *nextReady; // PERF-IC: the interpreter's next-ready-cycle cache (commit early-out)
 };
 
 // Hash (FNV-1a 64) of the microcode image these executors were generated from.

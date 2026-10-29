@@ -3976,14 +3976,16 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         [](VU1Interpreter &v, uint8_t r, uint8_t lanes, const float *val, uint32_t lat) { v.queueVfWrite(r, lanes, val, lat); },
         [](VU1Interpreter &v, uint8_t r, int32_t val, uint32_t lat) { v.queueViWrite(r, val, lat); },
         [](VU1Interpreter &v, uint8_t lanes, const float *val, uint32_t lat) { v.queueAccWrite(lanes, val, lat); },
+        [](VU1Interpreter &v) { v.progressXgkick(); }, // PERF-IC
     };
     const bool useFastUpper = !s_vfyRef && !vu1FastMode(); // PERF-HM: interpreter loop (VU0 + non-native VU1) uses fastUpper too
     static const bool vuNativeAllowed = []() { const char *e = std::getenv("PS2X_VU1_NATIVE"); return !(e && e[0] == '0'); }();
     const bool vuNativeOn = vuNativeAllowed && (m_unit == Unit::VU1) && !s_vfyRef && decodeCacheOk && !vu1FastMode() &&
+                            s_vuImmWrites && s_vuImmFlags && // PERF-IC: native pairs apply vf/vi/acc/flag writes directly
                             s_hcCurHash == kVu1NativeMainHash && codeSize == 0x4000u && !isVu3dProbeEnabled() &&
                             !probe_ae::isEnabled() && !probe_ae::isDcProbeEnabled() && !s_egCurRunTraced &&
                             !s_emRecording && !s_eiCurRunActive && !s_ekCurRunActive && !s_fcC80.active;
-    VuNativeCtx vuNativeCtx{&vuNativeOps, budgetEnd, 0u, false, vuData, dataSize, &gs, memory, codeSize};
+    VuNativeCtx vuNativeCtx{&vuNativeOps, budgetEnd, 0u, false, vuData, dataSize, &gs, memory, codeSize, &NR()};
 
     bool sigLanded = true; // PROBE-SIG: first pair of a run counts as a landing
     const auto sigPipelineHash = [this]() -> uint64_t

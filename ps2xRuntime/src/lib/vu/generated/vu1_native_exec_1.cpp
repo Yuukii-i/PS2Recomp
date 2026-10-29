@@ -29,7 +29,7 @@ inline float vuNormalizeOperand(float value)
 int vuS_0DA0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -41,10 +41,9 @@ int vuS_0DA0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x10020accu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_viReady[2] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -62,14 +61,16 @@ int vuS_0DA0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DA8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -81,10 +82,9 @@ int vuS_0DA8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x10010a2cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -102,14 +102,16 @@ int vuS_0DA8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DB0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -121,13 +123,9 @@ int vuS_0DB0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[5];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010739eau);
     op.execLower(vu, 0x34052000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010739eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[5]; vu.m_state.vi[5] = oldVi; op.qVi(vu, 5, nvi, 1); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_viReady[5] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -145,14 +143,16 @@ int vuS_0DB0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DB8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -165,11 +165,9 @@ int vuS_0DB8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x0104319au);
     op.execLower(vu, 0x52050052u, c.vuData, c.dataSize, *c.gs, c.memory, 0x0104319au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 8, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0DC0u;
@@ -186,14 +184,16 @@ int vuS_0DB8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DC0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -206,11 +206,9 @@ int vuS_0DC0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x0106382cu);
     op.execLower(vu, 0x01c60fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x0106382cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldLo, 16); op.qVf(vu, 6, 14, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -229,17 +227,19 @@ int vuS_0DC0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DC8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -257,17 +257,19 @@ int vuS_0DC8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DD0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -285,14 +287,16 @@ int vuS_0DD0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DD8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -305,10 +309,9 @@ int vuS_0DD8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[3];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x800310f0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[3]; vu.m_state.vi[3] = oldVi; op.qVi(vu, 3, nvi, 1); }
     vu.m_viReady[3] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -326,14 +329,16 @@ int vuS_0DD8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DE0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -350,13 +355,9 @@ int vuS_0DE0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[4];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x01c619acu);
     op.execLower(vu, 0x34042000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c619acu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[4]; vu.m_state.vi[4] = oldVi; op.qVi(vu, 4, nvi, 1); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -376,14 +377,16 @@ int vuS_0DE0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DE8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -397,11 +400,9 @@ int vuS_0DE8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c632aau);
     op.execLower(vu, 0x5204004cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c632aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -420,14 +421,16 @@ int vuS_0DE8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DF0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -438,11 +441,9 @@ int vuS_0DF0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002a01bcu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002a01bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0DF8u;
@@ -459,14 +460,16 @@ int vuS_0DF0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0DF8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -480,12 +483,9 @@ int vuS_0DF8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002a00bdu);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x002a00bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -504,14 +504,16 @@ int vuS_0DF8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E00(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -524,13 +526,9 @@ int vuS_0E00(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x002a00cau);
     op.execLower(vu, 0x01ca0fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x002a00cau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 1, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -550,14 +548,16 @@ int vuS_0E00(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E08(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -569,7 +569,7 @@ int vuS_0E08(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x81e303beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -587,14 +587,16 @@ int vuS_0E08(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E10(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -613,8 +615,6 @@ int vuS_0E10(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[6], 16);
       op.execUpper(vu, 0x01ca19acu);
@@ -623,8 +623,6 @@ int vuS_0E10(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81ca333cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ca19acu);
       std::memcpy(vu.m_state.vf[6], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -646,14 +644,16 @@ int vuS_0E10(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E18(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -666,11 +666,9 @@ int vuS_0E18(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01c6322au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c6322au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -689,14 +687,16 @@ int vuS_0E18(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E20(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -710,11 +710,9 @@ int vuS_0E20(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c0529cu);
     op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0529cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -733,14 +731,16 @@ int vuS_0E20(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E28(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -751,11 +751,9 @@ int vuS_0E28(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002801bcu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002801bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0E30u;
@@ -772,14 +770,16 @@ int vuS_0E28(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E30(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -793,12 +793,9 @@ int vuS_0E30(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002800bdu);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x002800bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -817,14 +814,16 @@ int vuS_0E30(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E38(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -837,13 +836,9 @@ int vuS_0E38(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x002800cau);
     op.execLower(vu, 0x01c90ffeu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002800cau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 1, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -863,14 +858,16 @@ int vuS_0E38(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E40(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -886,11 +883,9 @@ int vuS_0E40(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01c5522au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c5522au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -909,14 +904,16 @@ int vuS_0E40(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E48(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -934,11 +931,9 @@ int vuS_0E48(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c952aau);
     op.execLower(vu, 0x81e303beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c952aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -957,14 +952,16 @@ int vuS_0E48(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E50(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -977,13 +974,9 @@ int vuS_0E50(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0108403du);
     op.execLower(vu, 0x01c90fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x0108403du);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -1003,14 +996,16 @@ int vuS_0E50(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E58(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1023,11 +1018,9 @@ int vuS_0E58(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01080a0au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01080a0au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0E60u;
@@ -1044,17 +1037,19 @@ int vuS_0E58(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E60(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -1072,14 +1067,16 @@ int vuS_0E60(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E68(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1091,11 +1088,9 @@ int vuS_0E68(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x008a503cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x008a503cu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 4, na, 1u); }
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0E70u;
@@ -1112,14 +1107,16 @@ int vuS_0E68(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E70(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1132,11 +1129,9 @@ int vuS_0E70(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x008a0a0au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x008a0a0au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 4, nv, 4); }
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0E78u;
@@ -1153,14 +1148,16 @@ int vuS_0E70(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E78(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1172,11 +1169,9 @@ int vuS_0E78(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01044204u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01044204u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0E80u;
@@ -1193,14 +1188,16 @@ int vuS_0E78(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E80(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1219,8 +1216,6 @@ int vuS_0E80(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[6], 16);
       op.execUpper(vu, 0x01c919acu);
@@ -1229,8 +1224,6 @@ int vuS_0E80(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81ca333cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c919acu);
       std::memcpy(vu.m_state.vf[6], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -1252,17 +1245,19 @@ int vuS_0E80(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E88(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -1280,17 +1275,19 @@ int vuS_0E88(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E90(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -1308,14 +1305,16 @@ int vuS_0E90(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0E98(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1327,11 +1326,9 @@ int vuS_0E98(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01044219u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01044219u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0EA0u;
@@ -1348,14 +1345,16 @@ int vuS_0E98(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EA0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1368,11 +1367,9 @@ int vuS_0EA0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c6326au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c6326au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -1391,21 +1388,21 @@ int vuS_0EA0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EA8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x010002e0u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010002e0u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 8, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0EB0u;
@@ -1422,14 +1419,16 @@ int vuS_0EA8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EB0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1442,11 +1441,9 @@ int vuS_0EB0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01c0531cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0531cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 14, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_vfReady[12][2] = vu.m_cycle + 4u;
@@ -1465,14 +1462,16 @@ int vuS_0EB0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EB8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1484,11 +1483,9 @@ int vuS_0EB8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01804290u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01804290u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 12, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -1506,14 +1503,16 @@ int vuS_0EB8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EC0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1526,12 +1525,9 @@ int vuS_0EC0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002901bcu);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x002901bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -1550,14 +1546,16 @@ int vuS_0EC0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EC8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1570,13 +1568,9 @@ int vuS_0EC8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[8], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002900bdu);
     op.execLower(vu, 0x01c80ffeu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002900bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldLo, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -1596,14 +1590,16 @@ int vuS_0EC8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0ED0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1615,11 +1611,9 @@ int vuS_0ED0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x002900cau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002900cau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 1, nv, 4); }
     vu.m_vfReady[3][3] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0ED8u;
@@ -1636,14 +1630,16 @@ int vuS_0ED0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0ED8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1659,11 +1655,9 @@ int vuS_0ED8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c5626au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c5626au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -1682,14 +1676,16 @@ int vuS_0ED8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EE0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1706,13 +1702,9 @@ int vuS_0EE0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01c8622au);
     op.execLower(vu, 0x01cc0fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8622au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldLo, 16); op.qVf(vu, 12, 14, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_vfReady[12][2] = vu.m_cycle + 4u;
@@ -1734,14 +1726,16 @@ int vuS_0EE0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EE8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1755,11 +1749,9 @@ int vuS_0EE8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01805297u);
     op.execLower(vu, 0x81e303beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01805297u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 12, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -1777,14 +1769,16 @@ int vuS_0EE8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EF0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1796,11 +1790,9 @@ int vuS_0EF0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0109483du);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0109483du);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0EF8u;
@@ -1817,14 +1809,16 @@ int vuS_0EF0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0EF8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1837,11 +1831,9 @@ int vuS_0EF8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01090a4au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01090a4au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F00u;
@@ -1858,14 +1850,16 @@ int vuS_0EF8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F00(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1877,11 +1871,9 @@ int vuS_0F00(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0088403cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0088403cu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 4, na, 1u); }
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F08u;
@@ -1898,14 +1890,16 @@ int vuS_0F00(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F08(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1917,11 +1911,9 @@ int vuS_0F08(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x010a5219u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a5219u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F10u;
@@ -1938,17 +1930,19 @@ int vuS_0F08(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F10(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -1966,14 +1960,16 @@ int vuS_0F10(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F18(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -1985,11 +1981,9 @@ int vuS_0F18(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01044a44u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01044a44u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F20u;
@@ -2006,14 +2000,16 @@ int vuS_0F18(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F20(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2032,8 +2028,6 @@ int vuS_0F20(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[6], 16);
       op.execUpper(vu, 0x01cc19acu);
@@ -2042,8 +2036,6 @@ int vuS_0F20(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81ca333cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cc19acu);
       std::memcpy(vu.m_state.vf[6], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -2065,14 +2057,16 @@ int vuS_0F20(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F28(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2085,11 +2079,9 @@ int vuS_0F28(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x00880acau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x00880acau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 4, nv, 4); }
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F30u;
@@ -2106,14 +2098,16 @@ int vuS_0F28(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F30(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2125,11 +2119,9 @@ int vuS_0F30(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01085a2au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01085a2au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F38u;
@@ -2146,14 +2138,16 @@ int vuS_0F30(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F38(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2165,11 +2159,9 @@ int vuS_0F38(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01044ad9u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01044ad9u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 8, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F40u;
@@ -2186,14 +2178,16 @@ int vuS_0F38(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F40(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2206,11 +2200,9 @@ int vuS_0F40(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c6326au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c6326au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -2229,21 +2221,21 @@ int vuS_0F40(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F48(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010001e0u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010001e0u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 8, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F50u;
@@ -2260,14 +2252,16 @@ int vuS_0F48(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F50(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2281,11 +2275,9 @@ int vuS_0F50(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c0529cu);
     op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0529cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -2304,14 +2296,16 @@ int vuS_0F50(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F58(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2325,12 +2319,9 @@ int vuS_0F58(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01805b10u);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01805b10u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 12, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_viReady[1] = vu.m_cycle + 1u;
@@ -2350,14 +2341,16 @@ int vuS_0F58(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F60(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2369,13 +2362,9 @@ int vuS_0F60(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[11], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002901bcu);
     op.execLower(vu, 0x01cb0ffeu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002901bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldLo, 16); op.qVf(vu, 11, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -2395,14 +2384,16 @@ int vuS_0F60(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F68(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2414,11 +2405,9 @@ int vuS_0F68(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002900bdu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002900bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F70u;
@@ -2435,14 +2424,16 @@ int vuS_0F68(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F70(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2454,11 +2445,9 @@ int vuS_0F70(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x002900cau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002900cau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 1, nv, 4); }
     vu.m_vfReady[3][3] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0F78u;
@@ -2475,14 +2464,16 @@ int vuS_0F70(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F78(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2498,11 +2489,9 @@ int vuS_0F78(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c5526au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c5526au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -2521,14 +2510,16 @@ int vuS_0F78(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F80(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2544,11 +2535,9 @@ int vuS_0F80(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01cb52eau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cb52eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 14, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -2567,14 +2556,16 @@ int vuS_0F80(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F88(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2589,11 +2580,9 @@ int vuS_0F88(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01e81218u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e81218u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 15, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -2613,14 +2602,16 @@ int vuS_0F88(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F90(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2634,11 +2625,9 @@ int vuS_0F90(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01806317u);
     op.execLower(vu, 0x81e303beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01806317u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 12, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -2656,14 +2645,16 @@ int vuS_0F90(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0F98(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2675,11 +2666,9 @@ int vuS_0F98(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0109483du);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0109483du);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0FA0u;
@@ -2696,14 +2685,16 @@ int vuS_0F98(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FA0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2717,13 +2708,9 @@ int vuS_0FA0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01090a4au);
     op.execLower(vu, 0x01ea1000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01090a4au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 15, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -2744,14 +2731,16 @@ int vuS_0FA0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FA8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2764,13 +2753,9 @@ int vuS_0FA8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[14], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x008b583cu);
     op.execLower(vu, 0x01ce0fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x008b583cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[14], 16); std::memcpy(vu.m_state.vf[14], oldLo, 16); op.qVf(vu, 14, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 4, na, 1u); }
     vu.m_vfReady[14][0] = vu.m_cycle + 4u;
     vu.m_vfReady[14][1] = vu.m_cycle + 4u;
     vu.m_vfReady[14][2] = vu.m_cycle + 4u;
@@ -2790,14 +2775,16 @@ int vuS_0FA8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FB0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2812,12 +2799,9 @@ int vuS_0FB0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x008b0a4au);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x008b0a4au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 4, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -2836,14 +2820,16 @@ int vuS_0FB0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FB8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2855,11 +2841,9 @@ int vuS_0FB8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[13], 16);
     op.execUpper(vu, 0x010c6359u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010c6359u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldUp, 16); op.qVf(vu, 13, 8, nv, 4); }
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0FC0u;
@@ -2876,14 +2860,16 @@ int vuS_0FB8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FC0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2895,11 +2881,9 @@ int vuS_0FC0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01044ac4u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01044ac4u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 8, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0FC8u;
@@ -2916,14 +2900,16 @@ int vuS_0FC0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FC8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -2942,8 +2928,6 @@ int vuS_0FC8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[12], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[6], 16);
       op.execUpper(vu, 0x01ce19acu);
@@ -2952,8 +2936,6 @@ int vuS_0FC8(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81cc333cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ce19acu);
       std::memcpy(vu.m_state.vf[6], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldLo, 16); op.qVf(vu, 12, 14, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_vfReady[12][2] = vu.m_cycle + 4u;
@@ -2975,14 +2957,16 @@ int vuS_0FC8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FD0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3000,11 +2984,9 @@ int vuS_0FD0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01e852a8u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e852a8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 15, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -3024,14 +3006,16 @@ int vuS_0FD0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FD8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3043,11 +3027,9 @@ int vuS_0FD8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x010d3a2au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010d3a2au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0FE0u;
@@ -3064,14 +3046,16 @@ int vuS_0FD8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FE0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3083,11 +3067,9 @@ int vuS_0FE0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01045a59u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01045a59u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0FE8u;
@@ -3104,14 +3086,16 @@ int vuS_0FE0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FE8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3124,11 +3108,9 @@ int vuS_0FE8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01c632eau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c632eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 14, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -3147,14 +3129,16 @@ int vuS_0FE8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FF0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3169,11 +3153,9 @@ int vuS_0FF0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010001e0u);
     op.execLower(vu, 0x03e25000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010001e0u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 8, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x0FF8u;
@@ -3190,14 +3172,16 @@ int vuS_0FF0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_0FF8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3210,11 +3194,9 @@ int vuS_0FF8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c0629cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0629cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -3233,14 +3215,16 @@ int vuS_0FF8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1000(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3252,11 +3236,9 @@ int vuS_1000(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01804a50u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01804a50u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 12, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -3274,14 +3256,16 @@ int vuS_1000(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1008(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3293,13 +3277,9 @@ int vuS_1008(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[12], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002b01bcu);
     op.execLower(vu, 0x01cc0ffeu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002b01bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldLo, 16); op.qVf(vu, 12, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_vfReady[12][2] = vu.m_cycle + 4u;
@@ -3319,14 +3299,16 @@ int vuS_1008(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1010(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3338,11 +3320,9 @@ int vuS_1010(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002b00bdu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002b00bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1018u;
@@ -3359,14 +3339,16 @@ int vuS_1010(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1018(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3378,11 +3360,9 @@ int vuS_1018(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x002b00cau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002b00cau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 1, nv, 4); }
     vu.m_vfReady[3][3] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1020u;
@@ -3399,14 +3379,16 @@ int vuS_1018(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1020(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3422,11 +3404,9 @@ int vuS_1020(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[13], 16);
     op.execUpper(vu, 0x01c5536au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c5536au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldUp, 16); op.qVf(vu, 13, 14, nv, 4); }
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_vfReady[13][1] = vu.m_cycle + 4u;
     vu.m_vfReady[13][2] = vu.m_cycle + 4u;
@@ -3445,14 +3425,16 @@ int vuS_1020(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1028(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3468,11 +3450,9 @@ int vuS_1028(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01cc52eau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cc52eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 14, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -3491,14 +3471,16 @@ int vuS_1028(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1030(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3512,12 +3494,9 @@ int vuS_1030(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01804b17u);
     op.execLower(vu, 0x10021001u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01804b17u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 12, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_viReady[2] = vu.m_cycle + 1u;
@@ -3537,14 +3516,16 @@ int vuS_1030(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1038(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3561,11 +3542,9 @@ int vuS_1038(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01e81218u);
     op.execLower(vu, 0x81e303beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e81218u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 15, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -3585,14 +3564,16 @@ int vuS_1038(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1040(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3606,11 +3587,9 @@ int vuS_1040(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010d683du);
     op.execLower(vu, 0x520317ecu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010d683du);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1048u;
@@ -3627,14 +3606,16 @@ int vuS_1040(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1048(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3648,13 +3629,9 @@ int vuS_1048(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010d0a4au);
     op.execLower(vu, 0x01ea1000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010d0a4au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 15, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -3675,14 +3652,16 @@ int vuS_1048(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1050(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3693,7 +3672,7 @@ int vuS_1050(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -3711,14 +3690,16 @@ int vuS_1050(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1058(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3729,11 +3710,9 @@ int vuS_1058(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x09016800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1060u;
@@ -3750,21 +3729,21 @@ int vuS_1058(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1090(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c503ddu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -3783,14 +3762,16 @@ int vuS_1090(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1098(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3801,11 +3782,9 @@ int vuS_1098(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[6], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c66800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldLo, 16); op.qVf(vu, 6, 14, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -3824,21 +3803,21 @@ int vuS_1098(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10A0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[8], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c803deu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldLo, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -3857,21 +3836,21 @@ int vuS_10A0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10A8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[7], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c703dfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldLo, 16); op.qVf(vu, 7, 14, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -3890,14 +3869,16 @@ int vuS_10A8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10B0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3908,11 +3889,9 @@ int vuS_10B0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c96802u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -3931,14 +3910,16 @@ int vuS_10B0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10B8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -3952,13 +3933,9 @@ int vuS_10B8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c629bcu);
     op.execLower(vu, 0x090103f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c629bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -3978,14 +3955,16 @@ int vuS_10B8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10C0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4002,11 +3981,9 @@ int vuS_10C0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c640bdu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c640bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -4025,14 +4002,16 @@ int vuS_10C0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10C8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4049,13 +4028,9 @@ int vuS_10C8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c638beu);
     op.execLower(vu, 0x01c203d9u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c638beu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -4077,14 +4052,16 @@ int vuS_10C8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10D0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4097,11 +4074,9 @@ int vuS_10D0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x01c901acu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c901acu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 14, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -4120,14 +4095,16 @@ int vuS_10D0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10D8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4143,13 +4120,9 @@ int vuS_10D8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[2], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c0108bu);
     op.execLower(vu, 0x01c903f9u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0108bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldUp, 16); op.qVf(vu, 2, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -4171,14 +4144,16 @@ int vuS_10D8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4192,11 +4167,9 @@ int vuS_10E0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c629bcu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c629bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -4215,14 +4188,16 @@ int vuS_10E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4239,11 +4214,9 @@ int vuS_10E8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c640bdu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c640bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -4262,14 +4235,16 @@ int vuS_10E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4288,12 +4263,9 @@ int vuS_10F0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
     op.execUpper(vu, 0x01c6390au);
     op.execLower(vu, 0x10020accu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c6390au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -4314,14 +4286,16 @@ int vuS_10F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_10F8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4337,12 +4311,9 @@ int vuS_10F8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c929bcu);
     op.execLower(vu, 0x10010a2cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c929bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -4363,14 +4334,16 @@ int vuS_10F8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1100(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4388,13 +4361,9 @@ int vuS_1100(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[8], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c940bdu);
     op.execLower(vu, 0x01c80fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c940bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldLo, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -4416,14 +4385,16 @@ int vuS_1100(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1108(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4441,12 +4412,9 @@ int vuS_1108(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01c8122cu);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8122cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -4467,14 +4435,16 @@ int vuS_1108(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1110(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4488,7 +4458,7 @@ int vuS_1110(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x81c0473fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -4506,14 +4476,16 @@ int vuS_1110(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1118(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4531,13 +4503,9 @@ int vuS_1118(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x01c9394au);
     op.execLower(vu, 0x01c70fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c9394au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldLo, 16); op.qVf(vu, 7, 14, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -4559,14 +4527,16 @@ int vuS_1118(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1120(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4578,7 +4548,7 @@ int vuS_1120(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x800007bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -4596,21 +4566,21 @@ int vuS_1120(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1128(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[11], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x810b067cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldLo, 16); op.qVf(vu, 11, 8, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1130u;
@@ -4627,14 +4597,16 @@ int vuS_1128(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1130(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4650,11 +4622,9 @@ int vuS_1130(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x01c711ecu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c711ecu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 14, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -4673,14 +4643,16 @@ int vuS_1130(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1138(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4694,11 +4666,9 @@ int vuS_1138(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01cb4298u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cb4298u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -4717,14 +4687,16 @@ int vuS_1138(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1140(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4738,7 +4710,7 @@ int vuS_1140(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x81c03f3fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -4756,14 +4728,16 @@ int vuS_1140(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1148(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4779,11 +4753,9 @@ int vuS_1148(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[13], 16);
     op.execUpper(vu, 0x01ca236au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ca236au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldUp, 16); op.qVf(vu, 13, 14, nv, 4); }
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_vfReady[13][1] = vu.m_cycle + 4u;
     vu.m_vfReady[13][2] = vu.m_cycle + 4u;
@@ -4802,14 +4774,16 @@ int vuS_1148(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1150(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4825,11 +4799,9 @@ int vuS_1150(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01ca2a28u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ca2a28u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -4848,14 +4820,16 @@ int vuS_1150(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1158(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4867,11 +4841,9 @@ int vuS_1158(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010d6a81u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010d6a81u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1160u;
@@ -4888,14 +4860,16 @@ int vuS_1158(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1160(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4908,11 +4882,9 @@ int vuS_1160(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[16], 16);
     op.execUpper(vu, 0x01c8442au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8442au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[16], 16); std::memcpy(vu.m_state.vf[16], oldUp, 16); op.qVf(vu, 16, 14, nv, 4); }
     vu.m_vfReady[16][0] = vu.m_cycle + 4u;
     vu.m_vfReady[16][1] = vu.m_cycle + 4u;
     vu.m_vfReady[16][2] = vu.m_cycle + 4u;
@@ -4931,14 +4903,16 @@ int vuS_1160(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1168(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4951,13 +4925,9 @@ int vuS_1168(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x010d5282u);
     op.execLower(vu, 0x01836803u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010d5282u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldLo, 16); op.qVf(vu, 3, 12, nv, 4); }
     vu.m_vfReady[3][0] = vu.m_cycle + 4u;
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
@@ -4976,14 +4946,16 @@ int vuS_1168(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1170(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -4994,11 +4966,9 @@ int vuS_1170(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x003001bcu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x003001bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1178u;
@@ -5015,14 +4985,16 @@ int vuS_1170(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1178(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5034,11 +5006,9 @@ int vuS_1178(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x003000bdu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x003000bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1180u;
@@ -5055,14 +5025,16 @@ int vuS_1178(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1180(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5074,11 +5046,9 @@ int vuS_1180(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[2], 16);
     op.execUpper(vu, 0x0030008au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0030008au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldUp, 16); op.qVf(vu, 2, 1, nv, 4); }
     vu.m_vfReady[2][3] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1188u;
@@ -5095,14 +5065,16 @@ int vuS_1180(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1188(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5114,11 +5086,9 @@ int vuS_1188(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01035284u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01035284u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1190u;
@@ -5135,14 +5105,16 @@ int vuS_1188(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1190(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5154,7 +5126,7 @@ int vuS_1190(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x81e203beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -5172,14 +5144,16 @@ int vuS_1190(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1198(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5192,12 +5166,9 @@ int vuS_1198(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[13], 16);
     op.execUpper(vu, 0x01005350u);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01005350u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldUp, 16); op.qVf(vu, 13, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -5216,14 +5187,16 @@ int vuS_1198(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11A0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5234,11 +5207,9 @@ int vuS_11A0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[15], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01cf0fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldLo, 16); op.qVf(vu, 15, 14, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_vfReady[15][1] = vu.m_cycle + 4u;
     vu.m_vfReady[15][2] = vu.m_cycle + 4u;
@@ -5257,14 +5228,16 @@ int vuS_11A0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11A8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5276,7 +5249,7 @@ int vuS_11A8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x800007bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -5294,14 +5267,16 @@ int vuS_11A8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11B0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5316,13 +5291,9 @@ int vuS_11B0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[16], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01036c19u);
     op.execLower(vu, 0x81ca3b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01036c19u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[16], 16); std::memcpy(vu.m_state.vf[16], oldUp, 16); op.qVf(vu, 16, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -5342,14 +5313,16 @@ int vuS_11B0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11B8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5365,13 +5338,9 @@ int vuS_11B8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[13], 16);
     op.execUpper(vu, 0x01cf11ecu);
     op.execLower(vu, 0x810d067cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cf11ecu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldLo, 16); op.qVf(vu, 13, 8, nv, 4); }
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
@@ -5391,14 +5360,16 @@ int vuS_11B8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11C0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5409,11 +5380,9 @@ int vuS_11C0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[16], 16);
     op.execUpper(vu, 0x01008417u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01008417u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[16], 16); std::memcpy(vu.m_state.vf[16], oldUp, 16); op.qVf(vu, 16, 8, nv, 4); }
     vu.m_vfReady[16][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x11C8u;
@@ -5430,14 +5399,16 @@ int vuS_11C0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11C8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5455,11 +5426,9 @@ int vuS_11C8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x01cd5498u);
     op.execLower(vu, 0x81c03f3fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cd5498u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 14, nv, 4); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_vfReady[18][1] = vu.m_cycle + 4u;
     vu.m_vfReady[18][2] = vu.m_cycle + 4u;
@@ -5478,14 +5447,16 @@ int vuS_11C8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11D0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5496,7 +5467,7 @@ int vuS_11D0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -5514,14 +5485,16 @@ int vuS_11D0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11D8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5533,10 +5506,9 @@ int vuS_11D8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -5554,14 +5526,16 @@ int vuS_11D8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5575,13 +5549,9 @@ int vuS_11E0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c043dcu);
     op.execLower(vu, 0x01ca0ffdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c043dcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -5603,14 +5573,16 @@ int vuS_11E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5626,11 +5598,9 @@ int vuS_11E8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01d22a28u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d22a28u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -5649,14 +5619,16 @@ int vuS_11E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5672,11 +5644,9 @@ int vuS_11F0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x01d224aau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d224aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 14, nv, 4); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_vfReady[18][1] = vu.m_cycle + 4u;
     vu.m_vfReady[18][2] = vu.m_cycle + 4u;
@@ -5695,14 +5665,16 @@ int vuS_11F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_11F8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5718,11 +5690,9 @@ int vuS_11F8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01cf526au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cf526au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -5741,14 +5711,16 @@ int vuS_11F8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1200(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5761,11 +5733,9 @@ int vuS_1200(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01c8432au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8432au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 14, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_vfReady[12][2] = vu.m_cycle + 4u;
@@ -5784,14 +5754,16 @@ int vuS_1200(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1208(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5803,11 +5775,9 @@ int vuS_1208(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01129281u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01129281u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1210u;
@@ -5824,14 +5794,16 @@ int vuS_1208(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1210(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5843,11 +5815,9 @@ int vuS_1210(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x01094c81u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01094c81u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 8, nv, 4); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1218u;
@@ -5864,14 +5834,16 @@ int vuS_1210(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1218(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5882,11 +5854,9 @@ int vuS_1218(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002c01bcu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002c01bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1220u;
@@ -5903,14 +5873,16 @@ int vuS_1218(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1220(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5922,11 +5894,9 @@ int vuS_1220(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002c00bdu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002c00bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1228u;
@@ -5943,14 +5913,16 @@ int vuS_1220(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1228(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -5962,11 +5934,9 @@ int vuS_1228(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x011253c2u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x011253c2u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 8, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1230u;
@@ -5983,14 +5953,16 @@ int vuS_1228(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1230(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6002,11 +5974,9 @@ int vuS_1230(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[2], 16);
     op.execUpper(vu, 0x002c008au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002c008au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldUp, 16); op.qVf(vu, 2, 1, nv, 4); }
     vu.m_vfReady[2][3] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1238u;
@@ -6023,14 +5993,16 @@ int vuS_1230(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1238(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6042,11 +6014,9 @@ int vuS_1238(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01099282u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01099282u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1240u;
@@ -6063,14 +6033,16 @@ int vuS_1238(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1240(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6082,7 +6054,7 @@ int vuS_1240(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x800007bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -6100,14 +6072,16 @@ int vuS_1240(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1248(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6121,11 +6095,9 @@ int vuS_1248(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01037bc4u);
     op.execLower(vu, 0x81e203beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01037bc4u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 8, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1250u;
@@ -6142,14 +6114,16 @@ int vuS_1248(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1250(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6161,13 +6135,9 @@ int vuS_1250(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x011052aau);
     op.execLower(vu, 0x01e603f7u, c.vuData, c.dataSize, *c.gs, c.memory, 0x011052aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldLo, 16); op.qVf(vu, 6, 15, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -6188,14 +6158,16 @@ int vuS_1250(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1258(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6206,11 +6178,9 @@ int vuS_1258(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[16], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x81105b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[16], 16); std::memcpy(vu.m_state.vf[16], oldLo, 16); op.qVf(vu, 16, 8, nv, 4); }
     vu.m_vfReady[16][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1260u;
@@ -6227,14 +6197,16 @@ int vuS_1258(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1260(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6245,11 +6217,9 @@ int vuS_1260(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[11], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x810b6b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldLo, 16); op.qVf(vu, 11, 8, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1268u;
@@ -6266,14 +6236,16 @@ int vuS_1260(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1268(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6285,13 +6257,9 @@ int vuS_1268(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01007a50u);
     op.execLower(vu, 0x01cf0fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01007a50u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldLo, 16); op.qVf(vu, 15, 14, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_vfReady[15][1] = vu.m_cycle + 4u;
     vu.m_vfReady[15][2] = vu.m_cycle + 4u;
@@ -6311,14 +6279,16 @@ int vuS_1268(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1270(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6330,13 +6300,9 @@ int vuS_1270(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[13], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010651bcu);
     op.execLower(vu, 0x810d067cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010651bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldLo, 16); op.qVf(vu, 13, 8, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -6354,14 +6320,16 @@ int vuS_1270(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1278(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6375,13 +6343,9 @@ int vuS_1278(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010a54aau);
     op.execLower(vu, 0x81ca3b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a54aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -6401,14 +6365,16 @@ int vuS_1278(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1280(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6424,11 +6390,9 @@ int vuS_1280(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x01cf11ecu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cf11ecu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 14, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -6447,14 +6411,16 @@ int vuS_1280(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1288(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6466,11 +6432,9 @@ int vuS_1288(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01034a59u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01034a59u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1290u;
@@ -6487,14 +6451,16 @@ int vuS_1288(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1290(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6508,11 +6474,9 @@ int vuS_1290(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01cd53d8u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cd53d8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 14, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_vfReady[15][1] = vu.m_cycle + 4u;
     vu.m_vfReady[15][2] = vu.m_cycle + 4u;
@@ -6531,14 +6495,16 @@ int vuS_1290(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1298(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6551,12 +6517,9 @@ int vuS_1298(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x0112932au);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x0112932au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -6575,14 +6538,16 @@ int vuS_1298(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12A0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6599,11 +6564,9 @@ int vuS_12A0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010690bdu);
     op.execLower(vu, 0x81c03f3fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010690bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x12A8u;
@@ -6620,14 +6583,16 @@ int vuS_12A0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12A8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6641,13 +6606,9 @@ int vuS_12A8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[17], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c0445cu);
     op.execLower(vu, 0x01ca0ffdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0445cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[17], 16); std::memcpy(vu.m_state.vf[17], oldUp, 16); op.qVf(vu, 17, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -6669,14 +6630,16 @@ int vuS_12A8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12B0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6692,11 +6655,9 @@ int vuS_12B0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01cf2a28u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cf2a28u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -6715,14 +6676,16 @@ int vuS_12B0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12B8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6733,11 +6696,9 @@ int vuS_12B8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01004a57u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01004a57u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x12C0u;
@@ -6754,14 +6715,16 @@ int vuS_12B8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12C0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6777,11 +6740,9 @@ int vuS_12C0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01cf23eau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cf23eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 14, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_vfReady[15][1] = vu.m_cycle + 4u;
     vu.m_vfReady[15][2] = vu.m_cycle + 4u;
@@ -6800,14 +6761,16 @@ int vuS_12C0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12C8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6823,11 +6786,9 @@ int vuS_12C8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01d152aau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d152aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -6846,14 +6807,16 @@ int vuS_12C8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12D0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6866,11 +6829,9 @@ int vuS_12D0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[17], 16);
     op.execUpper(vu, 0x01c8446au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8446au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[17], 16); std::memcpy(vu.m_state.vf[17], oldUp, 16); op.qVf(vu, 17, 14, nv, 4); }
     vu.m_vfReady[17][0] = vu.m_cycle + 4u;
     vu.m_vfReady[17][1] = vu.m_cycle + 4u;
     vu.m_vfReady[17][2] = vu.m_cycle + 4u;
@@ -6889,14 +6850,16 @@ int vuS_12D0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12D8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6907,11 +6870,9 @@ int vuS_12D8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x010c64aau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010c64aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 8, nv, 4); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x12E0u;
@@ -6928,14 +6889,16 @@ int vuS_12D8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6947,11 +6910,9 @@ int vuS_12E0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x010f7bc1u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010f7bc1u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 8, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x12E8u;
@@ -6968,14 +6929,16 @@ int vuS_12E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -6987,11 +6950,9 @@ int vuS_12E8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010a5281u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a5281u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x12F0u;
@@ -7008,14 +6969,16 @@ int vuS_12E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7026,11 +6989,9 @@ int vuS_12F0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x003101bcu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x003101bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x12F8u;
@@ -7047,14 +7008,16 @@ int vuS_12F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_12F8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7066,11 +7029,9 @@ int vuS_12F8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x003100bdu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x003100bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1300u;
@@ -7087,14 +7048,16 @@ int vuS_12F8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1300(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7106,11 +7069,9 @@ int vuS_1300(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x010f7bc2u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010f7bc2u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 8, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1308u;
@@ -7127,14 +7088,16 @@ int vuS_1300(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1308(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7146,11 +7109,9 @@ int vuS_1308(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[2], 16);
     op.execUpper(vu, 0x0031008au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0031008au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldUp, 16); op.qVf(vu, 2, 1, nv, 4); }
     vu.m_vfReady[2][3] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1310u;
@@ -7167,14 +7128,16 @@ int vuS_1308(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1310(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7186,11 +7149,9 @@ int vuS_1310(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010a5282u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a5282u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1318u;
@@ -7207,14 +7168,16 @@ int vuS_1310(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1318(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7227,11 +7190,9 @@ int vuS_1318(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010660beu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010660beu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1320u;
@@ -7248,14 +7209,16 @@ int vuS_1318(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1320(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7269,13 +7232,9 @@ int vuS_1320(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x0106930bu);
     op.execLower(vu, 0x8112833cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0106930bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldLo, 16); op.qVf(vu, 18, 8, nv, 4); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -7293,14 +7252,16 @@ int vuS_1320(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1328(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7312,11 +7273,9 @@ int vuS_1328(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01037bc4u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01037bc4u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 8, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1330u;
@@ -7333,14 +7292,16 @@ int vuS_1328(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1330(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7354,11 +7315,9 @@ int vuS_1330(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010952aau);
     op.execLower(vu, 0x81e203beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010952aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1338u;
@@ -7375,14 +7334,16 @@ int vuS_1330(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1338(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7394,8 +7355,6 @@ int vuS_1338(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[16], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[11], 16);
       op.execUpper(vu, 0x010062d0u);
@@ -7404,8 +7363,6 @@ int vuS_1338(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81105b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010062d0u);
       std::memcpy(vu.m_state.vf[11], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[16], 16); std::memcpy(vu.m_state.vf[16], oldLo, 16); op.qVf(vu, 16, 8, nv, 4); }
     vu.m_vfReady[16][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -7423,14 +7380,16 @@ int vuS_1338(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1340(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7442,13 +7401,9 @@ int vuS_1340(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01007b10u);
     op.execLower(vu, 0x01cf0fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01007b10u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldLo, 16); op.qVf(vu, 15, 14, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_vfReady[15][1] = vu.m_cycle + 4u;
     vu.m_vfReady[15][2] = vu.m_cycle + 4u;
@@ -7468,14 +7423,16 @@ int vuS_1340(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1348(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7488,11 +7445,9 @@ int vuS_1348(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x010a526au);
     op.execLower(vu, 0x800007bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a526au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1350u;
@@ -7509,14 +7464,16 @@ int vuS_1348(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1350(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7531,13 +7488,9 @@ int vuS_1350(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010651bcu);
     op.execLower(vu, 0x81ca3b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010651bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -7557,14 +7510,16 @@ int vuS_1350(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1358(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7576,13 +7531,9 @@ int vuS_1358(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010b94aau);
     op.execLower(vu, 0x8107067cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010b94aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldLo, 16); op.qVf(vu, 7, 8, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -7600,14 +7551,16 @@ int vuS_1358(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1360(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7623,11 +7576,9 @@ int vuS_1360(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01cf12ecu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cf12ecu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 14, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -7646,14 +7597,16 @@ int vuS_1360(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1368(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7665,11 +7618,9 @@ int vuS_1368(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01036319u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01036319u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 8, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1370u;
@@ -7686,14 +7637,16 @@ int vuS_1368(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1370(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7704,11 +7657,9 @@ int vuS_1370(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[14], 16);
     op.execUpper(vu, 0x01094baau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01094baau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[14], 16); std::memcpy(vu.m_state.vf[14], oldUp, 16); op.qVf(vu, 14, 8, nv, 4); }
     vu.m_vfReady[14][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1378u;
@@ -7725,14 +7676,16 @@ int vuS_1370(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1378(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7747,11 +7700,9 @@ int vuS_1378(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01c753d8u);
     op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c753d8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 14, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_vfReady[15][1] = vu.m_cycle + 4u;
     vu.m_vfReady[15][2] = vu.m_cycle + 4u;
@@ -7770,14 +7721,16 @@ int vuS_1378(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1380(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7794,11 +7747,9 @@ int vuS_1380(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010648bdu);
     op.execLower(vu, 0x81c05f3fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010648bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1388u;
@@ -7815,14 +7766,16 @@ int vuS_1380(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1388(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7835,12 +7788,9 @@ int vuS_1388(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01006317u);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01006317u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -7859,14 +7809,16 @@ int vuS_1388(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1390(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7880,13 +7832,9 @@ int vuS_1390(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[17], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c0445cu);
     op.execLower(vu, 0x01ca0ffdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0445cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[17], 16); std::memcpy(vu.m_state.vf[17], oldUp, 16); op.qVf(vu, 17, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -7908,14 +7856,16 @@ int vuS_1390(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1398(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7931,11 +7881,9 @@ int vuS_1398(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01cf2a28u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cf2a28u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -7954,14 +7902,16 @@ int vuS_1398(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13A0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -7972,11 +7922,9 @@ int vuS_13A0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x010e726au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010e726au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x13A8u;
@@ -7993,14 +7941,16 @@ int vuS_13A0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13A8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8016,11 +7966,9 @@ int vuS_13A8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01cf23eau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cf23eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 14, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_vfReady[15][1] = vu.m_cycle + 4u;
     vu.m_vfReady[15][2] = vu.m_cycle + 4u;
@@ -8039,14 +7987,16 @@ int vuS_13A8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13B0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8062,11 +8012,9 @@ int vuS_13B0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01d152aau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d152aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -8085,14 +8033,16 @@ int vuS_13B0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13B8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8105,11 +8055,9 @@ int vuS_13B8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[17], 16);
     op.execUpper(vu, 0x01c8446au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8446au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[17], 16); std::memcpy(vu.m_state.vf[17], oldUp, 16); op.qVf(vu, 17, 14, nv, 4); }
     vu.m_vfReady[17][0] = vu.m_cycle + 4u;
     vu.m_vfReady[17][1] = vu.m_cycle + 4u;
     vu.m_vfReady[17][2] = vu.m_cycle + 4u;
@@ -8128,14 +8076,16 @@ int vuS_13B8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13C0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8148,13 +8098,9 @@ int vuS_13C0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[3];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010670beu);
     op.execLower(vu, 0x082303f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010670beu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[3]; vu.m_state.vi[3] = oldVi; op.qVi(vu, 3, nvi, 4); }
     vu.m_viReady[3] = vu.m_cycle + 4u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -8172,14 +8118,16 @@ int vuS_13C0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13C8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8191,11 +8139,9 @@ int vuS_13C8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x010f7bc1u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010f7bc1u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 8, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x13D0u;
@@ -8212,14 +8158,16 @@ int vuS_13C8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13D0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8231,11 +8179,9 @@ int vuS_13D0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010a5281u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a5281u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x13D8u;
@@ -8252,14 +8198,16 @@ int vuS_13D0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13D8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8271,13 +8219,9 @@ int vuS_13D8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x003101bcu);
     op.execLower(vu, 0x01e16801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x003101bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 15, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -8298,14 +8242,16 @@ int vuS_13D8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8320,12 +8266,9 @@ int vuS_13E0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[3];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x003100bdu);
     op.execLower(vu, 0x800310f0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x003100bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[3]; vu.m_state.vi[3] = oldVi; op.qVi(vu, 3, nvi, 1); }
     vu.m_viReady[3] = vu.m_cycle + 1u;
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
@@ -8344,14 +8287,16 @@ int vuS_13E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8363,11 +8308,9 @@ int vuS_13E8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x010f7bc2u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010f7bc2u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 8, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x13F0u;
@@ -8384,14 +8327,16 @@ int vuS_13E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8403,11 +8348,9 @@ int vuS_13F0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[2], 16);
     op.execUpper(vu, 0x0031008au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0031008au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldUp, 16); op.qVf(vu, 2, 1, nv, 4); }
     vu.m_vfReady[2][3] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x13F8u;
@@ -8424,14 +8367,16 @@ int vuS_13F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_13F8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8443,11 +8388,9 @@ int vuS_13F8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[14], 16);
     op.execUpper(vu, 0x010a5382u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a5382u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[14], 16); std::memcpy(vu.m_state.vf[14], oldUp, 16); op.qVf(vu, 14, 8, nv, 4); }
     vu.m_vfReady[14][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1400u;
@@ -8464,14 +8407,16 @@ int vuS_13F8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1400(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8484,11 +8429,9 @@ int vuS_1400(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01064a4bu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01064a4bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1408u;
@@ -8505,14 +8448,16 @@ int vuS_1400(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1408(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8525,13 +8470,9 @@ int vuS_1408(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[17], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01037c44u);
     op.execLower(vu, 0x01ea1000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01037c44u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[17], 16); std::memcpy(vu.m_state.vf[17], oldUp, 16); op.qVf(vu, 17, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 15, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -8552,14 +8493,16 @@ int vuS_1408(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1410(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8576,11 +8519,9 @@ int vuS_1410(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01f20bd8u);
     op.execLower(vu, 0x81e203beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01f20bd8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 15, nv, 4); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_vfReady[15][1] = vu.m_cycle + 4u;
     vu.m_vfReady[15][2] = vu.m_cycle + 4u;
@@ -8600,14 +8541,16 @@ int vuS_1410(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1418(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8619,11 +8562,9 @@ int vuS_1418(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x010c74aau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010c74aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 8, nv, 4); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1420u;
@@ -8640,14 +8581,16 @@ int vuS_1418(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1420(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8658,11 +8601,9 @@ int vuS_1420(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01004b10u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01004b10u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 8, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1428u;
@@ -8679,14 +8620,16 @@ int vuS_1420(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1428(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8699,12 +8642,9 @@ int vuS_1428(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[13];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[14], 16);
     op.execUpper(vu, 0x01008b90u);
     op.execLower(vu, 0x100d6804u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01008b90u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[14], 16); std::memcpy(vu.m_state.vf[14], oldUp, 16); op.qVf(vu, 14, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[13]; vu.m_state.vi[13] = oldVi; op.qVi(vu, 13, nvi, 1); }
     vu.m_vfReady[14][0] = vu.m_cycle + 4u;
     vu.m_viReady[13] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
@@ -8723,14 +8663,16 @@ int vuS_1428(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1430(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8749,8 +8691,6 @@ int vuS_1430(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[13], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[13], 16);
       op.execUpper(vu, 0x01ef5368u);
@@ -8759,8 +8699,6 @@ int vuS_1430(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81096b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ef5368u);
       std::memcpy(vu.m_state.vf[13], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldUp, 16); op.qVf(vu, 13, 15, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_vfReady[13][1] = vu.m_cycle + 4u;
@@ -8781,14 +8719,16 @@ int vuS_1430(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1438(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8800,13 +8740,9 @@ int vuS_1438(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[17], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[19], 16);
     op.execUpper(vu, 0x0112946au);
     op.execLower(vu, 0x01d30fb0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x0112946au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[17], 16); std::memcpy(vu.m_state.vf[17], oldUp, 16); op.qVf(vu, 17, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[19], 16); std::memcpy(vu.m_state.vf[19], oldLo, 16); op.qVf(vu, 19, 14, nv, 4); }
     vu.m_vfReady[19][0] = vu.m_cycle + 4u;
     vu.m_vfReady[19][1] = vu.m_cycle + 4u;
     vu.m_vfReady[19][2] = vu.m_cycle + 4u;
@@ -8826,14 +8762,16 @@ int vuS_1438(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1440(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8848,13 +8786,9 @@ int vuS_1440(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[18], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010691bcu);
     op.execLower(vu, 0x81d25b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010691bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldLo, 16); op.qVf(vu, 18, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_vfReady[18][1] = vu.m_cycle + 4u;
     vu.m_vfReady[18][2] = vu.m_cycle + 4u;
@@ -8874,14 +8808,16 @@ int vuS_1440(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1448(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8893,13 +8829,9 @@ int vuS_1448(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[14], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01037399u);
     op.execLower(vu, 0x810a067cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01037399u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[14], 16); std::memcpy(vu.m_state.vf[14], oldUp, 16); op.qVf(vu, 14, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[14][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -8917,14 +8849,16 @@ int vuS_1448(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1450(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8941,11 +8875,9 @@ int vuS_1450(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x010c832au);
     op.execLower(vu, 0x03e26800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010c832au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 8, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1458u;
@@ -8962,14 +8894,16 @@ int vuS_1450(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1458(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -8985,11 +8919,9 @@ int vuS_1458(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01d312ecu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d312ecu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 14, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -9008,14 +8940,16 @@ int vuS_1458(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1460(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9028,12 +8962,9 @@ int vuS_1460(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
     op.execUpper(vu, 0x01118beau);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01118beau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -9052,14 +8983,16 @@ int vuS_1460(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1468(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9073,11 +9006,9 @@ int vuS_1468(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x01ca9498u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ca9498u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 14, nv, 4); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_vfReady[18][1] = vu.m_cycle + 4u;
     vu.m_vfReady[18][2] = vu.m_cycle + 4u;
@@ -9096,14 +9027,16 @@ int vuS_1468(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1470(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9117,13 +9050,9 @@ int vuS_1470(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[16], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010688bdu);
     op.execLower(vu, 0x01d00ffdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010688bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[16], 16); std::memcpy(vu.m_state.vf[16], oldLo, 16); op.qVf(vu, 16, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_vfReady[16][0] = vu.m_cycle + 4u;
     vu.m_vfReady[16][1] = vu.m_cycle + 4u;
     vu.m_vfReady[16][2] = vu.m_cycle + 4u;
@@ -9143,14 +9072,16 @@ int vuS_1470(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1478(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9167,11 +9098,9 @@ int vuS_1478(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[19], 16);
     op.execUpper(vu, 0x01c044dcu);
     op.execLower(vu, 0x81c05f3fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c044dcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[19], 16); std::memcpy(vu.m_state.vf[19], oldUp, 16); op.qVf(vu, 19, 14, nv, 4); }
     vu.m_vfReady[19][0] = vu.m_cycle + 4u;
     vu.m_vfReady[19][1] = vu.m_cycle + 4u;
     vu.m_vfReady[19][2] = vu.m_cycle + 4u;
@@ -9190,14 +9119,16 @@ int vuS_1478(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1480(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9208,11 +9139,9 @@ int vuS_1480(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[13], 16);
     op.execUpper(vu, 0x010f7b6au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010f7b6au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldUp, 16); op.qVf(vu, 13, 8, nv, 4); }
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1488u;
@@ -9229,14 +9158,16 @@ int vuS_1480(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1488(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9252,11 +9183,9 @@ int vuS_1488(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01d22a28u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d22a28u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -9275,14 +9204,16 @@ int vuS_1488(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1490(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9298,11 +9229,9 @@ int vuS_1490(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[17], 16);
     op.execUpper(vu, 0x01d2246au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d2246au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[17], 16); std::memcpy(vu.m_state.vf[17], oldUp, 16); op.qVf(vu, 17, 14, nv, 4); }
     vu.m_vfReady[17][0] = vu.m_cycle + 4u;
     vu.m_vfReady[17][1] = vu.m_cycle + 4u;
     vu.m_vfReady[17][2] = vu.m_cycle + 4u;
@@ -9321,14 +9250,16 @@ int vuS_1490(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1498(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9344,11 +9275,9 @@ int vuS_1498(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[16], 16);
     op.execUpper(vu, 0x01d3842au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d3842au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[16], 16); std::memcpy(vu.m_state.vf[16], oldUp, 16); op.qVf(vu, 16, 14, nv, 4); }
     vu.m_vfReady[16][0] = vu.m_cycle + 4u;
     vu.m_vfReady[16][1] = vu.m_cycle + 4u;
     vu.m_vfReady[16][2] = vu.m_cycle + 4u;
@@ -9367,14 +9296,16 @@ int vuS_1498(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14A0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9385,11 +9316,9 @@ int vuS_14A0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[14], 16);
     op.execUpper(vu, 0x01007397u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01007397u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[14], 16); std::memcpy(vu.m_state.vf[14], oldUp, 16); op.qVf(vu, 14, 8, nv, 4); }
     vu.m_vfReady[14][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x14A8u;
@@ -9406,14 +9335,16 @@ int vuS_14A0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14A8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9426,11 +9357,9 @@ int vuS_14A8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x01c844aau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c844aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 14, nv, 4); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_vfReady[18][1] = vu.m_cycle + 4u;
     vu.m_vfReady[18][2] = vu.m_cycle + 4u;
@@ -9449,14 +9378,16 @@ int vuS_14A8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14B0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9468,11 +9399,9 @@ int vuS_14B0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[19], 16);
     op.execUpper(vu, 0x01118cc1u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01118cc1u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[19], 16); std::memcpy(vu.m_state.vf[19], oldUp, 16); op.qVf(vu, 19, 8, nv, 4); }
     vu.m_vfReady[19][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x14B8u;
@@ -9489,14 +9418,16 @@ int vuS_14B0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14B8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9508,11 +9439,9 @@ int vuS_14B8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[17], 16);
     op.execUpper(vu, 0x01108441u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01108441u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[17], 16); std::memcpy(vu.m_state.vf[17], oldUp, 16); op.qVf(vu, 17, 8, nv, 4); }
     vu.m_vfReady[17][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x14C0u;
@@ -9529,14 +9458,16 @@ int vuS_14B8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14C0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9549,11 +9480,9 @@ int vuS_14C0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010678beu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010678beu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x14C8u;
@@ -9570,14 +9499,16 @@ int vuS_14C0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14C8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9588,11 +9519,9 @@ int vuS_14C8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x003201bcu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x003201bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x14D0u;
@@ -9609,14 +9538,16 @@ int vuS_14C8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14D0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9628,11 +9559,9 @@ int vuS_14D0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x003200bdu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x003200bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x14D8u;
@@ -9649,14 +9578,16 @@ int vuS_14D0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14D8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9668,11 +9599,9 @@ int vuS_14D8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[16], 16);
     op.execUpper(vu, 0x01119c02u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01119c02u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[16], 16); std::memcpy(vu.m_state.vf[16], oldUp, 16); op.qVf(vu, 16, 8, nv, 4); }
     vu.m_vfReady[16][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x14E0u;
@@ -9689,14 +9618,16 @@ int vuS_14D8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9708,11 +9639,9 @@ int vuS_14E0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[2], 16);
     op.execUpper(vu, 0x0032008au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0032008au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldUp, 16); op.qVf(vu, 2, 1, nv, 4); }
     vu.m_vfReady[2][3] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x14E8u;
@@ -9729,14 +9658,16 @@ int vuS_14E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9748,11 +9679,9 @@ int vuS_14E8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x01108c82u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01108c82u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 8, nv, 4); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x14F0u;
@@ -9769,14 +9698,16 @@ int vuS_14E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9790,13 +9721,9 @@ int vuS_14F0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[19], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[17], 16);
     op.execUpper(vu, 0x01066ccbu);
     op.execLower(vu, 0x01f11001u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01066ccbu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[19], 16); std::memcpy(vu.m_state.vf[19], oldUp, 16); op.qVf(vu, 19, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[17], 16); std::memcpy(vu.m_state.vf[17], oldLo, 16); op.qVf(vu, 17, 15, nv, 4); }
     vu.m_vfReady[17][0] = vu.m_cycle + 4u;
     vu.m_vfReady[17][1] = vu.m_cycle + 4u;
     vu.m_vfReady[17][2] = vu.m_cycle + 4u;
@@ -9817,14 +9744,16 @@ int vuS_14F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_14F8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9837,13 +9766,9 @@ int vuS_14F8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[15], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[16], 16);
     op.execUpper(vu, 0x010383c4u);
     op.execLower(vu, 0x81104b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010383c4u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[15], 16); std::memcpy(vu.m_state.vf[15], oldUp, 16); op.qVf(vu, 15, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[16], 16); std::memcpy(vu.m_state.vf[16], oldLo, 16); op.qVf(vu, 16, 8, nv, 4); }
     vu.m_vfReady[16][0] = vu.m_cycle + 4u;
     vu.m_vfReady[15][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -9861,14 +9786,16 @@ int vuS_14F8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1500(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9885,11 +9812,9 @@ int vuS_1500(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[13], 16);
     op.execUpper(vu, 0x01ec0b58u);
     op.execLower(vu, 0x81e203beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ec0b58u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldUp, 16); op.qVf(vu, 13, 15, nv, 4); }
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_vfReady[13][1] = vu.m_cycle + 4u;
     vu.m_vfReady[13][2] = vu.m_cycle + 4u;
@@ -9909,14 +9834,16 @@ int vuS_1500(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1508(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9930,12 +9857,9 @@ int vuS_1508(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[18], 16);
     op.execUpper(vu, 0x010e94aau);
     op.execLower(vu, 0x10021001u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010e94aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[18], 16); std::memcpy(vu.m_state.vf[18], oldUp, 16); op.qVf(vu, 18, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_vfReady[18][0] = vu.m_cycle + 4u;
     vu.m_viReady[2] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
@@ -9954,14 +9878,16 @@ int vuS_1508(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1510(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -9973,13 +9899,9 @@ int vuS_1510(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01009b10u);
     op.execLower(vu, 0x81093b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01009b10u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -9997,14 +9919,16 @@ int vuS_1510(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1518(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10017,11 +9941,9 @@ int vuS_1518(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[14], 16);
     op.execUpper(vu, 0x01007b90u);
     op.execLower(vu, 0x520317e3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01007b90u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[14], 16); std::memcpy(vu.m_state.vf[14], oldUp, 16); op.qVf(vu, 14, 8, nv, 4); }
     vu.m_vfReady[14][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1520u;
@@ -10038,14 +9960,16 @@ int vuS_1518(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1520(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10064,13 +9988,9 @@ int vuS_1520(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[13], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x01ed8b68u);
     op.execLower(vu, 0x8107533cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ed8b68u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[13], 16); std::memcpy(vu.m_state.vf[13], oldUp, 16); op.qVf(vu, 13, 15, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldLo, 16); op.qVf(vu, 7, 8, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[13][0] = vu.m_cycle + 4u;
     vu.m_vfReady[13][1] = vu.m_cycle + 4u;
@@ -10091,14 +10011,16 @@ int vuS_1520(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1528(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10109,7 +10031,7 @@ int vuS_1528(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -10127,14 +10049,16 @@ int vuS_1528(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1530(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10145,11 +10069,9 @@ int vuS_1530(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x09016800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1538u;
@@ -10166,14 +10088,16 @@ int vuS_1530(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_15E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10184,11 +10108,9 @@ int vuS_15E0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[3], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c36800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldLo, 16); op.qVf(vu, 3, 14, nv, 4); }
     vu.m_vfReady[3][0] = vu.m_cycle + 4u;
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_vfReady[3][2] = vu.m_cycle + 4u;
@@ -10207,21 +10129,21 @@ int vuS_15E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_15E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c103ddu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 14, nv, 4); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -10240,21 +10162,21 @@ int vuS_15E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_15F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x090103f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x15F8u;
@@ -10271,21 +10193,21 @@ int vuS_15F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_15F8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c203deu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 14, nv, 4); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -10304,21 +10226,21 @@ int vuS_15F8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1600(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[4], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c403dfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldLo, 16); op.qVf(vu, 4, 14, nv, 4); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -10337,14 +10259,16 @@ int vuS_1600(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1608(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10360,12 +10284,9 @@ int vuS_1608(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c309bcu);
     op.execLower(vu, 0x10020accu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c309bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_viReady[2] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -10386,14 +10307,16 @@ int vuS_1608(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1610(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10412,12 +10335,9 @@ int vuS_1610(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c310bdu);
     op.execLower(vu, 0x10010a2cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c310bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -10438,14 +10358,16 @@ int vuS_1610(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1618(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10464,14 +10386,9 @@ int vuS_1618(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[4], 16);
     op.execUpper(vu, 0x01c320cau);
     op.execLower(vu, 0x81c40b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c320cau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldLo, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -10495,14 +10412,16 @@ int vuS_1618(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1620(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10514,12 +10433,9 @@ int vuS_1620(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[8], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x81c80b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldLo, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -10540,14 +10456,16 @@ int vuS_1620(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1628(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10563,11 +10481,9 @@ int vuS_1628(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
     op.execUpper(vu, 0x01c4192au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c4192au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -10586,14 +10502,16 @@ int vuS_1628(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1630(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10605,11 +10523,9 @@ int vuS_1630(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01042141u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01042141u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1638u;
@@ -10626,14 +10542,16 @@ int vuS_1630(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1638(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10650,8 +10568,6 @@ int vuS_1638(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[4], 16);
       op.execUpper(vu, 0x01c8192au);
@@ -10660,8 +10576,6 @@ int vuS_1638(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x8045233cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8192au);
       std::memcpy(vu.m_state.vf[4], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 2, nv, 4); }
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
@@ -10681,14 +10595,16 @@ int vuS_1638(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1640(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10700,12 +10616,9 @@ int vuS_1640(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[8], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x81c80b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldLo, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -10726,14 +10639,16 @@ int vuS_1640(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1648(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10745,11 +10660,9 @@ int vuS_1648(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01052942u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01052942u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1650u;
@@ -10766,14 +10679,16 @@ int vuS_1648(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1650(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10785,11 +10700,9 @@ int vuS_1650(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x81042181u);
     { const uint32_t lb = 0x3f000000u; float imm; std::memcpy(&imm, &lb, 4); vu.m_state.i = vuNormalizeOperand(imm); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 8, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1658u;
@@ -10806,14 +10719,16 @@ int vuS_1650(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1658(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10830,8 +10745,6 @@ int vuS_1658(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[4], 16);
       op.execUpper(vu, 0x01c8192au);
@@ -10840,8 +10753,6 @@ int vuS_1658(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x8045233cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8192au);
       std::memcpy(vu.m_state.vf[4], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 2, nv, 4); }
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
@@ -10861,21 +10772,21 @@ int vuS_1658(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1660(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0100023eu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0100023eu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1668u;
@@ -10892,14 +10803,16 @@ int vuS_1660(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1668(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10911,13 +10824,9 @@ int vuS_1668(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[3];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010029e3u);
     op.execLower(vu, 0x082303f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010029e3u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[3]; vu.m_state.vi[3] = oldVi; op.qVi(vu, 3, nvi, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_viReady[3] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -10935,14 +10844,16 @@ int vuS_1668(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1670(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -10956,14 +10867,9 @@ int vuS_1670(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01002967u);
     op.execLower(vu, 0x81c80b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01002967u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldLo, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -10985,14 +10891,16 @@ int vuS_1670(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1678(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11005,13 +10913,9 @@ int vuS_1678(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
     op.execUpper(vu, 0x010532c2u);
     op.execLower(vu, 0x01e16801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010532c2u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 15, nv, 4); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -11032,14 +10936,16 @@ int vuS_1678(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1680(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11050,13 +10956,9 @@ int vuS_1680(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0100023eu);
     op.execLower(vu, 0x01e26802u, c.vuData, c.dataSize, *c.gs, c.memory, 0x0100023eu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 15, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -11077,14 +10979,16 @@ int vuS_1680(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1688(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11097,13 +11001,9 @@ int vuS_1688(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01042181u);
     op.execLower(vu, 0x01ea1000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01042181u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 15, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -11124,14 +11024,16 @@ int vuS_1688(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1690(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11148,8 +11050,6 @@ int vuS_1690(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[4], 16);
       op.execUpper(vu, 0x01c8192au);
@@ -11158,8 +11058,6 @@ int vuS_1690(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x8045233cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8192au);
       std::memcpy(vu.m_state.vf[4], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 2, nv, 4); }
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
@@ -11179,14 +11077,16 @@ int vuS_1690(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1698(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11199,8 +11099,6 @@ int vuS_1698(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[5], 16);
       op.execUpper(vu, 0x01005967u);
@@ -11209,8 +11107,6 @@ int vuS_1698(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81092b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01005967u);
       std::memcpy(vu.m_state.vf[5], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 8, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -11228,14 +11124,16 @@ int vuS_1698(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16A0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11247,11 +11145,9 @@ int vuS_16A0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01005a23u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01005a23u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x16A8u;
@@ -11268,14 +11164,16 @@ int vuS_16A0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16A8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11291,12 +11189,9 @@ int vuS_16A8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[13];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01e0503cu);
     op.execLower(vu, 0x100d6803u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0503cu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 15, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[13]; vu.m_state.vi[13] = oldVi; op.qVi(vu, 13, nvi, 1); }
     vu.m_viReady[13] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -11318,14 +11213,16 @@ int vuS_16A8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16B0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11347,12 +11244,9 @@ int vuS_16B0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[3];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01e708bcu);
     op.execLower(vu, 0x800310f0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e708bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 15, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[3]; vu.m_state.vi[3] = oldVi; op.qVi(vu, 3, nvi, 1); }
     vu.m_viReady[3] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -11374,14 +11268,16 @@ int vuS_16B0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16B8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11402,14 +11298,9 @@ int vuS_16B8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01e911c8u);
     op.execLower(vu, 0x81cb0b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e911c8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 15, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldLo, 16); op.qVf(vu, 11, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -11434,14 +11325,16 @@ int vuS_16B8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16C0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11453,11 +11346,9 @@ int vuS_16C0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01053282u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01053282u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x16C8u;
@@ -11474,14 +11365,16 @@ int vuS_16C0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16C8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11492,13 +11385,9 @@ int vuS_16C8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0100023eu);
     op.execLower(vu, 0x8109433cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0100023eu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 8, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -11516,14 +11405,16 @@ int vuS_16C8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16D0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11536,13 +11427,9 @@ int vuS_16D0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01042181u);
     op.execLower(vu, 0x01ec1001u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01042181u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldLo, 16); op.qVf(vu, 12, 15, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_vfReady[12][2] = vu.m_cycle + 4u;
@@ -11563,14 +11450,16 @@ int vuS_16D0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16D8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11587,8 +11476,6 @@ int vuS_16D8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[4], 16);
       op.execUpper(vu, 0x01cb192au);
@@ -11597,8 +11484,6 @@ int vuS_16D8(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x8045233cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cb192au);
       std::memcpy(vu.m_state.vf[4], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 2, nv, 4); }
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
@@ -11618,14 +11503,16 @@ int vuS_16D8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11638,13 +11525,9 @@ int vuS_16E0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01005223u);
     op.execLower(vu, 0x810b2b3cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01005223u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldLo, 16); op.qVf(vu, 11, 8, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -11662,14 +11545,16 @@ int vuS_16E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11687,12 +11572,9 @@ int vuS_16E8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01005167u);
     op.execLower(vu, 0x81e23b7du, c.vuData, c.dataSize, *c.gs, c.memory, 0x01005167u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_viReady[2] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
@@ -11711,14 +11593,16 @@ int vuS_16E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11732,11 +11616,9 @@ int vuS_16F0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01e0603cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0603cu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 15, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -11756,14 +11638,16 @@ int vuS_16F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_16F8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11784,11 +11668,9 @@ int vuS_16F8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01e908bcu);
     op.execLower(vu, 0x520317f8u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e908bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 15, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -11808,14 +11690,16 @@ int vuS_16F8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1700(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11836,14 +11720,9 @@ int vuS_1700(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01eb11c8u);
     op.execLower(vu, 0x81cb0b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01eb11c8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 15, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldLo, 16); op.qVf(vu, 11, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -11868,14 +11747,16 @@ int vuS_1700(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1708(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11886,7 +11767,7 @@ int vuS_1708(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -11904,14 +11785,16 @@ int vuS_1708(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1710(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11922,11 +11805,9 @@ int vuS_1710(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x09016800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1718u;
@@ -11943,14 +11824,16 @@ int vuS_1710(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1720(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -11961,13 +11844,9 @@ int vuS_1720(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
     op.execUpper(vu, 0x01000113u);
     op.execLower(vu, 0x01c26800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01000113u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 14, nv, 4); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -11987,21 +11866,21 @@ int vuS_1720(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1728(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[3], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c303d6u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldLo, 16); op.qVf(vu, 3, 14, nv, 4); }
     vu.m_vfReady[3][0] = vu.m_cycle + 4u;
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_vfReady[3][2] = vu.m_cycle + 4u;
@@ -12020,21 +11899,21 @@ int vuS_1728(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1730(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c103d7u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 14, nv, 4); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -12053,21 +11932,21 @@ int vuS_1730(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1738(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c503d8u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -12086,14 +11965,16 @@ int vuS_1738(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1740(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12107,13 +11988,9 @@ int vuS_1740(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c219bcu);
     op.execLower(vu, 0x090103f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c219bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -12133,14 +12010,16 @@ int vuS_1740(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1748(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12157,13 +12036,9 @@ int vuS_1748(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[3], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c208bdu);
     op.execLower(vu, 0x01c303d9u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c208bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldLo, 16); op.qVf(vu, 3, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[3][0] = vu.m_cycle + 4u;
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_vfReady[3][2] = vu.m_cycle + 4u;
@@ -12185,14 +12060,16 @@ int vuS_1748(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1750(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12211,12 +12088,9 @@ int vuS_1750(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01c2294au);
     op.execLower(vu, 0x10020accu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c2294au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -12237,14 +12111,16 @@ int vuS_1750(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1758(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12256,10 +12132,9 @@ int vuS_1758(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x100109dcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -12277,14 +12152,16 @@ int vuS_1758(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1760(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12302,14 +12179,9 @@ int vuS_1760(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c328e8u);
     op.execLower(vu, 0x81ca0b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c328e8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -12333,14 +12205,16 @@ int vuS_1760(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1768(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12358,14 +12232,9 @@ int vuS_1768(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01ca1aacu);
     op.execLower(vu, 0x81c90b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ca1aacu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -12389,14 +12258,16 @@ int vuS_1768(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1770(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12410,13 +12281,9 @@ int vuS_1770(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
     op.execUpper(vu, 0x01ca52aau);
     op.execLower(vu, 0x01e26802u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ca52aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 15, nv, 4); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -12439,14 +12306,16 @@ int vuS_1770(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1778(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12462,11 +12331,9 @@ int vuS_1778(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c91a6cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c91a6cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -12485,14 +12352,16 @@ int vuS_1778(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1780(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12504,11 +12373,9 @@ int vuS_1780(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010a503du);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a503du);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1788u;
@@ -12525,14 +12392,16 @@ int vuS_1780(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1788(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12545,11 +12414,9 @@ int vuS_1788(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010a228au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a228au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1790u;
@@ -12566,14 +12433,16 @@ int vuS_1788(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1790(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12586,11 +12455,9 @@ int vuS_1790(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x0102522au);
     op.execLower(vu, 0x800a03bdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0102522au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1798u;
@@ -12607,14 +12474,16 @@ int vuS_1790(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1798(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12629,14 +12498,9 @@ int vuS_1798(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c94aaau);
     op.execLower(vu, 0x81c90b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c94aaau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -12660,14 +12524,16 @@ int vuS_1798(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17A0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12679,11 +12545,9 @@ int vuS_17A0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010a503du);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a503du);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x17A8u;
@@ -12700,14 +12564,16 @@ int vuS_17A0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17A8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12719,11 +12585,9 @@ int vuS_17A8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x0080129cu);
     op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0080129cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 4, nv, 4); }
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x17B0u;
@@ -12740,14 +12604,16 @@ int vuS_17A8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17B0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12760,11 +12626,9 @@ int vuS_17B0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010a228au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a228au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x17B8u;
@@ -12781,14 +12645,16 @@ int vuS_17B0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17B8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12804,11 +12670,9 @@ int vuS_17B8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c91a6cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c91a6cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -12827,14 +12691,16 @@ int vuS_17B8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17C0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12846,11 +12712,9 @@ int vuS_17C0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x010a4141u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a4141u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x17C8u;
@@ -12867,14 +12731,16 @@ int vuS_17C0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17C8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12887,11 +12753,9 @@ int vuS_17C8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x0102522au);
     op.execLower(vu, 0x800a03bdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0102522au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x17D0u;
@@ -12908,14 +12772,16 @@ int vuS_17C8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17D0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12928,11 +12794,9 @@ int vuS_17D0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c94aaau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c94aaau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -12951,14 +12815,16 @@ int vuS_17D0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17D8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -12972,14 +12838,9 @@ int vuS_17D8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01022942u);
     op.execLower(vu, 0x81c90b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01022942u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -13001,14 +12862,16 @@ int vuS_17D8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13020,11 +12883,9 @@ int vuS_17E0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x010a503du);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a503du);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x17E8u;
@@ -13041,14 +12902,16 @@ int vuS_17E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13061,11 +12924,9 @@ int vuS_17E8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x010a228au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a228au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x17F0u;
@@ -13082,14 +12943,16 @@ int vuS_17E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13100,11 +12963,9 @@ int vuS_17F0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x0080129cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0080129cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 4, nv, 4); }
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x17F8u;
@@ -13121,14 +12982,16 @@ int vuS_17F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_17F8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13144,13 +13007,9 @@ int vuS_17F8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[3];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c91a6cu);
     op.execLower(vu, 0x082303f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c91a6cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[3]; vu.m_state.vi[3] = oldVi; op.qVi(vu, 3, nvi, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -13170,14 +13029,16 @@ int vuS_17F8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1800(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13188,11 +13049,9 @@ int vuS_1800(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x010029abu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010029abu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 8, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1808u;
@@ -13209,14 +13068,16 @@ int vuS_1800(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1808(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13230,11 +13091,9 @@ int vuS_1808(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010a41c1u);
     op.execLower(vu, 0x800a03bdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010a41c1u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 8, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1810u;
@@ -13251,14 +13110,16 @@ int vuS_1808(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1810(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13274,12 +13135,9 @@ int vuS_1810(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[3];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01c9496au);
     op.execLower(vu, 0x800310f0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c9496au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[3]; vu.m_state.vi[3] = oldVi; op.qVi(vu, 3, nvi, 1); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -13300,14 +13158,16 @@ int vuS_1810(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1818(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13320,13 +13180,9 @@ int vuS_1818(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
     op.execUpper(vu, 0x0102522au);
     op.execLower(vu, 0x01e16801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x0102522au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 15, nv, 4); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -13347,14 +13203,16 @@ int vuS_1818(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1820(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13366,11 +13224,9 @@ int vuS_1820(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01023297u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01023297u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 8, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1828u;
@@ -13387,14 +13243,16 @@ int vuS_1820(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1828(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13406,11 +13264,9 @@ int vuS_1828(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010239c2u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010239c2u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 8, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1830u;
@@ -13427,14 +13283,16 @@ int vuS_1828(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1830(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13448,14 +13306,9 @@ int vuS_1830(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0105283du);
     op.execLower(vu, 0x81c90b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0105283du);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -13477,14 +13330,16 @@ int vuS_1830(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1838(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13497,11 +13352,9 @@ int vuS_1838(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x0105214au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0105214au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1840u;
@@ -13518,14 +13371,16 @@ int vuS_1838(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1840(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13536,11 +13391,9 @@ int vuS_1840(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
     op.execUpper(vu, 0x0080111cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0080111cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 4, nv, 4); }
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1848u;
@@ -13557,14 +13410,16 @@ int vuS_1840(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1848(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13579,11 +13434,9 @@ int vuS_1848(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01ea0a98u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ea0a98u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 15, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -13603,14 +13456,16 @@ int vuS_1848(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1850(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13627,13 +13482,9 @@ int vuS_1850(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c91aecu);
     op.execLower(vu, 0x01e91000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c91aecu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 15, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -13656,14 +13507,16 @@ int vuS_1850(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1858(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13676,11 +13529,9 @@ int vuS_1858(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010039ebu);
     op.execLower(vu, 0x800503bdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010039ebu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 8, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1860u;
@@ -13697,14 +13548,16 @@ int vuS_1858(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1860(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13716,11 +13569,9 @@ int vuS_1860(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x01044181u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01044181u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 8, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1868u;
@@ -13737,14 +13588,16 @@ int vuS_1860(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1868(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13756,11 +13609,9 @@ int vuS_1868(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x0102296au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0102296au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1870u;
@@ -13777,14 +13628,16 @@ int vuS_1868(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1870(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13797,11 +13650,9 @@ int vuS_1870(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01cb5a2au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cb5a2au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -13820,14 +13671,16 @@ int vuS_1870(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1878(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13845,11 +13698,9 @@ int vuS_1878(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01ea4aa8u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ea4aa8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 15, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -13869,14 +13720,16 @@ int vuS_1878(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1880(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13890,12 +13743,9 @@ int vuS_1880(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[13];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010239d7u);
     op.execLower(vu, 0x100d6803u, c.vuData, c.dataSize, *c.gs, c.memory, 0x010239d7u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 8, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[13]; vu.m_state.vi[13] = oldVi; op.qVi(vu, 13, nvi, 1); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_viReady[13] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
@@ -13914,14 +13764,16 @@ int vuS_1880(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1888(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13933,11 +13785,9 @@ int vuS_1888(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x01023182u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01023182u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 8, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1890u;
@@ -13954,14 +13804,16 @@ int vuS_1888(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1890(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -13975,14 +13827,9 @@ int vuS_1890(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[11], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0108403du);
     op.execLower(vu, 0x81cb0b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0108403du);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldLo, 16); op.qVf(vu, 11, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 8, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -14004,14 +13851,16 @@ int vuS_1890(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1898(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14024,11 +13873,9 @@ int vuS_1898(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x0108220au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0108220au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x18A0u;
@@ -14045,14 +13892,16 @@ int vuS_1898(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18A0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14069,12 +13918,9 @@ int vuS_18A0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x0080121cu);
     op.execLower(vu, 0x81e2537du, c.vuData, c.dataSize, *c.gs, c.memory, 0x0080121cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 4, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_viReady[2] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
@@ -14093,14 +13939,16 @@ int vuS_18A0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18A8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14115,11 +13963,9 @@ int vuS_18A8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x01e709d8u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e709d8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 15, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -14139,14 +13985,16 @@ int vuS_18A8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18B0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14162,11 +14010,9 @@ int vuS_18B0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[11], 16);
     op.execUpper(vu, 0x01cb1aecu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cb1aecu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldUp, 16); op.qVf(vu, 11, 14, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -14185,14 +14031,16 @@ int vuS_18B0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18B8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14204,13 +14052,9 @@ int vuS_18B8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x0100326bu);
     op.execLower(vu, 0x01ea1000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x0100326bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 15, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -14231,14 +14075,16 @@ int vuS_18B8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18C0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14250,11 +14096,9 @@ int vuS_18C0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x01082981u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01082981u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 8, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x18C8u;
@@ -14271,14 +14115,16 @@ int vuS_18C0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18C8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14291,11 +14137,9 @@ int vuS_18C8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x0102416au);
     op.execLower(vu, 0x800803bdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0102416au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 8, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x18D0u;
@@ -14312,14 +14156,16 @@ int vuS_18C8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18D0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14332,11 +14178,9 @@ int vuS_18D0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01cb5a2au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01cb5a2au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -14355,14 +14199,16 @@ int vuS_18D0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18D8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14382,11 +14228,9 @@ int vuS_18D8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01e752a8u);
     op.execLower(vu, 0x520317f5u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e752a8u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 15, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -14406,14 +14250,16 @@ int vuS_18D8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14425,11 +14271,9 @@ int vuS_18E0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x010249d7u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010249d7u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 8, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x18E8u;
@@ -14446,14 +14290,16 @@ int vuS_18E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14464,7 +14310,7 @@ int vuS_18E8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -14482,14 +14328,16 @@ int vuS_18E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_18F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14500,11 +14348,9 @@ int vuS_18F0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x09016800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x18F8u;
@@ -14521,17 +14367,19 @@ int vuS_18F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1900(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x4000000du, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -14549,14 +14397,16 @@ int vuS_1900(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1908(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14567,11 +14417,9 @@ int vuS_1908(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c91000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -14590,21 +14438,21 @@ int vuS_1908(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1910(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[4], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01e403d5u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldLo, 16); op.qVf(vu, 4, 15, nv, 4); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -14624,14 +14472,16 @@ int vuS_1910(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1918(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14642,11 +14492,9 @@ int vuS_1918(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01ca1001u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -14665,14 +14513,16 @@ int vuS_1918(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1920(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14683,11 +14533,9 @@ int vuS_1920(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[11], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01cb1002u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldLo, 16); op.qVf(vu, 11, 14, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -14706,14 +14554,16 @@ int vuS_1920(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1928(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14724,11 +14574,9 @@ int vuS_1928(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[12], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01cc1003u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldLo, 16); op.qVf(vu, 12, 14, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_vfReady[12][2] = vu.m_cycle + 4u;
@@ -14747,14 +14595,16 @@ int vuS_1928(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1930(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14768,13 +14618,9 @@ int vuS_1930(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c449bcu);
     op.execLower(vu, 0x01e203d3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c449bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 15, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -14797,14 +14643,16 @@ int vuS_1930(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1938(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14821,11 +14669,9 @@ int vuS_1938(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c450bdu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c450bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -14844,14 +14690,16 @@ int vuS_1938(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1940(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14868,11 +14716,9 @@ int vuS_1940(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c458beu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c458beu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -14891,14 +14737,16 @@ int vuS_1940(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1948(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14915,13 +14763,9 @@ int vuS_1948(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
     op.execUpper(vu, 0x01c4610bu);
     op.execLower(vu, 0x01e103d2u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c4610bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 15, nv, 4); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -14944,14 +14788,16 @@ int vuS_1948(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1950(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -14965,13 +14811,9 @@ int vuS_1950(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[3], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c249bcu);
     op.execLower(vu, 0x01e303d4u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c249bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldLo, 16); op.qVf(vu, 3, 15, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[3][0] = vu.m_cycle + 4u;
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_vfReady[3][2] = vu.m_cycle + 4u;
@@ -14994,14 +14836,16 @@ int vuS_1950(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1958(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15019,12 +14863,9 @@ int vuS_1958(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[4];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c250bdu);
     op.execLower(vu, 0x100401dcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c250bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[4]; vu.m_state.vi[4] = oldVi; op.qVi(vu, 4, nvi, 1); }
     vu.m_viReady[4] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -15045,14 +14886,16 @@ int vuS_1958(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1960(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15069,11 +14912,9 @@ int vuS_1960(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c258beu);
     op.execLower(vu, 0x40000009u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c258beu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -15092,14 +14933,16 @@ int vuS_1960(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1968(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15116,11 +14959,9 @@ int vuS_1968(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[2], 16);
     op.execUpper(vu, 0x01c2608bu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c2608bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldUp, 16); op.qVf(vu, 2, 14, nv, 4); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -15139,21 +14980,21 @@ int vuS_1968(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1970(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01e203dbu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 15, nv, 4); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -15173,14 +15014,16 @@ int vuS_1970(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1978(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15191,11 +15034,9 @@ int vuS_1978(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01ca1001u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -15214,14 +15055,16 @@ int vuS_1978(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1980(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15232,11 +15075,9 @@ int vuS_1980(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[11], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01cb1002u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[11], 16); std::memcpy(vu.m_state.vf[11], oldLo, 16); op.qVf(vu, 11, 14, nv, 4); }
     vu.m_vfReady[11][0] = vu.m_cycle + 4u;
     vu.m_vfReady[11][1] = vu.m_cycle + 4u;
     vu.m_vfReady[11][2] = vu.m_cycle + 4u;
@@ -15255,14 +15096,16 @@ int vuS_1980(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1988(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15273,11 +15116,9 @@ int vuS_1988(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[12], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01cc1003u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldLo, 16); op.qVf(vu, 12, 14, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_vfReady[12][2] = vu.m_cycle + 4u;
@@ -15296,14 +15137,16 @@ int vuS_1988(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1990(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15317,13 +15160,9 @@ int vuS_1990(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[3], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c249bcu);
     op.execLower(vu, 0x01e303dcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c249bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldLo, 16); op.qVf(vu, 3, 15, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[3][0] = vu.m_cycle + 4u;
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_vfReady[3][2] = vu.m_cycle + 4u;
@@ -15346,14 +15185,16 @@ int vuS_1990(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1998(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15370,13 +15211,9 @@ int vuS_1998(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c250bdu);
     op.execLower(vu, 0x01e103dau, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c250bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 15, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -15399,14 +15236,16 @@ int vuS_1998(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19A0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15424,12 +15263,9 @@ int vuS_19A0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[4];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c258beu);
     op.execLower(vu, 0x1004022cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c258beu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[4]; vu.m_state.vi[4] = oldVi; op.qVi(vu, 4, nvi, 1); }
     vu.m_viReady[4] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -15450,14 +15286,16 @@ int vuS_19A0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19A8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15474,13 +15312,9 @@ int vuS_19A8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[2], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[4], 16);
     op.execUpper(vu, 0x01c2608bu);
     op.execLower(vu, 0x81c4633cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c2608bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldUp, 16); op.qVf(vu, 2, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldLo, 16); op.qVf(vu, 4, 14, nv, 4); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -15502,14 +15336,16 @@ int vuS_19A8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19B0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15523,13 +15359,9 @@ int vuS_19B0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[11];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c349bcu);
     op.execLower(vu, 0x090b03f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c349bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[11]; vu.m_state.vi[11] = oldVi; op.qVi(vu, 11, nvi, 4); }
     vu.m_viReady[11] = vu.m_cycle + 4u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -15549,14 +15381,16 @@ int vuS_19B0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19B8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15573,13 +15407,9 @@ int vuS_19B8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[3];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c350bdu);
     op.execLower(vu, 0x082303f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c350bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[3]; vu.m_state.vi[3] = oldVi; op.qVi(vu, 3, nvi, 4); }
     vu.m_viReady[3] = vu.m_cycle + 4u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -15599,14 +15429,16 @@ int vuS_19B8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19C0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15623,11 +15455,9 @@ int vuS_19C0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c358beu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c358beu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -15646,14 +15476,16 @@ int vuS_19C0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19C8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15670,11 +15502,9 @@ int vuS_19C8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x01c360cbu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c360cbu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 14, nv, 4); }
     vu.m_vfReady[3][0] = vu.m_cycle + 4u;
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_vfReady[3][2] = vu.m_cycle + 4u;
@@ -15693,14 +15523,16 @@ int vuS_19C8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19D0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15717,12 +15549,9 @@ int vuS_19D0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c149bcu);
     op.execLower(vu, 0x80045870u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c149bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -15743,14 +15572,16 @@ int vuS_19D0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19D8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15769,14 +15600,9 @@ int vuS_19D8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c150bdu);
     op.execLower(vu, 0x81c50b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c150bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -15800,14 +15626,16 @@ int vuS_19D8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19E0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15826,12 +15654,9 @@ int vuS_19E0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c158beu);
     op.execLower(vu, 0x10025b1cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c158beu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_viReady[2] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -15852,14 +15677,16 @@ int vuS_19E0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19E8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15876,11 +15703,9 @@ int vuS_19E8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[12], 16);
     op.execUpper(vu, 0x01c1630bu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c1630bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[12], 16); std::memcpy(vu.m_state.vf[12], oldUp, 16); op.qVf(vu, 12, 14, nv, 4); }
     vu.m_vfReady[12][0] = vu.m_cycle + 4u;
     vu.m_vfReady[12][1] = vu.m_cycle + 4u;
     vu.m_vfReady[12][2] = vu.m_cycle + 4u;
@@ -15899,14 +15724,16 @@ int vuS_19E8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19F0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15922,14 +15749,9 @@ int vuS_19F0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[20], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c561bcu);
     op.execLower(vu, 0x81d40b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c561bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[20], 16); std::memcpy(vu.m_state.vf[20], oldLo, 16); op.qVf(vu, 20, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[20][0] = vu.m_cycle + 4u;
     vu.m_vfReady[20][1] = vu.m_cycle + 4u;
     vu.m_vfReady[20][2] = vu.m_cycle + 4u;
@@ -15953,14 +15775,16 @@ int vuS_19F0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_19F8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -15980,12 +15804,9 @@ int vuS_19F8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[3];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c510bdu);
     op.execLower(vu, 0x800310f0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c510bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[3]; vu.m_state.vi[3] = oldVi; op.qVi(vu, 3, nvi, 1); }
     vu.m_viReady[3] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -16006,14 +15827,16 @@ int vuS_19F8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A00(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16030,11 +15853,9 @@ int vuS_1A00(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c518beu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c518beu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[2] = vu.m_cycle + 1u;
@@ -16053,14 +15874,16 @@ int vuS_1A00(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A08(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16076,11 +15899,9 @@ int vuS_1A08(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01c0214bu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0214bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -16099,14 +15920,16 @@ int vuS_1A08(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A10(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16122,12 +15945,9 @@ int vuS_1A10(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01d461bcu);
     op.execLower(vu, 0x10021001u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d461bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_viReady[2] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -16148,14 +15968,16 @@ int vuS_1A10(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A18(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16173,13 +15995,9 @@ int vuS_1A18(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[20], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01d410bdu);
     op.execLower(vu, 0x01940800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d410bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[20], 16); std::memcpy(vu.m_state.vf[20], oldLo, 16); op.qVf(vu, 20, 12, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[20][0] = vu.m_cycle + 4u;
     vu.m_vfReady[20][1] = vu.m_cycle + 4u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
@@ -16200,14 +16018,16 @@ int vuS_1A18(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A20(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16226,14 +16046,9 @@ int vuS_1A20(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[20], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01d418beu);
     op.execLower(vu, 0x80540b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d418beu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[20], 16); std::memcpy(vu.m_state.vf[20], oldLo, 16); op.qVf(vu, 20, 2, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[20][2] = vu.m_cycle + 4u;
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
@@ -16255,14 +16070,16 @@ int vuS_1A20(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A28(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16274,7 +16091,7 @@ int vuS_1A28(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x520317fcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -16292,14 +16109,16 @@ int vuS_1A28(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A30(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16319,7 +16138,6 @@ int vuS_1A30(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[5], 16);
       op.execUpper(vu, 0x01c0214bu);
@@ -16328,7 +16146,6 @@ int vuS_1A30(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x03c22fffu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0214bu);
       std::memcpy(vu.m_state.vf[5], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -16347,14 +16164,16 @@ int vuS_1A30(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A38(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16365,7 +16184,7 @@ int vuS_1A38(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -16383,14 +16202,16 @@ int vuS_1A38(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A40(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16401,11 +16222,9 @@ int vuS_1A40(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x09016800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1A48u;
@@ -16422,21 +16241,21 @@ int vuS_1A40(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A68(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c203d6u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 14, nv, 4); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -16455,14 +16274,16 @@ int vuS_1A68(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A70(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16473,11 +16294,9 @@ int vuS_1A70(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c16800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 14, nv, 4); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -16496,21 +16315,21 @@ int vuS_1A70(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A78(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[6], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c603d7u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldLo, 16); op.qVf(vu, 6, 14, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -16529,21 +16348,21 @@ int vuS_1A78(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A80(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x01c503d8u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -16562,14 +16381,16 @@ int vuS_1A80(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A88(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16583,13 +16404,9 @@ int vuS_1A88(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[4], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c111bcu);
     op.execLower(vu, 0x01c403ddu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c111bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldLo, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -16611,14 +16428,16 @@ int vuS_1A88(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A90(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16636,13 +16455,9 @@ int vuS_1A90(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c130bdu);
     op.execLower(vu, 0x01c26801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c130bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -16664,14 +16479,16 @@ int vuS_1A90(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1A98(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16688,13 +16505,9 @@ int vuS_1A98(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c128beu);
     op.execLower(vu, 0x01c103d9u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c128beu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -16716,21 +16529,21 @@ int vuS_1A98(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AA0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x090103f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1AA8u;
@@ -16747,14 +16560,16 @@ int vuS_1AA0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AA8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16770,13 +16585,9 @@ int vuS_1AA8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[1], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x01c0084bu);
     op.execLower(vu, 0x01c603deu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0084bu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldUp, 16); op.qVf(vu, 1, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldLo, 16); op.qVf(vu, 6, 14, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -16798,14 +16609,16 @@ int vuS_1AA8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AB0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16820,13 +16633,9 @@ int vuS_1AB0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[4], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c221bcu);
     op.execLower(vu, 0x01c409dcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c221bcu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldLo, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -16848,14 +16657,16 @@ int vuS_1AB0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AB8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16872,13 +16683,9 @@ int vuS_1AB8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[2];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x01c230bdu);
     op.execLower(vu, 0x082203f3u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c230bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 14, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 4); }
     vu.m_viReady[2] = vu.m_cycle + 4u;
     vu.m_accReady[0] = vu.m_cycle + 1u;
     vu.m_accReady[1] = vu.m_cycle + 1u;
@@ -16898,14 +16705,16 @@ int vuS_1AB8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AC0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16921,11 +16730,9 @@ int vuS_1AC0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
     op.execUpper(vu, 0x01c4092cu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c4092cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -16944,14 +16751,16 @@ int vuS_1AC0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AC8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -16967,12 +16776,9 @@ int vuS_1AC8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x01c421aau);
     op.execLower(vu, 0x800208b0u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c421aau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldUp, 16); op.qVf(vu, 6, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -16993,14 +16799,16 @@ int vuS_1AC8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AD0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17013,12 +16821,9 @@ int vuS_1AD0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002601bcu);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x002601bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -17037,14 +16842,16 @@ int vuS_1AD0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AD8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17057,13 +16864,9 @@ int vuS_1AD8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[7], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002600bdu);
     op.execLower(vu, 0x01c709dcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002600bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldLo, 16); op.qVf(vu, 7, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -17083,14 +16886,16 @@ int vuS_1AD8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AE0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17105,13 +16910,9 @@ int vuS_1AE0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[1], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[6], 16);
     op.execUpper(vu, 0x0026004au);
     op.execLower(vu, 0x81c6233cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0026004au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldUp, 16); op.qVf(vu, 1, 1, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldLo, 16); op.qVf(vu, 6, 14, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -17131,14 +16932,16 @@ int vuS_1AE0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AE8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17156,11 +16959,9 @@ int vuS_1AE8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
     op.execUpper(vu, 0x01c7092cu);
     op.execLower(vu, 0x81e103beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c7092cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
     vu.m_vfReady[4][0] = vu.m_cycle + 4u;
     vu.m_vfReady[4][1] = vu.m_cycle + 4u;
     vu.m_vfReady[4][2] = vu.m_cycle + 4u;
@@ -17179,14 +16980,16 @@ int vuS_1AE8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AF0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17199,13 +17002,9 @@ int vuS_1AF0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01c421eau);
     op.execLower(vu, 0x01c503dfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c421eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -17227,14 +17026,16 @@ int vuS_1AF0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1AF8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17247,12 +17048,9 @@ int vuS_1AF8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002701bcu);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x002701bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -17271,14 +17069,16 @@ int vuS_1AF8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B00(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17291,13 +17091,9 @@ int vuS_1B00(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[8], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002700bdu);
     op.execLower(vu, 0x01c809dcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002700bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldLo, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -17317,14 +17113,16 @@ int vuS_1B00(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B08(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17337,13 +17135,9 @@ int vuS_1B08(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[1], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x0027004au);
     op.execLower(vu, 0x01c70a2au, c.vuData, c.dataSize, *c.gs, c.memory, 0x0027004au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldUp, 16); op.qVf(vu, 1, 1, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldLo, 16); op.qVf(vu, 7, 14, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -17363,14 +17157,16 @@ int vuS_1B08(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B10(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17390,13 +17186,9 @@ int vuS_1B10(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[2], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01c2288au);
     op.execLower(vu, 0x81c5333cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c2288au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldUp, 16); op.qVf(vu, 2, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -17418,14 +17210,16 @@ int vuS_1B10(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B18(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17444,8 +17238,6 @@ int vuS_1B18(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[6], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[4], 16);
       op.execUpper(vu, 0x01c8092cu);
@@ -17454,8 +17246,6 @@ int vuS_1B18(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81c6233cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8092cu);
       std::memcpy(vu.m_state.vf[4], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldLo, 16); op.qVf(vu, 6, 14, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -17477,14 +17267,16 @@ int vuS_1B18(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B20(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17500,11 +17292,9 @@ int vuS_1B20(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c7126au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c7126au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -17523,14 +17313,16 @@ int vuS_1B20(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B28(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17545,11 +17337,9 @@ int vuS_1B28(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01c02a1cu);
     op.execLower(vu, 0x81e103beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c02a1cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -17568,14 +17358,16 @@ int vuS_1B28(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B30(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17588,11 +17380,9 @@ int vuS_1B30(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01c4216au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c4216au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -17611,14 +17401,16 @@ int vuS_1B30(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B38(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17630,11 +17422,9 @@ int vuS_1B38(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x010948c1u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x010948c1u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 8, nv, 4); }
     vu.m_vfReady[3][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1B40u;
@@ -17651,14 +17441,16 @@ int vuS_1B38(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B40(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17674,11 +17466,9 @@ int vuS_1B40(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x01c741eau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c741eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 14, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -17697,14 +17487,16 @@ int vuS_1B40(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B48(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17715,11 +17507,9 @@ int vuS_1B48(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002501bcu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002501bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1B50u;
@@ -17736,14 +17526,16 @@ int vuS_1B48(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B50(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17756,11 +17548,9 @@ int vuS_1B50(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002500bdu);
     op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002500bdu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1B58u;
@@ -17777,14 +17567,16 @@ int vuS_1B50(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B58(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17798,12 +17590,9 @@ int vuS_1B58(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[1], 16);
     op.execUpper(vu, 0x0025004au);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x0025004au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldUp, 16); op.qVf(vu, 1, 1, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[1][3] = vu.m_cycle + 4u;
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -17822,14 +17611,16 @@ int vuS_1B58(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B60(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17840,13 +17631,9 @@ int vuS_1B60(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x004000c3u);
     op.execLower(vu, 0x01ca09dcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x004000c3u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 2, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -17866,14 +17653,16 @@ int vuS_1B60(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B68(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17885,11 +17674,9 @@ int vuS_1B68(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x808738c0u);
     { const uint32_t lb = 0x3f000000u; float imm; std::memcpy(&imm, &lb, 4); vu.m_state.i = vuNormalizeOperand(imm); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 4, nv, 4); }
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1B70u;
@@ -17906,14 +17693,16 @@ int vuS_1B68(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B70(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17926,13 +17715,9 @@ int vuS_1B70(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[8], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x0180023eu);
     op.execLower(vu, 0x81c8333cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0180023eu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldLo, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 12, na, 1u); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -17953,14 +17738,16 @@ int vuS_1B70(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B78(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -17973,13 +17760,9 @@ int vuS_1B78(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x010918c2u);
     op.execLower(vu, 0x01c50a2au, c.vuData, c.dataSize, *c.gs, c.memory, 0x010918c2u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldLo, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -17999,14 +17782,16 @@ int vuS_1B78(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B80(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18025,8 +17810,6 @@ int vuS_1B80(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[6], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[4], 16);
       op.execUpper(vu, 0x01ca092cu);
@@ -18035,8 +17818,6 @@ int vuS_1B80(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81c6233cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ca092cu);
       std::memcpy(vu.m_state.vf[4], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldLo, 16); op.qVf(vu, 6, 14, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -18058,14 +17839,16 @@ int vuS_1B80(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B88(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18079,11 +17862,9 @@ int vuS_1B88(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x008718c2u);
     op.execLower(vu, 0x81e103beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x008718c2u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 4, nv, 4); }
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1B90u;
@@ -18100,14 +17881,16 @@ int vuS_1B88(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B90(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18122,12 +17905,9 @@ int vuS_1B90(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[2];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01c0421cu);
     op.execLower(vu, 0x10021004u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0421cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 1); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -18148,14 +17928,16 @@ int vuS_1B90(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1B98(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18173,12 +17955,9 @@ int vuS_1B98(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x01c511eau);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c511eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -18199,14 +17978,16 @@ int vuS_1B98(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BA0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18221,12 +18002,9 @@ int vuS_1BA0(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[13];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c4226au);
     op.execLower(vu, 0x100d6802u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c4226au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[13]; vu.m_state.vi[13] = oldVi; op.qVi(vu, 13, nvi, 1); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -18247,14 +18025,16 @@ int vuS_1BA0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BA8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18270,11 +18050,9 @@ int vuS_1BA8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01c5416au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c5416au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -18293,14 +18071,16 @@ int vuS_1BA8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BB0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18314,11 +18094,9 @@ int vuS_1BB0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x018018e3u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x018018e3u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 12, nv, 4); }
     vu.m_vfReady[3][0] = vu.m_cycle + 4u;
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -18336,14 +18114,16 @@ int vuS_1BB0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BB8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18355,11 +18135,9 @@ int vuS_1BB8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x01073a01u);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01073a01u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldUp, 16); op.qVf(vu, 8, 8, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1BC0u;
@@ -18376,14 +18154,16 @@ int vuS_1BB8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BC0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18394,11 +18174,9 @@ int vuS_1BC0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002901bcu);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002901bcu);
     vu.m_viBranchBackupValid = false;
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_accReady[3] = vu.m_cycle + 1u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1BC8u;
@@ -18415,14 +18193,16 @@ int vuS_1BC0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BC8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18435,13 +18215,9 @@ int vuS_1BC8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[10], 16);
-    float oldAcc[4]; std::memcpy(oldAcc, vu.m_state.acc, 16);
     op.execUpper(vu, 0x002900bdu);
     op.execLower(vu, 0x01ca09dcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002900bdu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldLo, 16); op.qVf(vu, 10, 14, nv, 4); }
-    { float na[4]; std::memcpy(na, vu.m_state.acc, 16); std::memcpy(vu.m_state.acc, oldAcc, 16); op.qAcc(vu, 1, na, 1u); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -18461,14 +18237,16 @@ int vuS_1BC8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BD0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18483,13 +18261,9 @@ int vuS_1BD0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[1], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x0029004au);
     op.execLower(vu, 0x81c9333cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x0029004au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldUp, 16); op.qVf(vu, 1, 1, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldLo, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -18509,14 +18283,16 @@ int vuS_1BD0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BD8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18532,7 +18308,6 @@ int vuS_1BD8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[3], 16);
       op.execUpper(vu, 0x008528c0u);
@@ -18541,7 +18316,6 @@ int vuS_1BD8(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x03c11b18u, c.vuData, c.dataSize, *c.gs, c.memory, 0x008528c0u);
       std::memcpy(vu.m_state.vf[3], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 4, nv, 4); }
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1BE0u;
@@ -18558,14 +18332,16 @@ int vuS_1BD8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BE0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18578,13 +18354,9 @@ int vuS_1BE0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[8], 16);
     op.execUpper(vu, 0x010740c2u);
     op.execLower(vu, 0x01c80a2au, c.vuData, c.dataSize, *c.gs, c.memory, 0x010740c2u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 8, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[8], 16); std::memcpy(vu.m_state.vf[8], oldLo, 16); op.qVf(vu, 8, 14, nv, 4); }
     vu.m_vfReady[8][0] = vu.m_cycle + 4u;
     vu.m_vfReady[8][1] = vu.m_cycle + 4u;
     vu.m_vfReady[8][2] = vu.m_cycle + 4u;
@@ -18604,14 +18376,16 @@ int vuS_1BE0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BE8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18630,8 +18404,6 @@ int vuS_1BE8(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[4], 16);
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[6], 16);
     { float oldVf[4], upVf[4];
       std::memcpy(oldVf, vu.m_state.vf[4], 16);
       op.execUpper(vu, 0x01ca092cu);
@@ -18640,8 +18412,6 @@ int vuS_1BE8(VU1Interpreter &vu, VuNativeCtx &c)
       op.execLower(vu, 0x81c6233cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ca092cu);
       std::memcpy(vu.m_state.vf[4], upVf, 16); }
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[4], 16); std::memcpy(vu.m_state.vf[4], oldUp, 16); op.qVf(vu, 4, 14, nv, 4); }
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[6], 16); std::memcpy(vu.m_state.vf[6], oldLo, 16); op.qVf(vu, 6, 14, nv, 4); }
     vu.m_vfReady[6][0] = vu.m_cycle + 4u;
     vu.m_vfReady[6][1] = vu.m_cycle + 4u;
     vu.m_vfReady[6][2] = vu.m_cycle + 4u;
@@ -18663,14 +18433,16 @@ int vuS_1BE8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BF0(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18685,11 +18457,9 @@ int vuS_1BF0(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[10], 16);
     op.execUpper(vu, 0x01c04a9cu);
     op.execLower(vu, 0x81e103beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c04a9cu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[10], 16); std::memcpy(vu.m_state.vf[10], oldUp, 16); op.qVf(vu, 10, 14, nv, 4); }
     vu.m_vfReady[10][0] = vu.m_cycle + 4u;
     vu.m_vfReady[10][1] = vu.m_cycle + 4u;
     vu.m_vfReady[10][2] = vu.m_cycle + 4u;
@@ -18708,14 +18478,16 @@ int vuS_1BF0(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1BF8(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18729,12 +18501,9 @@ int vuS_1BF8(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[1];
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[3], 16);
     op.execUpper(vu, 0x008518c2u);
     op.execLower(vu, 0x10010801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x008518c2u);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[3], 16); std::memcpy(vu.m_state.vf[3], oldUp, 16); op.qVf(vu, 3, 4, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 1); }
     vu.m_vfReady[3][1] = vu.m_cycle + 4u;
     vu.m_viReady[1] = vu.m_cycle + 1u;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
@@ -18753,14 +18522,16 @@ int vuS_1BF8(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1C00(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18776,11 +18547,9 @@ int vuS_1C00(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[7], 16);
     op.execUpper(vu, 0x01c811eau);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c811eau);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[7], 16); std::memcpy(vu.m_state.vf[7], oldUp, 16); op.qVf(vu, 7, 14, nv, 4); }
     vu.m_vfReady[7][0] = vu.m_cycle + 4u;
     vu.m_vfReady[7][1] = vu.m_cycle + 4u;
     vu.m_vfReady[7][2] = vu.m_cycle + 4u;
@@ -18799,14 +18568,16 @@ int vuS_1C00(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1C08(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18821,11 +18592,9 @@ int vuS_1C08(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[9], 16);
     op.execUpper(vu, 0x01c4226au);
     op.execLower(vu, 0x52020ff4u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c4226au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[9], 16); std::memcpy(vu.m_state.vf[9], oldUp, 16); op.qVf(vu, 9, 14, nv, 4); }
     vu.m_vfReady[9][0] = vu.m_cycle + 4u;
     vu.m_vfReady[9][1] = vu.m_cycle + 4u;
     vu.m_vfReady[9][2] = vu.m_cycle + 4u;
@@ -18844,14 +18613,16 @@ int vuS_1C08(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1C10(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18867,11 +18638,9 @@ int vuS_1C10(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    float oldUp[4]; std::memcpy(oldUp, vu.m_state.vf[5], 16);
     op.execUpper(vu, 0x01c8516au);
     op.execLower(vu, 0x8000033cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c8516au);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[5], 16); std::memcpy(vu.m_state.vf[5], oldUp, 16); op.qVf(vu, 5, 14, nv, 4); }
     vu.m_vfReady[5][0] = vu.m_cycle + 4u;
     vu.m_vfReady[5][1] = vu.m_cycle + 4u;
     vu.m_vfReady[5][2] = vu.m_cycle + 4u;
@@ -18890,14 +18659,16 @@ int vuS_1C10(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1C18(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18908,7 +18679,7 @@ int vuS_1C18(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
@@ -18926,14 +18697,16 @@ int vuS_1C18(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1C20(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -18944,11 +18717,9 @@ int vuS_1C20(VU1Interpreter &vu, VuNativeCtx &c)
         op.advanceTo(vu, ready);
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x09016800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1C28u;
@@ -18965,21 +18736,21 @@ int vuS_1C20(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1C48(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[1];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x090103fau, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[1]; vu.m_state.vi[1] = oldVi; op.qVi(vu, 1, nvi, 4); }
     vu.m_viReady[1] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1C50u;
@@ -18996,21 +18767,21 @@ int vuS_1C48(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1C50(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     if (vu.m_cycle >= c.budgetEnd) return 1;
-    const int32_t oldVi = vu.m_state.vi[2];
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x082203fau, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { const int32_t nvi = vu.m_state.vi[2]; vu.m_state.vi[2] = oldVi; op.qVi(vu, 2, nvi, 4); }
     vu.m_viReady[2] = vu.m_cycle + 4u;
     vu.m_state.vf[0][0] = 0.0f; vu.m_state.vf[0][1] = 0.0f; vu.m_state.vf[0][2] = 0.0f; vu.m_state.vf[0][3] = 1.0f; vu.m_state.vi[0] = 0;
     vu.m_state.pc = 0x1C58u;
@@ -19027,14 +18798,16 @@ int vuS_1C50(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1C58(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -19046,12 +18819,9 @@ int vuS_1C58(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[13];
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[1], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x81e16b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[1], 16); std::memcpy(vu.m_state.vf[1], oldLo, 16); op.qVf(vu, 1, 15, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[13]; vu.m_state.vi[13] = oldVi; op.qVi(vu, 13, nvi, 1); }
     vu.m_vfReady[1][0] = vu.m_cycle + 4u;
     vu.m_vfReady[1][1] = vu.m_cycle + 4u;
     vu.m_vfReady[1][2] = vu.m_cycle + 4u;
@@ -19073,14 +18843,16 @@ int vuS_1C58(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
 int vuS_1C60(VU1Interpreter &vu, VuNativeCtx &c)
 {
     const VuNativeOps &op = *c.ops;
-    op.commit(vu);
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu); // PERF-IC: same early-out as commitReadyPipelines
     ++c.instrs;
     for (;;)
     {
@@ -19092,12 +18864,9 @@ int vuS_1C60(VU1Interpreter &vu, VuNativeCtx &c)
     }
     if (vu.m_cycle >= c.budgetEnd) return 1;
     const int32_t oldVi = vu.m_state.vi[13];
-    float oldLo[4]; std::memcpy(oldLo, vu.m_state.vf[2], 16);
-    op.execUpper(vu, 0x000002ffu);
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     op.execLower(vu, 0x81e26b7cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
     vu.m_viBranchBackupValid = false;
-    { float nv[4]; std::memcpy(nv, vu.m_state.vf[2], 16); std::memcpy(vu.m_state.vf[2], oldLo, 16); op.qVf(vu, 2, 15, nv, 4); }
-    { const int32_t nvi = vu.m_state.vi[13]; vu.m_state.vi[13] = oldVi; op.qVi(vu, 13, nvi, 1); }
     vu.m_vfReady[2][0] = vu.m_cycle + 4u;
     vu.m_vfReady[2][1] = vu.m_cycle + 4u;
     vu.m_vfReady[2][2] = vu.m_cycle + 4u;
@@ -19119,7 +18888,9 @@ int vuS_1C60(VU1Interpreter &vu, VuNativeCtx &c)
         else if (haltBit && !haltBranch) { vu.m_state.stoppedByD = dHalt; vu.m_state.stoppedByT = tHalt; c.programEnded = true; }
         else if (haltBranch) { vu.m_state.haltAfterDelaySlot = true; vu.m_pendingHaltD = dHalt; vu.m_pendingHaltT = tHalt; }
     }
-    op.advance1(vu);
+    ++vu.m_cycle; vu.m_state.cycles = vu.m_cycle; // PERF-IC: inline advanceOneCycle
+    if (vu.m_cycle >= *c.nextReady) op.commit(vu);
+    if (vu.m_xgkick.active) op.xgProgress(vu);
     return c.programEnded ? 1 : 0;
 }
 
