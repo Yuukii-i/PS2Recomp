@@ -113,13 +113,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         data[4] = stick(rx);
         data[5] = stick(ry);
     }
-    else
+    // PERF-JG: the keyboard is always active (a phantom/unmapped pad in slot 0 used to disable it); keys only override a stick axis while pressed
     {
-        // PERF-JG: WASD = left stick, I/J/K/L = right stick (net), arrows = D-pad
-        data[6] = static_cast<uint8_t>(IsKeyDown(KEY_A) ? 0 : (IsKeyDown(KEY_D) ? 255 : 128));
-        data[7] = static_cast<uint8_t>(IsKeyDown(KEY_W) ? 0 : (IsKeyDown(KEY_S) ? 255 : 128));
-        data[4] = static_cast<uint8_t>(IsKeyDown(KEY_J) ? 0 : (IsKeyDown(KEY_L) ? 255 : 128));
-        data[5] = static_cast<uint8_t>(IsKeyDown(KEY_I) ? 0 : (IsKeyDown(KEY_K) ? 255 : 128));
+        // WASD = left stick, I/J/K/L = right stick (net), arrows = D-pad
+        auto axis = [](uint8_t &out, int neg, int pos)
+        {
+            if (IsKeyDown(neg))
+                out = 0;
+            else if (IsKeyDown(pos))
+                out = 255;
+        };
+        axis(data[6], KEY_A, KEY_D);
+        axis(data[7], KEY_W, KEY_S);
+        axis(data[4], KEY_J, KEY_L);
+        axis(data[5], KEY_I, KEY_K);
         if (IsKeyDown(KEY_UP))
             clearBit(PAD_UP);
         if (IsKeyDown(KEY_DOWN))
