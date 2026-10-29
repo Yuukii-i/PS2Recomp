@@ -3891,16 +3891,16 @@ static bool executeUnrecompiledCode(uint8_t *rdram,
 
 struct EeProfilerScope {
     static inline thread_local int s_depth = 0;
-    static inline thread_local std::chrono::steady_clock::time_point s_start{};
+    // PERF-IR: rdtsc ticks instead of two steady_clock reads (QPC) per outermost dispatch (~7% of the EE thread in kb); g_profEeUs holds TSC ticks, converted to us at the [prof] line.
+    static inline thread_local uint64_t s_start = 0;
     EeProfilerScope() {
         if (s_depth++ == 0) {
-            s_start = std::chrono::steady_clock::now();
+            s_start = __rdtsc();
         }
     }
     ~EeProfilerScope() {
         if (--s_depth == 0) {
-            auto end = std::chrono::steady_clock::now();
-            g_profEeUs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - s_start).count()), std::memory_order_relaxed);
+            g_profEeUs.fetch_add(__rdtsc() - s_start, std::memory_order_relaxed);
         }
     }
 };
@@ -5836,7 +5836,14 @@ void PS2Runtime::run()
             ps2xSafeLog("[fps] FPS: %u (GS frames/sec), kicks=%llu, vsyncTick=%llu\n",
                         currentFps, (unsigned long long)currentGsKicks, (unsigned long long)(m_eeScheduler ? m_eeScheduler->currentVSyncTick() : 0));
 
-            uint64_t eeUs = g_profEeUs.exchange(0, std::memory_order_relaxed);
+            uint64_t eeUs = g_profEeUs.exchange(0, std::memory_order_relaxed); // PERF-IR: TSC ticks -> us over this window
+            {
+                static uint64_t s_eeLastTsc = 0;
+                const uint64_t tscNow = __rdtsc();
+                const uint64_t winUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - s_lastFpsLogTime).count());
+                eeUs = (s_eeLastTsc != 0 && tscNow > s_eeLastTsc) ? static_cast<uint64_t>(static_cast<double>(eeUs) * winUs / static_cast<double>(tscNow - s_eeLastTsc)) : 0u;
+                s_eeLastTsc = tscNow;
+            }
             uint64_t gsUs = g_profGsUs.exchange(0, std::memory_order_relaxed);
             uint64_t xferUs = g_profXferUs.exchange(0, std::memory_order_relaxed);
             uint64_t presentUs = s_profPresentUs;
