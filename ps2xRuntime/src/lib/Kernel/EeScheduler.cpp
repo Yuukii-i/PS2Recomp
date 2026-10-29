@@ -2418,10 +2418,21 @@ void EeScheduler::processEvent(const EeEvent &event)
                 }
             }
 
-            if (activeMask != 0) {
-                ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~activeMask), 0x80, 0x80, 0x80, 0x80);
+            // PERF-JH: this hard-wired key override (buttons only, sticks centred, W=L2, no gamepad) shadowed PSPadBackend::readState, so the
+            // real mapping and gamepads never reached the game. It is now only used for injected/auto pad input or with PS2X_LEGACY_PAD=1.
+            static const bool s_legacyPadOverride = []() {
+                const char *a = std::getenv("PS2X_AUTO_PAD");
+                const char *l = std::getenv("PS2X_LEGACY_PAD");
+                return (a && (a[0] == '1' || a[0] == 't')) || (l && l[0] == '1');
+            }();
+            if (!s_injections.empty() || s_legacyPadOverride) {
+                if (activeMask != 0) {
+                    ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~activeMask), 0x80, 0x80, 0x80, 0x80);
+                } else {
+                    ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+                }
             } else {
-                ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+                ps2_stubs::clearPadOverrideState();
             }
 
             ps2_syscalls::ps2xUpdateDbcPadBuffers(m_rdram, &m_runtime);
