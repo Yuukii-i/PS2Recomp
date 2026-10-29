@@ -3732,7 +3732,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     s_euStoreLoggedThisRun = false;
 
     s_currentRunXgkickNs = 0;
-    const auto tRunStart = std::chrono::steady_clock::now();
+    // PERF-IO: two clock reads per run cost ~5% of the EE thread at ~85k VU0 runs/s; PROBE-GE is a VU1 budget, so time VU1 runs only
+    // (the shared, non-atomic GE counters also mixed VU0 runs from the EE thread into the "ge vu1" line).
+    const bool runTimed = m_unit == Unit::VU1 || probe_ae::isEnabled() || probe_ae::isMovieHleVerify() || probe_ae::isDcProbeEnabled();
+    const auto tRunStart = runTimed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const uint64_t tRunStartCycle = m_cycle;
     uint32_t instrsThisRun = 0;
 
@@ -4066,6 +4069,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
 
     // PROBE-BLK state
     bool blkActive = false, blkDelayPending = false, blkEndNow = false, blkAbandon = false, blkXgEntry = false;
+    bool blkEPending = false; // PERF-IP: an E-bit pair was issued; the block (and the program) ends after its delay slot
     uint32_t blkStartPc = 0;
     uint64_t blkStartCycle = 0, blkEntryHash = 0;
     std::string blkEntryText;
@@ -4104,7 +4108,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (g_blkOn && !blkActive) // PROBE-BLK: block start
         {
             blkActive = true;
-            blkDelayPending = blkEndNow = blkAbandon = false;
+            blkDelayPending = blkEndNow = blkAbandon = blkEPending = false;
             blkStartPc = m_state.pc;
             blkStartCycle = m_cycle;
             blkIssue.clear();
@@ -4283,9 +4287,22 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 ++bu.pairsXgActive;
             const bool isBranch = !decoded.iBit && decoded.lowerUsage.pipeline == PipelineBranch;
             const bool isXg = !decoded.iBit && decoded.lowerUsage.pipeline == PipelineXgkick;
-            if (decoded.eBit || decoded.dBit || decoded.tBit || decoded.upperUsage.reserved || decoded.lowerUsage.reserved)
-                blkAbandon = true; // program end / halt bits: left to the interpreter
-            if (blkDelayPending)
+            if (decoded.dBit || decoded.tBit || decoded.upperUsage.reserved || decoded.lowerUsage.reserved)
+                blkAbandon = true; // halt bits: left to the interpreter
+            const bool blkWasE = blkEPending;
+            if (decoded.eBit) // PERF-IP: program end = block end after the delay slot (short VU0 programs never reach a branch)
+            {
+                if (blkDelayPending || blkWasE || isBranch || isXg)
+                    blkAbandon = true;
+                blkEPending = true;
+            }
+            if (blkWasE)
+            {
+                blkEndNow = true; // delay slot of the E-bit pair
+                if (isBranch || isXg)
+                    blkAbandon = true;
+            }
+            else if (blkDelayPending)
             {
                 blkEndNow = true; // this pair is the delay slot
                 if (isBranch)
@@ -4711,7 +4728,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (g_blkOn && blkActive && (blkEndNow || blkAbandon))
         {
             BlkUnit &bu = g_blkUnits[m_unit == Unit::VU1 ? 1 : 0];
-            if (blkAbandon || programEnded || m_stopRequested)
+            if (blkAbandon || (programEnded && !blkEPending) || (blkEPending && !programEnded) || m_stopRequested)
                 ++bu.abandoned;
             else
             {
@@ -5193,7 +5210,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);
 
-    { // PROBE-GE: per-second VU1 time budget
+    if (m_unit == Unit::VU1) { // PROBE-GE: per-second VU1 time budget (PERF-IO: VU1 only)
         static uint64_t s_geNs = 0, s_geXgNs = 0, s_geInstr = 0, s_geCalls = 0, s_geCycles = 0;
         static std::chrono::steady_clock::time_point s_geT0 = std::chrono::steady_clock::now();
         const auto geNow = std::chrono::steady_clock::now();
