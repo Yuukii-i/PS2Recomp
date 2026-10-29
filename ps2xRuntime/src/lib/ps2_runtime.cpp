@@ -5222,8 +5222,9 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     {
         return m_memory.read128(vaddr);
     }
-    catch (const std::exception &)
+    catch (const std::exception &ex)
     {
+        std::fprintf(stderr, "[probe] Load128 throw vaddr=0x%08X ctx=%p rdram=%p pc=0x%X what=%s\n", vaddr, (void *)ctx, (void *)rdram, ctx->pc, ex.what()); // PROBE-IZ
         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
         return _mm_setzero_si128();
     }
