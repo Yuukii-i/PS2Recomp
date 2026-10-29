@@ -886,7 +886,7 @@ static inline uint32_t pmCtz(uint32_t v)
 }
 #define PM() (s_pipeMasks[m_unit == Unit::VU1 ? 1 : 0])
 // PERF-HM: earliest cycle at which any pending write can land; push sites reset it to 0 (rescan), commit recomputes it.
-static bool s_vfyRef = false;                         // PERF-GR: true => use the original (reference) code paths, for A/B verification
+static thread_local bool s_vfyRef = false;            // PERF-GR (thread_local since PERF-IM: VU0 on the EE thread and VU1 on the VIF1 worker verify concurrently): true => use the original (reference) code paths, for A/B verification
 static uint64_t s_nextReady[2] = {0u, 0u};
 #define NR() (s_nextReady[m_unit == Unit::VU1 ? 1 : 0])
 
@@ -1360,8 +1360,8 @@ uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
 
 // PERF-GJ: fast mode (PS2X_VU1_FAST=1) drops the per-register hazard/latency scheduler: vf/vi/acc/flag/store
 // writes land immediately; only Q/P (fdiv/efu) keep their latency. Cycle counts become ~1 per pair.
-static std::vector<uint8_t> *s_vfyCapture = nullptr; // PROBE-GV: when set, XGKICK packets are captured instead of submitted
-static int s_vfyFastOverride = -1;                    // PROBE-GV: -1 env, 0 force exact, 1 force fast
+static thread_local std::vector<uint8_t> *s_vfyCapture = nullptr; // PROBE-GV (thread_local, see s_vfyRef): when set, XGKICK packets are captured instead of submitted
+static thread_local int s_vfyFastOverride = -1;       // PROBE-GV (thread_local, see s_vfyRef): -1 env, 0 force exact, 1 force fast
 static inline int vu1VerifyMode() // PS2X_VU1_VERIFY: 1 = VU1 only, 2 = VU0 only, 3 = both
 {
     static const int s_mode = []() { const char *v = std::getenv("PS2X_VU1_VERIFY"); return v ? std::atoi(v) : 0; }();
