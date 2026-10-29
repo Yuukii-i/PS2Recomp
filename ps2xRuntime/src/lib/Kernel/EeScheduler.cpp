@@ -28,6 +28,7 @@ namespace ps2_syscalls {
 #include "Stubs/CD.h"
 
 #include <algorithm>
+#include <intrin.h>
 #include <cassert>
 #include <mutex>
 #include <cstring>
@@ -577,12 +578,24 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     return false;
 }
 
+extern const bool g_profCounts;                                     // PROBE-IJ (ps2_runtime.cpp)
+extern uint64_t g_pcAcctCalls, g_pcAcctTicks, g_pcIopTicks;          // PROBE-IJ
+
 void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
+    const uint64_t t0 = g_profCounts ? __rdtsc() : 0u;
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
     m_eeCycle += elapsed;
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
+    const uint64_t t1 = g_profCounts ? __rdtsc() : 0u;
     m_runtime.advanceIopEeCycles(elapsed);
+    if (g_profCounts) // PROBE-IJ
+    {
+        const uint64_t t2 = __rdtsc();
+        ++g_pcAcctCalls;
+        g_pcAcctTicks += t2 - t0;
+        g_pcIopTicks += t2 - t1;
+    }
     if (m_pendingEeTimerInterrupts != 0u)
     {
         m_checkpointPending.store(true, std::memory_order_release);

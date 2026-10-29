@@ -223,6 +223,21 @@ extern std::atomic<uint64_t> g_profXferUs;
 extern std::atomic<uint64_t> g_profPrims;
 extern std::atomic<uint64_t> g_profPixels;
 std::atomic<uint64_t> g_profEeUs{0};
+// PROBE-IJ: per-second EE-thread event counts, printed as [prof3] (PS2X_PROF_COUNTS=1). Plain counters: written by the EE thread
+// only, read/reset by the fps logger (approximate by design).
+#include <intrin.h>
+extern const bool g_profCounts = []() { const char *e = std::getenv("PS2X_PROF_COUNTS"); return e && e[0] == '1'; }();
+uint64_t g_pcDispatch[5] = {}, g_pcCkpt = 0, g_pcCkptTrue = 0, g_pcSlowLd[6] = {}, g_pcSlowSt[6] = {};
+uint64_t g_pcAcctCalls = 0, g_pcAcctTicks = 0, g_pcIopTicks = 0;
+static inline int pcRegion(uint32_t a) // 0 SPR, 1 uncached/accel RAM mirror, 2 kseg RAM, 3 IO+VU, 4 GS priv, 5 other
+{
+    if (a >= 0x70000000u && a < 0x70004000u) return 0;
+    if (a >= 0x20000000u && a < 0x40000000u) return 1;
+    if (a >= 0x80000000u && (a & 0x1FFFFFFFu) < PS2_RAM_SIZE) return 2;
+    if (a >= 0x10000000u && a < 0x12000000u) return 3;
+    if (a >= 0x12000000u && a < 0x14000000u) return 4;
+    return 5;
+}
 static uint64_t s_profPresentUs = 0;
 static auto g_lastSceneTransitionTime = std::chrono::steady_clock::now();
 
@@ -3899,6 +3914,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      const char *debugName)
 {
     EeProfilerScope eeScope;
+    if (g_profCounts) // PROBE-IJ
+        ++g_pcDispatch[static_cast<int>(kind) % 5];
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
 
@@ -5099,6 +5116,7 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
     try
     {
         return m_memory.read8(vaddr);
@@ -5112,6 +5130,7 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
     try
     {
         return m_memory.read16(vaddr);
@@ -5125,6 +5144,7 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
     try
     {
         return m_memory.read32(vaddr);
@@ -5138,6 +5158,7 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
     try
     {
         return m_memory.read64(vaddr);
@@ -5151,6 +5172,7 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
     try
     {
         return m_memory.read128(vaddr);
@@ -5164,6 +5186,7 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
 {
+    if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
     ps2TraceGuestWrite(rdram, vaddr, 1u, value, 0u, "WRITE8", ctx);
     try
     {
@@ -5177,6 +5200,7 @@ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8
 
 void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value)
 {
+    if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
     ps2TraceGuestWrite(rdram, vaddr, 2u, value, 0u, "WRITE16", ctx);
     try
     {
@@ -5190,6 +5214,7 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
+    if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
     ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
     try
     {
@@ -5204,6 +5229,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
 {
+    if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
     ps2TraceGuestWrite(rdram, vaddr, 8u, value, 0u, "WRITE64", ctx);
     try
     {
@@ -5217,6 +5243,7 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value)
 {
+    if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
     alignas(16) uint64_t _parts[2];
     _mm_storeu_si128(reinterpret_cast<__m128i *>(_parts), value);
     ps2TraceGuestWrite(rdram, vaddr, 16u, _parts[0], _parts[1], "WRITE128", ctx);
@@ -5295,7 +5322,13 @@ void PS2Runtime::postEeEvent(EeEvent event)
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
-    return m_eeScheduler ? m_eeScheduler->checkpointDue(cycles) : false;
+    const bool due = m_eeScheduler ? m_eeScheduler->checkpointDue(cycles) : false;
+    if (g_profCounts) // PROBE-IJ
+    {
+        ++g_pcCkpt;
+        g_pcCkptTrue += due ? 1u : 0u;
+    }
+    return due;
 }
 
 [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)
@@ -5756,6 +5789,28 @@ void PS2Runtime::run()
             ps2xSafeLog("[prof] fps=%u ee_ms=%.2f gs_ms=%.2f xfer_ms=%.2f present_ms=%.2f prims=%llu pixels=%llu\n",
                         currentFps, ee_ms, gs_ms, xfer_ms, present_ms,
                         (unsigned long long)prims, (unsigned long long)pixels);
+            if (g_profCounts) // PROBE-IJ
+            {
+                static uint64_t s_lastTsc = __rdtsc();
+                const uint64_t tsc = __rdtsc();
+                const double ticksPerMs = double(tsc - s_lastTsc) / double(timeSinceLastFpsLog);
+                s_lastTsc = tsc;
+                const auto u = [](uint64_t v) { return (unsigned long long)v; };
+                ps2xSafeLog("[prof3] dj=%llu dc=%llu ij=%llu ic=%llu ret=%llu ckpt=%llu ckptTrue=%llu "
+                            "slowLd[spr/mir/kseg/io/gs/oth]=%llu/%llu/%llu/%llu/%llu/%llu slowSt=%llu/%llu/%llu/%llu/%llu/%llu "
+                            "acct=%llu acct_ms=%.1f iop_ms=%.1f vsync=%llu\n",
+                            u(g_pcDispatch[0]), u(g_pcDispatch[1]), u(g_pcDispatch[2]), u(g_pcDispatch[3]), u(g_pcDispatch[4]),
+                            u(g_pcCkpt), u(g_pcCkptTrue),
+                            u(g_pcSlowLd[0]), u(g_pcSlowLd[1]), u(g_pcSlowLd[2]), u(g_pcSlowLd[3]), u(g_pcSlowLd[4]), u(g_pcSlowLd[5]),
+                            u(g_pcSlowSt[0]), u(g_pcSlowSt[1]), u(g_pcSlowSt[2]), u(g_pcSlowSt[3]), u(g_pcSlowSt[4]), u(g_pcSlowSt[5]),
+                            u(g_pcAcctCalls), ticksPerMs > 0.0 ? g_pcAcctTicks / ticksPerMs : 0.0,
+                            ticksPerMs > 0.0 ? g_pcIopTicks / ticksPerMs : 0.0,
+                            u(m_eeScheduler ? m_eeScheduler->currentVSyncTick() : 0));
+                for (auto &v : g_pcDispatch) v = 0;
+                for (auto &v : g_pcSlowLd) v = 0;
+                for (auto &v : g_pcSlowSt) v = 0;
+                g_pcCkpt = g_pcCkptTrue = g_pcAcctCalls = g_pcAcctTicks = g_pcIopTicks = 0;
+            }
 
             probe_ae::onBqTickSec(m_memory.getRDRAM(), ee_ms);
             probe_ae::bhTickCheckPerSec(m_memory.getRDRAM());
