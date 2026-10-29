@@ -3641,6 +3641,8 @@ namespace
     {
         std::vector<uint32_t> issue;
         std::string exitText;
+        uint32_t pc = 0;
+        uint64_t image = 0, entry = 0;
         bool xgEntry = false;
         uint64_t exitHash = 0;
         uint64_t count = 0;
@@ -4049,6 +4051,18 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     uint64_t blkStartCycle = 0, blkEntryHash = 0;
     std::string blkEntryText;
     std::vector<uint32_t> blkIssue;
+    std::vector<uint8_t> blkCb, blkCa; // commit events: before the issue of pair i (stall advances + loop top) / during its final advance
+    uint32_t blkMark1 = 0, blkMark2 = 0;
+    // pending-queue signature: a change between two points means a commit happened (pushes only happen during exec)
+    const auto blkPend = [this]() -> uint32_t
+    {
+        uint32_t v = PM().store & 0xFFu;
+        if (m_fdiv.valid) v |= 0x100u;
+        if (m_efu[0].valid) v |= 0x200u;
+        if (m_efu[1].valid) v |= 0x400u;
+        return v;
+    };
+    blkMark2 = blkPend();
     // timing-state snapshot: hash + readable text, all times relative to the current cycle
     const auto blkSnapshot = [this](uint64_t &hash, std::string *text)
     {
@@ -4104,11 +4118,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             for (int k = 0; k < 2; ++k)
             {
                 const FlgRing &ring = *rings[k];
+                uint32_t ei = 0; // index among the not-yet-landed entries only (the position inside the ring is an artefact)
                 for (uint32_t i = 0; i < ring.count; ++i) // oldest -> newest
                 {
                     const uint32_t idx = (ring.head + 8u - ring.count + i) & 7u;
                     if (ring.cyc[idx] + 4u > c)
-                        emit(k ? "c" : "m", i, 0, static_cast<int64_t>(ring.cyc[idx]) - static_cast<int64_t>(c));
+                        emit(k ? "c" : "m", ei++, 0, static_cast<int64_t>(ring.cyc[idx]) - static_cast<int64_t>(c));
                 }
             }
         }
@@ -4141,6 +4156,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             blkStartPc = m_state.pc;
             blkStartCycle = m_cycle;
             blkIssue.clear();
+            blkCb.clear();
+            blkCa.clear();
             blkEntryText.clear();
             blkSnapshot(blkEntryHash, &blkEntryText);
             blkXgEntry = m_xgkick.active;
@@ -4307,6 +4324,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (g_blkOn && blkActive) // PROBE-BLK
         {
             blkIssue.push_back(static_cast<uint32_t>(m_cycle - blkStartCycle));
+            blkCb.push_back(blkPend() != blkMark2 ? 1 : 0);
             BlkUnit &bu = g_blkUnits[m_unit == Unit::VU1 ? 1 : 0];
             ++bu.pairs;
             if (m_xgkick.active)
@@ -4729,7 +4747,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             m_pendingHaltT = tHalt;
         }
 
+        if (g_blkOn)
+            blkMark1 = blkPend();
         advanceOneCycle();
+        if (g_blkOn)
+        {
+            blkMark2 = blkPend();
+            if (blkActive)
+                blkCa.push_back(blkMark2 != blkMark1 ? 1 : 0);
+        }
         if (g_blkOn && blkActive && (blkEndNow || blkAbandon))
         {
             BlkUnit &bu = g_blkUnits[m_unit == Unit::VU1 ? 1 : 0];
@@ -4751,6 +4777,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                     BlkRec rec;
                     rec.issue = blkIssue;
                     rec.exitText = exitText;
+                    rec.pc = blkStartPc;
+                    rec.image = imageHash;
+                    rec.entry = blkEntryHash;
                     rec.xgEntry = blkXgEntry;
                     rec.exitHash = exitHash;
                     rec.count = 1;
@@ -4771,6 +4800,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                         std::fprintf(bf, "  entry: %s\n  issue:", blkEntryText.c_str());
                         for (uint32_t o : blkIssue)
                             std::fprintf(bf, " %u", o);
+                        std::fprintf(bf, "\n  cb:");
+                        for (uint8_t v : blkCb)
+                            std::fprintf(bf, " %u", static_cast<unsigned>(v));
+                        std::fprintf(bf, "\n  ca:");
+                        for (uint8_t v : blkCa)
+                            std::fprintf(bf, " %u", static_cast<unsigned>(v));
                         std::fprintf(bf, "\n  exit: %s\n", exitText.c_str());
                         std::fflush(bf);
                     }
@@ -4806,6 +4841,20 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                                     u ? "VU1" : "VU0", (unsigned long long)b2.blocks, (unsigned long long)b2.pairs, double(b2.pairs) / double(b2.blocks),
                                     b2.recs.size(), (unsigned long long)b2.inconsistent, (unsigned long long)b2.inconsistentNoXg, (unsigned long long)b2.abandoned,
                                     100.0 * b2.pairsXgActive / std::max<uint64_t>(b2.pairs, 1), 100.0 * b2.blocksXgEntry / b2.blocks);
+                        std::vector<const BlkRec *> hot;
+                        for (const auto &kv : b2.recs)
+                            hot.push_back(&kv.second);
+                        std::sort(hot.begin(), hot.end(), [](const BlkRec *x, const BlkRec *y) { return x->count * x->issue.size() > y->count * y->issue.size(); });
+                        double cum = 0.0;
+                        for (size_t k = 0; k < hot.size() && k < 28; ++k)
+                        {
+                            const double share = 100.0 * double(hot[k]->count) * double(hot[k]->issue.size()) / double(std::max<uint64_t>(b2.pairs, 1));
+                            cum += share;
+                            std::printf("[probe] blkhot %s #%zu image=%016llx pc=%04X sig=%016llx n=%zu cycles=%u count=%llu pairShare=%.2f%% cum=%.1f%% xg=%d\n",
+                                        u ? "VU1" : "VU0", k, (unsigned long long)hot[k]->image, hot[k]->pc, (unsigned long long)hot[k]->entry,
+                                        hot[k]->issue.size(), hot[k]->issue.empty() ? 0u : hot[k]->issue.back() + 1u, (unsigned long long)hot[k]->count, share, cum,
+                                        hot[k]->xgEntry ? 1 : 0);
+                        }
                     }
                     std::fflush(stdout);
                 }
