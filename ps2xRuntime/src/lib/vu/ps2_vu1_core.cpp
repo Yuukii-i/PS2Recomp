@@ -3631,6 +3631,28 @@ namespace
     };
     InvUnit g_invUnits[2];
 
+    // PROBE-BLK: schedule recorder for static per-block scheduling (PS2X_VU_BLK=1, PS2X_VU1_NATIVE=0).
+    // A "dynamic block" runs from a loop-top state until the end of the delay slot after a branch (or an XGKICK pair).
+    // For each (start pc, entry timing state) we record the issue cycle of every pair and the exit state; repeats are checked for
+    // determinism (same entry state must give the same issue cycles and exit state). New states are appended to logs/vublk_u<k>_<hash>.txt.
+    struct BlkRec
+    {
+        std::vector<uint32_t> issue;
+        uint64_t exitHash = 0;
+        uint64_t count = 0;
+        uint64_t bad = 0;
+        std::unordered_map<uint32_t, uint64_t> nexts;
+    };
+    struct BlkUnit
+    {
+        std::unordered_map<uint64_t, BlkRec> recs; // key = (pc << 48) ^ entryHash
+        uint64_t blocks = 0, pairs = 0, pairsXgActive = 0, blocksXgEntry = 0, inconsistent = 0, abandoned = 0;
+        FILE *file = nullptr;
+    };
+    BlkUnit g_blkUnits[2];
+    uint64_t g_blkNextPrint = 2000000;
+    const bool g_blkOn = []() { const char *e = std::getenv("PS2X_VU_BLK"); return e && e[0] == '1'; }();
+
     // PROBE-FLG: do flag readers (FC*/FS*/FM* lower ops) ever see an in-flight flag write? (PS2X_VU_FLG=1, PS2X_VU1_NATIVE=0)
     // kinds: 0 clip, 1 status, 2 mac. Also counts flag writes per kind and same-pair FSSET/FCSET adjustments.
     struct FlgUnit
@@ -4015,6 +4037,81 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
     };
 
+    // PROBE-BLK state
+    bool blkActive = false, blkDelayPending = false, blkEndNow = false, blkAbandon = false, blkXgEntry = false;
+    uint32_t blkStartPc = 0;
+    uint64_t blkStartCycle = 0, blkEntryHash = 0;
+    std::string blkEntryText;
+    std::vector<uint32_t> blkIssue;
+    // timing-state snapshot: hash + readable text, all times relative to the current cycle
+    const auto blkSnapshot = [this](uint64_t &hash, std::string *text)
+    {
+        const uint64_t c = m_cycle;
+        hash = 0x1234ABCDull;
+        char buf[48];
+        auto add = [&](uint64_t v) { hash = sigMix(hash ^ sigMix(v)); };
+        auto emit = [&](const char *tag, uint32_t a, uint32_t b, int64_t rel)
+        {
+            add((uint64_t(tag[0]) << 56) ^ (uint64_t(a) << 40) ^ (uint64_t(b) << 32) ^ uint64_t(rel));
+            if (text)
+            {
+                std::snprintf(buf, sizeof(buf), "%s%u.%u.%lld ", tag, a, b, static_cast<long long>(rel));
+                *text += buf;
+            }
+        };
+        for (uint32_t reg = 1; reg < 32u; ++reg)
+            for (uint32_t l = 0; l < 4u; ++l)
+                if (m_vfReady[reg][l] > c)
+                    emit("f", reg, l, static_cast<int64_t>(m_vfReady[reg][l] - c));
+        for (uint32_t reg = 1; reg < 16u; ++reg)
+            if (m_viReady[reg] > c)
+                emit("i", reg, 0, static_cast<int64_t>(m_viReady[reg] - c));
+        for (uint32_t l = 0; l < 4u; ++l)
+            if (m_accReady[l] > c)
+                emit("a", l, 0, static_cast<int64_t>(m_accReady[l] - c));
+        if (m_fdiv.valid)
+            emit("q", 0, 0, static_cast<int64_t>(m_fdiv.readyCycle) - static_cast<int64_t>(c));
+        {
+            int64_t e[2];
+            int n = 0;
+            for (const ScalarPipelineEntry &en : m_efu)
+                if (en.valid)
+                    e[n++] = static_cast<int64_t>(en.readyCycle) - static_cast<int64_t>(c);
+            if (n == 2 && e[0] > e[1])
+                std::swap(e[0], e[1]);
+            for (int k = 0; k < n; ++k)
+                emit("p", static_cast<uint32_t>(k), 0, e[k]);
+        }
+        if (m_efuResourceReady > c)
+            emit("r", 0, 0, static_cast<int64_t>(m_efuResourceReady - c));
+        {
+            std::vector<int64_t> st;
+            for (uint32_t mk = PM().store; mk != 0u; mk &= mk - 1u)
+                st.push_back(static_cast<int64_t>(m_storePipeline[pmCtz(mk)].readyCycle) - static_cast<int64_t>(c));
+            std::sort(st.begin(), st.end());
+            for (size_t k = 0; k < st.size(); ++k)
+                emit("s", static_cast<uint32_t>(k), 0, st[k]);
+        }
+        {
+            const uint32_t u = m_unit == Unit::VU1 ? 1u : 0u;
+            const FlgRing *rings[2] = {&s_flgMac[u], &s_flgClip[u]};
+            for (int k = 0; k < 2; ++k)
+            {
+                const FlgRing &ring = *rings[k];
+                for (uint32_t i = 0; i < ring.count; ++i) // oldest -> newest
+                {
+                    const uint32_t idx = (ring.head + 8u - ring.count + i) & 7u;
+                    if (ring.cyc[idx] + 4u > c)
+                        emit(k ? "c" : "m", i, 0, static_cast<int64_t>(ring.cyc[idx]) - static_cast<int64_t>(c));
+                }
+            }
+        }
+        if (m_viBranchBackupValid)
+            emit("b", m_viBranchBackupReg, 0, 0);
+        if (m_xgkick.active)
+            emit("x", 1, 0, 0);
+    };
+
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
         if (vuNativeOn)
@@ -4031,6 +4128,17 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         commitReadyPipelines();
         if (m_state.pc + 8u > codeSize)
             break;
+        if (g_blkOn && !blkActive) // PROBE-BLK: block start
+        {
+            blkActive = true;
+            blkDelayPending = blkEndNow = blkAbandon = false;
+            blkStartPc = m_state.pc;
+            blkStartCycle = m_cycle;
+            blkIssue.clear();
+            blkEntryText.clear();
+            blkSnapshot(blkEntryHash, &blkEntryText);
+            blkXgEntry = m_xgkick.active;
+        }
 
         if (s_fcC80.active && (m_state.pc < 0xC80u || m_state.pc > 0xCB8u))
         {
@@ -4190,6 +4298,28 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (m_cycle >= budgetEnd)
             break;
 
+        if (g_blkOn && blkActive) // PROBE-BLK
+        {
+            blkIssue.push_back(static_cast<uint32_t>(m_cycle - blkStartCycle));
+            BlkUnit &bu = g_blkUnits[m_unit == Unit::VU1 ? 1 : 0];
+            ++bu.pairs;
+            if (m_xgkick.active)
+                ++bu.pairsXgActive;
+            const bool isBranch = !decoded.iBit && decoded.lowerUsage.pipeline == PipelineBranch;
+            const bool isXg = !decoded.iBit && decoded.lowerUsage.pipeline == PipelineXgkick;
+            if (decoded.eBit || decoded.dBit || decoded.tBit || decoded.upperUsage.reserved || decoded.lowerUsage.reserved)
+                blkAbandon = true; // program end / halt bits: left to the interpreter
+            if (blkDelayPending)
+            {
+                blkEndNow = true; // this pair is the delay slot
+                if (isBranch)
+                    blkAbandon = true;
+            }
+            else if (isBranch)
+                blkDelayPending = true;
+            else if (isXg)
+                blkEndNow = true;
+        }
         if (g_invOn) // PROBE-INV
         {
             InvUnit &iu = g_invUnits[m_unit == Unit::VU1 ? 1 : 0];
@@ -4594,6 +4724,80 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
 
         advanceOneCycle();
+        if (g_blkOn && blkActive && (blkEndNow || blkAbandon))
+        {
+            BlkUnit &bu = g_blkUnits[m_unit == Unit::VU1 ? 1 : 0];
+            if (blkAbandon || programEnded || m_stopRequested)
+                ++bu.abandoned;
+            else
+            {
+                ++bu.blocks;
+                if (blkXgEntry)
+                    ++bu.blocksXgEntry;
+                uint64_t exitHash = 0;
+                std::string exitText;
+                blkSnapshot(exitHash, &exitText);
+                const uint64_t key = (uint64_t(blkStartPc) << 48) ^ blkEntryHash;
+                auto it = bu.recs.find(key);
+                if (it == bu.recs.end())
+                {
+                    BlkRec rec;
+                    rec.issue = blkIssue;
+                    rec.exitHash = exitHash;
+                    rec.count = 1;
+                    rec.nexts[m_state.pc] = 1;
+                    if (bu.recs.size() < 8192)
+                        bu.recs.emplace(key, std::move(rec));
+                    if (!bu.file)
+                    {
+                        char path[160];
+                        std::snprintf(path, sizeof(path), "logs/vublk_u%d_%016llx.txt", m_unit == Unit::VU1 ? 1 : 0, static_cast<unsigned long long>(s_hcCurHash));
+                        bu.file = std::fopen(path, "w");
+                    }
+                    if (bu.file)
+                    {
+                        std::fprintf(bu.file, "B pc=%04X sig=%016llx exitsig=%016llx n=%zu xg=%d next=%04X\n", blkStartPc, (unsigned long long)blkEntryHash,
+                                     (unsigned long long)exitHash, blkIssue.size(), blkXgEntry ? 1 : 0, m_state.pc);
+                        std::fprintf(bu.file, "  entry: %s\n  issue:", blkEntryText.c_str());
+                        for (uint32_t o : blkIssue)
+                            std::fprintf(bu.file, " %u", o);
+                        std::fprintf(bu.file, "\n  exit: %s\n", exitText.c_str());
+                        std::fflush(bu.file);
+                    }
+                }
+                else
+                {
+                    BlkRec &rec = it->second;
+                    ++rec.count;
+                    ++rec.nexts[m_state.pc];
+                    if (rec.issue != blkIssue || rec.exitHash != exitHash)
+                    {
+                        ++rec.bad;
+                        ++bu.inconsistent;
+                        if (bu.inconsistent <= 6)
+                            std::printf("[probe] blk INCONSISTENT pc=%04X entry=%016llx exit %016llx vs %016llx n=%zu vs %zu\n", blkStartPc,
+                                        (unsigned long long)blkEntryHash, (unsigned long long)rec.exitHash, (unsigned long long)exitHash,
+                                        rec.issue.size(), blkIssue.size());
+                    }
+                }
+                if (g_blkUnits[0].blocks + g_blkUnits[1].blocks >= g_blkNextPrint)
+                {
+                    g_blkNextPrint *= 3;
+                    for (int u = 0; u < 2; ++u)
+                    {
+                        BlkUnit &b2 = g_blkUnits[u];
+                        if (b2.blocks == 0)
+                            continue;
+                        std::printf("[probe] blk %s blocks=%llu pairs=%llu pairs/block=%.2f distinct=%zu inconsistent=%llu abandoned=%llu xgActivePairs=%.1f%% xgEntryBlocks=%.1f%%\n",
+                                    u ? "VU1" : "VU0", (unsigned long long)b2.blocks, (unsigned long long)b2.pairs, double(b2.pairs) / double(b2.blocks),
+                                    b2.recs.size(), (unsigned long long)b2.inconsistent, (unsigned long long)b2.abandoned,
+                                    100.0 * b2.pairsXgActive / std::max<uint64_t>(b2.pairs, 1), 100.0 * b2.blocksXgEntry / b2.blocks);
+                    }
+                    std::fflush(stdout);
+                }
+            }
+            blkActive = false;
+        }
         if (s_egCurRunTraced)
         {
             s_egTotalPairs++;
