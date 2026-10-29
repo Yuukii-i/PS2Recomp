@@ -401,6 +401,9 @@ add_library(ps2_runtime STATIC
     src/lib/vu/generated/vu1_native_exec_3.cpp
     src/lib/vu/generated/vu1_native_dispatch.cpp
     src/lib/vu/generated/vu1_hot_blocks.cpp
+    src/lib/vu/generated/vu0_native_exec_0.cpp
+    src/lib/vu/generated/vu0_native_dispatch.cpp
+    src/lib/vu/generated/vu0_hot_blocks.cpp
     src/lib/games_database.cpp
     src/lib/probe_prof.cpp
 )

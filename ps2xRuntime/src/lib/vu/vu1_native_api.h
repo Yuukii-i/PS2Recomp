@@ -56,3 +56,9 @@ extern const uint64_t kVu1NativeMainHash;
 // Returns 1 when the interpreter loop must stop (budget reached / stop requested / program ended),
 // 2 when the interpreter has to execute the current pair itself.
 int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &ctx);
+
+// PERF-IM: the same executors generated for the VU0 microcode image (generated/vu0_*.cpp, gen_vu1_native.py on a _u0_ dump)
+VuHotFn vu0HotLookup(uint32_t pc, uint64_t entryHash);
+extern const bool kVu0HotStart[512];
+extern const uint64_t kVu0NativeMainHash;
+int vu0NativeRun(VU1Interpreter &vu, VuNativeCtx &ctx);

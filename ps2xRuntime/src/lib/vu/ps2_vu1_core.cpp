@@ -3997,9 +3997,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     };
     const bool useFastUpper = !s_vfyRef && !vu1FastMode(); // PERF-HM: interpreter loop (VU0 + non-native VU1) uses fastUpper too
     static const bool vuNativeAllowed = []() { const char *e = std::getenv("PS2X_VU1_NATIVE"); return !(e && e[0] == '0'); }();
-    const bool vuNativeOn = vuNativeAllowed && (m_unit == Unit::VU1) && !s_vfyRef && decodeCacheOk && !vu1FastMode() &&
+    static const bool vu0NativeAllowed = []() { const char *e = std::getenv("PS2X_VU0_NATIVE"); return !(e && e[0] == '0'); }(); // PERF-IM
+    const bool vuNativeImage = m_unit == Unit::VU1 ? (s_hcCurHash == kVu1NativeMainHash && codeSize == 0x4000u)
+                                                   : (vu0NativeAllowed && s_hcUnitHash[0] == kVu0NativeMainHash && codeSize == 0x1000u);
+    const bool vuNativeOn = vuNativeAllowed && vuNativeImage && !s_vfyRef && decodeCacheOk && !vu1FastMode() &&
                             s_vuImmWrites && s_vuImmFlags && // PERF-IC: native pairs apply vf/vi/acc/flag writes directly
-                            s_hcCurHash == kVu1NativeMainHash && codeSize == 0x4000u && !isVu3dProbeEnabled() &&
+                            !isVu3dProbeEnabled() &&
                             !probe_ae::isEnabled() && !probe_ae::isDcProbeEnabled() && !s_egCurRunTraced &&
                             !s_emRecording && !s_eiCurRunActive && !s_ekCurRunActive && !s_fcC80.active;
     static const bool vuBlkCheck = []() { const char *e = std::getenv("PS2X_VU_BLK_CHECK"); return e && e[0] == '1'; }();
@@ -4086,7 +4089,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     {
         if (vuNativeOn)
         {
-            const int nativeResult = vu1NativeRun(*this, vuNativeCtx);
+            const int nativeResult = m_unit == Unit::VU1 ? vu1NativeRun(*this, vuNativeCtx) : vu0NativeRun(*this, vuNativeCtx);
             instrsThisRun += vuNativeCtx.instrs;
             vuNativeCtx.instrs = 0u;
             if (vuNativeCtx.programEnded)
