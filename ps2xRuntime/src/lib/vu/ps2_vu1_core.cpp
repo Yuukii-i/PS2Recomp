@@ -9,6 +9,8 @@
 #include "ps2_vu1_detail.h"
 #include "probe_ae.h"
 #include "vu1_native_api.h"
+#include "vu1_flag_ring.h"
+using namespace vuflags; // FlgRing, s_flgMac/s_flgClip, s_flgStatusUndo, flg* helpers (shared with the generated hot blocks)
 
 #include <chrono>
 #include <algorithm>
@@ -895,67 +897,8 @@ static uint64_t s_nextReady[2] = {0u, 0u};
 // Reference (verifier) pass and PS2X_VU_IMMF=0 keep the delayed FlagPipelineEntry model.
 namespace
 {
-    struct FlgRing
-    {
-        uint64_t cyc[8];
-        uint32_t val[8];
-        uint32_t base;
-        uint8_t head;
-        uint8_t count;
-    };
-    FlgRing s_flgMac[2], s_flgClip[2];
-    struct FlgStatusUndo
-    {
-        uint64_t cyc;
-        uint32_t old;
-        bool valid;
-    };
-    FlgStatusUndo s_flgStatusUndo[2];
     const bool s_vuImmFlags = []() { const char *e = std::getenv("PS2X_VU_IMMF"); return !(e && e[0] == '0'); }();
 
-    inline void flgPush(FlgRing &ring, uint64_t cycle, uint32_t v)
-    {
-        if (ring.count == 8u)
-            ring.base = ring.val[ring.head]; // overwriting the oldest entry: it has certainly landed
-        else
-            ++ring.count;
-        ring.cyc[ring.head] = cycle;
-        ring.val[ring.head] = v;
-        ring.head = static_cast<uint8_t>((ring.head + 1u) & 7u);
-    }
-    inline void flgPushOrReplace(FlgRing &ring, uint64_t cycle, uint32_t v)
-    {
-        if (ring.count != 0u)
-        {
-            const uint32_t newest = (ring.head + 7u) & 7u;
-            if (ring.cyc[newest] == cycle)
-            {
-                ring.val[newest] = v;
-                return;
-            }
-        }
-        flgPush(ring, cycle, v);
-    }
-    inline uint32_t flgVisible(const FlgRing &ring, uint64_t cycle)
-    {
-        for (uint32_t i = 0; i < ring.count; ++i)
-        {
-            const uint32_t idx = (ring.head + 7u - i) & 7u;
-            if (ring.cyc[idx] + 4u <= cycle)
-                return ring.val[idx];
-        }
-        return ring.base;
-    }
-    inline uint32_t flgNewest(const FlgRing &ring)
-    {
-        return ring.count ? ring.val[(ring.head + 7u) & 7u] : ring.base;
-    }
-    inline void flgInit(FlgRing &ring, uint32_t base)
-    {
-        ring.base = base;
-        ring.head = 0;
-        ring.count = 0;
-    }
     // called before a FC*/FS*/FM* lower op executes: expose the value visible at this cycle
     inline void flgSyncReader(VU1State &st, uint32_t unit, uint64_t cycle, uint32_t lower)
     {
@@ -3924,6 +3867,76 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 dst[c] = result[c];
         return true;
     };
+    static const auto blkStateScan = [](VU1Interpreter &v, uint64_t &hash, std::string *text)
+    {
+        const uint64_t c = v.m_cycle;
+        hash = 0x1234ABCDull;
+        char buf[48];
+        auto add = [&](uint64_t val) { hash = sigMix(hash ^ sigMix(val)); };
+        auto emit = [&](const char *tag, uint32_t a, uint32_t b, int64_t rel)
+        {
+            add((uint64_t(tag[0]) << 56) ^ (uint64_t(a) << 40) ^ (uint64_t(b) << 32) ^ uint64_t(rel));
+            if (text)
+            {
+                std::snprintf(buf, sizeof(buf), "%s%u.%u.%lld ", tag, a, b, static_cast<long long>(rel));
+                *text += buf;
+            }
+        };
+        for (uint32_t reg = 1; reg < 32u; ++reg)
+            for (uint32_t l = 0; l < 4u; ++l)
+                if (v.m_vfReady[reg][l] > c)
+                    emit("f", reg, l, static_cast<int64_t>(v.m_vfReady[reg][l] - c));
+        for (uint32_t reg = 1; reg < 16u; ++reg)
+            if (v.m_viReady[reg] > c)
+                emit("i", reg, 0, static_cast<int64_t>(v.m_viReady[reg] - c));
+        for (uint32_t l = 0; l < 4u; ++l)
+            if (v.m_accReady[l] > c)
+                emit("a", l, 0, static_cast<int64_t>(v.m_accReady[l] - c));
+        if (v.m_fdiv.valid)
+            emit("q", 0, 0, static_cast<int64_t>(v.m_fdiv.readyCycle) - static_cast<int64_t>(c));
+        {
+            int64_t e[2];
+            int n = 0;
+            for (const ScalarPipelineEntry &en : v.m_efu)
+                if (en.valid)
+                    e[n++] = static_cast<int64_t>(en.readyCycle) - static_cast<int64_t>(c);
+            if (n == 2 && e[0] > e[1])
+                std::swap(e[0], e[1]);
+            for (int k = 0; k < n; ++k)
+                emit("p", static_cast<uint32_t>(k), 0, e[k]);
+        }
+        if (v.m_efuResourceReady > c)
+            emit("r", 0, 0, static_cast<int64_t>(v.m_efuResourceReady - c));
+        {
+            int64_t st[8];
+            uint32_t sn = 0;
+            for (uint32_t mk = s_pipeMasks[v.m_unit == Unit::VU1 ? 1 : 0].store; mk != 0u && sn < 8u; mk &= mk - 1u)
+                st[sn++] = static_cast<int64_t>(v.m_storePipeline[pmCtz(mk)].readyCycle) - static_cast<int64_t>(c);
+            std::sort(st, st + sn);
+            for (uint32_t k = 0; k < sn; ++k)
+                emit("s", k, 0, st[k]);
+        }
+        {
+            const uint32_t u = v.m_unit == Unit::VU1 ? 1u : 0u;
+            const FlgRing *rings[2] = {&s_flgMac[u], &s_flgClip[u]};
+            for (int k = 0; k < 2; ++k)
+            {
+                const FlgRing &ring = *rings[k];
+                uint32_t ei = 0; // index among the not-yet-landed entries only (the position inside the ring is an artefact)
+                for (uint32_t i = 0; i < ring.count; ++i) // oldest -> newest
+                {
+                    const uint32_t idx = (ring.head + 8u - ring.count + i) & 7u;
+                    if (ring.cyc[idx] + 4u > c)
+                        emit(k ? "c" : "m", ei++, 0, static_cast<int64_t>(ring.cyc[idx]) - static_cast<int64_t>(c));
+                }
+            }
+        }
+        if (v.m_viBranchBackupValid)
+            emit("b", v.m_viBranchBackupReg, 0, 0);
+        if (v.m_xgkick.active)
+            emit("x", 1, 0, 0);
+    };
+
     static const VuNativeOps vuNativeOps = {
         [](VU1Interpreter &v) { v.commitReadyPipelines(); },
         [](VU1Interpreter &v, uint64_t t) { v.advanceTo(t); },
@@ -3979,6 +3992,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         [](VU1Interpreter &v, uint8_t r, int32_t val, uint32_t lat) { v.queueViWrite(r, val, lat); },
         [](VU1Interpreter &v, uint8_t lanes, const float *val, uint32_t lat) { v.queueAccWrite(lanes, val, lat); },
         [](VU1Interpreter &v) { v.progressXgkick(); }, // PERF-IC
+        [](VU1Interpreter &v) -> uint64_t { uint64_t h = 0; blkStateScan(v, h, nullptr); return h; }, // PERF-IE
+        [](VU1Interpreter &v, uint32_t addr, const uint32_t *w, uint8_t lanes) { v.queueStore(addr, w, lanes); }, // PERF-IE
     };
     const bool useFastUpper = !s_vfyRef && !vu1FastMode(); // PERF-HM: interpreter loop (VU0 + non-native VU1) uses fastUpper too
     static const bool vuNativeAllowed = []() { const char *e = std::getenv("PS2X_VU1_NATIVE"); return !(e && e[0] == '0'); }();
@@ -3987,7 +4002,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                             s_hcCurHash == kVu1NativeMainHash && codeSize == 0x4000u && !isVu3dProbeEnabled() &&
                             !probe_ae::isEnabled() && !probe_ae::isDcProbeEnabled() && !s_egCurRunTraced &&
                             !s_emRecording && !s_eiCurRunActive && !s_ekCurRunActive && !s_fcC80.active;
-    VuNativeCtx vuNativeCtx{&vuNativeOps, budgetEnd, 0u, false, vuData, dataSize, &gs, memory, codeSize, &NR()};
+    static const bool vuBlkCheck = []() { const char *e = std::getenv("PS2X_VU_BLK_CHECK"); return e && e[0] == '1'; }();
+    VuNativeCtx vuNativeCtx{&vuNativeOps, budgetEnd, 0u, false, vuData, dataSize, &gs, memory, codeSize, &NR(), 0u, false, vuBlkCheck, 0u, 0u, 0u};
 
     bool sigLanded = true; // PROBE-SIG: first pair of a run counts as a landing
     const auto sigPipelineHash = [this]() -> uint64_t
@@ -4064,74 +4080,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     };
     blkMark2 = blkPend();
     // timing-state snapshot: hash + readable text, all times relative to the current cycle
-    const auto blkSnapshot = [this](uint64_t &hash, std::string *text)
-    {
-        const uint64_t c = m_cycle;
-        hash = 0x1234ABCDull;
-        char buf[48];
-        auto add = [&](uint64_t v) { hash = sigMix(hash ^ sigMix(v)); };
-        auto emit = [&](const char *tag, uint32_t a, uint32_t b, int64_t rel)
-        {
-            add((uint64_t(tag[0]) << 56) ^ (uint64_t(a) << 40) ^ (uint64_t(b) << 32) ^ uint64_t(rel));
-            if (text)
-            {
-                std::snprintf(buf, sizeof(buf), "%s%u.%u.%lld ", tag, a, b, static_cast<long long>(rel));
-                *text += buf;
-            }
-        };
-        for (uint32_t reg = 1; reg < 32u; ++reg)
-            for (uint32_t l = 0; l < 4u; ++l)
-                if (m_vfReady[reg][l] > c)
-                    emit("f", reg, l, static_cast<int64_t>(m_vfReady[reg][l] - c));
-        for (uint32_t reg = 1; reg < 16u; ++reg)
-            if (m_viReady[reg] > c)
-                emit("i", reg, 0, static_cast<int64_t>(m_viReady[reg] - c));
-        for (uint32_t l = 0; l < 4u; ++l)
-            if (m_accReady[l] > c)
-                emit("a", l, 0, static_cast<int64_t>(m_accReady[l] - c));
-        if (m_fdiv.valid)
-            emit("q", 0, 0, static_cast<int64_t>(m_fdiv.readyCycle) - static_cast<int64_t>(c));
-        {
-            int64_t e[2];
-            int n = 0;
-            for (const ScalarPipelineEntry &en : m_efu)
-                if (en.valid)
-                    e[n++] = static_cast<int64_t>(en.readyCycle) - static_cast<int64_t>(c);
-            if (n == 2 && e[0] > e[1])
-                std::swap(e[0], e[1]);
-            for (int k = 0; k < n; ++k)
-                emit("p", static_cast<uint32_t>(k), 0, e[k]);
-        }
-        if (m_efuResourceReady > c)
-            emit("r", 0, 0, static_cast<int64_t>(m_efuResourceReady - c));
-        {
-            std::vector<int64_t> st;
-            for (uint32_t mk = PM().store; mk != 0u; mk &= mk - 1u)
-                st.push_back(static_cast<int64_t>(m_storePipeline[pmCtz(mk)].readyCycle) - static_cast<int64_t>(c));
-            std::sort(st.begin(), st.end());
-            for (size_t k = 0; k < st.size(); ++k)
-                emit("s", static_cast<uint32_t>(k), 0, st[k]);
-        }
-        {
-            const uint32_t u = m_unit == Unit::VU1 ? 1u : 0u;
-            const FlgRing *rings[2] = {&s_flgMac[u], &s_flgClip[u]};
-            for (int k = 0; k < 2; ++k)
-            {
-                const FlgRing &ring = *rings[k];
-                uint32_t ei = 0; // index among the not-yet-landed entries only (the position inside the ring is an artefact)
-                for (uint32_t i = 0; i < ring.count; ++i) // oldest -> newest
-                {
-                    const uint32_t idx = (ring.head + 8u - ring.count + i) & 7u;
-                    if (ring.cyc[idx] + 4u > c)
-                        emit(k ? "c" : "m", ei++, 0, static_cast<int64_t>(ring.cyc[idx]) - static_cast<int64_t>(c));
-                }
-            }
-        }
-        if (m_viBranchBackupValid)
-            emit("b", m_viBranchBackupReg, 0, 0);
-        if (m_xgkick.active)
-            emit("x", 1, 0, 0);
-    };
+    const auto blkSnapshot = [this](uint64_t &hash, std::string *text) { blkStateScan(*this, hash, text); };
 
     while (m_cycle < budgetEnd && !m_stopRequested)
     {

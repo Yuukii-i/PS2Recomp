@@ -3825,16 +3825,58 @@ const StepFn kStep[2048] = {
 };
 }
 
+#include <cstdio>
+
+namespace
+{
+uint64_t s_hotBlocks = 0, s_hotPairs = 0, s_slowPairs = 0;
+}
+
 int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
 {
+    c.hashValid = false; // the interpreter may have executed pairs since the last hot block
     while (vu.m_cycle < c.budgetEnd && !vu.m_stopRequested)
     {
         const uint32_t pc = vu.m_state.pc;
         if ((pc & 7u) != 0u || pc >= 0x4000u)
             return 2;
+        // PERF-IE: hot blocks with static timing (generated/vu1_hot_blocks.cpp); any unknown state falls back to the pair executors
+        if (kVu1HotStart[pc >> 3] && !vu.m_xgkick.active && !vu.m_state.branchPending && !vu.m_state.ebit &&
+            !vu.m_state.haltAfterDelaySlot && c.budgetEnd - vu.m_cycle > 160u)
+        {
+            if (!c.hashValid)
+            {
+                c.nextHash = c.ops->blkHash(vu);
+                c.hashValid = true;
+            }
+            const VuHotFn hf = vu1HotLookup(pc, c.nextHash);
+            if (hf)
+            {
+                const uint64_t i0 = c.instrs;
+                const int hr = hf(vu, c);
+                s_hotPairs += c.instrs - i0;
+                ++s_hotBlocks;
+                if (c.check && c.ops->blkHash(vu) != c.nextHash)
+                {
+                    ++c.checkFail;
+                    if (c.checkFail <= 6)
+                        std::printf("[probe] hot block exit-hash MISMATCH at pc=%04X (block entered at %04X)\n", vu.m_state.pc, pc);
+                    c.hashValid = false;
+                }
+                if ((s_hotBlocks & 0x7FFFFFull) == 0u)
+                    std::printf("[probe] hot blocks=%llu hotPairs=%llu slowPairs=%llu hotShare=%.1f%% checkFail=%llu\n", (unsigned long long)s_hotBlocks,
+                                (unsigned long long)s_hotPairs, (unsigned long long)s_slowPairs,
+                                100.0 * s_hotPairs / double(s_hotPairs + s_slowPairs + 1), (unsigned long long)c.checkFail);
+                if (hr != 0)
+                    return hr;
+                continue;
+            }
+        }
+        c.hashValid = false;
         const StepFn fn = kStep[pc >> 3];
         if (!fn)
             return 2;
+        ++s_slowPairs;
         const int r = fn(vu, c);
         if (r != 0)
             return r;

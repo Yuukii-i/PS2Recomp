@@ -20,6 +20,8 @@ struct VuNativeOps
     void (*qVi)(VU1Interpreter &, uint8_t reg, int32_t value, uint32_t latency);
     void (*qAcc)(VU1Interpreter &, uint8_t lanes, const float *value, uint32_t latency);
     void (*xgProgress)(VU1Interpreter &); // PERF-IC: progressXgkick (called only while a transfer is active)
+    uint64_t (*blkHash)(VU1Interpreter &); // PERF-IE: timing-state hash (identical to the PROBE-BLK entry/exit hash)
+    void (*qStore)(VU1Interpreter &, uint32_t address, const uint32_t *words, uint8_t laneMask); // PERF-IE: queueStore
 };
 
 struct VuNativeCtx
@@ -34,7 +36,16 @@ struct VuNativeCtx
     PS2Memory *memory;
     uint32_t codeSize;
     const uint64_t *nextReady; // PERF-IC: the interpreter's next-ready-cycle cache (commit early-out)
+    uint64_t nextHash;         // PERF-IE: exit-state hash of the last hot block (valid while hashValid)
+    bool hashValid;
+    bool check;                // PS2X_VU_BLK_CHECK=1: compare each hot block's constant exit hash with the real state
+    uint64_t hotBlocks, hotPairs, checkFail;
 };
+
+// PERF-IE: generated hot blocks (generated/vu1_hot_blocks.cpp)
+using VuHotFn = int (*)(VU1Interpreter &, VuNativeCtx &);
+VuHotFn vu1HotLookup(uint32_t pc, uint64_t entryHash);
+extern const bool kVu1HotStart[2048];
 
 // Hash (FNV-1a 64) of the microcode image these executors were generated from.
 extern const uint64_t kVu1NativeMainHash;
