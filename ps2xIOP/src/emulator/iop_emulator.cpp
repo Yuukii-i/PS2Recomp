@@ -1,4 +1,5 @@
 #include "iop_emulator.h"
+#include <cstdlib>
 #include "imports/iop_cdvd.h"
 #include "core/iop_cpu.h"
 #include "imports/iop_heaplib.h"
@@ -742,6 +743,19 @@ namespace ps2x::iop::detail
     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
     {
         const uint64_t total = m_impl->eeCycleCarry + eeCycles;
+        // PERF-JK: accountCycles() calls this at every guest checkpoint with a handful of cycles; each IOP runCycles() pass re-polls DMA/callback/timer/
+        // ready-queue state (~9% of the EE thread in the title). Let the IOP lag by at most kBatch EE cycles (~7 us at 2048) and run it in bigger steps.
+        // PS2X_IOP_BATCH=<EE cycles> overrides (0 = previous behaviour).
+        static const uint64_t kBatch = []() -> uint64_t
+        {
+            const char *e = std::getenv("PS2X_IOP_BATCH");
+            return e ? static_cast<uint64_t>(std::strtoull(e, nullptr, 10)) : 2048u;
+        }();
+        if (total < kBatch)
+        {
+            m_impl->eeCycleCarry = total;
+            return;
+        }
         const uint64_t iopCycles = total / 8u;
         m_impl->eeCycleCarry = total % 8u;
         if (iopCycles)
