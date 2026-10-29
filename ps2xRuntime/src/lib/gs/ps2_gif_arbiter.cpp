@@ -22,6 +22,8 @@ struct GsAsyncState
     std::condition_variable cvIdle;
     std::deque<std::vector<uint8_t>> q;
     size_t queuedBytes = 0;
+    uint64_t enqueuedPkts = 0;  // PERF-JF: packets handed to the worker / finished by it (ordering ticket for the async present latch)
+    uint64_t processedPkts = 0;
     bool busy = false;
     bool started = false;
     std::function<void(const uint8_t *, uint32_t)> fn;
@@ -55,6 +57,7 @@ void gsAsyncWorker()
         st.fn(pkt.data(), static_cast<uint32_t>(pkt.size()));
         lock.lock();
         st.queuedBytes -= pkt.size();
+        ++st.processedPkts;
         st.busy = false;
         st.cvIdle.notify_all();
     }
@@ -71,6 +74,26 @@ extern "C" void ps2_gs_async_fence()
     if (!st.started)
         return;
     st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
+}
+
+// PERF-JF: ticket = number of packets handed to the async worker so far (0 when async is off / not started).
+extern "C" uint64_t ps2_gs_async_ticket()
+{
+    if (!gsAsyncEnabled())
+        return 0;
+    GsAsyncState &st = gsAsync();
+    std::lock_guard<std::mutex> lock(st.m);
+    return st.started ? st.enqueuedPkts : 0;
+}
+
+// Wait until the worker has finished the first `ticket` packets (the draws that were queued when the ticket was taken).
+extern "C" void ps2_gs_async_wait_ticket(uint64_t ticket)
+{
+    if (!ticket)
+        return;
+    GsAsyncState &st = gsAsync();
+    std::unique_lock<std::mutex> lock(st.m);
+    st.cvIdle.wait(lock, [&] { return st.processedPkts >= ticket; });
 }
 
 GifArbiter::GifArbiter(ProcessPacketFn processFn)
@@ -142,6 +165,7 @@ void GifArbiter::drain()
                 continue;
             st.cvIdle.wait(lock, [&] { return st.queuedBytes < kGsAsyncMaxBytes; }); // backpressure
             st.queuedBytes += pkt.data.size();
+            ++st.enqueuedPkts;
             st.q.push_back(std::move(pkt.data));
             st.cvWork.notify_one();
         }

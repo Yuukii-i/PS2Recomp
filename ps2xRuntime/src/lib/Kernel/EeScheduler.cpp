@@ -31,6 +31,8 @@ namespace ps2_syscalls {
 #include <intrin.h>
 #include <cassert>
 #include <mutex>
+#include <thread>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -2208,6 +2210,76 @@ void EeScheduler::processDueDeadlines()
 }
 
 
+// PERF-JF: PS2X_PRESENT_ASYNC=1 (needs PS2X_GS_ASYNC=1) runs the vblank present latch (GPU fence wait + CPU de-swizzle, ~14 ms) on its own
+// thread, ordered after the GIF packets queued at vblank time, so the EE thread no longer waits for it. A latch requested while one is still
+// running is coalesced (the worker re-latches once with the newest ticket).
+extern "C" uint64_t ps2_gs_async_ticket();
+extern "C" void ps2_gs_async_wait_ticket(uint64_t ticket);
+namespace
+{
+struct PresentLatchWorker
+{
+    std::mutex m;
+    std::condition_variable cv;
+    bool pending = false;
+    bool dirty = false;
+    bool started = false;
+    uint64_t ticket = 0;
+    GS *gs = nullptr;
+};
+
+bool isPresentAsyncEnabled()
+{
+    static const bool on = []() { const char *e = std::getenv("PS2X_PRESENT_ASYNC"); return e && e[0] == '1'; }();
+    return on;
+}
+
+bool postPresentLatch(GS &gs)
+{
+    static PresentLatchWorker *w = new PresentLatchWorker(); // leaked on purpose: detached worker outlives static destruction
+    const uint64_t ticket = ps2_gs_async_ticket();
+    if (!ticket)
+        return false; // async GS off or not started yet: caller latches inline
+    {
+        std::lock_guard<std::mutex> lk(w->m);
+        w->ticket = ticket;
+        w->gs = &gs;
+        if (w->pending)
+        {
+            w->dirty = true;
+            return true;
+        }
+        w->pending = true;
+        if (!w->started)
+        {
+            w->started = true;
+            std::thread([w = w]() {
+                std::unique_lock<std::mutex> lk2(w->m);
+                for (;;)
+                {
+                    w->cv.wait(lk2, [&] { return w->pending; });
+                    for (;;)
+                    {
+                        const uint64_t t = w->ticket;
+                        GS *g = w->gs;
+                        w->dirty = false;
+                        lk2.unlock();
+                        ps2_gs_async_wait_ticket(t);
+                        g->latchHostPresentationFrame();
+                        lk2.lock();
+                        if (!w->dirty)
+                            break;
+                    }
+                    w->pending = false;
+                }
+            }).detach();
+        }
+    }
+    w->cv.notify_one();
+    return true;
+}
+} // namespace
+
 static bool isVblankLatchEnabled()
 {
     static const bool s_enabled = []() {
@@ -2256,7 +2328,8 @@ void EeScheduler::processEvent(const EeEvent &event)
             static uint64_t s_lastLatchTick = 0;
             if ((g_gsFrameKicks.load(std::memory_order_relaxed) != s_lastLatchKicks) || (m_vsyncTick - s_lastLatchTick >= 30))
             {
-                m_runtime.gs().latchHostPresentationFrame();
+                if (!(isPresentAsyncEnabled() && postPresentLatch(m_runtime.gs())))
+                    m_runtime.gs().latchHostPresentationFrame();
                 s_lastLatchKicks = g_gsFrameKicks.load(std::memory_order_relaxed);
                 s_lastLatchTick = m_vsyncTick;
             }
