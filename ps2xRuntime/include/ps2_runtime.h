@@ -251,6 +251,13 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
     (void)rdram;
     (void)size;
     (void)valueHi;
+#if !defined(PS2X_TRACE_GUEST_WRITES)
+    // PERF-IH: these debug watches ran inside every guest store of the generated code. Define PS2X_TRACE_GUEST_WRITES to restore.
+    (void)guestAddr;
+    (void)valueLo;
+    (void)op;
+    (void)ctx;
+#else
     uint32_t phys = guestAddr & 0x01FFFFFFu;
     if (phys >= 0x74B140u && phys <= 0x74B17Fu) {
         static std::atomic<uint32_t> s_vtWriteCount{0};
@@ -286,6 +293,7 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
             ps2x_probeBadStore(guestAddr, valueLo, valueHi, pc, ra);
         }
     }
+#endif
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -295,6 +303,12 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
                                     const R5900Context *ctx)
 {
     (void)rdram;
+#if !defined(PS2X_TRACE_GUEST_WRITES)
+    (void)guestAddr;
+    (void)size;
+    (void)op;
+    (void)ctx;
+#else
     uint32_t start = guestAddr & 0x01FFFFFFu;
     uint32_t end = start + size;
     if (end > 0x74B140u && start <= 0x74B17Fu) {
@@ -308,6 +322,7 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
             std::fflush(stdout);
         }
     }
+#endif
 }
 
 class PS2Runtime

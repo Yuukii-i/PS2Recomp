@@ -52,6 +52,9 @@ static inline constexpr bool Ps2IsPhysicalSpecialAddress(uint32_t physAddr)
 
 static inline constexpr bool Ps2IsSpecialAddress(uint32_t addr)
 {
+    // PERF-IH: plain kuseg RDRAM (0..32 MB) is the hot case and is never special: every special range starts at >= 0x10000000.
+    if (addr < PS2_RAM_SIZE)
+        return false;
     if (Ps2IsKseg23Address(addr))
         return true;
 
