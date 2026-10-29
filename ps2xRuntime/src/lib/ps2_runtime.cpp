@@ -5218,6 +5218,11 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
         std::memcpy(&v, m_memory.getScratchpad() + (vaddr & 0x3FFFu), sizeof(v));
         return v;
     }
+    {
+        static std::atomic<int> s_q{0}; // PROBE-JB: first slow-path 128-bit loads (non-fast addresses only)
+        if (s_q.fetch_add(1) < 12)
+            std::fprintf(stderr, "[probe] Load128 slow vaddr=0x%08X ctx=%p pc=0x%X this=%p\n", vaddr, (void *)ctx, ctx->pc, (void *)this);
+    }
     try
     {
         return m_memory.read128(vaddr);
