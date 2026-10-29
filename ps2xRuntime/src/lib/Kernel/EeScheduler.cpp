@@ -2230,7 +2230,7 @@ struct PresentLatchWorker
 
 bool isPresentAsyncEnabled()
 {
-    static const bool on = []() { const char *e = std::getenv("PS2X_PRESENT_ASYNC"); return e && e[0] == '1'; }();
+    static const bool on = []() { const char *e = std::getenv("PS2X_PRESENT_ASYNC"); return !(e && e[0] == '0'); }(); // default on (needs PS2X_GS_ASYNC=1, else inline)
     return on;
 }
 
