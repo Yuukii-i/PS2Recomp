@@ -886,7 +886,11 @@ static inline uint32_t pmCtz(uint32_t v)
 }
 #define PM() (s_pipeMasks[m_unit == Unit::VU1 ? 1 : 0])
 // PERF-HM: earliest cycle at which any pending write can land; push sites reset it to 0 (rescan), commit recomputes it.
-static thread_local bool s_vfyRef = false;            // PERF-GR (thread_local since PERF-IM: VU0 on the EE thread and VU1 on the VIF1 worker verify concurrently): true => use the original (reference) code paths, for A/B verification
+// PERF-IQ: the verifier switches are thread_local (VU0 on the EE thread, VU1 on the worker), but a TLS read per flag/write site cost
+// speed when not verifying. s_vfyRef now short-circuits on a plain global that is false unless PS2X_VU1_VERIFY is set.
+static const bool s_vfyOn = []() { const char *v = std::getenv("PS2X_VU1_VERIFY"); return v && std::atoi(v) != 0; }();
+static thread_local bool s_vfyRefTl = false;
+#define s_vfyRef (s_vfyOn && s_vfyRefTl)
 static uint64_t s_nextReady[2] = {0u, 0u};
 #define NR() (s_nextReady[m_unit == Unit::VU1 ? 1 : 0])
 
@@ -1370,7 +1374,7 @@ static inline int vu1VerifyMode() // PS2X_VU1_VERIFY: 1 = VU1 only, 2 = VU0 only
 static const bool s_vu1FastEnv = []() { const char *v = std::getenv("PS2X_VU1_FAST"); return v && v[0] == '1'; }(); // PERF-HI
 static inline bool vu1FastMode()
 {
-    if (s_vfyFastOverride >= 0)
+    if (s_vfyOn && s_vfyFastOverride >= 0)
         return s_vfyFastOverride == 1;
     return s_vu1FastEnv;
 }
@@ -3298,7 +3302,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         std::vector<uint8_t> capA, capB;
 
         s_vfyFastOverride = 0;
-        s_vfyRef = false;
+        s_vfyRefTl = false;
         s_vfyCapture = &capA;
         run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
         const VU1State sA = m_state;
@@ -3312,7 +3316,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         std::memcpy(vuData, mem0.data(), dataSize);
         resetScheduler();
         s_vfyFastOverride = 0;
-        s_vfyRef = true;
+        s_vfyRefTl = true;
         s_vfyCapture = &capB;
         run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
         const VU1State sB = m_state;
@@ -3383,7 +3387,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         m_cycle = cycA;
         std::memcpy(vuData, memA.data(), dataSize);
         s_vfyFastOverride = -1;
-        s_vfyRef = false;
+        s_vfyRefTl = false;
         s_vfyCapture = nullptr;
         if (!capA.empty() && memory)
             memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));
