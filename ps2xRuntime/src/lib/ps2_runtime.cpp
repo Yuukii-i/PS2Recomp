@@ -5205,6 +5205,13 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    if (vaddr & 15u) // PROBE-IZ: R5900 lq ignores the low 4 address bits
+    {
+        static std::atomic<int> s_n{0};
+        if (s_n.fetch_add(1) < 5)
+            std::fprintf(stderr, "[probe] lq unaligned vaddr=0x%08X pc=0x%X ra=0x%llX\n", vaddr, ctx->pc, (unsigned long long)_mm_cvtsi128_si64(ctx->r[31]));
+        vaddr &= ~15u;
+    }
     if (sprFastAddr<__m128i>(vaddr))
     {
         __m128i v;
@@ -5301,6 +5308,7 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value)
 {
+    vaddr &= ~15u; // PROBE-IZ: R5900 sq ignores the low 4 address bits
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
     if (sprFastAddr<__m128i>(vaddr))
     {
