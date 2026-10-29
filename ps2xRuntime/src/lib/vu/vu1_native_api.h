@@ -40,6 +40,8 @@ struct VuNativeCtx
     bool hashValid;
     bool check;                // PS2X_VU_BLK_CHECK=1: compare each hot block's constant exit hash with the real state
     uint64_t hotBlocks, hotPairs, checkFail;
+    uint32_t *storeMask;       // PERF-IF: pending-store slot mask of this unit (inline queueStore in the hot blocks)
+    uint64_t *nextReadyW;      // PERF-IF: writable next-ready cache
 };
 
 // PERF-IE: generated hot blocks (generated/vu1_hot_blocks.cpp)

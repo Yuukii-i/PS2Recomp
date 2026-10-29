@@ -1,8 +1,10 @@
 // vu1_hot_ops.h -- inline, constant-folding op implementations for the generated VU1 hot blocks (generated/vu1_hot_blocks.cpp).
-// Exact copies of the interpreter semantics: fmac == fastUpper (ps2_vu1_core.cpp), the rest == ps2_vu1_upper.cpp / ps2_vu1_lower.cpp.
-// The including TU must have done `#define private public` + #include "runtime/ps2_vu1.h" (VU1Interpreter, VU1State).
+// Exact re-implementations of the interpreter semantics (fastUpper in ps2_vu1_core.cpp, ps2_vu1_upper.cpp, ps2_vu1_lower.cpp):
+// the FMAC family runs the same float/double math on 4 lanes at once with AVX2 and derives the MAC/STATUS bits from the compare masks.
+// The including TU must have done `#define private public` + #include "runtime/ps2_vu1.h" and "../vu1_native_api.h".
 #pragma once
 
+#include <bit>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
@@ -33,171 +35,169 @@ namespace vuhot
         return value;
     }
 
-    // fastUpper's flagsOf: long double == double on MSVC
-    VUHOT_INLINE uint8_t flagsOf(float &value, double ex)
+    VUHOT_INLINE __m128 N4(__m128 v) // normalizeOperand on 4 lanes
     {
-        const bool negative = std::signbit(ex);
-        const double magnitude = std::fabs(ex);
-        uint8_t flags = negative ? 0x2u : 0u;
-        uint32_t bits = negative ? 0x80000000u : 0u;
-        if (magnitude == 0.0)
-        {
-            flags |= 0x1u;
-            std::memcpy(&value, &bits, sizeof(value));
-        }
-        else if (magnitude > static_cast<double>(FLT_MAX))
-        {
-            flags |= 0x8u;
-            bits |= 0x7F7FFFFFu;
-            std::memcpy(&value, &bits, sizeof(value));
-        }
-        else if (magnitude < static_cast<double>(FLT_MIN))
-        {
-            flags |= 0x5u;
-            std::memcpy(&value, &bits, sizeof(value));
-        }
-        return flags;
+        const __m128i bits = _mm_castps_si128(v);
+        const __m128i expo = _mm_and_si128(_mm_srli_epi32(bits, 23), _mm_set1_epi32(0xFF));
+        const __m128i sign = _mm_and_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u)));
+        const __m128i isZero = _mm_cmpeq_epi32(expo, _mm_setzero_si128());
+        const __m128i isFF = _mm_cmpeq_epi32(expo, _mm_set1_epi32(0xFF));
+        __m128i r = bits;
+        r = _mm_blendv_epi8(r, sign, isZero);
+        r = _mm_blendv_epi8(r, _mm_or_si128(sign, _mm_set1_epi32(0x7F7FFFFF)), isFF);
+        return _mm_castsi128_ps(r);
     }
 
-    // VU1Interpreter::updateFmacFlags, immediate-flag model (PERF-HV)
-    VUHOT_INLINE void pushFmacFlags(VU1State &st, uint32_t unit, uint64_t cycle, const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky)
+    // bit c of `bits` -> lane c all ones
+    VUHOT_INLINE __m128i laneMask4(uint32_t bits)
     {
-        if (dest == 0u)
-            return;
-        uint32_t mac = 0u;
-        uint32_t status = 0u;
-        for (uint32_t c = 0; c < 4u; ++c)
-        {
-            const uint8_t lane = static_cast<uint8_t>(8u >> c);
-            if ((dest & lane) == 0u)
-                continue;
-            const uint32_t flags = laneFlags[c];
-            if ((flags & 0x1u) != 0u)
-                mac |= lane;
-            if ((flags & 0x2u) != 0u)
-                mac |= static_cast<uint32_t>(lane) << 4;
-            if ((flags & 0x4u) != 0u)
-                mac |= static_cast<uint32_t>(lane) << 8;
-            if ((flags & 0x8u) != 0u)
-                mac |= static_cast<uint32_t>(lane) << 12;
-            status |= flags;
-        }
-        vuflags::flgPush(vuflags::s_flgMac[unit], cycle, mac);
-        vuflags::s_flgStatusUndo[unit] = {cycle, st.status, true};
-        const uint32_t current = status & 0xFu;
-        st.status = (st.status & 0xFF0u) | current | ((current | extraSticky) << 6);
+        const __m128i sel = _mm_set_epi32(8, 4, 2, 1);
+        return _mm_cmpeq_epi32(_mm_and_si128(_mm_set1_epi32(static_cast<int>(bits)), sel), sel);
     }
 
-    // kind: 0 add, 1 sub, 2 madd, 3 msub, 4 mul. src: 0 vt[BC], 1 q, 2 i, 3 vt[c]. Same math as fastUpper.
-    template <int KIND, int SRC, int BC, bool TOACC>
-    VUHOT_INLINE void fmac(VU1Interpreter &v, uint32_t unit, uint8_t dest, uint32_t fs, uint32_t ft, uint32_t fd)
+    constexpr uint32_t rev4(uint32_t b) { return ((b & 1u) << 3) | ((b & 2u) << 1) | ((b & 4u) >> 1) | ((b & 8u) >> 3); }
+
+    // classification of the exact (double) result per lane; bit c = lane c. `under` excludes zero (fastUpper's flagsOf chain).
+    struct Cls
     {
-        VU1State &st = v.m_state;
+        uint32_t sign, zero, over, under;
+    };
+
+    VUHOT_INLINE Cls classify(__m256d ex)
+    {
+        Cls r;
+        const __m256d mag = _mm256_and_pd(ex, _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFll)));
+        r.sign = static_cast<uint32_t>(_mm256_movemask_pd(ex));
+        r.zero = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_cmp_pd(mag, _mm256_setzero_pd(), _CMP_EQ_OQ)));
+        r.over = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_cmp_pd(mag, _mm256_set1_pd(static_cast<double>(FLT_MAX)), _CMP_GT_OQ)));
+        r.under = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_cmp_pd(mag, _mm256_set1_pd(static_cast<double>(FLT_MIN)), _CMP_LT_OQ))) & ~r.zero & 0xFu;
+        return r;
+    }
+
+    // MAC word (lane value 8>>c, groups zero/sign/underflow/overflow at <<0/4/8/12) and OR of the 4-bit lane flags over the dest lanes
+    VUHOT_INLINE void macOf(const Cls &c, uint32_t d4, uint32_t &mac, uint32_t &status4)
+    {
+        const uint32_t z = (c.zero | c.under) & d4;
+        const uint32_t s = c.sign & d4;
+        const uint32_t u = c.under & d4;
+        const uint32_t o = c.over & d4;
+        mac = rev4(z) | (rev4(s) << 4) | (rev4(u) << 8) | (rev4(o) << 12);
+        status4 = (z ? 1u : 0u) | (s ? 2u : 0u) | (u ? 4u : 0u) | (o ? 8u : 0u);
+    }
+
+    // kind: 0 add, 1 sub, 2 madd, 3 msub, 4 mul. src: 0 vt[BC], 1 q, 2 i, 3 vt[c]. DEST in VU encoding (x = 8).
+    template <int KIND, int SRC, int BC, bool TOACC, int DEST, bool KEEPMAC>
+    VUHOT_INLINE void fmac(VU1Interpreter &v, uint32_t unit, uint32_t fs, uint32_t ft, uint32_t fd)
+    {
+        if constexpr (DEST == 0)
+            return; // updateFmacFlags returns early and no lane is written
         constexpr bool madd = KIND == 2 || KIND == 3;
-        float bval = 0.0f;
-        if constexpr (SRC == 0)
-            bval = N(st.vf[ft][BC]);
-        else if constexpr (SRC == 1)
-            bval = N(st.q);
-        else if constexpr (SRC == 2)
-            bval = N(st.i);
-
-        float result[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        uint8_t laneFlags[4] = {0u, 0u, 0u, 0u};
-        uint32_t extraSticky = 0u;
-        for (uint32_t c = 0; c < 4u; ++c)
+        constexpr uint32_t D4 = rev4(static_cast<uint32_t>(DEST));
+        VU1State &st = v.m_state;
+        const __m128 a4 = N4(_mm_loadu_ps(st.vf[fs]));
+        __m128 b4;
+        if constexpr (SRC == 3)
+            b4 = N4(_mm_loadu_ps(st.vf[ft]));
+        else
         {
-            if ((dest & (8u >> c)) == 0u)
-                continue;
-            const float a = N(st.vf[fs][c]);
-            const float b = (SRC == 3) ? N(st.vf[ft][c]) : bval;
-            const float ac = madd ? N(st.acc[c]) : 0.0f;
-            float val;
-            double ex;
-            if constexpr (KIND == 0)
+            float bs;
+            if constexpr (SRC == 0)
+                bs = N(st.vf[ft][BC]);
+            else if constexpr (SRC == 1)
+                bs = N(st.q);
+            else
+                bs = N(st.i);
+            b4 = _mm_set1_ps(bs);
+        }
+        const __m256d ad = _mm256_cvtps_pd(a4);
+        const __m256d bd = _mm256_cvtps_pd(b4);
+        __m128 val;
+        __m256d exd;
+        __m256d prod = _mm256_setzero_pd();
+        if constexpr (KIND == 0)
+        {
+            val = _mm_add_ps(a4, b4);
+            exd = _mm256_add_pd(ad, bd);
+        }
+        else if constexpr (KIND == 1)
+        {
+            val = _mm_sub_ps(a4, b4);
+            exd = _mm256_sub_pd(ad, bd);
+        }
+        else if constexpr (KIND == 4)
+        {
+            val = _mm_mul_ps(a4, b4);
+            exd = _mm256_mul_pd(ad, bd);
+        }
+        else
+        {
+            const __m128 ac4 = N4(_mm_loadu_ps(st.acc));
+            const __m256d acd = _mm256_cvtps_pd(ac4);
+            prod = _mm256_mul_pd(ad, bd);
+            if constexpr (KIND == 2)
             {
-                val = a + b;
-                ex = static_cast<double>(a) + static_cast<double>(b);
-            }
-            else if constexpr (KIND == 1)
-            {
-                val = a - b;
-                ex = static_cast<double>(a) - static_cast<double>(b);
-            }
-            else if constexpr (KIND == 2)
-            {
-                val = _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(ac)));
-                ex = static_cast<double>(ac) + static_cast<double>(a) * static_cast<double>(b);
-            }
-            else if constexpr (KIND == 3)
-            {
-                val = _mm_cvtss_f32(_mm_fnmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(ac)));
-                ex = static_cast<double>(ac) - static_cast<double>(a) * static_cast<double>(b);
+                val = _mm_fmadd_ps(a4, b4, ac4);
+                exd = _mm256_add_pd(acd, prod);
             }
             else
             {
-                val = a * b;
-                ex = static_cast<double>(a) * static_cast<double>(b);
-            }
-            laneFlags[c] = flagsOf(val, ex);
-            result[c] = val;
-            if constexpr (madd)
-            {
-                float pv = a * b;
-                extraSticky |= flagsOf(pv, static_cast<double>(a) * static_cast<double>(b)) & 0xFu;
+                val = _mm_fnmadd_ps(a4, b4, ac4);
+                exd = _mm256_sub_pd(acd, prod);
             }
         }
-        pushFmacFlags(st, unit, v.m_cycle, laneFlags, dest, extraSticky);
+        const Cls cx = classify(exd);
+        __m128i vb = _mm_castps_si128(val);
+        const __m128i sg = _mm_and_si128(laneMask4(cx.sign), _mm_set1_epi32(static_cast<int>(0x80000000u)));
+        vb = _mm_blendv_epi8(vb, sg, laneMask4(cx.zero | cx.under));
+        vb = _mm_blendv_epi8(vb, _mm_or_si128(sg, _mm_set1_epi32(0x7F7FFFFF)), laneMask4(cx.over));
+        uint32_t mac, status4, extra = 0u, dummy;
+        macOf(cx, D4, mac, status4);
+        if constexpr (madd)
+            macOf(classify(prod), D4, dummy, extra);
+        if constexpr (KEEPMAC)
+            vuflags::flgPush(vuflags::s_flgMac[unit], v.m_cycle, mac);
+        const uint32_t current = status4 & 0xFu;
+        st.status = (st.status & 0xFF0u) | current | ((current | extra) << 6);
         float *dst = TOACC ? st.acc : st.vf[fd];
-        for (uint32_t c = 0; c < 4u; ++c)
-            if ((dest & (8u >> c)) != 0u)
-                dst[c] = result[c];
+        _mm_storeu_ps(dst, _mm_blend_ps(_mm_loadu_ps(dst), _mm_castsi128_ps(vb), D4));
     }
 
     // MAX / MINI (no flags): src 0 = vt[BC], 2 = i, 3 = vt[c]
-    template <bool IS_MAX, int SRC, int BC>
-    VUHOT_INLINE void maxmini(VU1State &st, uint8_t dest, uint32_t fs, uint32_t ft, uint32_t fd)
+    template <bool IS_MAX, int SRC, int BC, int DEST>
+    VUHOT_INLINE void maxmini(VU1State &st, uint32_t fs, uint32_t ft, uint32_t fd)
     {
-        float bval = 0.0f;
-        if constexpr (SRC == 0)
-            bval = N(st.vf[ft][BC]);
-        else if constexpr (SRC == 2)
-            bval = N(st.i);
-        float result[4];
-        for (uint32_t c = 0; c < 4u; ++c)
-        {
-            const float a = N(st.vf[fs][c]);
-            const float b = (SRC == 3) ? N(st.vf[ft][c]) : bval;
-            result[c] = IS_MAX ? ((a > b) ? a : b) : ((a < b) ? a : b);
-        }
-        for (uint32_t c = 0; c < 4u; ++c)
-            if ((dest & (8u >> c)) != 0u)
-                st.vf[fd][c] = result[c];
+        if constexpr (DEST == 0)
+            return;
+        constexpr uint32_t D4 = rev4(static_cast<uint32_t>(DEST));
+        const __m128 a4 = N4(_mm_loadu_ps(st.vf[fs]));
+        __m128 b4;
+        if constexpr (SRC == 3)
+            b4 = N4(_mm_loadu_ps(st.vf[ft]));
+        else if constexpr (SRC == 0)
+            b4 = _mm_set1_ps(N(st.vf[ft][BC]));
+        else
+            b4 = _mm_set1_ps(N(st.i));
+        const __m128 res = IS_MAX ? _mm_max_ps(a4, b4) : _mm_min_ps(a4, b4); // == (a > b) ? a : b  /  (a < b) ? a : b
+        float *dst = st.vf[fd];
+        _mm_storeu_ps(dst, _mm_blend_ps(_mm_loadu_ps(dst), res, D4));
     }
 
-    VUHOT_INLINE int32_t floatToInt(float value, float scale) // vuFloatToInt
+    // FTOI0/4/12/15 (vuFloatToInt): destination is vf[ft]
+    template <int SCALE, int DEST>
+    VUHOT_INLINE void ftoi(VU1State &st, uint32_t fs, uint32_t ft)
     {
-        const double scaled = static_cast<double>(value) * static_cast<double>(scale);
-        if (scaled >= static_cast<double>(std::numeric_limits<int32_t>::max()))
-            return std::numeric_limits<int32_t>::max();
-        if (scaled <= static_cast<double>(std::numeric_limits<int32_t>::min()))
-            return std::numeric_limits<int32_t>::min();
-        return static_cast<int32_t>(scaled);
-    }
-
-    // FTOI0/4/12/15: destination is vf[ft]
-    template <int SCALE>
-    VUHOT_INLINE void ftoi(VU1State &st, uint8_t dest, uint32_t fs, uint32_t ft)
-    {
-        float result[4];
-        for (uint32_t c = 0; c < 4u; ++c)
-        {
-            const int32_t iv = floatToInt(N(st.vf[fs][c]), static_cast<float>(SCALE));
-            std::memcpy(&result[c], &iv, 4);
-        }
-        for (uint32_t c = 0; c < 4u; ++c)
-            if ((dest & (8u >> c)) != 0u)
-                st.vf[ft][c] = result[c];
+        if constexpr (DEST == 0)
+            return;
+        constexpr uint32_t D4 = rev4(static_cast<uint32_t>(DEST));
+        const __m128 a4 = N4(_mm_loadu_ps(st.vf[fs]));
+        const __m256d sc = _mm256_mul_pd(_mm256_cvtps_pd(a4), _mm256_set1_pd(static_cast<double>(static_cast<float>(SCALE))));
+        __m128i t = _mm256_cvttpd_epi32(sc);
+        const uint32_t ge = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_cmp_pd(sc, _mm256_set1_pd(static_cast<double>(std::numeric_limits<int32_t>::max())), _CMP_GE_OQ)));
+        const uint32_t le = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_cmp_pd(sc, _mm256_set1_pd(static_cast<double>(std::numeric_limits<int32_t>::min())), _CMP_LE_OQ)));
+        t = _mm_blendv_epi8(t, _mm_set1_epi32(std::numeric_limits<int32_t>::max()), laneMask4(ge));
+        t = _mm_blendv_epi8(t, _mm_set1_epi32(std::numeric_limits<int32_t>::min()), laneMask4(le));
+        float *dst = st.vf[ft];
+        _mm_storeu_ps(dst, _mm_blend_ps(_mm_loadu_ps(dst), _mm_castsi128_ps(t), D4));
     }
 
     VUHOT_INLINE void applyDest(float *dst, const float *result, uint8_t dest)
@@ -210,6 +210,29 @@ namespace vuhot
             dst[2] = result[2];
         if (dest & 0x1u)
             dst[3] = result[3];
+    }
+
+    // VU1Interpreter::queueStore for the native (probe-free) path: first free pending-store slot, ready next cycle
+    VUHOT_INLINE void storeFast(VU1Interpreter &v, VuNativeCtx &c, uint32_t address, const uint32_t *words, uint8_t laneMask)
+    {
+        const uint32_t freeMask = ~(*c.storeMask) & 0xFFu;
+        if (freeMask == 0u)
+        {
+            c.ops->qStore(v, address, words, laneMask); // reports the overflow like the interpreter
+            return;
+        }
+        const uint32_t slot = static_cast<uint32_t>(std::countr_zero(freeMask));
+        VU1Interpreter::PendingStore &s = v.m_storePipeline[slot];
+        s.valid = true;
+        *c.storeMask |= 1u << slot;
+        *c.nextReadyW = 0u;
+        s.readyCycle = v.m_cycle + 1u;
+        s.address = address;
+        s.laneMask = laneMask;
+        s.words[0] = words[0];
+        s.words[1] = words[1];
+        s.words[2] = words[2];
+        s.words[3] = words[3];
     }
 
     // ---- lower ops ----

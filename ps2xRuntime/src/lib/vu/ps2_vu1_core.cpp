@@ -4003,7 +4003,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                             !probe_ae::isEnabled() && !probe_ae::isDcProbeEnabled() && !s_egCurRunTraced &&
                             !s_emRecording && !s_eiCurRunActive && !s_ekCurRunActive && !s_fcC80.active;
     static const bool vuBlkCheck = []() { const char *e = std::getenv("PS2X_VU_BLK_CHECK"); return e && e[0] == '1'; }();
-    VuNativeCtx vuNativeCtx{&vuNativeOps, budgetEnd, 0u, false, vuData, dataSize, &gs, memory, codeSize, &NR(), 0u, false, vuBlkCheck, 0u, 0u, 0u};
+    VuNativeCtx vuNativeCtx{&vuNativeOps, budgetEnd, 0u, false, vuData, dataSize, &gs, memory, codeSize, &NR(), 0u, false, vuBlkCheck, 0u, 0u, 0u, &PM().store, &NR()};
 
     bool sigLanded = true; // PROBE-SIG: first pair of a run counts as a landing
     const auto sigPipelineHash = [this]() -> uint64_t
