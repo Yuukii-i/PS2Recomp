@@ -5235,6 +5235,12 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     }
 }
 
+// PERF-JC: void-returning entry for clang-cl compiled guest code (MSVC/clang disagree on how a member function returns __m128i).
+extern "C" void ps2x_Load128Out(PS2Runtime *rt, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i *out)
+{
+    *out = rt->Load128(rdram, ctx, vaddr);
+}
+
 void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
