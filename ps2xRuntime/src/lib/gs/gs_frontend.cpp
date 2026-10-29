@@ -688,7 +688,8 @@ void GS::latchHostPresentationFrame()
             v[i] = static_cast<double>(cur - s_prev[i]) / ticksPerMs / 128.0;
             s_prev[i] = cur;
         }
-        std::fprintf(stderr, "[present] n=128 window_ms=%.0f per-latch ms: total=%.2f flushsync=%.2f present=%.2f vksync=%.2f snapshot=%.2f deswizzle=%.2f\n",
+        extern void ps2xSafeLog(const char *fmt, ...); // stderr is routed to NUL unless PS2X_VERBOSE_LOG=1
+        ps2xSafeLog("[present] n=128 window_ms=%.0f per-latch ms: total=%.2f flushsync=%.2f present=%.2f vksync=%.2f snapshot=%.2f deswizzle=%.2f\n",
                      ms, v[0], v[1], v[2], v[3], v[4], v[5]);
         s_prevTsc = nowTsc;
         s_prevT = nowT;
