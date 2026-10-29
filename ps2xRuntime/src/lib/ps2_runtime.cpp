@@ -5114,9 +5114,23 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     return stackPointer;
 }
 
+// PERF-IK: the scratchpad is plain memory without load/store side effects. Aligned SPR accesses are served here directly
+// instead of PS2Memory's GS/IO dispatch + try/catch and, for stores, the DMAC/INTC drain (two mutexes + vector swaps).
+template <typename T>
+static inline bool sprFastAddr(uint32_t vaddr)
+{
+    return (vaddr & 0xFFFFC000u) == PS2_SCRATCHPAD_BASE && (vaddr & (sizeof(T) - 1u)) == 0u;
+}
+
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<uint8_t>(vaddr))
+    {
+        uint8_t v;
+        std::memcpy(&v, m_memory.getScratchpad() + (vaddr & 0x3FFFu), sizeof(v));
+        return v;
+    }
     try
     {
         return m_memory.read8(vaddr);
@@ -5131,6 +5145,12 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<uint16_t>(vaddr))
+    {
+        uint16_t v;
+        std::memcpy(&v, m_memory.getScratchpad() + (vaddr & 0x3FFFu), sizeof(v));
+        return v;
+    }
     try
     {
         return m_memory.read16(vaddr);
@@ -5145,6 +5165,12 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<uint32_t>(vaddr))
+    {
+        uint32_t v;
+        std::memcpy(&v, m_memory.getScratchpad() + (vaddr & 0x3FFFu), sizeof(v));
+        return v;
+    }
     try
     {
         return m_memory.read32(vaddr);
@@ -5159,6 +5185,12 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<uint64_t>(vaddr))
+    {
+        uint64_t v;
+        std::memcpy(&v, m_memory.getScratchpad() + (vaddr & 0x3FFFu), sizeof(v));
+        return v;
+    }
     try
     {
         return m_memory.read64(vaddr);
@@ -5173,6 +5205,12 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<__m128i>(vaddr))
+    {
+        __m128i v;
+        std::memcpy(&v, m_memory.getScratchpad() + (vaddr & 0x3FFFu), sizeof(v));
+        return v;
+    }
     try
     {
         return m_memory.read128(vaddr);
@@ -5187,6 +5225,11 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<uint8_t>(vaddr))
+    {
+        std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));
+        return;
+    }
     ps2TraceGuestWrite(rdram, vaddr, 1u, value, 0u, "WRITE8", ctx);
     try
     {
@@ -5201,6 +5244,11 @@ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8
 void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<uint16_t>(vaddr))
+    {
+        std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));
+        return;
+    }
     ps2TraceGuestWrite(rdram, vaddr, 2u, value, 0u, "WRITE16", ctx);
     try
     {
@@ -5215,6 +5263,11 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<uint32_t>(vaddr))
+    {
+        std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));
+        return;
+    }
     ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
     try
     {
@@ -5230,6 +5283,11 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<uint64_t>(vaddr))
+    {
+        std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));
+        return;
+    }
     ps2TraceGuestWrite(rdram, vaddr, 8u, value, 0u, "WRITE64", ctx);
     try
     {
@@ -5244,6 +5302,11 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    if (sprFastAddr<__m128i>(vaddr))
+    {
+        std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));
+        return;
+    }
     alignas(16) uint64_t _parts[2];
     _mm_storeu_si128(reinterpret_cast<__m128i *>(_parts), value);
     ps2TraceGuestWrite(rdram, vaddr, 16u, _parts[0], _parts[1], "WRITE128", ctx);
