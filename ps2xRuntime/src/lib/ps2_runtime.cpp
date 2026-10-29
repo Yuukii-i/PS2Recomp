@@ -3961,7 +3961,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
-    if (rdram && targetPc == 0x003B45E8u)
+    // PERF-IG: the FQ/FM/FZ2/GX/GY debug probes below ran on every guest call (FM took a mutex + std::map lookup per call in the
+    // model-draw ranges). They are now opt-in: PS2X_DISPATCH_PROBES=1 restores them.
+    static const bool s_dispatchProbes = std::getenv("PS2X_DISPATCH_PROBES") != nullptr;
+    if (s_dispatchProbes && rdram && targetPc == 0x003B45E8u)
     {
         // Task FQ: dump EE RAM at the 1st and 2000th model draw, to diff against a PCSX2 savestate (eeMemory.bin)
         static std::atomic<uint32_t> s_fqDraws{0};
@@ -3979,7 +3982,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
-    if (ctx && ((targetPc >= 0x003B1000u && targetPc < 0x003B2600u) || (targetPc >= 0x00254500u && targetPc < 0x00254900u) || targetPc == 0x003BA680u || targetPc == 0x003B45E8u || targetPc == 0x003BA090u))
+    if (s_dispatchProbes && ctx && ((targetPc >= 0x003B1000u && targetPc < 0x003B2600u) || (targetPc >= 0x00254500u && targetPc < 0x00254900u) || targetPc == 0x003BA680u || targetPc == 0x003B45E8u || targetPc == 0x003BA090u))
     {
         // Task FM: batch builders take a2 = vertex count; PCSX2 shows a2=4 at every call seen so far
         static std::atomic<uint32_t> s_fmCount{0};
@@ -4003,7 +4006,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             std::fflush(stdout);
         }
     }
-    if (ctx && (targetPc == 0x003B3C60u || targetPc == 0x003B45E8u)) // PROBE-FZ2
+    if (s_dispatchProbes && ctx && (targetPc == 0x003B3C60u || targetPc == 0x003B45E8u)) // PROBE-FZ2
     {
         // Task FZ2: draw gate at 0x268724 requires free space > 0x3FFFF in the packet ring (obj at *0x64942C)
         static std::atomic<uint32_t> s_gateCalls{0}, s_gateLow{0}, s_drawCalls{0}, s_gateLines{0};
@@ -4027,7 +4030,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
-    if (ctx && (targetPc == 0x0034A890u || targetPc == 0x003327B0u || targetPc == 0x00350C18u || targetPc == 0x0034A7FCu)) // PROBE-GX
+    if (s_dispatchProbes && ctx && (targetPc == 0x0034A890u || targetPc == 0x003327B0u || targetPc == 0x00350C18u || targetPc == 0x0034A7FCu)) // PROBE-GX
     {
         static std::atomic<uint32_t> s_gxLines{0};
         if (s_gxLines.fetch_add(1, std::memory_order_relaxed) < 700u)
@@ -4052,7 +4055,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             std::fflush(stdout);
         }
     }
-    if (ctx) // PROBE-GY: who changes the player-name record at 0x742250 / 0x742280 (log first changes with call context)
+    if (s_dispatchProbes && ctx) // PROBE-GY: who changes the player-name record at 0x742250 / 0x742280 (log first changes with call context)
     {
         static uint64_t s_gyLast[3] = {0, 0, 0};
         static std::atomic<uint32_t> s_gyLines{0};
