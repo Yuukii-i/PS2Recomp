@@ -5776,9 +5776,10 @@ void PS2Runtime::run()
         const auto now = std::chrono::steady_clock::now();
         const auto timeSinceLastPresent = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastPresentTime).count();
         const bool vblankLatchOn = isVblankLatchEnabled();
+        constexpr int64_t kIdleRepresentMs = 250; // PERF-IR2: re-present an unchanged frame only every 250 ms (was 33 ms: ~25 redundant sync+de-swizzle presents/s at the title, kd)
         const bool shouldPresent = vblankLatchOn
-            ? ((currentPresentSeq != s_lastPresentedSeq) || (timeSinceLastPresent >= 33))
-            : ((currentGsKicks != s_lastPresentedGsKicks) || (timeSinceLastPresent >= 33));
+            ? ((currentPresentSeq != s_lastPresentedSeq) || (timeSinceLastPresent >= kIdleRepresentMs))
+            : ((currentGsKicks != s_lastPresentedGsKicks) || (timeSinceLastPresent >= kIdleRepresentMs));
 
         if (shouldPresent)
         {
