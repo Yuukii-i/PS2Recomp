@@ -465,7 +465,9 @@ static void vif1Worker()
         Vif1Job job;
         {
             std::unique_lock<std::mutex> lock(st.m);
+            const uint64_t idT0 = __rdtsc(); // PROBE-KF: worker idle = waiting for the EE to enqueue the next job
             st.cvWork.wait(lock, [&] { return !st.q.empty(); });
+            g_waitTicks[6].fetch_add(__rdtsc() - idT0, std::memory_order_relaxed);
             job = std::move(st.q.front());
             st.q.pop_front();
             st.queuedBytes -= job.data.size();
@@ -547,15 +549,15 @@ extern "C" void ps2_vif1_fence()
             const uint64_t tsc = __rdtsc();
             const double tpm = static_cast<double>(tsc - s_tsc0) / ms;
             double v[8];
-            for (int i = 0; i < 6; ++i)
+            for (int i = 0; i < 7; ++i)
             {
                 const uint64_t cur = g_waitTicks[i].load(std::memory_order_relaxed);
                 v[i] = (i == 5) ? static_cast<double>(cur - s_prev[i]) : static_cast<double>(cur - s_prev[i]) / tpm;
                 s_prev[i] = cur;
             }
             // global ps2xSafeLog
-            ps2xSafeLog("[wait] window_ms=%.0f EE ms: vif1_fence=%.0f (n=%.0f) vif1_enqueue=%.0f gs_fence=%.0f gs_backpressure=%.0f | vif1_worker_busy=%.0f\n", ms, v[0], v[5],
-                        v[1], v[2], v[3], v[4]);
+            ps2xSafeLog("[wait] window_ms=%.0f EE ms: vif1_fence=%.0f (n=%.0f) vif1_enqueue=%.0f gs_fence=%.0f gs_backpressure=%.0f | vif1_worker_busy=%.0f vif1_worker_idle=%.0f\n", ms, v[0], v[5],
+                        v[1], v[2], v[3], v[4], v[6]);
             s_t0 = now;
             s_tsc0 = tsc;
         }
