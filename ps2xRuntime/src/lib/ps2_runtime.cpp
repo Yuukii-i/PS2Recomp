@@ -5796,6 +5796,39 @@ void PS2Runtime::run()
                 ps2xSafeLog("[ramdump] wrote ram_f9.bin\n");
             }
         }
+        // C313: F10 captures 16 snapshots of EE RAM 0x600000..0xD00000 (7 MB each) ~20 ms apart -> logs/ram_seq.bin (to find words that flicker per frame)
+        {
+            constexpr uint32_t kSeqBase = 0x600000u, kSeqLen = 0x700000u, kSeqCount = 16u;
+            static std::vector<uint8_t> s_seqBuf;
+            static uint32_t s_seqDone = kSeqCount;
+            static std::chrono::steady_clock::time_point s_seqLast;
+            const auto seqNow = std::chrono::steady_clock::now();
+            if (s_seqDone >= kSeqCount && IsKeyPressed(KEY_F10))
+            {
+                s_seqBuf.assign(static_cast<size_t>(kSeqLen) * kSeqCount, 0);
+                s_seqDone = 0;
+                s_seqLast = seqNow - std::chrono::milliseconds(100);
+            }
+            if (s_seqDone < kSeqCount && std::chrono::duration_cast<std::chrono::milliseconds>(seqNow - s_seqLast).count() >= 20)
+            {
+                s_seqLast = seqNow;
+                std::memcpy(s_seqBuf.data() + static_cast<size_t>(s_seqDone) * kSeqLen, m_memory.getRDRAM() + kSeqBase, kSeqLen);
+                if (++s_seqDone == kSeqCount)
+                {
+                    FILE *sf = std::fopen("logs/ram_seq.bin", "wb");
+                    if (!sf)
+                        sf = std::fopen("ram_seq.bin", "wb");
+                    if (sf)
+                    {
+                        std::fwrite(s_seqBuf.data(), 1, s_seqBuf.size(), sf);
+                        std::fclose(sf);
+                        ps2xSafeLog("[ramdump] wrote ram_seq.bin\n");
+                    }
+                    s_seqBuf.clear();
+                    s_seqBuf.shrink_to_fit();
+                }
+            }
+        }
         // Sample real keyboard state from Raylib window thread
         uint16_t activeButtons = 0;
         if (IsKeyDown(KEY_ENTER)) activeButtons |= (1u << 3); // START
