@@ -3200,14 +3200,17 @@ namespace probe_ae {
 
         static std::mutex s_sigMutex;
         static std::vector<uint64_t> s_loggedSignatures;
-        {
+        // PERF-JN: this ran a mutex + vector scan + std::map increment on EVERY VU microprogram call (~450k/s). The map count is never read;
+        // the signature is logged once, so only take the lock when this thread has not yet seen the current hash.
+        static thread_local uint64_t s_lastSeenHash = 0;
+        if (hash != s_lastSeenHash) {
             std::lock_guard<std::mutex> lock(s_sigMutex);
             if (std::find(s_loggedSignatures.begin(), s_loggedSignatures.end(), hash) == s_loggedSignatures.end()) {
                 s_loggedSignatures.push_back(hash);
                 std::printf("[hle] sig=0x%016llX match=%d\n", (unsigned long long)hash, match ? 1 : 0);
                 std::fflush(stdout);
             }
-            s_sigCountsThisSec[hash]++;
+            s_lastSeenHash = hash;
         }
 
         probe_ae::recordCaMscal(startPC);
