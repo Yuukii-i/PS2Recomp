@@ -3158,9 +3158,15 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
 {
     if (m_unit == Unit::VU0)
         s_jmExec0 = s_jmMark = __rdtsc(); // PROBE-JM
+    g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
+    // PERF-KL: everything up to the handleMovieHleMscal call below is per-run state of the PROBE-DY/DZ/VD/EE/EG/EM/EL/EK/EI probes (~40 thread_local
+    // stores + memset + vector clears per call, ~40 ns x 445k VU0 calls/s). Their consumers (tail statistics, native-path gating flags) are all behind
+    // the same four conditions, so skip the whole block when none of them is enabled.
+    static const bool s_vuAnyProbe = []() { return isVu3dProbeEnabled() || probe_ae::isEnabled() || probe_ae::isDcProbeEnabled() || probe_ae::isMovieHleVerify(); }();
+    if (s_vuAnyProbe)
+    {
     s_dyCurIsMscnt = false;
     s_dyCurStartPc = startPC;
-    g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
     s_dyCurTop = top;
     s_dyCurItop = itop;
     s_dzPendingRun = false;
@@ -3297,6 +3303,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             }
         }
     }
+
+    } // PERF-KL: end of s_vuAnyProbe
 
     if (probe_ae::handleMovieHleMscal(startPC, vuCode, codeSize, vuData, dataSize, top, gs, memory))
     {

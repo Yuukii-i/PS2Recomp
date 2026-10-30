@@ -10,6 +10,9 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+// PERF-KL: cached pointer to the GIF_STAT entry of m_ioRegisters (advanceEeTimers cleared its FQC bits with a hash lookup on every cycle-accounting call)
+static uint32_t *s_gifStatPtr = nullptr;
+static const void *s_gifStatOwner = nullptr;
 void ps2xSafeLog(const char *fmt, ...);
 
 std::atomic<uint64_t> g_gsFrameKicks{0};
@@ -360,6 +363,7 @@ bool PS2Memory::initialize(size_t ramSize)
 
         // Initialize I/O registers
         m_ioRegisters.clear();
+        s_gifStatPtr = nullptr; // PERF-KL: the cached element is gone
 
         // Initialize GS registers
         memset(&gs_regs, 0, sizeof(gs_regs));
@@ -606,9 +610,14 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
 
     constexpr uint32_t kGifStat = 0x10003020u;
     constexpr uint32_t kGifFqcMask = 0x1F000000u;
-    auto gifStatIt = m_ioRegisters.find(kGifStat);
-    if (gifStatIt != m_ioRegisters.end())
-        gifStatIt->second &= ~kGifFqcMask;
+    if (s_gifStatOwner != this || s_gifStatPtr == nullptr) // PERF-KL: unordered_map elements are node-stable; the only invalidation is clear() (reset above)
+    {
+        auto gifStatIt = m_ioRegisters.find(kGifStat);
+        s_gifStatOwner = this;
+        s_gifStatPtr = gifStatIt != m_ioRegisters.end() ? &gifStatIt->second : nullptr;
+    }
+    if (s_gifStatPtr)
+        *s_gifStatPtr &= ~kGifFqcMask;
 
     uint32_t interruptMask = 0u;
     for (size_t index = 0; index < m_eeTimers.size(); ++index)
