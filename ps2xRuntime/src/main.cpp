@@ -26,6 +26,13 @@
 #include <cstring>
 #endif
 
+#if defined(_WIN32)
+// PERF-KA: the real symbol comes from clang_rt.profile when the guest code is built with -fprofile-instr-generate; otherwise this no-op is used.
+extern "C" int ps2x_profile_noop() { return 0; }
+extern "C" int __llvm_profile_write_file(void);
+#pragma comment(linker, "/alternatename:__llvm_profile_write_file=ps2x_profile_noop")
+#endif
+
 namespace
 {
 #if defined(__ANDROID__)
@@ -313,6 +320,9 @@ int main(int argc, char *argv[])
 #endif
         std::cout.flush();
         std::cerr.flush();
+#if defined(_WIN32)
+        __llvm_profile_write_file(); // PERF-KA: PGO-instrumented builds only (no-op otherwise); _Exit skips the profile runtime's atexit hook
+#endif
         std::_Exit(0);
     }
     catch (const std::exception &e)
