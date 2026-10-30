@@ -459,6 +459,9 @@ static std::function<void()> s_vif1DrainArbiter;
 static void vif1Worker()
 {
     t_onVif1Worker = true;
+    // PROBE-KJ: PS2X_PROF_VU1WORKER=1 (with PS2X_PROF_SAMPLE=1) points the sampler's stack/owner/budget2 output at this worker instead of the EE thread
+    if (const char *pe = std::getenv("PS2X_PROF_VU1WORKER"); pe && pe[0] == '1')
+        probe_ae::recordMainGuestThread();
     Vif1AsyncState &st = vifAsync();
     for (;;)
     {
