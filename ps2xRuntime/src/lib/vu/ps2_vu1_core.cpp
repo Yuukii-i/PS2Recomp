@@ -923,6 +923,29 @@ VU1Interpreter::VU1Interpreter(Unit unit)
     reset();
 }
 
+// PROBE-JM: VU0 call-phase timers (rdtsc ticks, EE thread only): 0 execute preamble, 1 resetScheduler+state init, 2 run() setup,
+// 3 main loop (incl. native), 4 run() tail + return, 5 total execute(), 6 time inside vu0NativeRun
+static uint64_t s_jmT[8], s_jmN, s_jmExec0, s_jmMark, s_jmRunEntry;
+static void jmReport()
+{
+    static uint64_t s_prevTsc = __rdtsc();
+    static auto s_prevT = std::chrono::steady_clock::now();
+    const uint64_t nowTsc = __rdtsc();
+    const auto nowT = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(nowT - s_prevT).count();
+    const double tpns = ms > 0.0 ? static_cast<double>(nowTsc - s_prevTsc) / (ms * 1e6) : 1.0; // ticks per ns
+    const double n = static_cast<double>(s_jmN);
+    extern void ps2xSafeLog(const char *fmt, ...);
+    ps2xSafeLog("[jm] vu0 calls=%llu window_ms=%.0f ns/call: preamble=%.0f resetsched+init=%.0f runsetup=%.0f loop=%.0f (native=%.0f) tail=%.0f total=%.0f\n",
+                static_cast<unsigned long long>(s_jmN), ms, s_jmT[0] / tpns / n, s_jmT[1] / tpns / n, s_jmT[2] / tpns / n, s_jmT[3] / tpns / n,
+                s_jmT[6] / tpns / n, s_jmT[4] / tpns / n, s_jmT[5] / tpns / n);
+    for (uint64_t &t : s_jmT)
+        t = 0;
+    s_jmN = 0;
+    s_prevTsc = nowTsc;
+    s_prevT = nowT;
+}
+
 void VU1Interpreter::resetScheduler()
 {
     // PERF-HM: entries are zeroed when committed, so with nothing pending the arrays are already clear
@@ -3121,6 +3144,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint32_t startPC, uint32_t top, uint32_t itop,
                              uint32_t maxCycles)
 {
+    if (m_unit == Unit::VU0)
+        s_jmExec0 = s_jmMark = __rdtsc(); // PROBE-JM
     s_dyCurIsMscnt = false;
     s_dyCurStartPc = startPC;
     g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
@@ -3271,6 +3296,12 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     probe_ae::onBxOrigRunStart(startPC, top, vuData, dataSize);
     probe_ae::onBzOrigRunBlock();
 
+    if (m_unit == Unit::VU0)
+    {
+        const uint64_t jmNow = __rdtsc(); // PROBE-JM
+        s_jmT[0] += jmNow - s_jmMark;
+        s_jmMark = jmNow;
+    }
     resetScheduler();
     m_state.pc = startPC & microAddressMask();
     if (probe_ae::isEnabled() || probe_ae::isMovieHleVerify())
@@ -3293,6 +3324,12 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     m_state.vf[0][1] = 0.0f;
     m_state.vf[0][2] = 0.0f;
     m_state.vf[0][3] = 1.0f;
+    if (m_unit == Unit::VU0)
+    {
+        const uint64_t jmNow = __rdtsc(); // PROBE-JM
+        s_jmT[1] += jmNow - s_jmMark;
+        s_jmMark = jmNow;
+    }
     if ((vu1VerifyMode() & (m_unit == Unit::VU1 ? 1 : 2)) != 0) // PROBE-GV: A/B check exact vs fast on identical input; game keeps the exact result
     {
         const VU1State s0 = m_state;
@@ -3394,6 +3431,14 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         return;
     }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+    if (m_unit == Unit::VU0)
+    {
+        const uint64_t jmNow = __rdtsc(); // PROBE-JM
+        s_jmT[4] += jmNow - s_jmMark;
+        s_jmT[5] += jmNow - s_jmExec0;
+        if (++s_jmN >= 131072u)
+            jmReport();
+    }
 }
 
 void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
@@ -3729,6 +3774,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                          uint8_t *vuData, uint32_t dataSize,
                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
 {
+    if (m_unit == Unit::VU0)
+        s_jmRunEntry = __rdtsc(); // PROBE-JM
     m_activeVuData = vuData;
     m_activeVuDataSize = dataSize;
     m_activeGs = &gs;
@@ -4096,11 +4143,20 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     // timing-state snapshot: hash + readable text, all times relative to the current cycle
     const auto blkSnapshot = [this](uint64_t &hash, std::string *text) { blkStateScan(*this, hash, text); };
 
+    if (m_unit == Unit::VU0)
+    {
+        const uint64_t jmNow = __rdtsc(); // PROBE-JM
+        s_jmT[2] += jmNow - s_jmRunEntry;
+        s_jmMark = jmNow;
+    }
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
         if (vuNativeOn)
         {
+            const uint64_t jmN0 = m_unit == Unit::VU0 ? __rdtsc() : 0u; // PROBE-JM
             const int nativeResult = m_unit == Unit::VU1 ? vu1NativeRun(*this, vuNativeCtx) : vu0NativeRun(*this, vuNativeCtx);
+            if (m_unit == Unit::VU0)
+                s_jmT[6] += __rdtsc() - jmN0;
             instrsThisRun += vuNativeCtx.instrs;
             vuNativeCtx.instrs = 0u;
             if (vuNativeCtx.programEnded)
@@ -5212,6 +5268,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             }
             std::fflush(stdout);
         }
+    }
+    if (m_unit == Unit::VU0)
+    {
+        const uint64_t jmNow = __rdtsc(); // PROBE-JM
+        s_jmT[3] += jmNow - s_jmMark;
+        s_jmMark = jmNow;
     }
     m_state.cycles = m_cycle;
     if (useVuRounding && previousRoundingMode != -1)
