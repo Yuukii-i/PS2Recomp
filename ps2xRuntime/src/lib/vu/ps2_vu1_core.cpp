@@ -2339,14 +2339,16 @@ void VU1Interpreter::finishXgkick()
         probe_ae::onBxOrigRunXgkick(m_xgkick.packet.data(), m_xgkick.totalBytes);
     }
 
-    const auto tXgkickStart = std::chrono::steady_clock::now();
+    // PERF-KK: both clock reads (QueryPerformanceCounter) are only consumed by the PROBE-AE block below; they cost ~2% of the VU1 worker per XGKICK
+    const bool xgTimed = probe_ae::isEnabled();
+    const auto tXgkickStart = xgTimed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (s_vfyCapture)
         s_vfyCapture->insert(s_vfyCapture->end(), m_xgkick.packet.data(), m_xgkick.packet.data() + m_xgkick.totalBytes);
     else if (m_activeMemory)
         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
     else if (m_activeGs)
         m_activeGs->processGIFPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
-    const auto tXgkickEnd = std::chrono::steady_clock::now();
+    const auto tXgkickEnd = xgTimed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
     if (probe_ae::isEnabled())
     {

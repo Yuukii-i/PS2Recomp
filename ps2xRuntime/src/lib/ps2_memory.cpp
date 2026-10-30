@@ -2482,7 +2482,8 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     ps2_vif1_fence(); // PERF-HN: EE-thread submits must not overtake / race the VIF1 worker's PATH1/PATH2 packets
 
     probe_ae::onBhSubmitGifStart();
-    auto tGifStart = std::chrono::steady_clock::now();
+    // PERF-KK: the timestamp is only read by the probe_ae block at the end of this function
+    const auto tGifStart = probe_ae::isEnabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
     if (pathId == GifPathId::Path3)
     {
