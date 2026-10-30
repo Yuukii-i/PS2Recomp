@@ -5575,6 +5575,12 @@ void PS2Runtime::run()
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
+        // C310: the EE FPU always rounds toward zero; FPU_CVT_W_S/ROUND_W_S use nearbyintf, which follows MXCSR.RC
+        {
+            const char *rtz = getenv("PS2X_EE_RTZ");
+            if (rtz && rtz[0] == '1')
+                _mm_setcsr(_mm_getcsr() | 0x6000u);
+        }
         try
         {
             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
