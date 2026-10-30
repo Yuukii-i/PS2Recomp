@@ -5191,24 +5191,9177 @@ static int vuH_26(VU1Interpreter &vu, VuNativeCtx &c) // pc=1EE0 entry=cd057af54
 }
 
 
+static int vuH_27(VU1Interpreter &vu, VuNativeCtx &c) // pc=0088 entry=cd057af54d65447f exit=8a31455fcf484019 n=1 cycles=1
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 1u;
+    { // pair 0 @ 0088
+    st.pc = 0x0088u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x80006efcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0090u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0x8a31455fcf484019ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_28(VU1Interpreter &vu, VuNativeCtx &c) // pc=0050 entry=cd057af54d65447f exit=e2b01f30fecfb22b n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 0050
+    st.pc = 0x0050u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[1] = static_cast<int16_t>(st.vi[0] + 1023);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0058
+    st.pc = 0x0058u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x80000efcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0060u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0xe2b01f30fecfb22bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_29(VU1Interpreter &vu, VuNativeCtx &c) // pc=0060 entry=e2b01f30fecfb22b exit=8aba1b92c58909d9 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 0060
+    st.pc = 0x0060u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0068u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0068
+    st.pc = 0x0068u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0070u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x8aba1b92c58909d9ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_30(VU1Interpreter &vu, VuNativeCtx &c) // pc=0000 entry=cd057af54d65447f exit=393a14f347c5813c n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 0000
+    st.pc = 0x0000u;
+    vu.m_currentUpperInstruction = 0x400002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
+    { // pair 1 @ 0008
+    st.pc = 0x0008u;
+    const int32_t oldVi = st.vi[15];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[15] = static_cast<int16_t>(st.vi[0] + 5);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[15] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 15; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0010u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x393a14f347c5813cull; c.hashValid = true;
+    c.programEnded = true;
+    return 1;
+}
+
+
+static int vuH_31(VU1Interpreter &vu, VuNativeCtx &c) // pc=0040 entry=000000001234abcd exit=b60833aad3c33ed1 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 0040
+    st.pc = 0x0040u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x400007f9u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0048u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0048
+    st.pc = 0x0048u;
+    const int32_t oldVi = st.vi[15];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[15] = static_cast<int16_t>(st.vi[0] + 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[15] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 15; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0050u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xb60833aad3c33ed1ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_32(VU1Interpreter &vu, VuNativeCtx &c) // pc=0010 entry=b60833aad3c33ed1 exit=cd057af54d65447f n=6 cycles=7
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 6u;
+    { // pair 0 @ 0010
+    st.pc = 0x0010u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x800c06bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0018
+    st.pc = 0x0018u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 12, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 0020
+    st.pc = 0x0020u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[13] = static_cast<int16_t>(st.vi[12] + 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 0028
+    st.pc = 0x0028u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[13] = static_cast<int16_t>(st.vi[13] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 5u; st.cycles = vu.m_cycle;
+    { // pair 4 @ 0030
+    st.pc = 0x0030u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48000800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0038u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 0038
+    st.pc = 0x0038u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 2, 13, -1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0040u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xcd057af54d65447full; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_33(VU1Interpreter &vu, VuNativeCtx &c) // pc=0000 entry=8aba1b92c58909d9 exit=dacf070b6fc2a37a n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 0000
+    st.pc = 0x0000u;
+    vu.m_currentUpperInstruction = 0x400002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
+    { // pair 1 @ 0008
+    st.pc = 0x0008u;
+    const int32_t oldVi = st.vi[15];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[15] = static_cast<int16_t>(st.vi[0] + 5);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[15] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 15; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0010u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xdacf070b6fc2a37aull; c.hashValid = true;
+    c.programEnded = true;
+    return 1;
+}
+
+
+static int vuH_34(VU1Interpreter &vu, VuNativeCtx &c) // pc=0188 entry=d5c96e298e5a79b6 exit=8aba1b92c58909d9 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 0188
+    st.pc = 0x0188u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0190u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0190
+    st.pc = 0x0190u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0198u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x8aba1b92c58909d9ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_35(VU1Interpreter &vu, VuNativeCtx &c) // pc=0188 entry=13eefc24f37234d9 exit=8aba1b92c58909d9 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 0188
+    st.pc = 0x0188u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0190u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0190
+    st.pc = 0x0190u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0198u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x8aba1b92c58909d9ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_36(VU1Interpreter &vu, VuNativeCtx &c) // pc=1F68 entry=486828c814e27754 exit=b4f4b1b4da29db30 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 1F68
+    st.pc = 0x1F68u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x5800089au, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1F70u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1F70
+    st.pc = 0x1F70u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x811b43fdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1F78u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xb4f4b1b4da29db30ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_37(VU1Interpreter &vu, VuNativeCtx &c) // pc=24F0 entry=40380d0740f5fe55 exit=c946c511275567c5 n=25 cycles=25
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 25u;
+    { // pair 0 @ 24F0
+    st.pc = 0x24F0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 1, 15, 7);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[15][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 1 @ 24F8
+    st.pc = 0x24F8u;
+    vu.m_currentUpperInstruction = 0x002501beu;
+    vuhot::fmac<4, 0, 2, true, 1, false>(vu, 1u, 0, 5, 6);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 7, 4, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2500
+    st.pc = 0x2500u;
+    vu.m_currentUpperInstruction = 0x00202a61u;
+    vuhot::fmac<2, 1, 0, false, 1, false>(vu, 1u, 5, 0, 9);
+    vuhot::move(st, 15, 28, 29);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[28][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[28][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[28][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[28][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2508
+    st.pc = 0x2508u;
+    vu.m_currentUpperInstruction = 0x01e0ff82u;
+    vuhot::fmac<0, 0, 2, false, 15, false>(vu, 1u, 31, 0, 30);
+    vuhot::move(st, 15, 29, 10);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[29][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[29][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[29][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[29][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2510
+    st.pc = 0x2510u;
+    vu.m_currentUpperInstruction = 0x81c0321cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 6, 0, 8);
+    { const uint32_t lb = 0x437f0000u; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2518
+    st.pc = 0x2518u;
+    const int32_t oldVi = st.vi[12];
+    vu.m_currentUpperInstruction = 0x01c03c5cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 7, 0, 17);
+    st.vi[12] = st.vi[7] & st.vi[11];
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 12; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2520
+    st.pc = 0x2520u;
+    vu.m_currentUpperInstruction = 0x00204a10u;
+    vuhot::maxmini<true, 0, 0, 1>(st, 9, 0, 8);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 10, 12, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[10][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2528
+    st.pc = 0x2528u;
+    const int32_t oldVi = st.vi[4];
+    op.execUpper(vu, 0x01dce1ffu);
+    st.vi[4] = static_cast<int16_t>(st.vi[4] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[4] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 4; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2530
+    st.pc = 0x2530u;
+    const int32_t oldVi = st.vi[6];
+    op.execUpper(vu, 0x01dde9ffu);
+    st.vi[6] = static_cast<int16_t>(st.vi[6] + 4);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2538
+    st.pc = 0x2538u;
+    vu.m_currentUpperInstruction = 0x01e06b5fu;
+    vuhot::maxmini<false, 2, 0, 15>(st, 13, 0, 13);
+    vuhot::sq(st, c.dataSize, 14, 17, 6, -3, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 10 @ 2540
+    st.pc = 0x2540u;
+    vu.m_currentUpperInstruction = 0x0020421fu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 8, 0, 8);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 9, 12, 716);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2548
+    st.pc = 0x2548u;
+    op.execUpper(vu, 0x01ca51ffu);
+    vuhot::move(st, 15, 31, 7);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[31][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[31][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[31][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[31][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2550
+    st.pc = 0x2550u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x01ea0abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 1, 10, 10);
+    vuhot::lqi(st, c.vuData, c.dataSize, 14, 7, 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2558
+    st.pc = 0x2558u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x01e06c90u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 13, 0, 18);
+    st.vi[8] = static_cast<int16_t>(st.vi[9] + st.vi[10]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 2560
+    st.pc = 0x2560u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x002f4228u;
+    vuhot::fmac<0, 3, 0, false, 1, false>(vu, 1u, 8, 15, 8);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 13, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 15 @ 2568
+    st.pc = 0x2568u;
+    vu.m_currentUpperInstruction = 0x01ea118bu;
+    vuhot::fmac<2, 0, 3, false, 15, false>(vu, 1u, 2, 10, 6);
+    op.execLower(vu, 0x2400003fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ea118bu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 16 @ 2570
+    st.pc = 0x2570u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x01e062c0u;
+    vuhot::fmac<0, 0, 0, false, 15, false>(vu, 1u, 12, 0, 11);
+    st.vi[8] = static_cast<int16_t>(st.vi[8] + st.vi[1]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 17 @ 2578
+    st.pc = 0x2578u;
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[18], 16);
+      vu.m_currentUpperInstruction = 0x01f2917cu;
+      vuhot::ftoi<1, 15>(st, 18, 18);
+      std::memcpy(upVf, st.vf[18], 16);
+      std::memcpy(st.vf[18], oldVf, 16);
+      vuhot::move(st, 15, 12, 18);
+      std::memcpy(st.vf[18], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 18 @ 2580
+    st.pc = 0x2580u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x01e8417du;
+    vuhot::ftoi<16, 15>(st, 8, 8);
+    st.vi[9] = static_cast<int16_t>(st.vi[0] + st.vi[10]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 19 @ 2588
+    st.pc = 0x2588u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x01f06b6au;
+    vuhot::fmac<4, 3, 0, false, 15, true>(vu, 1u, 13, 16, 13);
+    st.vi[5] = static_cast<int16_t>(st.vi[5] + -1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 20 @ 2590
+    st.pc = 0x2590u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x81e603bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 21 @ 2598
+    st.pc = 0x2598u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 18, 6, -2, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 22 @ 25A0
+    st.pc = 0x25A0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 8, 6, -4, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 23 @ 25A8
+    st.pc = 0x25A8u;
+    vu.m_currentUpperInstruction = 0x01ed72beu;
+    vuhot::fmac<4, 3, 0, true, 15, true>(vu, 1u, 14, 13, 10);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 5)))
+    { st.branchPending = true; st.branchTarget = 0x24C8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x25B0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 24 @ 25B0
+    st.pc = 0x25B0u;
+    vu.m_currentUpperInstruction = 0x01ed4b69u;
+    vuhot::fmac<2, 3, 0, false, 15, true>(vu, 1u, 9, 13, 13);
+    vuhot::sq(st, c.dataSize, 15, 8, 6, -1, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x25B8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0xc946c511275567c5ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_38(VU1Interpreter &vu, VuNativeCtx &c) // pc=24C8 entry=c946c511275567c5 exit=8c57fdc659ceb8ca n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 24C8
+    st.pc = 0x24C8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x58003804u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x24D0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 24D0
+    st.pc = 0x24D0u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[0] + st.vi[1]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x24D8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0x8c57fdc659ceb8caull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_39(VU1Interpreter &vu, VuNativeCtx &c) // pc=24D8 entry=8c57fdc659ceb8ca exit=7665281c31708c5c n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 24D8
+    st.pc = 0x24D8u;
+    vu.m_currentUpperInstruction = 0x002003ecu;
+    vuhot::fmac<1, 3, 0, false, 1, true>(vu, 1u, 0, 0, 15);
+    op.execLower(vu, 0x5c004003u, c.vuData, c.dataSize, *c.gs, c.memory, 0x002003ecu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[15][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x24E0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 24E0
+    st.pc = 0x24E0u;
+    vu.m_currentUpperInstruction = 0x800002ffu; // NOP
+    { const uint32_t lb = 0x437f0000u; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x24E8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x7665281c31708c5cull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_40(VU1Interpreter &vu, VuNativeCtx &c) // pc=24E8 entry=7665281c31708c5c exit=e8e15a5c4d996754 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 24E8
+    st.pc = 0x24E8u;
+    vu.m_currentUpperInstruction = 0x01e06b5fu;
+    vuhot::maxmini<false, 2, 0, 15>(st, 13, 0, 13);
+    op.execLower(vu, 0x420c0076u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e06b5fu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x24F0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 24F0
+    st.pc = 0x24F0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 1, 15, 7);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[15][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x24F8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xe8e15a5c4d996754ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_41(VU1Interpreter &vu, VuNativeCtx &c) // pc=28A0 entry=e8e15a5c4d996754 exit=000000001234abcd n=3 cycles=3
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 3u;
+    { // pair 0 @ 28A0
+    st.pc = 0x28A0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x26fdf7dfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 28A8
+    st.pc = 0x28A8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 1)))
+    { st.branchPending = true; st.branchTarget = 0x2DA8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28B0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 28B0
+    st.pc = 0x28B0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x26fefbefu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28B8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x000000001234abcdull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_42(VU1Interpreter &vu, VuNativeCtx &c) // pc=2DA8 entry=000000001234abcd exit=000000001234abcd n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 2DA8
+    st.pc = 0x2DA8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48006000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2DB0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2DB0
+    st.pc = 0x2DB0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2DB8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x000000001234abcdull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_43(VU1Interpreter &vu, VuNativeCtx &c) // pc=25B8 entry=c946c511275567c5 exit=b2116da548f0fb1b n=8 cycles=8
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 8u;
+    { // pair 0 @ 25B8
+    st.pc = 0x25B8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 6, 0, 1023);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 25C0
+    st.pc = 0x25C0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 2, 7, 0, 1023);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 2 @ 25C8
+    st.pc = 0x25C8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x800c06bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 25D0
+    st.pc = 0x25D0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 25D8
+    st.pc = 0x25D8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 2, 6, 0, 1023, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 5 @ 25E0
+    st.pc = 0x25E0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 1, 7, 0, 1023, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 6 @ 25E8
+    st.pc = 0x25E8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x25F0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 25F0
+    st.pc = 0x25F0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x80003efcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x25F8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0xb2116da548f0fb1bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_44(VU1Interpreter &vu, VuNativeCtx &c) // pc=28B8 entry=000000001234abcd exit=000000001234abcd n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 28B8
+    st.pc = 0x28B8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 1)))
+    { st.branchPending = true; st.branchTarget = 0x2DA8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28C0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 28C0
+    st.pc = 0x28C0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x26ff7df7u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28C8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x000000001234abcdull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_45(VU1Interpreter &vu, VuNativeCtx &c) // pc=28C8 entry=000000001234abcd exit=000000001234abcd n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 28C8
+    st.pc = 0x28C8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 1)))
+    { st.branchPending = true; st.branchTarget = 0x2DA8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28D0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 28D0
+    st.pc = 0x28D0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x26ffbefbu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28D8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x000000001234abcdull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_46(VU1Interpreter &vu, VuNativeCtx &c) // pc=28D8 entry=000000001234abcd exit=000000001234abcd n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 28D8
+    st.pc = 0x28D8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 1)))
+    { st.branchPending = true; st.branchTarget = 0x2DA8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28E0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 28E0
+    st.pc = 0x28E0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x26ffdf7du, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28E8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x000000001234abcdull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_47(VU1Interpreter &vu, VuNativeCtx &c) // pc=28E8 entry=000000001234abcd exit=000000001234abcd n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 28E8
+    st.pc = 0x28E8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 1)))
+    { st.branchPending = true; st.branchTarget = 0x2DA8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28F0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 28F0
+    st.pc = 0x28F0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x26ffefbeu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x28F8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x000000001234abcdull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_48(VU1Interpreter &vu, VuNativeCtx &c) // pc=28F8 entry=000000001234abcd exit=000000001234abcd n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 28F8
+    st.pc = 0x28F8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 1)))
+    { st.branchPending = true; st.branchTarget = 0x2DA8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2900u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2900
+    st.pc = 0x2900u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 8, 5, 0, 1022, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2908u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0x000000001234abcdull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_49(VU1Interpreter &vu, VuNativeCtx &c) // pc=2908 entry=000000001234abcd exit=000000001234abcd n=22 cycles=22
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 22u;
+    { // pair 0 @ 2908
+    st.pc = 0x2908u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 4, 6, 0, 1022, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 1 @ 2910
+    st.pc = 0x2910u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 2, 7, 0, 1022, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 2 @ 2918
+    st.pc = 0x2918u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 1, 8, 0, 1022, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 3 @ 2920
+    st.pc = 0x2920u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 8, 9, 0, 1021, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 4 @ 2928
+    st.pc = 0x2928u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 4, 10, 0, 1021, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 5 @ 2930
+    st.pc = 0x2930u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 2, 11, 0, 1021, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 6 @ 2938
+    st.pc = 0x2938u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 11, 0, 1012);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2940
+    st.pc = 0x2940u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 1, 12, 0, 1021, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 8 @ 2948
+    st.pc = 0x2948u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 8, 13, 0, 1020, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 9 @ 2950
+    st.pc = 0x2950u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 4, 15, 0, 1020, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 10 @ 2958
+    st.pc = 0x2958u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[0] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2960
+    st.pc = 0x2960u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = st.vi[11] & st.vi[10];
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2968
+    st.pc = 0x2968u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 28, 0, 918, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 13 @ 2970
+    st.pc = 0x2970u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 29, 0, 921, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 14 @ 2978
+    st.pc = 0x2978u;
+    vu.m_currentUpperInstruction = 0x01e06b50u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 13, 0, 13);
+    vuhot::sq(st, c.dataSize, 15, 10, 0, 924, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 15 @ 2980
+    st.pc = 0x2980u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 28, 0, 927, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 16 @ 2988
+    st.pc = 0x2988u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 30, 0, 920, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 17 @ 2990
+    st.pc = 0x2990u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 31, 0, 923, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 18 @ 2998
+    st.pc = 0x2998u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 7, 0, 926, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 19 @ 29A0
+    st.pc = 0x29A0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 13, 0, 925, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 20 @ 29A8
+    st.pc = 0x29A8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) == static_cast<int16_t>(vuhot::readBranchVi(vu, 11)))
+    { st.branchPending = true; st.branchTarget = 0x29D8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x29B0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 21 @ 29B0
+    st.pc = 0x29B0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 30, 0, 929, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x29B8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0x000000001234abcdull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_50(VU1Interpreter &vu, VuNativeCtx &c) // pc=29D8 entry=000000001234abcd exit=98c2232933f1dd3b n=17 cycles=17
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 17u;
+    { // pair 0 @ 29D8
+    st.pc = 0x29D8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 11, 0, 919, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 1 @ 29E0
+    st.pc = 0x29E0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 12, 0, 922, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 2 @ 29E8
+    st.pc = 0x29E8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 11, 0, 928, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 3 @ 29F0
+    st.pc = 0x29F0u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x01000507u;
+    vuhot::fmac<1, 0, 3, false, 8, true>(vu, 1u, 0, 0, 20);
+    st.vi[5] = static_cast<int16_t>(st.vi[0] + 2048);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][0] = vu.m_cycle + 4u;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 29F8
+    st.pc = 0x29F8u;
+    const int32_t oldVi = st.vi[6];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[6] = static_cast<int16_t>(st.vi[0] + 32);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2A00
+    st.pc = 0x2A00u;
+    const int32_t oldVi = st.vi[7];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[7] = static_cast<int16_t>(st.vi[0] + 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 7; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2A08
+    st.pc = 0x2A08u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[8] = static_cast<int16_t>(st.vi[0] + 922);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2A10
+    st.pc = 0x2A10u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[9] = static_cast<int16_t>(st.vi[0] + 948);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2A18
+    st.pc = 0x2A18u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[0] + 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2A20
+    st.pc = 0x2A20u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = static_cast<int16_t>(st.vi[0] + 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2A28
+    st.pc = 0x2A28u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 17, 0, 918);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2A30
+    st.pc = 0x2A30u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 21, 0, 921);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2A38
+    st.pc = 0x2A38u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 23, 0, 920);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[23][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2A40
+    st.pc = 0x2A40u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 18, 0, 919);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 2A48
+    st.pc = 0x2A48u;
+    const int32_t oldVi = st.vi[14];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[14] = static_cast<int16_t>(st.vi[9] + st.vi[0]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[14] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 14; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 15 @ 2A50
+    st.pc = 0x2A50u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c006cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2A58u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 16 @ 2A58
+    st.pc = 0x2A58u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2A60u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_51(VU1Interpreter &vu, VuNativeCtx &c) // pc=2A50 entry=d41ee2f6b57fe0b5 exit=98c2232933f1dd3b n=2 cycles=4
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    vu.m_cycle = S + 2u; st.cycles = vu.m_cycle;
+    { // pair 0 @ 2A50
+    st.pc = 0x2A50u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c006cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2A58u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2A58
+    st.pc = 0x2A58u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2A60u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_52(VU1Interpreter &vu, VuNativeCtx &c) // pc=2E88 entry=d41ee2f6b57fe0b5 exit=21870965ff0b7b2f n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 2E88
+    st.pc = 0x2E88u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) == static_cast<int16_t>(vuhot::readBranchVi(vu, 11)))
+    { st.branchPending = true; st.branchTarget = 0x2D50u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E90u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2E90
+    st.pc = 0x2E90u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 25, 14, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E98u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x21870965ff0b7b2full; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_53(VU1Interpreter &vu, VuNativeCtx &c) // pc=2A60 entry=326ca533d68687be exit=98c2232933f1dd3b n=13 cycles=13
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 13u;
+    { // pair 0 @ 2A60
+    st.pc = 0x2A60u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x01000503u;
+    vuhot::fmac<0, 0, 3, false, 8, true>(vu, 1u, 0, 0, 20);
+    st.vi[5] = static_cast<int16_t>(st.vi[0] + 1024);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][0] = vu.m_cycle + 4u;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2A68
+    st.pc = 0x2A68u;
+    const int32_t oldVi = st.vi[6];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[6] = static_cast<int16_t>(st.vi[0] + 16);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2A70
+    st.pc = 0x2A70u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[8] = static_cast<int16_t>(st.vi[0] + 952);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2A78
+    st.pc = 0x2A78u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[9] = static_cast<int16_t>(st.vi[0] + 918);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2A80
+    st.pc = 0x2A80u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[0] + st.vi[11]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2A88
+    st.pc = 0x2A88u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = static_cast<int16_t>(st.vi[0] + 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2A90
+    st.pc = 0x2A90u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 17, 0, 948);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2A98
+    st.pc = 0x2A98u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 21, 0, 951);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2AA0
+    st.pc = 0x2AA0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 23, 0, 950);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[23][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2AA8
+    st.pc = 0x2AA8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 18, 0, 949);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2AB0
+    st.pc = 0x2AB0u;
+    const int32_t oldVi = st.vi[14];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[14] = static_cast<int16_t>(st.vi[9] + st.vi[0]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[14] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 14; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2AB8
+    st.pc = 0x2AB8u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c005fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2AC0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2AC0
+    st.pc = 0x2AC0u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2AC8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_54(VU1Interpreter &vu, VuNativeCtx &c) // pc=2AB8 entry=d41ee2f6b57fe0b5 exit=98c2232933f1dd3b n=2 cycles=4
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    vu.m_cycle = S + 2u; st.cycles = vu.m_cycle;
+    { // pair 0 @ 2AB8
+    st.pc = 0x2AB8u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c005fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2AC0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2AC0
+    st.pc = 0x2AC0u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2AC8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_55(VU1Interpreter &vu, VuNativeCtx &c) // pc=2AC8 entry=326ca533d68687be exit=98c2232933f1dd3b n=14 cycles=14
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 14u;
+    { // pair 0 @ 2AC8
+    st.pc = 0x2AC8u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x01000507u;
+    vuhot::fmac<1, 0, 3, false, 8, true>(vu, 1u, 0, 0, 20);
+    st.vi[5] = static_cast<int16_t>(st.vi[0] + 128);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][0] = vu.m_cycle + 4u;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2AD0
+    st.pc = 0x2AD0u;
+    const int32_t oldVi = st.vi[6];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[6] = static_cast<int16_t>(st.vi[0] + 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2AD8
+    st.pc = 0x2AD8u;
+    const int32_t oldVi = st.vi[7];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[7] = static_cast<int16_t>(st.vi[0] + 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 7; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2AE0
+    st.pc = 0x2AE0u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[8] = static_cast<int16_t>(st.vi[0] + 922);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2AE8
+    st.pc = 0x2AE8u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[9] = static_cast<int16_t>(st.vi[0] + 948);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2AF0
+    st.pc = 0x2AF0u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[0] + st.vi[11]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2AF8
+    st.pc = 0x2AF8u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = static_cast<int16_t>(st.vi[0] + 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2B00
+    st.pc = 0x2B00u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 17, 0, 918);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2B08
+    st.pc = 0x2B08u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 21, 0, 921);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2B10
+    st.pc = 0x2B10u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 23, 0, 920);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[23][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2B18
+    st.pc = 0x2B18u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 18, 0, 919);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2B20
+    st.pc = 0x2B20u;
+    const int32_t oldVi = st.vi[14];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[14] = static_cast<int16_t>(st.vi[9] + st.vi[0]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[14] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 14; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2B28
+    st.pc = 0x2B28u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c0051u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2B30u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2B30
+    st.pc = 0x2B30u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2B38u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_56(VU1Interpreter &vu, VuNativeCtx &c) // pc=2B28 entry=d41ee2f6b57fe0b5 exit=98c2232933f1dd3b n=2 cycles=4
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    vu.m_cycle = S + 2u; st.cycles = vu.m_cycle;
+    { // pair 0 @ 2B28
+    st.pc = 0x2B28u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c0051u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2B30u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2B30
+    st.pc = 0x2B30u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2B38u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_57(VU1Interpreter &vu, VuNativeCtx &c) // pc=2B38 entry=326ca533d68687be exit=98c2232933f1dd3b n=13 cycles=13
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 13u;
+    { // pair 0 @ 2B38
+    st.pc = 0x2B38u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x01000503u;
+    vuhot::fmac<0, 0, 3, false, 8, true>(vu, 1u, 0, 0, 20);
+    st.vi[5] = static_cast<int16_t>(st.vi[0] + 64);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][0] = vu.m_cycle + 4u;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2B40
+    st.pc = 0x2B40u;
+    const int32_t oldVi = st.vi[6];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[6] = static_cast<int16_t>(st.vi[0] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2B48
+    st.pc = 0x2B48u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[8] = static_cast<int16_t>(st.vi[0] + 952);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2B50
+    st.pc = 0x2B50u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[9] = static_cast<int16_t>(st.vi[0] + 918);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2B58
+    st.pc = 0x2B58u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[0] + st.vi[11]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2B60
+    st.pc = 0x2B60u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = static_cast<int16_t>(st.vi[0] + 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2B68
+    st.pc = 0x2B68u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 17, 0, 948);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2B70
+    st.pc = 0x2B70u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 21, 0, 951);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2B78
+    st.pc = 0x2B78u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 23, 0, 950);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[23][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2B80
+    st.pc = 0x2B80u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 18, 0, 949);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2B88
+    st.pc = 0x2B88u;
+    const int32_t oldVi = st.vi[14];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[14] = static_cast<int16_t>(st.vi[9] + st.vi[0]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[14] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 14; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2B90
+    st.pc = 0x2B90u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c0044u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2B98u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2B98
+    st.pc = 0x2B98u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2BA0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_58(VU1Interpreter &vu, VuNativeCtx &c) // pc=2E50 entry=8c2a0e5d3afdce3f exit=212a5887dba05810 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 2E50
+    st.pc = 0x2E50u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x4201000eu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E58u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2E58
+    st.pc = 0x2E58u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = static_cast<int16_t>(st.vi[11] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E60u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x212a5887dba05810ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_59(VU1Interpreter &vu, VuNativeCtx &c) // pc=2EC8 entry=212a5887dba05810 exit=e3e200fd9bc84c85 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 2EC8
+    st.pc = 0x2EC8u;
+    vu.m_currentUpperInstruction = 0x01f98e47u;
+    vuhot::fmac<1, 0, 3, false, 15, true>(vu, 1u, 17, 25, 25);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) == static_cast<int16_t>(vuhot::readBranchVi(vu, 7)))
+    { st.branchPending = true; st.branchTarget = 0x2EF8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2ED0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2ED0
+    st.pc = 0x2ED0u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x01faae87u;
+    vuhot::fmac<1, 0, 3, false, 15, true>(vu, 1u, 21, 26, 26);
+    st.vi[13] = static_cast<int16_t>(st.vi[0] + st.vi[7]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2ED8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xe3e200fd9bc84c85ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_60(VU1Interpreter &vu, VuNativeCtx &c) // pc=2EF8 entry=e3e200fd9bc84c85 exit=ccb59dece6b32591 n=15 cycles=28
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 15u;
+    vu.m_cycle = S + 3u; st.cycles = vu.m_cycle;
+    { // pair 0 @ 2EF8
+    st.pc = 0x2EF8u;
+    vu.m_currentUpperInstruction = 0x0119d6ecu;
+    vuhot::fmac<1, 3, 0, false, 8, false>(vu, 1u, 26, 25, 27);
+    vuhot::move(st, 8, 24, 25);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 7u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2F00
+    st.pc = 0x2F00u;
+    vu.m_currentUpperInstruction = 0x009a0600u;
+    vuhot::fmac<0, 0, 0, false, 4, false>(vu, 1u, 0, 26, 24);
+    op.execLower(vu, 0x807b03bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x009a0600u);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 11u; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2F08
+    st.pc = 0x2F08u;
+    op.execUpper(vu, 0x0198c1fdu);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[24][1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    op.advanceTo(vu, S + 14u);
+    { // pair 3 @ 2F10
+    st.pc = 0x2F10u;
+    vu.m_currentUpperInstruction = 0x00400620u;
+    vuhot::fmac<0, 1, 0, false, 2, false>(vu, 1u, 0, 0, 24);
+    op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x00400620u);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2F18
+    st.pc = 0x2F18u;
+    vu.m_currentUpperInstruction = 0x01f889bdu;
+    vuhot::fmac<4, 0, 1, true, 15, false>(vu, 1u, 17, 24, 6);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 17, 0, 1012);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2F20
+    st.pc = 0x2F20u;
+    vu.m_currentUpperInstruction = 0x01f8ae48u;
+    vuhot::fmac<2, 0, 0, false, 15, false>(vu, 1u, 21, 24, 25);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2F28
+    st.pc = 0x2F28u;
+    vu.m_currentUpperInstruction = 0x01f891bdu;
+    vuhot::fmac<4, 0, 1, true, 15, false>(vu, 1u, 18, 24, 6);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2F30
+    st.pc = 0x2F30u;
+    op.execUpper(vu, 0x0058c1fdu);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2F38
+    st.pc = 0x2F38u;
+    vu.m_currentUpperInstruction = 0x01f8b688u;
+    vuhot::fmac<2, 0, 0, false, 15, false>(vu, 1u, 22, 24, 26);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2F40
+    st.pc = 0x2F40u;
+    vu.m_currentUpperInstruction = 0x01f899bdu;
+    vuhot::fmac<4, 0, 1, true, 15, false>(vu, 1u, 19, 24, 6);
+    vuhot::sq(st, c.dataSize, 7, 17, 0, 876, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 10 @ 2F48
+    st.pc = 0x2F48u;
+    vu.m_currentUpperInstruction = 0x01f8bec8u;
+    vuhot::fmac<2, 0, 0, false, 15, false>(vu, 1u, 23, 24, 27);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2F50
+    st.pc = 0x2F50u;
+    vu.m_currentUpperInstruction = 0x01f8ce5au;
+    vuhot::fmac<4, 0, 2, false, 15, false>(vu, 1u, 25, 24, 25);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2F58
+    st.pc = 0x2F58u;
+    vu.m_currentUpperInstruction = 0x81f8d69au;
+    vuhot::fmac<4, 0, 2, false, 15, true>(vu, 1u, 26, 24, 26);
+    { const uint32_t lb = 0x3a83126fu; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 25u; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2F60
+    st.pc = 0x2F60u;
+    vu.m_currentUpperInstruction = 0x01f8dedau;
+    vuhot::fmac<4, 0, 2, false, 15, true>(vu, 1u, 27, 24, 27);
+    op.execLower(vu, 0x48000800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01f8dedau);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2F68u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 27u; st.cycles = vu.m_cycle;
+    { // pair 14 @ 2F68
+    st.pc = 0x2F68u;
+    vu.m_currentUpperInstruction = 0x81e0d6a2u;
+    vuhot::fmac<0, 2, 0, false, 15, true>(vu, 1u, 26, 0, 26);
+    { const uint32_t lb = 0x437f0000u; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2F70u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xccb59dece6b32591ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_61(VU1Interpreter &vu, VuNativeCtx &c) // pc=2E60 entry=ccb59dece6b32591 exit=d41ee2f6b57fe0b5 n=5 cycles=7
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 5u;
+    { // pair 0 @ 2E60
+    st.pc = 0x2E60u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sqi(st, c.dataSize, 15, 25, 9, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    vu.m_cycle = S + 3u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2E68
+    st.pc = 0x2E68u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sqi(st, c.dataSize, 15, 26, 9, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 2 @ 2E70
+    st.pc = 0x2E70u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sqi(st, c.dataSize, 15, 27, 9, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 3 @ 2E78
+    st.pc = 0x2E78u;
+    vu.m_currentUpperInstruction = 0x01e0ac40u;
+    vuhot::fmac<0, 0, 0, false, 15, true>(vu, 1u, 21, 0, 17);
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0ac40u);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E80u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2E80
+    st.pc = 0x2E80u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x01e0b480u;
+    vuhot::fmac<0, 0, 0, false, 15, true>(vu, 1u, 22, 0, 18);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 21, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E88u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xd41ee2f6b57fe0b5ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_62(VU1Interpreter &vu, VuNativeCtx &c) // pc=2B90 entry=d41ee2f6b57fe0b5 exit=98c2232933f1dd3b n=2 cycles=4
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    vu.m_cycle = S + 2u; st.cycles = vu.m_cycle;
+    { // pair 0 @ 2B90
+    st.pc = 0x2B90u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c0044u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2B98u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2B98
+    st.pc = 0x2B98u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2BA0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_63(VU1Interpreter &vu, VuNativeCtx &c) // pc=2E00 entry=8655dbcc72d6d1ad exit=093fa05c5bd880a3 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 2E00
+    st.pc = 0x2E00u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 1)))
+    { st.branchPending = true; st.branchTarget = 0x2E78u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E08u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2E08
+    st.pc = 0x2E08u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[1] = static_cast<int16_t>(st.vi[0] + 1484);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E10u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x093fa05c5bd880a3ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_64(VU1Interpreter &vu, VuNativeCtx &c) // pc=2E10 entry=093fa05c5bd880a3 exit=212a5887dba05810 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 2E10
+    st.pc = 0x2E10u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x40000016u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E18u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2E18
+    st.pc = 0x2E18u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = static_cast<int16_t>(st.vi[11] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E20u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x212a5887dba05810ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_65(VU1Interpreter &vu, VuNativeCtx &c) // pc=2BA0 entry=326ca533d68687be exit=98c2232933f1dd3b n=14 cycles=14
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 14u;
+    { // pair 0 @ 2BA0
+    st.pc = 0x2BA0u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x01000507u;
+    vuhot::fmac<1, 0, 3, false, 8, true>(vu, 1u, 0, 0, 20);
+    st.vi[5] = static_cast<int16_t>(st.vi[0] + 512);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][0] = vu.m_cycle + 4u;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2BA8
+    st.pc = 0x2BA8u;
+    const int32_t oldVi = st.vi[6];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[6] = static_cast<int16_t>(st.vi[0] + 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2BB0
+    st.pc = 0x2BB0u;
+    const int32_t oldVi = st.vi[7];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[7] = static_cast<int16_t>(st.vi[0] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 7; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2BB8
+    st.pc = 0x2BB8u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[8] = static_cast<int16_t>(st.vi[0] + 922);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2BC0
+    st.pc = 0x2BC0u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[9] = static_cast<int16_t>(st.vi[0] + 948);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2BC8
+    st.pc = 0x2BC8u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[0] + st.vi[11]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2BD0
+    st.pc = 0x2BD0u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = static_cast<int16_t>(st.vi[0] + 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2BD8
+    st.pc = 0x2BD8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 17, 0, 918);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2BE0
+    st.pc = 0x2BE0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 21, 0, 921);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2BE8
+    st.pc = 0x2BE8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 23, 0, 920);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[23][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2BF0
+    st.pc = 0x2BF0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 18, 0, 919);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2BF8
+    st.pc = 0x2BF8u;
+    const int32_t oldVi = st.vi[14];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[14] = static_cast<int16_t>(st.vi[9] + st.vi[0]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[14] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 14; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2C00
+    st.pc = 0x2C00u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c0036u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2C08u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2C08
+    st.pc = 0x2C08u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2C10u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_66(VU1Interpreter &vu, VuNativeCtx &c) // pc=2C00 entry=d41ee2f6b57fe0b5 exit=98c2232933f1dd3b n=2 cycles=4
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    vu.m_cycle = S + 2u; st.cycles = vu.m_cycle;
+    { // pair 0 @ 2C00
+    st.pc = 0x2C00u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c0036u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2C08u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2C08
+    st.pc = 0x2C08u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2C10u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_67(VU1Interpreter &vu, VuNativeCtx &c) // pc=2C10 entry=326ca533d68687be exit=98c2232933f1dd3b n=13 cycles=13
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 13u;
+    { // pair 0 @ 2C10
+    st.pc = 0x2C10u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x01000503u;
+    vuhot::fmac<0, 0, 3, false, 8, true>(vu, 1u, 0, 0, 20);
+    st.vi[5] = static_cast<int16_t>(st.vi[0] + 256);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][0] = vu.m_cycle + 4u;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2C18
+    st.pc = 0x2C18u;
+    const int32_t oldVi = st.vi[6];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[6] = static_cast<int16_t>(st.vi[0] + 4);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2C20
+    st.pc = 0x2C20u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[8] = static_cast<int16_t>(st.vi[0] + 952);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2C28
+    st.pc = 0x2C28u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[9] = static_cast<int16_t>(st.vi[0] + 918);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2C30
+    st.pc = 0x2C30u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[0] + st.vi[11]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2C38
+    st.pc = 0x2C38u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = static_cast<int16_t>(st.vi[0] + 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2C40
+    st.pc = 0x2C40u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 17, 0, 948);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2C48
+    st.pc = 0x2C48u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 21, 0, 951);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2C50
+    st.pc = 0x2C50u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 23, 0, 950);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[23][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[23][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2C58
+    st.pc = 0x2C58u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 18, 0, 949);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2C60
+    st.pc = 0x2C60u;
+    const int32_t oldVi = st.vi[14];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[14] = static_cast<int16_t>(st.vi[9] + st.vi[0]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[14] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 14; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2C68
+    st.pc = 0x2C68u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c0029u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2C70u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2C70
+    st.pc = 0x2C70u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2C78u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_68(VU1Interpreter &vu, VuNativeCtx &c) // pc=2E78 entry=093fa05c5bd880a3 exit=d41ee2f6b57fe0b5 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 2E78
+    st.pc = 0x2E78u;
+    vu.m_currentUpperInstruction = 0x01e0ac40u;
+    vuhot::fmac<0, 0, 0, false, 15, true>(vu, 1u, 21, 0, 17);
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0ac40u);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E80u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2E80
+    st.pc = 0x2E80u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x01e0b480u;
+    vuhot::fmac<0, 0, 0, false, 15, true>(vu, 1u, 22, 0, 18);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 21, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2E88u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xd41ee2f6b57fe0b5ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_69(VU1Interpreter &vu, VuNativeCtx &c) // pc=2C68 entry=d41ee2f6b57fe0b5 exit=98c2232933f1dd3b n=2 cycles=4
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    vu.m_cycle = S + 2u; st.cycles = vu.m_cycle;
+    { // pair 0 @ 2C68
+    st.pc = 0x2C68u;
+    op.execUpper(vu, 0x01d189ffu);
+    op.execLower(vu, 0x420c0029u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01d189ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2C70u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2C70
+    st.pc = 0x2C70u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01d5a9ffu);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 22, 8);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[22][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[22][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2C78u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x98c2232933f1dd3bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_70(VU1Interpreter &vu, VuNativeCtx &c) // pc=2ED8 entry=e3e200fd9bc84c85 exit=498f75e2d3e57238 n=4 cycles=5
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 4u;
+    { // pair 0 @ 2ED8
+    st.pc = 0x2ED8u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x120d6801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 2u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2EE0
+    st.pc = 0x2EE0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::mr32(st, 15, 25, 25);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2EE8
+    st.pc = 0x2EE8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 13)))
+    { st.branchPending = true; st.branchTarget = 0x2ED8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2EF0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2EF0
+    st.pc = 0x2EF0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::mr32(st, 15, 26, 26);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2EF8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x498f75e2d3e57238ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_71(VU1Interpreter &vu, VuNativeCtx &c) // pc=2EF8 entry=498f75e2d3e57238 exit=ccb59dece6b32591 n=15 cycles=28
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 15u;
+    vu.m_cycle = S + 3u; st.cycles = vu.m_cycle;
+    { // pair 0 @ 2EF8
+    st.pc = 0x2EF8u;
+    vu.m_currentUpperInstruction = 0x0119d6ecu;
+    vuhot::fmac<1, 3, 0, false, 8, false>(vu, 1u, 26, 25, 27);
+    vuhot::move(st, 8, 24, 25);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 7u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2F00
+    st.pc = 0x2F00u;
+    vu.m_currentUpperInstruction = 0x009a0600u;
+    vuhot::fmac<0, 0, 0, false, 4, false>(vu, 1u, 0, 26, 24);
+    op.execLower(vu, 0x807b03bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x009a0600u);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 11u; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2F08
+    st.pc = 0x2F08u;
+    op.execUpper(vu, 0x0198c1fdu);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[24][1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    op.advanceTo(vu, S + 14u);
+    { // pair 3 @ 2F10
+    st.pc = 0x2F10u;
+    vu.m_currentUpperInstruction = 0x00400620u;
+    vuhot::fmac<0, 1, 0, false, 2, false>(vu, 1u, 0, 0, 24);
+    op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x00400620u);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2F18
+    st.pc = 0x2F18u;
+    vu.m_currentUpperInstruction = 0x01f889bdu;
+    vuhot::fmac<4, 0, 1, true, 15, false>(vu, 1u, 17, 24, 6);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 17, 0, 1012);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][3] = vu.m_cycle + 4u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2F20
+    st.pc = 0x2F20u;
+    vu.m_currentUpperInstruction = 0x01f8ae48u;
+    vuhot::fmac<2, 0, 0, false, 15, false>(vu, 1u, 21, 24, 25);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2F28
+    st.pc = 0x2F28u;
+    vu.m_currentUpperInstruction = 0x01f891bdu;
+    vuhot::fmac<4, 0, 1, true, 15, false>(vu, 1u, 18, 24, 6);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2F30
+    st.pc = 0x2F30u;
+    op.execUpper(vu, 0x0058c1fdu);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[24][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2F38
+    st.pc = 0x2F38u;
+    vu.m_currentUpperInstruction = 0x01f8b688u;
+    vuhot::fmac<2, 0, 0, false, 15, false>(vu, 1u, 22, 24, 26);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2F40
+    st.pc = 0x2F40u;
+    vu.m_currentUpperInstruction = 0x01f899bdu;
+    vuhot::fmac<4, 0, 1, true, 15, false>(vu, 1u, 19, 24, 6);
+    vuhot::sq(st, c.dataSize, 7, 17, 0, 876, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 10 @ 2F48
+    st.pc = 0x2F48u;
+    vu.m_currentUpperInstruction = 0x01f8bec8u;
+    vuhot::fmac<2, 0, 0, false, 15, false>(vu, 1u, 23, 24, 27);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2F50
+    st.pc = 0x2F50u;
+    vu.m_currentUpperInstruction = 0x01f8ce5au;
+    vuhot::fmac<4, 0, 2, false, 15, false>(vu, 1u, 25, 24, 25);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2F58
+    st.pc = 0x2F58u;
+    vu.m_currentUpperInstruction = 0x81f8d69au;
+    vuhot::fmac<4, 0, 2, false, 15, true>(vu, 1u, 26, 24, 26);
+    { const uint32_t lb = 0x3a83126fu; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 25u; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2F60
+    st.pc = 0x2F60u;
+    vu.m_currentUpperInstruction = 0x01f8dedau;
+    vuhot::fmac<4, 0, 2, false, 15, true>(vu, 1u, 27, 24, 27);
+    op.execLower(vu, 0x48000800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01f8dedau);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2F68u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 27u; st.cycles = vu.m_cycle;
+    { // pair 14 @ 2F68
+    st.pc = 0x2F68u;
+    vu.m_currentUpperInstruction = 0x81e0d6a2u;
+    vuhot::fmac<0, 2, 0, false, 15, true>(vu, 1u, 26, 0, 26);
+    { const uint32_t lb = 0x437f0000u; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2F70u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xccb59dece6b32591ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_72(VU1Interpreter &vu, VuNativeCtx &c) // pc=2C78 entry=326ca533d68687be exit=7ba272039efac167 n=8 cycles=8
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 8u;
+    { // pair 0 @ 2C78
+    st.pc = 0x2C78u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[11] + 16384);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2C80
+    st.pc = 0x2C80u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[10] + 16384);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2C88
+    st.pc = 0x2C88u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::isw(st, c.dataSize, 8, 10, 0, 876, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 3 @ 2C90
+    st.pc = 0x2C90u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[9] = static_cast<int16_t>(st.vi[0] + 877);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2C98
+    st.pc = 0x2C98u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x81f303bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2CA0
+    st.pc = 0x2CA0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 25, 14, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2CA8
+    st.pc = 0x2CA8u;
+    const int32_t oldVi = st.vi[12];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[12] = static_cast<int16_t>(st.vi[0] + 1023);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 12; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2CB0
+    st.pc = 0x2CB0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x800066fcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2CB8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0x7ba272039efac167ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_73(VU1Interpreter &vu, VuNativeCtx &c) // pc=2CB8 entry=7ba272039efac167 exit=000000001234abcd n=18 cycles=21
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 18u;
+    op.advanceTo(vu, S + 3u);
+    { // pair 0 @ 2CB8
+    st.pc = 0x2CB8u;
+    vu.m_currentUpperInstruction = 0x002501beu;
+    vuhot::fmac<4, 0, 2, true, 1, false>(vu, 1u, 0, 5, 6);
+    op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x002501beu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2CC0
+    st.pc = 0x2CC0u;
+    vu.m_currentUpperInstruction = 0x00202a21u;
+    vuhot::fmac<2, 1, 0, false, 1, false>(vu, 1u, 5, 0, 8);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 26, 14, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2CC8
+    st.pc = 0x2CC8u;
+    vu.m_currentUpperInstruction = 0x01e09d5cu;
+    vuhot::fmac<4, 1, 0, false, 15, false>(vu, 1u, 19, 0, 21);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 27, 14, 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2CD0
+    st.pc = 0x2CD0u;
+    const int32_t oldVi = st.vi[12];
+    vu.m_currentUpperInstruction = 0x01f90abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 1, 25, 10);
+    st.vi[12] = static_cast<int16_t>(st.vi[0] + 876);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 12; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2CD8
+    st.pc = 0x2CD8u;
+    vu.m_currentUpperInstruction = 0x01f914cbu;
+    vuhot::fmac<2, 0, 3, false, 15, false>(vu, 1u, 2, 25, 19);
+    vuhot::ilw(st, c.vuData, c.dataSize, 2, 7, 0, 1022);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[19][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[19][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[19][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[19][3] = vu.m_cycle + 4u;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2CE0
+    st.pc = 0x2CE0u;
+    vu.m_currentUpperInstruction = 0x00204210u;
+    vuhot::maxmini<true, 0, 0, 1>(st, 8, 0, 8);
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 6, 0, 1022);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    vu.m_viReady[6] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2CE8
+    st.pc = 0x2CE8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 5, 0, 1022);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[5] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2CF0
+    st.pc = 0x2CF0u;
+    const int32_t oldVi = st.vi[11];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[11] = static_cast<int16_t>(st.vi[11] + -1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 11; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2CF8
+    st.pc = 0x2CF8u;
+    vu.m_currentUpperInstruction = 0x81c0dedcu;
+    vuhot::fmac<4, 1, 0, false, 14, true>(vu, 1u, 27, 0, 27);
+    { const uint32_t lb = 0x437f0000u; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2D00
+    st.pc = 0x2D00u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x0020421fu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 8, 0, 8);
+    st.vi[9] = static_cast<int16_t>(st.vi[9] + 4);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2D08
+    st.pc = 0x2D08u;
+    const int32_t oldVi = st.vi[14];
+    vu.m_currentUpperInstruction = 0x01fad17cu;
+    vuhot::ftoi<1, 15>(st, 26, 26);
+    st.vi[14] = static_cast<int16_t>(st.vi[14] + 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    vu.m_viReady[14] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 14; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2D10
+    st.pc = 0x2D10u;
+    vu.m_currentUpperInstruction = 0x01f5a97du;
+    vuhot::ftoi<16, 15>(st, 21, 21);
+    op.execLower(vu, 0x81f303bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01f5a97du);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[21][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[21][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2D18
+    st.pc = 0x2D18u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 25, 14, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2D20
+    st.pc = 0x2D20u;
+    vu.m_currentUpperInstruction = 0x0028417du;
+    vuhot::ftoi<16, 1>(st, 8, 8);
+    vuhot::sq(st, c.dataSize, 15, 27, 9, -3, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 14 @ 2D28
+    st.pc = 0x2D28u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 26, 9, -2, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 15 @ 2D30
+    st.pc = 0x2D30u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 21, 9, -1, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 16 @ 2D38
+    st.pc = 0x2D38u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 11)))
+    { st.branchPending = true; st.branchTarget = 0x2CB8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2D40u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 17 @ 2D40
+    st.pc = 0x2D40u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 1, 8, 9, -4, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2D48u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0x000000001234abcdull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_74(VU1Interpreter &vu, VuNativeCtx &c) // pc=2D48 entry=000000001234abcd exit=b2116da548f0fb1b n=1 cycles=1
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 1u;
+    { // pair 0 @ 2D48
+    st.pc = 0x2D48u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x800066fcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2D50u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0xb2116da548f0fb1bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_75(VU1Interpreter &vu, VuNativeCtx &c) // pc=1C48 entry=cd057af54d65447f exit=2f980bed0e31daf4 n=13 cycles=18
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 13u;
+    { // pair 0 @ 1C48
+    st.pc = 0x1C48u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 0, 1018);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1C50
+    st.pc = 0x1C50u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 2, 0, 1018);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 1C58
+    st.pc = 0x1C58u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 1, 13);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 1C60
+    st.pc = 0x1C60u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 2, 13);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 1C68
+    st.pc = 0x1C68u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[1] = static_cast<int16_t>(st.vi[1] + st.vi[12]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 1C70
+    st.pc = 0x1C70u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lqi(st, c.vuData, c.dataSize, 14, 5, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 1C78
+    st.pc = 0x1C78u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 3, 13);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 9u; st.cycles = vu.m_cycle;
+    { // pair 7 @ 1C80
+    st.pc = 0x1C80u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x01e509bcu;
+    vuhot::fmac<4, 0, 0, true, 15, false>(vu, 1u, 1, 5, 6);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 4, 13);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 1C88
+    st.pc = 0x1C88u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x01e510bdu;
+    vuhot::fmac<2, 0, 1, true, 15, false>(vu, 1u, 2, 5, 2);
+    st.vi[2] = static_cast<int16_t>(st.vi[1] + st.vi[2]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 1C90
+    st.pc = 0x1C90u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01e518beu;
+    vuhot::fmac<2, 0, 2, true, 15, false>(vu, 1u, 3, 5, 2);
+    vuhot::lqi(st, c.vuData, c.dataSize, 14, 5, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 13u; st.cycles = vu.m_cycle;
+    { // pair 10 @ 1C98
+    st.pc = 0x1C98u;
+    vu.m_currentUpperInstruction = 0x01e0218bu;
+    vuhot::fmac<2, 0, 3, false, 15, true>(vu, 1u, 4, 0, 6);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 15u; st.cycles = vu.m_cycle;
+    { // pair 11 @ 1CA0
+    st.pc = 0x1CA0u;
+    vu.m_currentUpperInstruction = 0x01e509bcu;
+    vuhot::fmac<4, 0, 0, true, 15, true>(vu, 1u, 1, 5, 6);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 1)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 2)))
+    { st.branchPending = true; st.branchTarget = 0x1C90u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1CA8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 17u; st.cycles = vu.m_cycle;
+    { // pair 12 @ 1CA8
+    st.pc = 0x1CA8u;
+    vu.m_currentUpperInstruction = 0x01e510bdu;
+    vuhot::fmac<2, 0, 1, true, 15, true>(vu, 1u, 2, 5, 2);
+    vuhot::sq(st, c.dataSize, 15, 6, 1, -2, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1CB0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0x2f980bed0e31daf4ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_76(VU1Interpreter &vu, VuNativeCtx &c) // pc=1C90 entry=2f980bed0e31daf4 exit=4ff258233afc63ab n=4 cycles=6
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 4u;
+    { // pair 0 @ 1C90
+    st.pc = 0x1C90u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01e518beu;
+    vuhot::fmac<2, 0, 2, true, 15, false>(vu, 1u, 3, 5, 2);
+    vuhot::lqi(st, c.vuData, c.dataSize, 14, 5, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1C98
+    st.pc = 0x1C98u;
+    vu.m_currentUpperInstruction = 0x01e0218bu;
+    vuhot::fmac<2, 0, 3, false, 15, true>(vu, 1u, 4, 0, 6);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 4u; st.cycles = vu.m_cycle;
+    { // pair 2 @ 1CA0
+    st.pc = 0x1CA0u;
+    vu.m_currentUpperInstruction = 0x01e509bcu;
+    vuhot::fmac<4, 0, 0, true, 15, true>(vu, 1u, 1, 5, 6);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 1)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 2)))
+    { st.branchPending = true; st.branchTarget = 0x1C90u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1CA8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 1CA8
+    st.pc = 0x1CA8u;
+    vu.m_currentUpperInstruction = 0x01e510bdu;
+    vuhot::fmac<2, 0, 1, true, 15, true>(vu, 1u, 2, 5, 2);
+    vuhot::sq(st, c.dataSize, 15, 6, 1, -2, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1CB0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0x4ff258233afc63abull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_77(VU1Interpreter &vu, VuNativeCtx &c) // pc=1C90 entry=4ff258233afc63ab exit=4ff258233afc63ab n=4 cycles=6
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 4u;
+    { // pair 0 @ 1C90
+    st.pc = 0x1C90u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01e518beu;
+    vuhot::fmac<2, 0, 2, true, 15, false>(vu, 1u, 3, 5, 2);
+    vuhot::lqi(st, c.vuData, c.dataSize, 14, 5, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1C98
+    st.pc = 0x1C98u;
+    vu.m_currentUpperInstruction = 0x01e0218bu;
+    vuhot::fmac<2, 0, 3, false, 15, true>(vu, 1u, 4, 0, 6);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 4u; st.cycles = vu.m_cycle;
+    { // pair 2 @ 1CA0
+    st.pc = 0x1CA0u;
+    vu.m_currentUpperInstruction = 0x01e509bcu;
+    vuhot::fmac<4, 0, 0, true, 15, true>(vu, 1u, 1, 5, 6);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 1)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 2)))
+    { st.branchPending = true; st.branchTarget = 0x1C90u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1CA8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 1CA8
+    st.pc = 0x1CA8u;
+    vu.m_currentUpperInstruction = 0x01e510bdu;
+    vuhot::fmac<2, 0, 1, true, 15, true>(vu, 1u, 2, 5, 2);
+    vuhot::sq(st, c.dataSize, 15, 6, 1, -2, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1CB0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0x4ff258233afc63abull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_78(VU1Interpreter &vu, VuNativeCtx &c) // pc=1CB0 entry=4ff258233afc63ab exit=a4ebff2cd70bb7ef n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 1CB0
+    st.pc = 0x1CB0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1CB8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1CB8
+    st.pc = 0x1CB8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1CC0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xa4ebff2cd70bb7efull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_79(VU1Interpreter &vu, VuNativeCtx &c) // pc=0028 entry=a4ebff2cd70bb7ef exit=cd057af54d65447f n=3 cycles=5
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 3u;
+    { // pair 0 @ 0028
+    st.pc = 0x0028u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[13] = static_cast<int16_t>(st.vi[13] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 3u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0030
+    st.pc = 0x0030u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48000800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0038u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 0038
+    st.pc = 0x0038u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 2, 13, -1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0040u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xcd057af54d65447full; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_80(VU1Interpreter &vu, VuNativeCtx &c) // pc=2ED8 entry=498f75e2d3e57238 exit=498f75e2d3e57238 n=4 cycles=4
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 4u;
+    { // pair 0 @ 2ED8
+    st.pc = 0x2ED8u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x120d6801u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2EE0
+    st.pc = 0x2EE0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::mr32(st, 15, 25, 25);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[25][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[25][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2EE8
+    st.pc = 0x2EE8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 13)))
+    { st.branchPending = true; st.branchTarget = 0x2ED8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2EF0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2EF0
+    st.pc = 0x2EF0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::mr32(st, 15, 26, 26);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[26][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[26][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2EF8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x498f75e2d3e57238ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_81(VU1Interpreter &vu, VuNativeCtx &c) // pc=2D50 entry=21870965ff0b7b2f exit=1172e6b5e82732fa n=13 cycles=13
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 13u;
+    { // pair 0 @ 2D50
+    st.pc = 0x2D50u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 2, 7, 0, 1022);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2D58
+    st.pc = 0x2D58u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 6, 0, 1022);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2D60
+    st.pc = 0x2D60u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 5, 0, 1022);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[5] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2D68
+    st.pc = 0x2D68u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x81e603bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2D70
+    st.pc = 0x2D70u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 15, 0, 1020);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[15] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2D78
+    st.pc = 0x2D78u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 13, 0, 1020);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[13] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2D80
+    st.pc = 0x2D80u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 12, 0, 1021);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2D88
+    st.pc = 0x2D88u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 2, 11, 0, 1021);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2D90
+    st.pc = 0x2D90u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 10, 0, 1021);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2D98
+    st.pc = 0x2D98u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 9, 0, 1021);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 10 @ 2DA0
+    st.pc = 0x2DA0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 8, 0, 1022);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2DA8
+    st.pc = 0x2DA8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48006000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2DB0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2DB0
+    st.pc = 0x2DB0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2DB8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x1172e6b5e82732faull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_82(VU1Interpreter &vu, VuNativeCtx &c) // pc=24F8 entry=1172e6b5e82732fa exit=c946c511275567c5 n=24 cycles=24
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 24u;
+    { // pair 0 @ 24F8
+    st.pc = 0x24F8u;
+    vu.m_currentUpperInstruction = 0x002501beu;
+    vuhot::fmac<4, 0, 2, true, 1, false>(vu, 1u, 0, 5, 6);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 7, 4, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2500
+    st.pc = 0x2500u;
+    vu.m_currentUpperInstruction = 0x00202a61u;
+    vuhot::fmac<2, 1, 0, false, 1, false>(vu, 1u, 5, 0, 9);
+    vuhot::move(st, 15, 28, 29);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[28][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[28][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[28][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[28][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2508
+    st.pc = 0x2508u;
+    vu.m_currentUpperInstruction = 0x01e0ff82u;
+    vuhot::fmac<0, 0, 2, false, 15, false>(vu, 1u, 31, 0, 30);
+    vuhot::move(st, 15, 29, 10);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[29][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[29][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[29][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[29][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2510
+    st.pc = 0x2510u;
+    vu.m_currentUpperInstruction = 0x81c0321cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 6, 0, 8);
+    { const uint32_t lb = 0x437f0000u; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2518
+    st.pc = 0x2518u;
+    const int32_t oldVi = st.vi[12];
+    vu.m_currentUpperInstruction = 0x01c03c5cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 7, 0, 17);
+    st.vi[12] = st.vi[7] & st.vi[11];
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[17][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[17][2] = vu.m_cycle + 4u;
+    vu.m_viReady[12] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 12; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2520
+    st.pc = 0x2520u;
+    vu.m_currentUpperInstruction = 0x00204a10u;
+    vuhot::maxmini<true, 0, 0, 1>(st, 9, 0, 8);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 10, 12, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[10][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2528
+    st.pc = 0x2528u;
+    const int32_t oldVi = st.vi[4];
+    op.execUpper(vu, 0x01dce1ffu);
+    st.vi[4] = static_cast<int16_t>(st.vi[4] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[4] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 4; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2530
+    st.pc = 0x2530u;
+    const int32_t oldVi = st.vi[6];
+    op.execUpper(vu, 0x01dde9ffu);
+    st.vi[6] = static_cast<int16_t>(st.vi[6] + 4);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2538
+    st.pc = 0x2538u;
+    vu.m_currentUpperInstruction = 0x01e06b5fu;
+    vuhot::maxmini<false, 2, 0, 15>(st, 13, 0, 13);
+    vuhot::sq(st, c.dataSize, 14, 17, 6, -3, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 9 @ 2540
+    st.pc = 0x2540u;
+    vu.m_currentUpperInstruction = 0x0020421fu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 8, 0, 8);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 9, 12, 716);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2548
+    st.pc = 0x2548u;
+    op.execUpper(vu, 0x01ca51ffu);
+    vuhot::move(st, 15, 31, 7);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[31][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[31][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[31][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[31][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 2550
+    st.pc = 0x2550u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x01ea0abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 1, 10, 10);
+    vuhot::lqi(st, c.vuData, c.dataSize, 14, 7, 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 2558
+    st.pc = 0x2558u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x01e06c90u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 13, 0, 18);
+    st.vi[8] = static_cast<int16_t>(st.vi[9] + st.vi[10]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2560
+    st.pc = 0x2560u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x002f4228u;
+    vuhot::fmac<0, 3, 0, false, 1, false>(vu, 1u, 8, 15, 8);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 13, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 2568
+    st.pc = 0x2568u;
+    vu.m_currentUpperInstruction = 0x01ea118bu;
+    vuhot::fmac<2, 0, 3, false, 15, false>(vu, 1u, 2, 10, 6);
+    op.execLower(vu, 0x2400003fu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01ea118bu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 15 @ 2570
+    st.pc = 0x2570u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x01e062c0u;
+    vuhot::fmac<0, 0, 0, false, 15, false>(vu, 1u, 12, 0, 11);
+    st.vi[8] = static_cast<int16_t>(st.vi[8] + st.vi[1]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 16 @ 2578
+    st.pc = 0x2578u;
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[18], 16);
+      vu.m_currentUpperInstruction = 0x01f2917cu;
+      vuhot::ftoi<1, 15>(st, 18, 18);
+      std::memcpy(upVf, st.vf[18], 16);
+      std::memcpy(st.vf[18], oldVf, 16);
+      vuhot::move(st, 15, 12, 18);
+      std::memcpy(st.vf[18], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[18][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 17 @ 2580
+    st.pc = 0x2580u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x01e8417du;
+    vuhot::ftoi<16, 15>(st, 8, 8);
+    st.vi[9] = static_cast<int16_t>(st.vi[0] + st.vi[10]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 18 @ 2588
+    st.pc = 0x2588u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x01f06b6au;
+    vuhot::fmac<4, 3, 0, false, 15, true>(vu, 1u, 13, 16, 13);
+    st.vi[5] = static_cast<int16_t>(st.vi[5] + -1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 19 @ 2590
+    st.pc = 0x2590u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x81e603bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 20 @ 2598
+    st.pc = 0x2598u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 18, 6, -2, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 21 @ 25A0
+    st.pc = 0x25A0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 15, 8, 6, -4, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 22 @ 25A8
+    st.pc = 0x25A8u;
+    vu.m_currentUpperInstruction = 0x01ed72beu;
+    vuhot::fmac<4, 3, 0, true, 15, true>(vu, 1u, 14, 13, 10);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 5)))
+    { st.branchPending = true; st.branchTarget = 0x24C8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x25B0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 23 @ 25B0
+    st.pc = 0x25B0u;
+    vu.m_currentUpperInstruction = 0x01ed4b69u;
+    vuhot::fmac<2, 3, 0, false, 15, true>(vu, 1u, 9, 13, 13);
+    vuhot::sq(st, c.dataSize, 15, 8, 6, -1, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x25B8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0xc946c511275567c5ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_83(VU1Interpreter &vu, VuNativeCtx &c) // pc=1708 entry=4620a69b7ddcfd0f exit=cbcb1990c40525ea n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 1708
+    st.pc = 0x1708u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1710u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1710
+    st.pc = 0x1710u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1718u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xcbcb1990c40525eaull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_84(VU1Interpreter &vu, VuNativeCtx &c) // pc=0028 entry=cbcb1990c40525ea exit=cd057af54d65447f n=3 cycles=5
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 3u;
+    { // pair 0 @ 0028
+    st.pc = 0x0028u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[13] = static_cast<int16_t>(st.vi[13] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 3u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0030
+    st.pc = 0x0030u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48000800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0038u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 0038
+    st.pc = 0x0038u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 2, 13, -1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0040u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xcd057af54d65447full; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_85(VU1Interpreter &vu, VuNativeCtx &c) // pc=1F78 entry=b4f4b1b4da29db30 exit=ed9ddb4fd6ac295f n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 1F78
+    st.pc = 0x1F78u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x4000000cu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1F80u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1F80
+    st.pc = 0x1F80u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[5] = static_cast<int16_t>(st.vi[5] + st.vi[5]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1F88u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xed9ddb4fd6ac295full; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_86(VU1Interpreter &vu, VuNativeCtx &c) // pc=2170 entry=56c3edca4422f591 exit=b2116da548f0fb1b n=19 cycles=29
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 19u;
+    { // pair 0 @ 2170
+    st.pc = 0x2170u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x01eb512au;
+    vuhot::fmac<4, 3, 0, false, 15, false>(vu, 1u, 10, 11, 4);
+    vuhot::lqi(st, c.vuData, c.dataSize, 14, 3, 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2178
+    st.pc = 0x2178u;
+    vu.m_currentUpperInstruction = 0x01c04a5cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 9, 0, 9);
+    vuhot::lq(st, c.vuData, c.dataSize, 3, 27, 0, 1012);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2180
+    st.pc = 0x2180u;
+    vu.m_currentUpperInstruction = 0x01e2417cu;
+    vuhot::ftoi<1, 15>(st, 8, 2);
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 11, 0, 1023);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    vu.m_viReady[11] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2188
+    st.pc = 0x2188u;
+    vu.m_currentUpperInstruction = 0x00204a5fu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 9, 0, 9);
+    vuhot::sq(st, c.dataSize, 1, 6, 9, -11, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 4 @ 2190
+    st.pc = 0x2190u;
+    vu.m_currentUpperInstruction = 0x002101beu;
+    vuhot::fmac<4, 0, 2, true, 1, false>(vu, 1u, 0, 1, 6);
+    vuhot::move(st, 14, 1, 5);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][2] = vu.m_cycle + 4u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2198
+    st.pc = 0x2198u;
+    vu.m_currentUpperInstruction = 0x01e02210u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 4, 0, 8);
+    vuhot::sq(st, c.dataSize, 14, 6, 9, -8, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 6 @ 21A0
+    st.pc = 0x21A0u;
+    vu.m_currentUpperInstruction = 0x01c0191cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 3, 0, 4);
+    vuhot::sq(st, c.dataSize, 15, 2, 9, -5, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 7 @ 21A8
+    st.pc = 0x21A8u;
+    vu.m_currentUpperInstruction = 0x002009a1u;
+    vuhot::fmac<2, 1, 0, false, 1, false>(vu, 1u, 1, 0, 6);
+    vuhot::sq(st, c.dataSize, 15, 27, 6, 0, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 8 @ 21B0
+    st.pc = 0x21B0u;
+    vu.m_currentUpperInstruction = 0x01e5497du;
+    vuhot::ftoi<16, 15>(st, 9, 5);
+    vuhot::isw(st, c.dataSize, 1, 6, 0, 1023, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 9 @ 21B8
+    st.pc = 0x21B8u;
+    vu.m_currentUpperInstruction = 0x01e0421fu;
+    vuhot::maxmini<false, 2, 0, 15>(st, 8, 0, 8);
+    vuhot::isw(st, c.dataSize, 2, 11, 0, 1023, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 10 @ 21C0
+    st.pc = 0x21C0u;
+    vu.m_currentUpperInstruction = 0x01c0099cu;
+    vuhot::fmac<4, 1, 0, false, 14, true>(vu, 1u, 1, 0, 6);
+    vuhot::sq(st, c.dataSize, 14, 4, 9, -2, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    vu.m_cycle = S + 12u; st.cycles = vu.m_cycle;
+    { // pair 11 @ 21C8
+    st.pc = 0x21C8u;
+    vu.m_currentUpperInstruction = 0x00203190u;
+    vuhot::maxmini<true, 0, 0, 1>(st, 6, 0, 6);
+    vuhot::sq(st, c.dataSize, 1, 5, 9, -7, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 12 @ 21D0
+    st.pc = 0x21D0u;
+    vu.m_currentUpperInstruction = 0x01e9417cu;
+    vuhot::ftoi<1, 15>(st, 8, 9);
+    vuhot::sq(st, c.dataSize, 14, 5, 9, -4, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    vu.m_cycle = S + 17u; st.cycles = vu.m_cycle;
+    { // pair 13 @ 21D8
+    st.pc = 0x21D8u;
+    vu.m_currentUpperInstruction = 0x0020319fu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 6, 0, 6);
+    vuhot::sq(st, c.dataSize, 15, 9, 9, -1, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    vu.m_cycle = S + 21u; st.cycles = vu.m_cycle;
+    { // pair 14 @ 21E0
+    st.pc = 0x21E0u;
+    vu.m_currentUpperInstruction = 0x01e6317du;
+    vuhot::ftoi<16, 15>(st, 6, 6);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 25u; st.cycles = vu.m_cycle;
+    { // pair 15 @ 21E8
+    st.pc = 0x21E8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 1, 6, 9, -3, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 16 @ 21F0
+    st.pc = 0x21F0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 14, 6, 9, 0, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 17 @ 21F8
+    st.pc = 0x21F8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2200u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 18 @ 2200
+    st.pc = 0x2200u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x800036fcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2208u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0xb2116da548f0fb1bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_87(VU1Interpreter &vu, VuNativeCtx &c) // pc=1900 entry=cd057af54d65447f exit=abac5bc79122dc22 n=2 cycles=4
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 1900
+    st.pc = 0x1900u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x4000000du, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1908u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 3u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1908
+    st.pc = 0x1908u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 14, 9, 2, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1910u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xabac5bc79122dc22ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_88(VU1Interpreter &vu, VuNativeCtx &c) // pc=1970 entry=abac5bc79122dc22 exit=da85bd57c158f0ce n=25 cycles=28
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 25u;
+    { // pair 0 @ 1970
+    st.pc = 0x1970u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 2, 0, 987);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1978
+    st.pc = 0x1978u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 14, 10, 2, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[10][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 1980
+    st.pc = 0x1980u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 14, 11, 2, 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 1988
+    st.pc = 0x1988u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 14, 12, 2, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 1990
+    st.pc = 0x1990u;
+    vu.m_currentUpperInstruction = 0x01c249bcu;
+    vuhot::fmac<4, 0, 0, true, 14, false>(vu, 1u, 9, 2, 6);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 3, 0, 988);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 1998
+    st.pc = 0x1998u;
+    vu.m_currentUpperInstruction = 0x01c250bdu;
+    vuhot::fmac<2, 0, 1, true, 14, false>(vu, 1u, 10, 2, 2);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 1, 0, 986);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 19A0
+    st.pc = 0x19A0u;
+    const int32_t oldVi = st.vi[4];
+    vu.m_currentUpperInstruction = 0x01c258beu;
+    vuhot::fmac<2, 0, 2, true, 14, false>(vu, 1u, 11, 2, 2);
+    st.vi[4] = static_cast<int16_t>(st.vi[0] + 556);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[4] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 4; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 19A8
+    st.pc = 0x19A8u;
+    vu.m_currentUpperInstruction = 0x01c2608bu;
+    vuhot::fmac<2, 0, 3, false, 14, false>(vu, 1u, 12, 2, 2);
+    vuhot::move(st, 14, 4, 12);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 19B0
+    st.pc = 0x19B0u;
+    vu.m_currentUpperInstruction = 0x01c349bcu;
+    vuhot::fmac<4, 0, 0, true, 14, false>(vu, 1u, 9, 3, 6);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 11, 0, 1011);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[11] = vu.m_cycle + 4u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 19B8
+    st.pc = 0x19B8u;
+    vu.m_currentUpperInstruction = 0x01c350bdu;
+    vuhot::fmac<2, 0, 1, true, 14, false>(vu, 1u, 10, 3, 2);
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 3, 0, 1011);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[3] = vu.m_cycle + 4u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 19C0
+    st.pc = 0x19C0u;
+    vu.m_currentUpperInstruction = 0x01c358beu;
+    vuhot::fmac<2, 0, 2, true, 14, false>(vu, 1u, 11, 3, 2);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 19C8
+    st.pc = 0x19C8u;
+    vu.m_currentUpperInstruction = 0x01c360cbu;
+    vuhot::fmac<2, 0, 3, false, 14, false>(vu, 1u, 12, 3, 3);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 19D0
+    st.pc = 0x19D0u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01c149bcu;
+    vuhot::fmac<4, 0, 0, true, 14, false>(vu, 1u, 9, 1, 6);
+    st.vi[1] = static_cast<int16_t>(st.vi[11] + st.vi[4]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 19D8
+    st.pc = 0x19D8u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01c150bdu;
+    vuhot::fmac<2, 0, 1, true, 14, false>(vu, 1u, 10, 1, 2);
+    vuhot::lqi(st, c.vuData, c.dataSize, 14, 5, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 19E0
+    st.pc = 0x19E0u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x01c158beu;
+    vuhot::fmac<2, 0, 2, true, 14, false>(vu, 1u, 11, 1, 2);
+    st.vi[2] = static_cast<int16_t>(st.vi[11] + 796);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 15 @ 19E8
+    st.pc = 0x19E8u;
+    vu.m_currentUpperInstruction = 0x01c1630bu;
+    vuhot::fmac<2, 0, 3, false, 14, false>(vu, 1u, 12, 1, 12);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 19u; st.cycles = vu.m_cycle;
+    { // pair 16 @ 19F0
+    st.pc = 0x19F0u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01c561bcu;
+    vuhot::fmac<4, 0, 0, true, 14, false>(vu, 1u, 12, 5, 6);
+    vuhot::lqi(st, c.vuData, c.dataSize, 14, 20, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[20][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[20][2] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 17 @ 19F8
+    st.pc = 0x19F8u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x01c510bdu;
+    vuhot::fmac<2, 0, 1, true, 14, false>(vu, 1u, 2, 5, 2);
+    st.vi[3] = static_cast<int16_t>(st.vi[2] + st.vi[3]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 18 @ 1A00
+    st.pc = 0x1A00u;
+    vu.m_currentUpperInstruction = 0x01c518beu;
+    vuhot::fmac<2, 0, 2, true, 14, false>(vu, 1u, 3, 5, 2);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 19 @ 1A08
+    st.pc = 0x1A08u;
+    vu.m_currentUpperInstruction = 0x01c0214bu;
+    vuhot::fmac<2, 0, 3, false, 14, false>(vu, 1u, 4, 0, 5);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 20 @ 1A10
+    st.pc = 0x1A10u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x01d461bcu;
+    vuhot::fmac<4, 0, 0, true, 14, false>(vu, 1u, 12, 20, 6);
+    st.vi[2] = static_cast<int16_t>(st.vi[2] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 21 @ 1A18
+    st.pc = 0x1A18u;
+    vu.m_currentUpperInstruction = 0x01d410bdu;
+    vuhot::fmac<2, 0, 1, true, 14, true>(vu, 1u, 2, 20, 2);
+    vuhot::lq(st, c.vuData, c.dataSize, 12, 20, 1, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[20][1] = vu.m_cycle + 4u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 22 @ 1A20
+    st.pc = 0x1A20u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01d418beu;
+    vuhot::fmac<2, 0, 2, true, 14, true>(vu, 1u, 3, 20, 2);
+    vuhot::lqi(st, c.vuData, c.dataSize, 2, 20, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][2] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 23 @ 1A28
+    st.pc = 0x1A28u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 3)))
+    { st.branchPending = true; st.branchTarget = 0x1A10u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1A30u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 24 @ 1A30
+    st.pc = 0x1A30u;
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[5], 16);
+      vu.m_currentUpperInstruction = 0x01c0214bu;
+      vuhot::fmac<2, 0, 3, false, 14, true>(vu, 1u, 4, 0, 5);
+      std::memcpy(upVf, st.vf[5], 16);
+      std::memcpy(st.vf[5], oldVf, 16);
+      vuhot::sq(st, c.dataSize, 14, 5, 2, -1, qs);
+      std::memcpy(st.vf[5], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1A38u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0xda85bd57c158f0ceull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_89(VU1Interpreter &vu, VuNativeCtx &c) // pc=1A10 entry=da85bd57c158f0ce exit=da85bd57c158f0ce n=5 cycles=5
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 5u;
+    { // pair 0 @ 1A10
+    st.pc = 0x1A10u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x01d461bcu;
+    vuhot::fmac<4, 0, 0, true, 14, false>(vu, 1u, 12, 20, 6);
+    st.vi[2] = static_cast<int16_t>(st.vi[2] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1A18
+    st.pc = 0x1A18u;
+    vu.m_currentUpperInstruction = 0x01d410bdu;
+    vuhot::fmac<2, 0, 1, true, 14, true>(vu, 1u, 2, 20, 2);
+    vuhot::lq(st, c.vuData, c.dataSize, 12, 20, 1, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[20][1] = vu.m_cycle + 4u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 1A20
+    st.pc = 0x1A20u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01d418beu;
+    vuhot::fmac<2, 0, 2, true, 14, true>(vu, 1u, 3, 20, 2);
+    vuhot::lqi(st, c.vuData, c.dataSize, 2, 20, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[20][2] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 1A28
+    st.pc = 0x1A28u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 3)))
+    { st.branchPending = true; st.branchTarget = 0x1A10u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1A30u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 1A30
+    st.pc = 0x1A30u;
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[5], 16);
+      vu.m_currentUpperInstruction = 0x01c0214bu;
+      vuhot::fmac<2, 0, 3, false, 14, true>(vu, 1u, 4, 0, 5);
+      std::memcpy(upVf, st.vf[5], 16);
+      std::memcpy(st.vf[5], oldVf, 16);
+      vuhot::sq(st, c.dataSize, 14, 5, 2, -1, qs);
+      std::memcpy(st.vf[5], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1A38u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0xda85bd57c158f0ceull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_90(VU1Interpreter &vu, VuNativeCtx &c) // pc=1A38 entry=da85bd57c158f0ce exit=43c6c7edd043412e n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 1A38
+    st.pc = 0x1A38u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1A40u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1A40
+    st.pc = 0x1A40u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1A48u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x43c6c7edd043412eull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_91(VU1Interpreter &vu, VuNativeCtx &c) // pc=0028 entry=43c6c7edd043412e exit=cd057af54d65447f n=3 cycles=5
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 3u;
+    { // pair 0 @ 0028
+    st.pc = 0x0028u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[13] = static_cast<int16_t>(st.vi[13] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 3u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0030
+    st.pc = 0x0030u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48000800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0038u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 0038
+    st.pc = 0x0038u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 2, 13, -1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0040u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xcd057af54d65447full; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_92(VU1Interpreter &vu, VuNativeCtx &c) // pc=1EF0 entry=cd057af54d65447f exit=486828c814e27754 n=15 cycles=15
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 15u;
+    { // pair 0 @ 1EF0
+    st.pc = 0x1EF0u;
+    const int32_t oldVi = st.vi[10];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[10] = static_cast<int16_t>(st.vi[0] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[10] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 10; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1EF8
+    st.pc = 0x1EF8u;
+    vu.m_currentUpperInstruction = 0x01e00710u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 0, 0, 28);
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 5, 0, 1018);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[28][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[28][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[28][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[28][3] = vu.m_cycle + 4u;
+    vu.m_viReady[5] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 1F00
+    st.pc = 0x1F00u;
+    vu.m_currentUpperInstruction = 0x01e00750u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 0, 0, 29);
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 1, 0, 1011);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[29][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[29][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[29][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[29][3] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 1F08
+    st.pc = 0x1F08u;
+    vu.m_currentUpperInstruction = 0x01e00790u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 0, 0, 30);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 2, 0, 1018);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[30][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[30][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 1F10
+    st.pc = 0x1F10u;
+    vu.m_currentUpperInstruction = 0x01e007d0u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 0, 0, 31);
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 3, 0, 1018);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[31][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[31][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[31][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[31][3] = vu.m_cycle + 4u;
+    vu.m_viReady[3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 1F18
+    st.pc = 0x1F18u;
+    op.execUpper(vu, 0x01c001ffu);
+    vuhot::ilw(st, c.vuData, c.dataSize, 2, 4, 0, 1018);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[4] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 1F20
+    st.pc = 0x1F20u;
+    op.execUpper(vu, 0x01c001ffu);
+    vuhot::ilw(st, c.vuData, c.dataSize, 2, 6, 0, 1023);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 1F28
+    st.pc = 0x1F28u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 16, 0, 1013);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[16][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[16][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[16][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[16][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 1F30
+    st.pc = 0x1F30u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lqi(st, c.vuData, c.dataSize, 4, 27, 13);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][1] = vu.m_cycle + 4u;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 1F38
+    st.pc = 0x1F38u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[8] = static_cast<int16_t>(st.vi[5] + 16384);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 1F40
+    st.pc = 0x1F40u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[8] = static_cast<int16_t>(st.vi[8] + 16384);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 1F48
+    st.pc = 0x1F48u;
+    const int32_t oldVi = st.vi[4];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[4] = static_cast<int16_t>(st.vi[4] + st.vi[12]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[4] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 4; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 1F50
+    st.pc = 0x1F50u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 7, 4, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 1F58
+    st.pc = 0x1F58u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 0)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 10)))
+    { st.branchPending = true; st.branchTarget = 0x1F88u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1F60u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 1F60
+    st.pc = 0x1F60u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[3] = static_cast<int16_t>(st.vi[3] + st.vi[12]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1F68u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x486828c814e27754ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_93(VU1Interpreter &vu, VuNativeCtx &c) // pc=1F88 entry=486828c814e27754 exit=b4f4b1b4da29db30 n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 1F88
+    st.pc = 0x1F88u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x580008dcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1F90u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1F90
+    st.pc = 0x1F90u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x811b43fdu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][0] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1F98u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xb4f4b1b4da29db30ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_94(VU1Interpreter &vu, VuNativeCtx &c) // pc=1F98 entry=b4f4b1b4da29db30 exit=ed9ddb4fd6ac295f n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 1F98
+    st.pc = 0x1F98u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x4000004eu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1FA0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 1FA0
+    st.pc = 0x1FA0u;
+    const int32_t oldVi = st.vi[5];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[5] = static_cast<int16_t>(st.vi[5] + st.vi[5]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[5] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 5; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x1FA8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xed9ddb4fd6ac295full; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_95(VU1Interpreter &vu, VuNativeCtx &c) // pc=2210 entry=ed9ddb4fd6ac295f exit=5c3b3d8fadf25b65 n=35 cycles=42
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 35u;
+    { // pair 0 @ 2210
+    st.pc = 0x2210u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 5, 7, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2218
+    st.pc = 0x2218u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 3, 0, 1002);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2220
+    st.pc = 0x2220u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 4, 0, 1003);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2228
+    st.pc = 0x2228u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 7, 7, 716);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 2230
+    st.pc = 0x2230u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 2, 0, 1014);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2238
+    st.pc = 0x2238u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x01e51abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 3, 5, 10);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 13, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 2240
+    st.pc = 0x2240u;
+    vu.m_currentUpperInstruction = 0x01e5214bu;
+    vuhot::fmac<2, 0, 3, false, 15, false>(vu, 1u, 4, 5, 5);
+    vuhot::lq(st, c.vuData, c.dataSize, 3, 1, 0, 1016);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2248
+    st.pc = 0x2248u;
+    vu.m_currentUpperInstruction = 0x01f03abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 7, 16, 10);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 12, 4, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[12] = vu.m_cycle + 4u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 10u; st.cycles = vu.m_cycle;
+    { // pair 8 @ 2250
+    st.pc = 0x2250u;
+    vu.m_currentUpperInstruction = 0x01f011e9u;
+    vuhot::fmac<2, 3, 0, false, 15, false>(vu, 1u, 2, 16, 7);
+    op.execLower(vu, 0x81e503bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01f011e9u);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 14u; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2258
+    st.pc = 0x2258u;
+    vu.m_currentUpperInstruction = 0x01e76b6au;
+    vuhot::fmac<4, 3, 0, false, 15, false>(vu, 1u, 13, 7, 13);
+    vuhot::lq(st, c.vuData, c.dataSize, 14, 6, 7, 796);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2260
+    st.pc = 0x2260u;
+    vu.m_currentUpperInstruction = 0x002101beu;
+    vuhot::fmac<4, 0, 2, true, 1, false>(vu, 1u, 0, 1, 6);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 7, 12, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    op.advanceTo(vu, S + 18u);
+    { // pair 11 @ 2268
+    st.pc = 0x2268u;
+    vu.m_currentUpperInstruction = 0x01e06a50u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 13, 0, 9);
+    vuhot::isw(st, c.dataSize, 1, 7, 6, 4, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 12 @ 2270
+    st.pc = 0x2270u;
+    vu.m_currentUpperInstruction = 0x01c0331cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 6, 0, 12);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 11, 12, 716);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2278
+    st.pc = 0x2278u;
+    vu.m_currentUpperInstruction = 0x802009a1u;
+    vuhot::fmac<2, 1, 0, false, 1, false>(vu, 1u, 1, 0, 6);
+    { const uint32_t lb = 0x437f0000u; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 2280
+    st.pc = 0x2280u;
+    vu.m_currentUpperInstruction = 0x01e71abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 3, 7, 10);
+    vuhot::isw(st, c.dataSize, 1, 12, 6, 8, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 15 @ 2288
+    st.pc = 0x2288u;
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[5], 16);
+      vu.m_currentUpperInstruction = 0x01e7214bu;
+      vuhot::fmac<2, 0, 3, false, 15, false>(vu, 1u, 4, 7, 5);
+      std::memcpy(upVf, st.vf[5], 16);
+      std::memcpy(st.vf[5], oldVf, 16);
+      vuhot::move(st, 14, 7, 5);
+      std::memcpy(st.vf[5], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 16 @ 2290
+    st.pc = 0x2290u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x01f05abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 11, 16, 10);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 13, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 17 @ 2298
+    st.pc = 0x2298u;
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[12], 16);
+      vu.m_currentUpperInstruction = 0x01f01329u;
+      vuhot::fmac<2, 3, 0, false, 15, false>(vu, 1u, 2, 16, 12);
+      std::memcpy(upVf, st.vf[12], 16);
+      std::memcpy(st.vf[12], oldVf, 16);
+      vuhot::sq(st, c.dataSize, 14, 12, 6, 2, qs);
+      std::memcpy(st.vf[12], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 18 @ 22A0
+    st.pc = 0x22A0u;
+    vu.m_currentUpperInstruction = 0x01e04adfu;
+    vuhot::maxmini<false, 2, 0, 15>(st, 9, 0, 11);
+    vuhot::lq(st, c.vuData, c.dataSize, 14, 6, 12, 796);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 19 @ 22A8
+    st.pc = 0x22A8u;
+    vu.m_currentUpperInstruction = 0x00203190u;
+    vuhot::maxmini<true, 0, 0, 1>(st, 6, 0, 6);
+    op.execLower(vu, 0x81e503bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x00203190u);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 20 @ 22B0
+    st.pc = 0x22B0u;
+    vu.m_currentUpperInstruction = 0x01c039dcu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 7, 0, 7);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 7, 4, 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 21 @ 22B8
+    st.pc = 0x22B8u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x01ec6a6au;
+    vuhot::fmac<4, 3, 0, false, 15, false>(vu, 1u, 13, 12, 9);
+    st.vi[2] = static_cast<int16_t>(st.vi[6] + st.vi[5]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 22 @ 22C0
+    st.pc = 0x22C0u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x01ed597cu;
+    vuhot::ftoi<1, 15>(st, 11, 13);
+    st.vi[2] = static_cast<int16_t>(st.vi[2] + st.vi[5]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 23 @ 22C8
+    st.pc = 0x22C8u;
+    vu.m_currentUpperInstruction = 0x002031dfu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 6, 0, 7);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 24 @ 22D0
+    st.pc = 0x22D0u;
+    vu.m_currentUpperInstruction = 0x002101beu;
+    vuhot::fmac<4, 0, 2, true, 1, false>(vu, 1u, 0, 1, 6);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 11, 7, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 25 @ 22D8
+    st.pc = 0x22D8u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x01e04a50u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 9, 0, 9);
+    st.vi[8] = static_cast<int16_t>(st.vi[6] + 12);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 26 @ 22E0
+    st.pc = 0x22E0u;
+    vu.m_currentUpperInstruction = 0x01c0329cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 6, 0, 10);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 8, 7, 716);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 27 @ 22E8
+    st.pc = 0x22E8u;
+    vu.m_currentUpperInstruction = 0x002009a1u;
+    vuhot::fmac<2, 1, 0, false, 1, false>(vu, 1u, 1, 0, 6);
+    vuhot::isw(st, c.dataSize, 1, 7, 8, 0, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 28 @ 22F0
+    st.pc = 0x22F0u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x01eb1abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 3, 11, 10);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 12, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][3] = vu.m_cycle + 4u;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 29 @ 22F8
+    st.pc = 0x22F8u;
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[5], 16);
+      vu.m_currentUpperInstruction = 0x01eb214bu;
+      vuhot::fmac<2, 0, 3, false, 15, false>(vu, 1u, 4, 11, 5);
+      std::memcpy(upVf, st.vf[5], 16);
+      std::memcpy(st.vf[5], oldVf, 16);
+      vuhot::move(st, 14, 11, 5);
+      std::memcpy(st.vf[5], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 30 @ 2300
+    st.pc = 0x2300u;
+    vu.m_currentUpperInstruction = 0x01f042beu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 8, 16, 10);
+    vuhot::sq(st, c.dataSize, 15, 13, 8, -9, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 31 @ 2308
+    st.pc = 0x2308u;
+    vu.m_currentUpperInstruction = 0x01f01369u;
+    vuhot::fmac<2, 3, 0, false, 15, true>(vu, 1u, 2, 16, 13);
+    vuhot::lq(st, c.vuData, c.dataSize, 14, 6, 7, 796);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 32 @ 2310
+    st.pc = 0x2310u;
+    vu.m_currentUpperInstruction = 0x01e7397du;
+    vuhot::ftoi<16, 15>(st, 7, 7);
+    vuhot::sq(st, c.dataSize, 14, 10, 8, -6, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 33 @ 2318
+    st.pc = 0x2318u;
+    vu.m_currentUpperInstruction = 0x01e04a5fu;
+    vuhot::maxmini<false, 2, 0, 15>(st, 9, 0, 9);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) == static_cast<int16_t>(vuhot::readBranchVi(vu, 8)))
+    { st.branchPending = true; st.branchTarget = 0x23A0u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2320u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 34 @ 2320
+    st.pc = 0x2320u;
+    vu.m_currentUpperInstruction = 0x00203190u;
+    vuhot::maxmini<true, 0, 0, 1>(st, 6, 0, 6);
+    op.execLower(vu, 0x81e503bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x00203190u);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2328u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x5c3b3d8fadf25b65ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_96(VU1Interpreter &vu, VuNativeCtx &c) // pc=2328 entry=5c3b3d8fadf25b65 exit=a9b7bf656c828574 n=15 cycles=15
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 15u;
+    { // pair 0 @ 2328
+    st.pc = 0x2328u;
+    vu.m_currentUpperInstruction = 0x01ed62aau;
+    vuhot::fmac<4, 3, 0, false, 15, false>(vu, 1u, 12, 13, 10);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 7, 4, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[10][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][3] = vu.m_cycle + 4u;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2330
+    st.pc = 0x2330u;
+    const int32_t oldVi = st.vi[4];
+    vu.m_currentUpperInstruction = 0x01c05a1cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 11, 0, 8);
+    st.vi[4] = static_cast<int16_t>(st.vi[4] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][2] = vu.m_cycle + 4u;
+    vu.m_viReady[4] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 4; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2338
+    st.pc = 0x2338u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x01e9497cu;
+    vuhot::ftoi<1, 15>(st, 9, 9);
+    st.vi[8] = static_cast<int16_t>(st.vi[8] + 4);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2340
+    st.pc = 0x2340u;
+    vu.m_currentUpperInstruction = 0x0020321fu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 6, 0, 8);
+    vuhot::sq(st, c.dataSize, 1, 7, 8, -15, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 4 @ 2348
+    st.pc = 0x2348u;
+    vu.m_currentUpperInstruction = 0x002101beu;
+    vuhot::fmac<4, 0, 2, true, 1, false>(vu, 1u, 0, 1, 6);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 11, 7, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2350
+    st.pc = 0x2350u;
+    vu.m_currentUpperInstruction = 0x01e05290u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 10, 0, 10);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 13, 7, 716);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 6 @ 2358
+    st.pc = 0x2358u;
+    vu.m_currentUpperInstruction = 0x01c0339cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 6, 0, 14);
+    vuhot::lq(st, c.vuData, c.dataSize, 14, 6, 7, 796);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[14][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[14][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[14][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2360
+    st.pc = 0x2360u;
+    vu.m_currentUpperInstruction = 0x002009a1u;
+    vuhot::fmac<2, 1, 0, false, 1, false>(vu, 1u, 1, 0, 6);
+    vuhot::isw(st, c.dataSize, 1, 7, 8, 0, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 8 @ 2368
+    st.pc = 0x2368u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x01eb1abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 3, 11, 10);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 12, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][3] = vu.m_cycle + 4u;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2370
+    st.pc = 0x2370u;
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[5], 16);
+      vu.m_currentUpperInstruction = 0x01eb214bu;
+      vuhot::fmac<2, 0, 3, false, 15, false>(vu, 1u, 4, 11, 5);
+      std::memcpy(upVf, st.vf[5], 16);
+      std::memcpy(st.vf[5], oldVf, 16);
+      vuhot::move(st, 14, 11, 5);
+      std::memcpy(st.vf[5], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2378
+    st.pc = 0x2378u;
+    vu.m_currentUpperInstruction = 0x01f06abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 13, 16, 10);
+    vuhot::sq(st, c.dataSize, 14, 14, 8, -6, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 11 @ 2380
+    st.pc = 0x2380u;
+    vu.m_currentUpperInstruction = 0x01f01369u;
+    vuhot::fmac<2, 3, 0, false, 15, true>(vu, 1u, 2, 16, 13);
+    vuhot::sq(st, c.dataSize, 15, 9, 8, -9, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 12 @ 2388
+    st.pc = 0x2388u;
+    vu.m_currentUpperInstruction = 0x01e0525fu;
+    vuhot::maxmini<false, 2, 0, 15>(st, 10, 0, 9);
+    vuhot::sq(st, c.dataSize, 14, 7, 8, -12, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 13 @ 2390
+    st.pc = 0x2390u;
+    vu.m_currentUpperInstruction = 0x00203190u;
+    vuhot::maxmini<true, 0, 0, 1>(st, 6, 0, 6);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 8)))
+    { st.branchPending = true; st.branchTarget = 0x2328u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2398u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 2398
+    st.pc = 0x2398u;
+    vu.m_currentUpperInstruction = 0x01e7417du;
+    vuhot::ftoi<16, 15>(st, 8, 7);
+    op.execLower(vu, 0x81e503bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e7417du);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x23A0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xa9b7bf656c828574ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_97(VU1Interpreter &vu, VuNativeCtx &c) // pc=2328 entry=a9b7bf656c828574 exit=a9b7bf656c828574 n=15 cycles=15
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 15u;
+    { // pair 0 @ 2328
+    st.pc = 0x2328u;
+    vu.m_currentUpperInstruction = 0x01ed62aau;
+    vuhot::fmac<4, 3, 0, false, 15, false>(vu, 1u, 12, 13, 10);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 7, 4, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[10][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][3] = vu.m_cycle + 4u;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 2330
+    st.pc = 0x2330u;
+    const int32_t oldVi = st.vi[4];
+    vu.m_currentUpperInstruction = 0x01c05a1cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 11, 0, 8);
+    st.vi[4] = static_cast<int16_t>(st.vi[4] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[8][2] = vu.m_cycle + 4u;
+    vu.m_viReady[4] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 4; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 2338
+    st.pc = 0x2338u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x01e9497cu;
+    vuhot::ftoi<1, 15>(st, 9, 9);
+    st.vi[8] = static_cast<int16_t>(st.vi[8] + 4);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 2340
+    st.pc = 0x2340u;
+    vu.m_currentUpperInstruction = 0x0020321fu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 6, 0, 8);
+    vuhot::sq(st, c.dataSize, 1, 7, 8, -15, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[8][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 4 @ 2348
+    st.pc = 0x2348u;
+    vu.m_currentUpperInstruction = 0x002101beu;
+    vuhot::fmac<4, 0, 2, true, 1, false>(vu, 1u, 0, 1, 6);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 11, 7, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 2350
+    st.pc = 0x2350u;
+    vu.m_currentUpperInstruction = 0x01e05290u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 10, 0, 10);
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 13, 7, 716);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[10][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 6 @ 2358
+    st.pc = 0x2358u;
+    vu.m_currentUpperInstruction = 0x01c0339cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 6, 0, 14);
+    vuhot::lq(st, c.vuData, c.dataSize, 14, 6, 7, 796);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[14][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[14][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[14][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 2360
+    st.pc = 0x2360u;
+    vu.m_currentUpperInstruction = 0x002009a1u;
+    vuhot::fmac<2, 1, 0, false, 1, false>(vu, 1u, 1, 0, 6);
+    vuhot::isw(st, c.dataSize, 1, 7, 8, 0, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 8 @ 2368
+    st.pc = 0x2368u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x01eb1abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 3, 11, 10);
+    vuhot::lqi(st, c.vuData, c.dataSize, 15, 12, 3);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][3] = vu.m_cycle + 4u;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 2370
+    st.pc = 0x2370u;
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[5], 16);
+      vu.m_currentUpperInstruction = 0x01eb214bu;
+      vuhot::fmac<2, 0, 3, false, 15, false>(vu, 1u, 4, 11, 5);
+      std::memcpy(upVf, st.vf[5], 16);
+      std::memcpy(st.vf[5], oldVf, 16);
+      vuhot::move(st, 14, 11, 5);
+      std::memcpy(st.vf[5], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 2378
+    st.pc = 0x2378u;
+    vu.m_currentUpperInstruction = 0x01f06abeu;
+    vuhot::fmac<4, 3, 0, true, 15, false>(vu, 1u, 13, 16, 10);
+    vuhot::sq(st, c.dataSize, 14, 14, 8, -6, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 11 @ 2380
+    st.pc = 0x2380u;
+    vu.m_currentUpperInstruction = 0x01f01369u;
+    vuhot::fmac<2, 3, 0, false, 15, true>(vu, 1u, 2, 16, 13);
+    vuhot::sq(st, c.dataSize, 15, 9, 8, -9, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[13][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[13][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 12 @ 2388
+    st.pc = 0x2388u;
+    vu.m_currentUpperInstruction = 0x01e0525fu;
+    vuhot::maxmini<false, 2, 0, 15>(st, 10, 0, 9);
+    vuhot::sq(st, c.dataSize, 14, 7, 8, -12, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 13 @ 2390
+    st.pc = 0x2390u;
+    vu.m_currentUpperInstruction = 0x00203190u;
+    vuhot::maxmini<true, 0, 0, 1>(st, 6, 0, 6);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 8)))
+    { st.branchPending = true; st.branchTarget = 0x2328u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2398u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 2398
+    st.pc = 0x2398u;
+    vu.m_currentUpperInstruction = 0x01e7417du;
+    vuhot::ftoi<16, 15>(st, 8, 7);
+    op.execLower(vu, 0x81e503bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e7417du);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x23A0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xa9b7bf656c828574ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_98(VU1Interpreter &vu, VuNativeCtx &c) // pc=23A0 entry=a9b7bf656c828574 exit=b2116da548f0fb1b n=19 cycles=29
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 19u;
+    { // pair 0 @ 23A0
+    st.pc = 0x23A0u;
+    vu.m_currentUpperInstruction = 0x01ed60aau;
+    vuhot::fmac<4, 3, 0, false, 15, false>(vu, 1u, 12, 13, 2);
+    vuhot::lq(st, c.vuData, c.dataSize, 3, 27, 0, 1012);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[27][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[27][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 23A8
+    st.pc = 0x23A8u;
+    vu.m_currentUpperInstruction = 0x01c05adcu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 11, 0, 11);
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 11, 0, 1023);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_viReady[11] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 23B0
+    st.pc = 0x23B0u;
+    vu.m_currentUpperInstruction = 0x01e9497cu;
+    vuhot::ftoi<1, 15>(st, 9, 9);
+    vuhot::isw(st, c.dataSize, 1, 6, 0, 1023, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 3 @ 23B8
+    st.pc = 0x23B8u;
+    vu.m_currentUpperInstruction = 0x002032dfu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 6, 0, 11);
+    vuhot::sq(st, c.dataSize, 1, 7, 8, -11, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 4 @ 23C0
+    st.pc = 0x23C0u;
+    vu.m_currentUpperInstruction = 0x002101beu;
+    vuhot::fmac<4, 0, 2, true, 1, false>(vu, 1u, 0, 1, 6);
+    vuhot::sq(st, c.dataSize, 14, 7, 8, -8, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[3] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 5 @ 23C8
+    st.pc = 0x23C8u;
+    vu.m_currentUpperInstruction = 0x01e01090u;
+    vuhot::maxmini<true, 0, 0, 15>(st, 2, 0, 2);
+    vuhot::sq(st, c.dataSize, 15, 27, 6, 0, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 6 @ 23D0
+    st.pc = 0x23D0u;
+    vu.m_currentUpperInstruction = 0x01c0305cu;
+    vuhot::fmac<4, 1, 0, false, 14, false>(vu, 1u, 6, 0, 1);
+    vuhot::move(st, 14, 6, 5);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[6][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[6][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 23D8
+    st.pc = 0x23D8u;
+    vu.m_currentUpperInstruction = 0x002009e1u;
+    vuhot::fmac<2, 1, 0, false, 1, false>(vu, 1u, 1, 0, 7);
+    vuhot::sq(st, c.dataSize, 15, 9, 8, -5, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 8 @ 23E0
+    st.pc = 0x23E0u;
+    vu.m_currentUpperInstruction = 0x01e5597du;
+    vuhot::ftoi<16, 15>(st, 11, 5);
+    vuhot::isw(st, c.dataSize, 2, 11, 0, 1023, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 9 @ 23E8
+    st.pc = 0x23E8u;
+    vu.m_currentUpperInstruction = 0x01e0125fu;
+    vuhot::maxmini<false, 2, 0, 15>(st, 2, 0, 9);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[9][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[9][3] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 23F0
+    st.pc = 0x23F0u;
+    vu.m_currentUpperInstruction = 0x01c031dcu;
+    vuhot::fmac<4, 1, 0, false, 14, true>(vu, 1u, 6, 0, 7);
+    vuhot::sq(st, c.dataSize, 14, 1, 8, -2, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    vu.m_cycle = S + 12u; st.cycles = vu.m_cycle;
+    { // pair 11 @ 23F8
+    st.pc = 0x23F8u;
+    vu.m_currentUpperInstruction = 0x002039d0u;
+    vuhot::maxmini<true, 0, 0, 1>(st, 7, 0, 7);
+    vuhot::sq(st, c.dataSize, 1, 5, 8, -7, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 12 @ 2400
+    st.pc = 0x2400u;
+    vu.m_currentUpperInstruction = 0x01eb497cu;
+    vuhot::ftoi<1, 15>(st, 9, 11);
+    vuhot::sq(st, c.dataSize, 14, 5, 8, -4, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    vu.m_cycle = S + 17u; st.cycles = vu.m_cycle;
+    { // pair 13 @ 2408
+    st.pc = 0x2408u;
+    vu.m_currentUpperInstruction = 0x002039dfu;
+    vuhot::maxmini<false, 2, 0, 1>(st, 7, 0, 7);
+    vuhot::sq(st, c.dataSize, 15, 11, 8, -1, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    vu.m_cycle = S + 21u; st.cycles = vu.m_cycle;
+    { // pair 14 @ 2410
+    st.pc = 0x2410u;
+    vu.m_currentUpperInstruction = 0x01e7397du;
+    vuhot::ftoi<16, 15>(st, 7, 7);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[7][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[7][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 25u; st.cycles = vu.m_cycle;
+    { // pair 15 @ 2418
+    st.pc = 0x2418u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 1, 7, 8, -3, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 16 @ 2420
+    st.pc = 0x2420u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::sq(st, c.dataSize, 14, 7, 8, 0, qs);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 17 @ 2428
+    st.pc = 0x2428u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2430u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 18 @ 2430
+    st.pc = 0x2430u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x800036fcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x2438u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    c.nextHash = 0xb2116da548f0fb1bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_99(VU1Interpreter &vu, VuNativeCtx &c) // pc=24D8 entry=40380d0740f5fe55 exit=7665281c31708c5c n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 24D8
+    st.pc = 0x24D8u;
+    vu.m_currentUpperInstruction = 0x002003ecu;
+    vuhot::fmac<1, 3, 0, false, 1, true>(vu, 1u, 0, 0, 15);
+    op.execLower(vu, 0x5c004003u, c.vuData, c.dataSize, *c.gs, c.memory, 0x002003ecu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[15][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x24E0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    op.advance1(vu);
+    { // pair 1 @ 24E0
+    st.pc = 0x24E0u;
+    vu.m_currentUpperInstruction = 0x800002ffu; // NOP
+    { const uint32_t lb = 0x437f0000u; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x24E8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x7665281c31708c5cull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_100(VU1Interpreter &vu, VuNativeCtx &c) // pc=0B40 entry=cd057af54d65447f exit=fb8ef27e9dfd2579 n=29 cycles=33
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 29u;
+    { // pair 0 @ 0B40
+    st.pc = 0x0B40u;
+    vu.m_currentUpperInstruction = 0x01e0006bu;
+    vuhot::maxmini<true, 3, 0, 15>(st, 0, 0, 1);
+    vuhot::ilw(st, c.vuData, c.dataSize, 2, 1, 0, 1018);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0B48
+    st.pc = 0x0B48u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x01e0012bu;
+    vuhot::maxmini<true, 3, 0, 15>(st, 0, 0, 4);
+    st.vi[3] = static_cast<int16_t>(st.vi[0] + 128);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 0B50
+    st.pc = 0x0B50u;
+    vu.m_currentUpperInstruction = 0x01e002d3u;
+    vuhot::maxmini<true, 0, 3, 15>(st, 0, 0, 11);
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 2, 0, 1018);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[11][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[11][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 0B58
+    st.pc = 0x0B58u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 4, 1, 13, -1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 0B60
+    st.pc = 0x0B60u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[1] = static_cast<int16_t>(st.vi[1] + st.vi[12]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 0B68
+    st.pc = 0x0B68u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 6, 1, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 0B70
+    st.pc = 0x0B70u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 5, 1, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[5] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 0B78
+    st.pc = 0x0B78u;
+    const int32_t oldVi = st.vi[4];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[4] = static_cast<int16_t>(st.vi[0] + 16384);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[4] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 4; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 0B80
+    st.pc = 0x0B80u;
+    const int32_t oldVi = st.vi[4];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[4] = static_cast<int16_t>(st.vi[4] + 16384);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[4] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 4; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 0B88
+    st.pc = 0x0B88u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 12, 6, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[12][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 0B90
+    st.pc = 0x0B90u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 2, 5, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 13u; st.cycles = vu.m_cycle;
+    { // pair 11 @ 0B98
+    st.pc = 0x0B98u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x004c0303u;
+    vuhot::fmac<0, 0, 3, false, 2, true>(vu, 1u, 0, 12, 12);
+    st.vi[2] = static_cast<int16_t>(st.vi[1] + st.vi[2]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[12][2] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 0BA0
+    st.pc = 0x0BA0u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x00420083u;
+    vuhot::fmac<0, 0, 3, false, 2, true>(vu, 1u, 0, 2, 2);
+    st.vi[2] = static_cast<int16_t>(st.vi[2] + 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 17u; st.cycles = vu.m_cycle;
+    { // pair 13 @ 0BA8
+    st.pc = 0x0BA8u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01ec60ebu;
+    vuhot::maxmini<true, 3, 0, 15>(st, 12, 12, 3);
+    st.vi[1] = static_cast<int16_t>(st.vi[1] + 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 0BB0
+    st.pc = 0x0BB0u;
+    vu.m_currentUpperInstruction = 0x0100002au;
+    vuhot::fmac<4, 3, 0, false, 8, true>(vu, 1u, 0, 0, 0);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 15 @ 0BB8
+    st.pc = 0x0BB8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 7, 1, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 16 @ 0BC0
+    st.pc = 0x0BC0u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 8, 1, -2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 17 @ 0BC8
+    st.pc = 0x0BC8u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01e3196bu;
+    vuhot::maxmini<true, 3, 0, 15>(st, 3, 3, 5);
+    st.vi[1] = static_cast<int16_t>(st.vi[1] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 18 @ 0BD0
+    st.pc = 0x0BD0u;
+    vu.m_currentUpperInstruction = 0x01e210ebu;
+    vuhot::maxmini<true, 3, 0, 15>(st, 2, 2, 3);
+    op.execLower(vu, 0x34091800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e210ebu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 19 @ 0BD8
+    st.pc = 0x0BD8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 2, 7, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 20 @ 0BE0
+    st.pc = 0x0BE0u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x0104203du;
+    vuhot::fmac<0, 0, 1, true, 8, true>(vu, 1u, 4, 4, 0);
+    st.vi[9] = static_cast<int16_t>(st.vi[9] + 32767);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 21 @ 0BE8
+    st.pc = 0x0BE8u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x0104590au;
+    vuhot::fmac<2, 0, 2, false, 8, true>(vu, 1u, 11, 4, 4);
+    st.vi[8] = static_cast<int16_t>(st.vi[9] + st.vi[8]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 22 @ 0BF0
+    st.pc = 0x0BF0u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01c32afeu);
+    st.vi[8] = st.vi[8] & st.vi[4];
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 23 @ 0BF8
+    st.pc = 0x0BF8u;
+    const int32_t oldVi = st.vi[6];
+    op.execUpper(vu, 0x01c5196eu);
+    st.vi[6] = st.vi[6] | st.vi[8];
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 24 @ 0C00
+    st.pc = 0x0C00u;
+    vu.m_currentUpperInstruction = 0x00420083u;
+    vuhot::fmac<0, 0, 3, false, 2, true>(vu, 1u, 0, 2, 2);
+    vuhot::isw(st, c.dataSize, 8, 6, 1, -3, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 25 @ 0C08
+    st.pc = 0x0C08u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 6, 1, -2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 26 @ 0C10
+    st.pc = 0x0C10u;
+    vu.m_currentUpperInstruction = 0x01012019u;
+    vuhot::fmac<4, 0, 1, false, 8, true>(vu, 1u, 4, 1, 0);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 7, 1, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 27 @ 0C18
+    st.pc = 0x0C18u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 1)))
+    { st.branchPending = true; st.branchTarget = 0x0BC8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0C20u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 28 @ 0C20
+    st.pc = 0x0C20u;
+    vu.m_currentUpperInstruction = 0x01e2292au;
+    vuhot::fmac<4, 3, 0, false, 15, true>(vu, 1u, 5, 2, 4);
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 8, 1, -2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0C28u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xfb8ef27e9dfd2579ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_101(VU1Interpreter &vu, VuNativeCtx &c) // pc=0BC8 entry=fb8ef27e9dfd2579 exit=fb8ef27e9dfd2579 n=12 cycles=12
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 12u;
+    { // pair 0 @ 0BC8
+    st.pc = 0x0BC8u;
+    const int32_t oldVi = st.vi[1];
+    vu.m_currentUpperInstruction = 0x01e3196bu;
+    vuhot::maxmini<true, 3, 0, 15>(st, 3, 3, 5);
+    st.vi[1] = static_cast<int16_t>(st.vi[1] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][3] = vu.m_cycle + 4u;
+    vu.m_viReady[1] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 1; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0BD0
+    st.pc = 0x0BD0u;
+    vu.m_currentUpperInstruction = 0x01e210ebu;
+    vuhot::maxmini<true, 3, 0, 15>(st, 2, 2, 3);
+    op.execLower(vu, 0x34091800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e210ebu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 0BD8
+    st.pc = 0x0BD8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 15, 2, 7, 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 0BE0
+    st.pc = 0x0BE0u;
+    const int32_t oldVi = st.vi[9];
+    vu.m_currentUpperInstruction = 0x0104203du;
+    vuhot::fmac<0, 0, 1, true, 8, true>(vu, 1u, 4, 4, 0);
+    st.vi[9] = static_cast<int16_t>(st.vi[9] + 32767);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[9] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 9; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 0BE8
+    st.pc = 0x0BE8u;
+    const int32_t oldVi = st.vi[8];
+    vu.m_currentUpperInstruction = 0x0104590au;
+    vuhot::fmac<2, 0, 2, false, 8, true>(vu, 1u, 11, 4, 4);
+    st.vi[8] = static_cast<int16_t>(st.vi[9] + st.vi[8]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 0BF0
+    st.pc = 0x0BF0u;
+    const int32_t oldVi = st.vi[8];
+    op.execUpper(vu, 0x01c32afeu);
+    st.vi[8] = st.vi[8] & st.vi[4];
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[8] = vu.m_cycle + 1u;
+    vu.m_accReady[0] = vu.m_cycle + 1u;
+    vu.m_accReady[1] = vu.m_cycle + 1u;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 8; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 0BF8
+    st.pc = 0x0BF8u;
+    const int32_t oldVi = st.vi[6];
+    op.execUpper(vu, 0x01c5196eu);
+    st.vi[6] = st.vi[6] | st.vi[8];
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[5][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[5][2] = vu.m_cycle + 4u;
+    vu.m_viReady[6] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 6; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 0C00
+    st.pc = 0x0C00u;
+    vu.m_currentUpperInstruction = 0x00420083u;
+    vuhot::fmac<0, 0, 3, false, 2, true>(vu, 1u, 0, 2, 2);
+    vuhot::isw(st, c.dataSize, 8, 6, 1, -3, qs);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 8 @ 0C08
+    st.pc = 0x0C08u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 6, 1, -2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[6] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 0C10
+    st.pc = 0x0C10u;
+    vu.m_currentUpperInstruction = 0x01012019u;
+    vuhot::fmac<4, 0, 1, false, 8, true>(vu, 1u, 4, 1, 0);
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 7, 1, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[7] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 0C18
+    st.pc = 0x0C18u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 1)))
+    { st.branchPending = true; st.branchTarget = 0x0BC8u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0C20u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 0C20
+    st.pc = 0x0C20u;
+    vu.m_currentUpperInstruction = 0x01e2292au;
+    vuhot::fmac<4, 3, 0, false, 15, true>(vu, 1u, 5, 2, 4);
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 8, 1, -2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    vu.m_viReady[8] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0C28u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xfb8ef27e9dfd2579ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_102(VU1Interpreter &vu, VuNativeCtx &c) // pc=0C28 entry=fb8ef27e9dfd2579 exit=a62156f3a4de9d7b n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 0C28
+    st.pc = 0x0C28u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0C30u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0C30
+    st.pc = 0x0C30u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0C38u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xa62156f3a4de9d7bull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_103(VU1Interpreter &vu, VuNativeCtx &c) // pc=0028 entry=a62156f3a4de9d7b exit=cd057af54d65447f n=3 cycles=5
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 3u;
+    { // pair 0 @ 0028
+    st.pc = 0x0028u;
+    const int32_t oldVi = st.vi[13];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[13] = static_cast<int16_t>(st.vi[13] + 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[13] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 13; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 3u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 0030
+    st.pc = 0x0030u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48000800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0038u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 0038
+    st.pc = 0x0038u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 4, 2, 13, -1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x0040u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xcd057af54d65447full; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_104(VU1Interpreter &vu, VuNativeCtx &c) // pc=3160 entry=cd057af54d65447f exit=ea6174d99d51dfdc n=16 cycles=19
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 16u;
+    { // pair 0 @ 3160
+    st.pc = 0x3160u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 0, 1011);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 3168
+    st.pc = 0x3168u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 1, 3, 0, 1011);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 4u; st.cycles = vu.m_cycle;
+    { // pair 2 @ 3170
+    st.pc = 0x3170u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[2] = static_cast<int16_t>(st.vi[1] + 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 3178
+    st.pc = 0x3178u;
+    const int32_t oldVi = st.vi[3];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    st.vi[3] = static_cast<int16_t>(st.vi[2] + st.vi[3]);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[3] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 3; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 3180
+    st.pc = 0x3180u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 1, 4, 2, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 3188
+    st.pc = 0x3188u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lqi(st, c.vuData, c.dataSize, 1, 1, 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 3190
+    st.pc = 0x3190u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 2, 1, 0, 1006);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 3198
+    st.pc = 0x3198u;
+    vu.m_currentUpperInstruction = 0x800002ffu; // NOP
+    { const uint32_t lb = 0x3f800000u; float imm; std::memcpy(&imm, &lb, 4); st.i = vuhot::N(imm); }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 11u; st.cycles = vu.m_cycle;
+    { // pair 8 @ 31A0
+    st.pc = 0x31A0u;
+    vu.m_currentUpperInstruction = 0x00200866u;
+    vuhot::fmac<1, 2, 0, false, 1, true>(vu, 1u, 1, 0, 1);
+    vuhot::lq(st, c.vuData, c.dataSize, 2, 2, 0, 1007);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][2] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 31A8
+    st.pc = 0x31A8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lq(st, c.vuData, c.dataSize, 8, 3, 0, 1008);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 31B0
+    st.pc = 0x31B0u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lqi(st, c.vuData, c.dataSize, 1, 2, 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 31B8
+    st.pc = 0x31B8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 31C0
+    st.pc = 0x31C0u;
+    vu.m_currentUpperInstruction = 0x0021212fu;
+    vuhot::maxmini<false, 3, 0, 1>(st, 4, 1, 4);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 13 @ 31C8
+    st.pc = 0x31C8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 31D0
+    st.pc = 0x31D0u;
+    vu.m_currentUpperInstruction = 0x00201066u;
+    vuhot::fmac<1, 2, 0, false, 1, true>(vu, 1u, 2, 0, 1);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 3)))
+    { st.branchPending = true; st.branchTarget = 0x31B0u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x31D8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 15 @ 31D8
+    st.pc = 0x31D8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x31E0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xea6174d99d51dfdcull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_105(VU1Interpreter &vu, VuNativeCtx &c) // pc=31B0 entry=ea6174d99d51dfdc exit=ea6174d99d51dfdc n=6 cycles=6
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 6u;
+    { // pair 0 @ 31B0
+    st.pc = 0x31B0u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::lqi(st, c.vuData, c.dataSize, 1, 2, 2);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 31B8
+    st.pc = 0x31B8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 31C0
+    st.pc = 0x31C0u;
+    vu.m_currentUpperInstruction = 0x0021212fu;
+    vuhot::maxmini<false, 3, 0, 1>(st, 4, 1, 4);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 31C8
+    st.pc = 0x31C8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 31D0
+    st.pc = 0x31D0u;
+    vu.m_currentUpperInstruction = 0x00201066u;
+    vuhot::fmac<1, 2, 0, false, 1, true>(vu, 1u, 2, 0, 1);
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 3)))
+    { st.branchPending = true; st.branchTarget = 0x31B0u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x31D8u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 5 @ 31D8
+    st.pc = 0x31D8u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x31E0u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xea6174d99d51dfdcull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_106(VU1Interpreter &vu, VuNativeCtx &c) // pc=31E0 entry=ea6174d99d51dfdc exit=2505ebe450768d32 n=17 cycles=43
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 17u;
+    vu.m_cycle = S + 2u; st.cycles = vu.m_cycle;
+    { // pair 0 @ 31E0
+    st.pc = 0x31E0u;
+    const int32_t oldVi = st.vi[2];
+    vu.m_currentUpperInstruction = 0x0021212fu;
+    vuhot::maxmini<false, 3, 0, 1>(st, 4, 1, 4);
+    st.vi[2] = static_cast<int16_t>(st.vi[1] + 636);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[4][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 6u; st.cycles = vu.m_cycle;
+    { // pair 1 @ 31E8
+    st.pc = 0x31E8u;
+    vu.m_currentUpperInstruction = 0x01040047u;
+    vuhot::fmac<1, 0, 3, false, 8, false>(vu, 1u, 0, 4, 1);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][0] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 10u; st.cycles = vu.m_cycle;
+    { // pair 2 @ 31F0
+    st.pc = 0x31F0u;
+    vu.m_currentUpperInstruction = 0x0103086bu;
+    vuhot::maxmini<true, 3, 0, 8>(st, 1, 3, 1);
+    vuhot::lq(st, c.vuData, c.dataSize, 13, 3, 2, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][0] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 14u; st.cycles = vu.m_cycle;
+    { // pair 3 @ 31F8
+    st.pc = 0x31F8u;
+    vu.m_currentUpperInstruction = 0x010008afu;
+    vuhot::maxmini<false, 3, 0, 8>(st, 1, 0, 2);
+    vuhot::lq(st, c.vuData, c.dataSize, 1, 1, 2, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[2][0] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 18u; st.cycles = vu.m_cycle;
+    { // pair 4 @ 3200
+    st.pc = 0x3200u;
+    vu.m_currentUpperInstruction = 0x00220880u;
+    vuhot::fmac<0, 0, 0, false, 1, false>(vu, 1u, 1, 2, 2);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[2][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 22u; st.cycles = vu.m_cycle;
+    { // pair 5 @ 3208
+    st.pc = 0x3208u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x81e113bcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    op.advanceTo(vu, S + 29u);
+    { // pair 6 @ 3210
+    st.pc = 0x3210u;
+    vu.m_currentUpperInstruction = 0x01a018dcu;
+    vuhot::fmac<4, 1, 0, false, 13, false>(vu, 1u, 3, 0, 3);
+    op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01a018dcu);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    vu.m_cycle = S + 33u; st.cycles = vu.m_cycle;
+    { // pair 7 @ 3218
+    st.pc = 0x3218u;
+    vu.m_currentUpperInstruction = 0x004309bfu;
+    vuhot::fmac<4, 0, 3, true, 2, false>(vu, 1u, 1, 3, 6);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 3220
+    st.pc = 0x3220u;
+    vu.m_currentUpperInstruction = 0x004010cbu;
+    vuhot::fmac<2, 0, 3, false, 2, false>(vu, 1u, 2, 0, 3);
+    vuhot::lq(st, c.vuData, c.dataSize, 13, 1, 2, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 9 @ 3228
+    st.pc = 0x3228u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 10 @ 3230
+    st.pc = 0x3230u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 11 @ 3238
+    st.pc = 0x3238u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 12 @ 3240
+    st.pc = 0x3240u;
+    const int32_t oldVi = st.vi[2];
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[3], 16);
+      vu.m_currentUpperInstruction = 0x01a008dcu;
+      vuhot::fmac<4, 1, 0, false, 13, true>(vu, 1u, 1, 0, 3);
+      std::memcpy(upVf, st.vf[3], 16);
+      std::memcpy(st.vf[3], oldVf, 16);
+      vuhot::sqi(st, c.dataSize, 15, 3, 2, qs);
+      std::memcpy(st.vf[3], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 13 @ 3248
+    st.pc = 0x3248u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 14 @ 3250
+    st.pc = 0x3250u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 15 @ 3258
+    st.pc = 0x3258u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 3)))
+    { st.branchPending = true; st.branchTarget = 0x3220u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x3260u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 16 @ 3260
+    st.pc = 0x3260u;
+    vu.m_currentUpperInstruction = 0x004309bfu;
+    vuhot::fmac<4, 0, 3, true, 2, true>(vu, 1u, 1, 3, 6);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x3268u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x2505ebe450768d32ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_107(VU1Interpreter &vu, VuNativeCtx &c) // pc=3220 entry=2505ebe450768d32 exit=2505ebe450768d32 n=9 cycles=9
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 9u;
+    { // pair 0 @ 3220
+    st.pc = 0x3220u;
+    vu.m_currentUpperInstruction = 0x004010cbu;
+    vuhot::fmac<2, 0, 3, false, 2, false>(vu, 1u, 2, 0, 3);
+    vuhot::lq(st, c.vuData, c.dataSize, 13, 1, 2, 1);
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[1][3] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][2] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 3228
+    st.pc = 0x3228u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 2 @ 3230
+    st.pc = 0x3230u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 3 @ 3238
+    st.pc = 0x3238u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 4 @ 3240
+    st.pc = 0x3240u;
+    const int32_t oldVi = st.vi[2];
+    { float oldVf[4], upVf[4];
+      std::memcpy(oldVf, st.vf[3], 16);
+      vu.m_currentUpperInstruction = 0x01a008dcu;
+      vuhot::fmac<4, 1, 0, false, 13, true>(vu, 1u, 1, 0, 3);
+      std::memcpy(upVf, st.vf[3], 16);
+      std::memcpy(st.vf[3], oldVf, 16);
+      vuhot::sqi(st, c.dataSize, 15, 3, 2, qs);
+      std::memcpy(st.vf[3], upVf, 16); }
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[3][0] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][1] = vu.m_cycle + 4u;
+    vu.m_vfReady[3][3] = vu.m_cycle + 4u;
+    vu.m_viReady[2] = vu.m_cycle + 1u;
+    vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    op.advance1(vu);
+    { // pair 5 @ 3248
+    st.pc = 0x3248u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 6 @ 3250
+    st.pc = 0x3250u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 7 @ 3258
+    st.pc = 0x3258u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 3)))
+    { st.branchPending = true; st.branchTarget = 0x3220u; st.branchDelay = 1; }
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x3260u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 8 @ 3260
+    st.pc = 0x3260u;
+    vu.m_currentUpperInstruction = 0x004309bfu;
+    vuhot::fmac<4, 0, 3, true, 2, true>(vu, 1u, 1, 3, 6);
+    vuhot::move(st, 0, 0, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[2] = vu.m_cycle + 1u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x3268u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0x2505ebe450768d32ull; c.hashValid = true;
+    return 0;
+}
+
+
+static int vuH_108(VU1Interpreter &vu, VuNativeCtx &c) // pc=3268 entry=2505ebe450768d32 exit=a4ebff2cd70bb7ef n=2 cycles=2
+{
+    const VuNativeOps &op = *c.ops;
+    VU1State &st = vu.m_state;
+    const uint64_t S = vu.m_cycle;
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    (void)qs; (void)op;
+    c.instrs += 2u;
+    { // pair 0 @ 3268
+    st.pc = 0x3268u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    vu.m_viBranchBackupValid = false;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x3270u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    { // pair 1 @ 3270
+    st.pc = 0x3270u;
+    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
+    vuhot::ilw(st, c.vuData, c.dataSize, 8, 1, 13, 0);
+    vu.m_viBranchBackupValid = false;
+    vu.m_viReady[1] = vu.m_cycle + 4u;
+    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    st.pc = 0x3278u;
+    if (st.branchPending)
+    {
+        if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+        else { --st.branchDelay; }
+    }
+    }
+    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    c.nextHash = 0xa4ebff2cd70bb7efull; c.hashValid = true;
+    return 0;
+}
+
+
 VuHotFn vu1HotLookup(uint32_t pc, uint64_t h)
 {
     switch (pc)
     {
+    case 0x0000:
+        if (h == 0xcd057af54d65447full) return vuH_30;
+        if (h == 0x8aba1b92c58909d9ull) return vuH_33;
+        break;
     case 0x0008:
         if (h == 0x000000001234abcdull) return vuH_6;
         break;
+    case 0x0010:
+        if (h == 0xb60833aad3c33ed1ull) return vuH_32;
+        break;
     case 0x0028:
         if (h == 0x8aba1b92c58909d9ull) return vuH_11;
+        if (h == 0xa4ebff2cd70bb7efull) return vuH_79;
+        if (h == 0xcbcb1990c40525eaull) return vuH_84;
+        if (h == 0x43c6c7edd043412eull) return vuH_91;
+        if (h == 0xa62156f3a4de9d7bull) return vuH_103;
+        break;
+    case 0x0040:
+        if (h == 0x000000001234abcdull) return vuH_31;
+        break;
+    case 0x0050:
+        if (h == 0xcd057af54d65447full) return vuH_28;
+        break;
+    case 0x0060:
+        if (h == 0xe2b01f30fecfb22bull) return vuH_29;
         break;
     case 0x0070:
         if (h == 0xcd057af54d65447full) return vuH_21;
+        break;
+    case 0x0088:
+        if (h == 0xcd057af54d65447full) return vuH_27;
         break;
     case 0x00A8:
         if (h == 0xcd057af54d65447full) return vuH_13;
         break;
     case 0x0158:
         if (h == 0xd5c96e298e5a79b6ull) return vuH_2;
+        break;
+    case 0x0188:
+        if (h == 0xd5c96e298e5a79b6ull) return vuH_34;
+        if (h == 0x13eefc24f37234d9ull) return vuH_35;
+        break;
+    case 0x0B40:
+        if (h == 0xcd057af54d65447full) return vuH_100;
+        break;
+    case 0x0BC8:
+        if (h == 0xfb8ef27e9dfd2579ull) return vuH_101;
+        break;
+    case 0x0C28:
+        if (h == 0xfb8ef27e9dfd2579ull) return vuH_102;
         break;
     case 0x0C80:
         if (h == 0xcd057af54d65447full) return vuH_10;
@@ -5225,11 +14378,51 @@ VuHotFn vu1HotLookup(uint32_t pc, uint64_t h)
     case 0x16C0:
         if (h == 0x4620a69b7ddcfd0full) return vuH_1;
         break;
+    case 0x1708:
+        if (h == 0x4620a69b7ddcfd0full) return vuH_83;
+        break;
+    case 0x1900:
+        if (h == 0xcd057af54d65447full) return vuH_87;
+        break;
+    case 0x1970:
+        if (h == 0xabac5bc79122dc22ull) return vuH_88;
+        break;
+    case 0x1A10:
+        if (h == 0xda85bd57c158f0ceull) return vuH_89;
+        break;
+    case 0x1A38:
+        if (h == 0xda85bd57c158f0ceull) return vuH_90;
+        break;
+    case 0x1C48:
+        if (h == 0xcd057af54d65447full) return vuH_75;
+        break;
+    case 0x1C90:
+        if (h == 0x2f980bed0e31daf4ull) return vuH_76;
+        if (h == 0x4ff258233afc63abull) return vuH_77;
+        break;
+    case 0x1CB0:
+        if (h == 0x4ff258233afc63abull) return vuH_78;
+        break;
     case 0x1EE0:
         if (h == 0xcd057af54d65447full) return vuH_26;
         break;
+    case 0x1EF0:
+        if (h == 0xcd057af54d65447full) return vuH_92;
+        break;
     case 0x1EF8:
         if (h == 0x2500f9095d82efe9ull) return vuH_7;
+        break;
+    case 0x1F68:
+        if (h == 0x486828c814e27754ull) return vuH_36;
+        break;
+    case 0x1F78:
+        if (h == 0xb4f4b1b4da29db30ull) return vuH_85;
+        break;
+    case 0x1F88:
+        if (h == 0x486828c814e27754ull) return vuH_93;
+        break;
+    case 0x1F98:
+        if (h == 0xb4f4b1b4da29db30ull) return vuH_94;
         break;
     case 0x1FE0:
         if (h == 0xed9ddb4fd6ac295full) return vuH_3;
@@ -5240,19 +14433,115 @@ VuHotFn vu1HotLookup(uint32_t pc, uint64_t h)
         break;
     case 0x2170:
         if (h == 0x11f866f1c074d242ull) return vuH_5;
+        if (h == 0x56c3edca4422f591ull) return vuH_86;
+        break;
+    case 0x2210:
+        if (h == 0xed9ddb4fd6ac295full) return vuH_95;
+        break;
+    case 0x2328:
+        if (h == 0x5c3b3d8fadf25b65ull) return vuH_96;
+        if (h == 0xa9b7bf656c828574ull) return vuH_97;
+        break;
+    case 0x23A0:
+        if (h == 0xa9b7bf656c828574ull) return vuH_98;
         break;
     case 0x2440:
         if (h == 0xb4f4b1b4da29db30ull) return vuH_20;
         break;
+    case 0x24C8:
+        if (h == 0xc946c511275567c5ull) return vuH_38;
+        break;
+    case 0x24D8:
+        if (h == 0x8c57fdc659ceb8caull) return vuH_39;
+        if (h == 0x40380d0740f5fe55ull) return vuH_99;
+        break;
+    case 0x24E8:
+        if (h == 0x7665281c31708c5cull) return vuH_40;
+        break;
     case 0x24F0:
         if (h == 0x8c57fdc659ceb8caull) return vuH_22;
+        if (h == 0x40380d0740f5fe55ull) return vuH_37;
         break;
     case 0x24F8:
         if (h == 0x7665281c31708c5cull) return vuH_9;
         if (h == 0x000000001234abcdull) return vuH_12;
+        if (h == 0x1172e6b5e82732faull) return vuH_82;
+        break;
+    case 0x25B8:
+        if (h == 0xc946c511275567c5ull) return vuH_43;
+        break;
+    case 0x28A0:
+        if (h == 0xe8e15a5c4d996754ull) return vuH_41;
+        break;
+    case 0x28B8:
+        if (h == 0x000000001234abcdull) return vuH_44;
+        break;
+    case 0x28C8:
+        if (h == 0x000000001234abcdull) return vuH_45;
+        break;
+    case 0x28D8:
+        if (h == 0x000000001234abcdull) return vuH_46;
+        break;
+    case 0x28E8:
+        if (h == 0x000000001234abcdull) return vuH_47;
+        break;
+    case 0x28F8:
+        if (h == 0x000000001234abcdull) return vuH_48;
+        break;
+    case 0x2908:
+        if (h == 0x000000001234abcdull) return vuH_49;
+        break;
+    case 0x29D8:
+        if (h == 0x000000001234abcdull) return vuH_50;
+        break;
+    case 0x2A50:
+        if (h == 0xd41ee2f6b57fe0b5ull) return vuH_51;
+        break;
+    case 0x2A60:
+        if (h == 0x326ca533d68687beull) return vuH_53;
+        break;
+    case 0x2AB8:
+        if (h == 0xd41ee2f6b57fe0b5ull) return vuH_54;
+        break;
+    case 0x2AC8:
+        if (h == 0x326ca533d68687beull) return vuH_55;
+        break;
+    case 0x2B28:
+        if (h == 0xd41ee2f6b57fe0b5ull) return vuH_56;
+        break;
+    case 0x2B38:
+        if (h == 0x326ca533d68687beull) return vuH_57;
+        break;
+    case 0x2B90:
+        if (h == 0xd41ee2f6b57fe0b5ull) return vuH_62;
+        break;
+    case 0x2BA0:
+        if (h == 0x326ca533d68687beull) return vuH_65;
+        break;
+    case 0x2C00:
+        if (h == 0xd41ee2f6b57fe0b5ull) return vuH_66;
+        break;
+    case 0x2C10:
+        if (h == 0x326ca533d68687beull) return vuH_67;
+        break;
+    case 0x2C68:
+        if (h == 0xd41ee2f6b57fe0b5ull) return vuH_69;
+        break;
+    case 0x2C78:
+        if (h == 0x326ca533d68687beull) return vuH_72;
         break;
     case 0x2CB8:
         if (h == 0x000000001234abcdull) return vuH_19;
+        if (h == 0x7ba272039efac167ull) return vuH_73;
+        break;
+    case 0x2D48:
+        if (h == 0x000000001234abcdull) return vuH_74;
+        break;
+    case 0x2D50:
+        if (h == 0x21870965ff0b7b2full) return vuH_81;
+        break;
+    case 0x2DA8:
+        if (h == 0x000000001234abcdull) return vuH_42;
         break;
     case 0x2DB8:
         if (h == 0x98c2232933f1dd3bull) return vuH_16;
@@ -5263,14 +14552,58 @@ VuHotFn vu1HotLookup(uint32_t pc, uint64_t h)
     case 0x2DE0:
         if (h == 0x000000001234abcdull) return vuH_18;
         break;
+    case 0x2E00:
+        if (h == 0x8655dbcc72d6d1adull) return vuH_63;
+        break;
+    case 0x2E10:
+        if (h == 0x093fa05c5bd880a3ull) return vuH_64;
+        break;
     case 0x2E18:
         if (h == 0x8655dbcc72d6d1adull) return vuH_15;
         break;
     case 0x2E40:
         if (h == 0x8c2a0e5d3afdce3full) return vuH_24;
         break;
+    case 0x2E50:
+        if (h == 0x8c2a0e5d3afdce3full) return vuH_58;
+        break;
+    case 0x2E60:
+        if (h == 0xccb59dece6b32591ull) return vuH_61;
+        break;
+    case 0x2E78:
+        if (h == 0x093fa05c5bd880a3ull) return vuH_68;
+        break;
+    case 0x2E88:
+        if (h == 0xd41ee2f6b57fe0b5ull) return vuH_52;
+        break;
     case 0x2E98:
         if (h == 0x21870965ff0b7b2full) return vuH_23;
+        break;
+    case 0x2EC8:
+        if (h == 0x212a5887dba05810ull) return vuH_59;
+        break;
+    case 0x2ED8:
+        if (h == 0xe3e200fd9bc84c85ull) return vuH_70;
+        if (h == 0x498f75e2d3e57238ull) return vuH_80;
+        break;
+    case 0x2EF8:
+        if (h == 0xe3e200fd9bc84c85ull) return vuH_60;
+        if (h == 0x498f75e2d3e57238ull) return vuH_71;
+        break;
+    case 0x3160:
+        if (h == 0xcd057af54d65447full) return vuH_104;
+        break;
+    case 0x31B0:
+        if (h == 0xea6174d99d51dfdcull) return vuH_105;
+        break;
+    case 0x31E0:
+        if (h == 0xea6174d99d51dfdcull) return vuH_106;
+        break;
+    case 0x3220:
+        if (h == 0x2505ebe450768d32ull) return vuH_107;
+        break;
+    case 0x3268:
+        if (h == 0x2505ebe450768d32ull) return vuH_108;
         break;
     default: break;
     }
@@ -5278,8 +14611,8 @@ VuHotFn vu1HotLookup(uint32_t pc, uint64_t h)
 }
 
 const bool kVu1HotStart[2048] = {
-    0,1,0,0,0,1,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    1,1,1,0,0,1,0,0,1,0,1,0,1,0,1,0,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -5289,8 +14622,8 @@ const bool kVu1HotStart[2048] = {
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,
+    0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -5301,34 +14634,34 @@ const bool kVu1HotStart[2048] = {
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,
+    0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    1,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,1,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,1,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,0,1,0,1,0,0,0,0,0,0,0,0,1,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,0,1,1,1,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1,0,0,0,
-    0,0,0,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,1,0,1,0,1,0,1,0,1,
+    0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,
+    0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,
+    1,0,1,0,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,1,1,0,0,0,
+    1,0,1,1,0,0,0,0,1,0,1,0,1,0,0,1,0,1,0,1,0,0,0,0,0,1,0,1,0,0,0,1,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,
+    0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
