@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cctype>
 #include "../IsoDisc.h"
 
@@ -794,7 +796,7 @@ namespace
               m_ctx(ctx),
               m_runtime(runtime),
               m_fixedArgs(fixedArgs),
-              m_stackBase(getRegU32(ctx, 29) + 0x10)
+              m_stackBase(getRegU32(ctx, 29)) // FIX-VARARG-STACK: EE ABI stack args start at sp+0 in 8-byte slots (verified in PCSX2 at 0x350CCC)
         {
             if (m_fixedArgs < 0)
             {
@@ -812,6 +814,15 @@ namespace
 
         uint64_t nextU64()
         {
+            if (m_slotIndex >= 8u)
+            {
+                // stack arguments occupy one 8-byte slot each
+                const uint64_t lo = readWordAtSlot(m_slotIndex);
+                uint32_t hiWord = 0;
+                (void)tryReadWordFromGuest(m_rdram, m_runtime, m_stackBase + (m_slotIndex - 8u) * 8u + 4u, hiWord);
+                ++m_slotIndex;
+                return lo | (static_cast<uint64_t>(hiWord) << 32);
+            }
             // O32 ABI aligns 64-bit variadic values on even 32-bit slots.
             if ((m_slotIndex & 1u) != 0u)
             {
@@ -833,7 +844,7 @@ namespace
             }
 
             const uint32_t stackIndex = slotIndex - 8u;
-            const uint32_t stackAddr = m_stackBase + stackIndex * 4u;
+            const uint32_t stackAddr = m_stackBase + stackIndex * 8u;
             uint32_t value = 0;
             (void)tryReadWordFromGuest(m_rdram, m_runtime, stackAddr, value);
             return value;
@@ -1207,7 +1218,7 @@ namespace
     std::string formatPs2StringWithArgs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, const char *format, int fixedArgs)
     {
         Ps2VarArgCursor cursor(rdram, ctx, runtime, fixedArgs);
-        return formatPs2StringCore(
+        std::string gzResult = formatPs2StringCore(
             rdram,
             format,
             [&cursor]()
@@ -1216,6 +1227,18 @@ namespace
             { return cursor.nextU64(); },
             [rdram, runtime](uint32_t addr)
             { return readPs2CStringBounded(rdram, runtime, addr); });
+        { // PROBE-GZ: log path-like formatted strings (format, arg regs, result)
+            static std::atomic<uint32_t> s_gzLines{0};
+            if ((gzResult.find("player") != std::string::npos || gzResult.find("g_nrm") != std::string::npos) &&
+                s_gzLines.fetch_add(1, std::memory_order_relaxed) < 60u)
+            {
+                std::printf("[probe] gz fmt=\"%s\" a2=0x%X a3=0x%X t0=0x%X t1=0x%X t2=0x%X t3=0x%X ra=0x%X result=\"%s\"\n",
+                            format, getRegU32(ctx, 6), getRegU32(ctx, 7), getRegU32(ctx, 8), getRegU32(ctx, 9),
+                            getRegU32(ctx, 10), getRegU32(ctx, 11), getRegU32(ctx, 31), gzResult.c_str());
+                std::fflush(stdout);
+            }
+        }
+        return gzResult;
     }
 
     std::string formatPs2StringWithVaList(uint8_t *rdram, PS2Runtime *runtime, const char *format, uint32_t vaListAddr)

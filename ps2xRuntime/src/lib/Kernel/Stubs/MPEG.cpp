@@ -285,7 +285,10 @@ namespace ps2_stubs
                 // movies finish early once the EE is fast enough to drain them.
                 m_codecCtx->skip_frame = AVDISCARD_DEFAULT;
                 m_codecCtx->err_recognition = 0;
-                m_codecCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+                // No AV_CODEC_FLAG_LOW_DELAY: the streams are IPBBP coded (coded order P2 B1 P5 B3 B4 ...,
+                // display order by temporal reference); low delay made FFmpeg emit pictures in coded order,
+                // which showed motion going back and forth. Without it FFmpeg buffers one P picture and
+                // outputs in display order.
                 const int ret = avcodec_open2(m_codecCtx, codec, nullptr);
                 if (ret < 0)
                 {

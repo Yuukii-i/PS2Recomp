@@ -1,4 +1,5 @@
 #include "iop_emulator.h"
+#include <cstdlib>
 #include "imports/iop_cdvd.h"
 #include "core/iop_cpu.h"
 #include "imports/iop_heaplib.h"
@@ -24,11 +25,55 @@
 #include <span>
 #include <sstream>
 #include <utility>
+#include <chrono>
+#include <intrin.h>
+#include <cstdio>
+#include <unordered_map>
+#include <vector>
 
 namespace ps2x::iop::detail
 {
     namespace
     {
+        // PROBE-KC: IOP time budget, reported about once per second on stdout ("[iop] ...")
+        struct KcStats
+        {
+            uint64_t rcCalls = 0, rcTicks = 0, cpuCalls = 0, cpuTicks = 0, instrs = 0, loopIters = 0, idleIters = 0, slices = 0;
+            std::unordered_map<uint32_t, uint64_t> hot;
+            std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+            uint64_t tsc0 = __rdtsc();
+        };
+        KcStats g_kc;
+
+        void kcMaybeReport()
+        {
+            if ((g_kc.rcCalls & 0xFFFFu) != 0u)
+                return;
+            const auto now = std::chrono::steady_clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(now - g_kc.t0).count();
+            if (ms < 1000.0)
+                return;
+            const uint64_t tsc = __rdtsc();
+            const double ticksPerMs = static_cast<double>(tsc - g_kc.tsc0) / ms;
+            std::vector<std::pair<uint64_t, uint32_t>> top;
+            for (const auto &[pcb, n] : g_kc.hot)
+                top.emplace_back(n, pcb);
+            std::sort(top.begin(), top.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+            std::printf("[iop] window_ms=%.0f runCycles calls=%llu busy=%.1fms (%.1f%%) loopIters=%llu idleIters=%llu | runCpu calls=%llu busy=%.1fms instrs=%llu (%.1f M/s) top:",
+                        ms, static_cast<unsigned long long>(g_kc.rcCalls), g_kc.rcTicks / ticksPerMs, 100.0 * g_kc.rcTicks / ticksPerMs / ms,
+                        static_cast<unsigned long long>(g_kc.loopIters), static_cast<unsigned long long>(g_kc.idleIters),
+                        static_cast<unsigned long long>(g_kc.cpuCalls), g_kc.cpuTicks / ticksPerMs, static_cast<unsigned long long>(g_kc.instrs),
+                        g_kc.instrs / ms / 1000.0);
+            for (size_t i = 0; i < top.size() && i < 8; ++i)
+                std::printf(" 0x%08X=%.1f%%", top[i].second, g_kc.instrs ? 100.0 * top[i].first / g_kc.instrs : 0.0);
+            std::printf("\n");
+            std::fflush(stdout);
+            g_kc.rcCalls = g_kc.rcTicks = g_kc.cpuCalls = g_kc.cpuTicks = g_kc.instrs = g_kc.loopIters = g_kc.idleIters = 0;
+            g_kc.hot.clear();
+            g_kc.t0 = now;
+            g_kc.tsc0 = tsc;
+        }
+
         constexpr uint32_t kRamSize = IopMemory::RamSize;
         constexpr uint32_t kKernelHeapBase = IopMemory::HeapBase;
         constexpr uint32_t kKernelHeapLimit = IopMemory::HeapLimit;
@@ -126,6 +171,7 @@ namespace ps2x::iop::detail
             ioman.reset();
             pendingDmaInterrupts.clear();
             pendingGuestCallbacks.clear();
+            idleSkipUntil = 0; // PERF-KE
             nextModuleId = 1;
             moduleCursor = kModuleLoadBase;
             totalCycles = 0;
@@ -399,6 +445,7 @@ namespace ps2x::iop::detail
 
         uint32_t runCpu(CpuState &cpu, uint32_t instructionBudget)
         {
+            const uint64_t kcT0 = __rdtsc(); // PROBE-KC
             CpuState *previous = activeCpu;
             activeCpu = &cpu;
             const uint64_t start = totalInstructions;
@@ -412,6 +459,14 @@ namespace ps2x::iop::detail
                     servicePendingGuestCallbacks();
             }
             activeCpu = previous;
+            // PROBE-KC: where does the IOP spend its instructions? end-of-slice pc histogram (64-byte buckets) weighted by instructions run
+            {
+                const uint64_t executed = totalInstructions - start;
+                g_kc.hot[cpu.pc & ~0x3Fu] += executed;
+                g_kc.instrs += executed;
+                ++g_kc.cpuCalls;
+                g_kc.cpuTicks += __rdtsc() - kcT0;
+            }
             return static_cast<uint32_t>(totalInstructions - start);
         }
 
@@ -555,26 +610,41 @@ namespace ps2x::iop::detail
 
         void runCycles(uint64_t cycles) noexcept
         {
+            // PERF-KE: the EE calls this ~4.5M times per second and every call used to run one full idle iteration (DMA/callback/timer service, ready-queue
+            // scan, thread-map + timer scans for the next wake) = ~9% of the EE thread, with 0 IOP instructions executed. When the previous pass found the IOP idle
+            // until `idleSkipUntil` (earliest of: delayed-thread wake, pending DMA irq, guest callback, timer compare/overflow), nothing can happen before
+            // then, so just advance the cycle counter. Every external entry point (RPC, SIF, module load, memory write, reset) clears the hint.
+            if (idleSkipUntil != 0u && totalCycles + cycles < idleSkipUntil)
+            {
+                totalCycles += cycles;
+                return;
+            }
+            const uint64_t kcR0 = __rdtsc(); // PROBE-KC
+            ++g_kc.rcCalls;
             try
             {
                 const uint64_t target = totalCycles + cycles;
                 while (totalCycles < target)
                 {
+                    ++g_kc.loopIters; // PROBE-KC
                     servicePendingDmaInterrupts();
                     servicePendingGuestCallbacks();
                     timrman.serviceDue(totalCycles, *this);
                     IopThread *next = kernel.beginNextReady(totalCycles);
                     if (!next)
                     {
-                        uint64_t nextWake = kernel.nextWakeCycle(target);
+                        ++g_kc.idleIters; // PROBE-KC
+                        uint64_t horizon = kernel.nextWakeCycle(UINT64_MAX);
                         for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
-                            nextWake = std::min(nextWake, completionCycle);
+                            horizon = std::min(horizon, completionCycle);
                         if (!pendingGuestCallbacks.empty())
-                            nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
-                        nextWake = timrman.nextEventCycle(nextWake);
-                        totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
+                            horizon = std::min(horizon, pendingGuestCallbacks.begin()->first);
+                        horizon = timrman.nextEventCycle(horizon);
+                        idleSkipUntil = horizon; // PERF-KE
+                        totalCycles = std::max(totalCycles + 1u, std::min(target, horizon));
                         continue;
                     }
+                    idleSkipUntil = 0u; // PERF-KE: a thread is runnable, the idle hint is void
                     const uint64_t before = totalCycles;
                     runCpu(next->cpu, static_cast<uint32_t>(std::min<uint64_t>(kDefaultSlice, target - totalCycles)));
                     kernel.endTimeslice(*next, kThreadReturnSentinel);
@@ -586,6 +656,8 @@ namespace ps2x::iop::detail
             {
                 // Runtime scheduling must never throw through EeScheduler::accountCycles().
             }
+            g_kc.rcTicks += __rdtsc() - kcR0; // PROBE-KC
+            kcMaybeReport();
         }
 
         ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
@@ -702,6 +774,7 @@ namespace ps2x::iop::detail
         uint64_t totalCycles = 0;
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;
+        uint64_t idleSkipUntil = 0; // PERF-KE: IOP cycle before which runCycles() is a no-op (0 = unknown / not idle)
         CpuState *activeCpu = nullptr;
         std::string lastError;
         bool servicingDmaInterrupts = false;
@@ -726,22 +799,38 @@ namespace ps2x::iop::detail
 
     ModuleLoadResult IopEmulator::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         return m_impl->loadModule(path, arguments, argumentSize);
     }
 
     ModuleLoadResult IopEmulator::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         return m_impl->loadModuleBuffer(guestAddress, arguments, argumentSize);
     }
 
     bool IopEmulator::stopModule(int32_t moduleId, int32_t *result)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         return m_impl->stopModule(moduleId, result);
     }
 
     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
     {
         const uint64_t total = m_impl->eeCycleCarry + eeCycles;
+        // PERF-JK: accountCycles() calls this at every guest checkpoint with a handful of cycles; each IOP runCycles() pass re-polls DMA/callback/timer/
+        // ready-queue state (~9% of the EE thread in the title). Let the IOP lag by at most kBatch EE cycles (~7 us at 2048) and run it in bigger steps.
+        // PS2X_IOP_BATCH=<EE cycles> overrides (0 = previous behaviour).
+        static const uint64_t kBatch = []() -> uint64_t
+        {
+            const char *e = std::getenv("PS2X_IOP_BATCH");
+            return e ? static_cast<uint64_t>(std::strtoull(e, nullptr, 10)) : 0u; // default off: A/B (li vs lj) showed no gain
+        }();
+        if (total < kBatch)
+        {
+            m_impl->eeCycleCarry = total;
+            return;
+        }
         const uint64_t iopCycles = total / 8u;
         m_impl->eeCycleCarry = total % 8u;
         if (iopCycles)
@@ -750,6 +839,7 @@ namespace ps2x::iop::detail
 
     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         return m_impl->rpc.handleRpc(request, *m_impl);
     }
 
@@ -760,6 +850,7 @@ namespace ps2x::iop::detail
 
     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         m_impl->rpc.onSifTransfer(transfer);
     }
 

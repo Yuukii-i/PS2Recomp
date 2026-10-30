@@ -10,6 +10,10 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+// PERF-KL: cached pointer to the GIF_STAT entry of m_ioRegisters (advanceEeTimers cleared its FQC bits with a hash lookup on every cycle-accounting call)
+static uint32_t *s_gifStatPtr = nullptr;
+static const void *s_gifStatOwner = nullptr;
+void ps2xSafeLog(const char *fmt, ...);
 
 std::atomic<uint64_t> g_gsFrameKicks{0};
 
@@ -359,6 +363,7 @@ bool PS2Memory::initialize(size_t ramSize)
 
         // Initialize I/O registers
         m_ioRegisters.clear();
+        s_gifStatPtr = nullptr; // PERF-KL: the cached element is gone
 
         // Initialize GS registers
         memset(&gs_regs, 0, sizeof(gs_regs));
@@ -403,6 +408,194 @@ bool PS2Memory::initialize(size_t ramSize)
     }
 }
 
+// Task FK2: map VIF1 chain-buffer offsets to guest source addresses (probe only)
+#include <mutex>
+#include <map>
+#include <cstdlib>
+#include <chrono>
+#include <intrin.h>
+// PROBE-KF: wait/busy ticks: 0 vif1 fence wait, 1 vif1 enqueue wait, 2 gs fence wait, 3 gs backpressure wait, 4 vif1 worker busy, 5 fence waits (count)
+std::atomic<uint64_t> g_waitTicks[8]{};
+extern "C" void ps2_gs_async_fence(); // PERF-GK (gs/ps2_gif_arbiter.cpp)
+
+// PERF-HN: async VIF1/VU1 worker (opt-in PS2X_VIF1_ASYNC=1). The EE thread copies VIF1 packet data into jobs; one worker
+// runs processVIF1Data (VIF1 regs, VU1 code/data, VU1 execution, PATH1/PATH2 GIF submits). Every EE-thread access to that
+// state fences first (ps2_vif1_fence), so the worker is the exclusive owner while it runs.
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <thread>
+extern std::function<uint32_t()> g_vif1FbrstProvider;   // ps2_runtime.cpp: EE-thread FBRST (VU0 control reg) snapshot
+extern std::function<void()> g_vif1ApplyVpuStat;        // ps2_runtime.cpp: merge worker-produced VPU_STAT bits into the EE context
+extern thread_local uint32_t g_vif1JobFbrst;            // ps2_runtime.cpp: FBRST for the job being run by the worker (~0u = none)
+namespace
+{
+    struct Vif1Job
+    {
+        std::vector<uint8_t> data;
+        uint32_t fbrst = 0u;
+    };
+    struct Vif1AsyncState
+    {
+        std::mutex m;
+        std::condition_variable cvWork, cvIdle, cvSpace;
+        std::deque<Vif1Job> q;
+        size_t queuedBytes = 0;
+        bool busy = false;
+        bool started = false;
+        std::atomic<bool> pending{false}; // queue non-empty or worker busy
+    };
+    Vif1AsyncState &vifAsync()
+    {
+        static Vif1AsyncState *s = new Vif1AsyncState();
+        return *s;
+    }
+    bool vif1AsyncEnabled()
+    {
+        static const bool on = []() { const char *e = std::getenv("PS2X_VIF1_ASYNC"); return e && e[0] == '1'; }();
+        return on;
+    }
+    thread_local bool t_onVif1Worker = false;
+    constexpr size_t kVif1AsyncMaxBytes = 16u * 1024u * 1024u;
+}
+static std::function<void(const uint8_t *, uint32_t)> s_vif1Process; // bound by a PS2Memory member (private access)
+static std::function<void()> s_vif1DrainArbiter;
+static void vif1Worker()
+{
+    t_onVif1Worker = true;
+    // PROBE-KJ: PS2X_PROF_VU1WORKER=1 (with PS2X_PROF_SAMPLE=1) points the sampler's stack/owner/budget2 output at this worker instead of the EE thread
+    if (const char *pe = std::getenv("PS2X_PROF_VU1WORKER"); pe && pe[0] == '1')
+        probe_ae::recordMainGuestThread();
+    Vif1AsyncState &st = vifAsync();
+    for (;;)
+    {
+        Vif1Job job;
+        {
+            std::unique_lock<std::mutex> lock(st.m);
+            const uint64_t idT0 = __rdtsc(); // PROBE-KF: worker idle = waiting for the EE to enqueue the next job
+            st.cvWork.wait(lock, [&] { return !st.q.empty(); });
+            g_waitTicks[6].fetch_add(__rdtsc() - idT0, std::memory_order_relaxed);
+            job = std::move(st.q.front());
+            st.q.pop_front();
+            st.queuedBytes -= job.data.size();
+            st.busy = true;
+            st.cvSpace.notify_all();
+        }
+        g_vif1JobFbrst = job.fbrst;
+        const uint64_t wkT0 = __rdtsc(); // PROBE-KF
+        s_vif1Process(job.data.data(), static_cast<uint32_t>(job.data.size()));
+        g_waitTicks[4].fetch_add(__rdtsc() - wkT0, std::memory_order_relaxed);
+        if (s_vif1DrainArbiter)
+            s_vif1DrainArbiter();
+        g_vif1JobFbrst = ~0u;
+        {
+            std::lock_guard<std::mutex> lock(st.m);
+            st.busy = false;
+            if (st.q.empty())
+            {
+                st.pending.store(false, std::memory_order_release);
+                st.cvIdle.notify_all();
+            }
+        }
+    }
+}
+static void vif1EnqueueJob(std::vector<uint8_t> &&data)
+{
+    if (data.empty())
+        return;
+    Vif1AsyncState &st = vifAsync();
+    const uint32_t fbrst = g_vif1FbrstProvider ? g_vif1FbrstProvider() : 0u;
+    std::unique_lock<std::mutex> lock(st.m);
+    const uint64_t eqT0 = __rdtsc(); // PROBE-KF
+    st.cvSpace.wait(lock, [&] { return st.q.empty() || st.queuedBytes + data.size() <= kVif1AsyncMaxBytes; });
+    g_waitTicks[1].fetch_add(__rdtsc() - eqT0, std::memory_order_relaxed);
+    if (!st.started)
+    {
+        st.started = true;
+        std::thread(vif1Worker).detach();
+    }
+    Vif1Job job;
+    job.fbrst = fbrst;
+    st.queuedBytes += data.size();
+    job.data = std::move(data);
+    st.q.push_back(std::move(job));
+    st.pending.store(true, std::memory_order_release);
+    st.cvWork.notify_one();
+}
+static void vif1EnqueueCopy(const uint8_t *p, uint32_t n)
+{
+    vif1EnqueueJob(std::vector<uint8_t>(p, p + n));
+}
+extern "C" bool ps2_vif1_on_worker() { return t_onVif1Worker; }
+extern "C" void ps2_vif1_fence()
+{
+    if (!vif1AsyncEnabled() || t_onVif1Worker)
+        return;
+    Vif1AsyncState &st = vifAsync();
+    if (st.pending.load(std::memory_order_acquire))
+    {
+        const uint64_t fT0 = __rdtsc(); // PROBE-KF
+        std::unique_lock<std::mutex> lock(st.m);
+        st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
+        g_waitTicks[0].fetch_add(__rdtsc() - fT0, std::memory_order_relaxed);
+        g_waitTicks[5].fetch_add(1, std::memory_order_relaxed);
+    }
+    if (g_vif1ApplyVpuStat)
+        g_vif1ApplyVpuStat();
+    // PROBE-KF: once per second (EE thread): where does the EE wait? ms/s per wait source + VIF1 worker busy
+    static uint64_t s_calls = 0;
+    if ((++s_calls & 0xFFFu) == 0u)
+    {
+        static auto s_t0 = std::chrono::steady_clock::now();
+        static uint64_t s_tsc0 = __rdtsc();
+        static uint64_t s_prev[8]{};
+        const auto now = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - s_t0).count();
+        if (ms >= 1000.0)
+        {
+            const uint64_t tsc = __rdtsc();
+            const double tpm = static_cast<double>(tsc - s_tsc0) / ms;
+            double v[8];
+            for (int i = 0; i < 7; ++i)
+            {
+                const uint64_t cur = g_waitTicks[i].load(std::memory_order_relaxed);
+                v[i] = (i == 5) ? static_cast<double>(cur - s_prev[i]) : static_cast<double>(cur - s_prev[i]) / tpm;
+                s_prev[i] = cur;
+            }
+            // global ps2xSafeLog
+            ps2xSafeLog("[wait] window_ms=%.0f EE ms: vif1_fence=%.0f (n=%.0f) vif1_enqueue=%.0f gs_fence=%.0f gs_backpressure=%.0f | vif1_worker_busy=%.0f vif1_worker_idle=%.0f\n", ms, v[0], v[5],
+                        v[1], v[2], v[3], v[4], v[6]);
+            s_t0 = now;
+            s_tsc0 = tsc;
+        }
+    }
+}
+static std::mutex s_fkSpanMutex;
+static std::map<uint32_t, std::vector<probe_ae::AySpan>> s_fkSpansBySize;
+static void ps2_fk_setSpans(uint32_t chainSize, const std::vector<probe_ae::AySpan> &spans)
+{
+    std::lock_guard<std::mutex> lock(s_fkSpanMutex);
+    s_fkSpansBySize[chainSize] = spans;
+}
+extern "C" bool ps2_fk_lookup(uint32_t chainSize, uint32_t pos, uint32_t *outSrc, uint32_t *outBytes, uint32_t *outBufOff)
+{
+    std::lock_guard<std::mutex> lock(s_fkSpanMutex);
+    auto it = s_fkSpansBySize.find(chainSize);
+    if (it == s_fkSpansBySize.end())
+        return false;
+    for (const auto &sp : it->second)
+    {
+        if (sp.byteCount != 8u && pos >= sp.bufOffset && pos < sp.bufOffset + sp.byteCount)
+        {
+            *outSrc = sp.srcGuestAddr + (pos - sp.bufOffset);
+            *outBytes = sp.byteCount;
+            *outBufOff = sp.bufOffset;
+            return true;
+        }
+    }
+    return false;
+}
+
 void PS2Memory::resetEeTimers() noexcept
 {
     m_eeTimers = {};
@@ -417,9 +610,14 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
 
     constexpr uint32_t kGifStat = 0x10003020u;
     constexpr uint32_t kGifFqcMask = 0x1F000000u;
-    auto gifStatIt = m_ioRegisters.find(kGifStat);
-    if (gifStatIt != m_ioRegisters.end())
-        gifStatIt->second &= ~kGifFqcMask;
+    if (s_gifStatOwner != this || s_gifStatPtr == nullptr) // PERF-KL: unordered_map elements are node-stable; the only invalidation is clear() (reset above)
+    {
+        auto gifStatIt = m_ioRegisters.find(kGifStat);
+        s_gifStatOwner = this;
+        s_gifStatPtr = gifStatIt != m_ioRegisters.end() ? &gifStatIt->second : nullptr;
+    }
+    if (s_gifStatPtr)
+        *s_gifStatPtr &= ~kGifFqcMask;
 
     uint32_t interruptMask = 0u;
     for (size_t index = 0; index < m_eeTimers.size(); ++index)
@@ -538,6 +736,8 @@ uint8_t *PS2Memory::mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offs
 
 const uint8_t *PS2Memory::mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit) const
 {
+    if (physAddr >= 0x11000000u && physAddr < 0x11010000u)
+        ps2_vif1_fence(); // PERF-HN
     auto mapRange = [&](uint32_t base, uint32_t rangeSize, const uint8_t *ptr) -> const uint8_t *
     {
         if (!ptr || physAddr < base)
@@ -1095,6 +1295,16 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     {
         alignas(16) uint8_t fifoData[16];
         _mm_storeu_si128(reinterpret_cast<__m128i *>(fifoData), value);
+        if (vif1AsyncEnabled())
+        {
+            if (!s_vif1Process)
+            {
+                s_vif1DrainArbiter = [this]() { if (m_gifArbiter) m_gifArbiter->drain(); };
+                s_vif1Process = [this](const uint8_t *d, uint32_t n) { processVIF1Data(d, n); };
+            }
+            vif1EnqueueCopy(fifoData, sizeof(fifoData));
+            return;
+        }
         processVIF1Data(fifoData, sizeof(fifoData));
         return;
     }
@@ -1234,6 +1444,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (address >= 0x10003C00u && address < 0x10003E00u)
     {
+        ps2_vif1_fence(); // PERF-HN
         m_vifWriteCount.fetch_add(1, std::memory_order_relaxed);
 
         switch (address)
@@ -1320,6 +1531,23 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+            {
+                // Task FU: first sighting of each (channel, MOD, direction, TTE) DMA combination + periodic counts
+                static std::mutex s_fuMutex;
+                static std::map<uint32_t, uint32_t> s_fuSeen;
+                const uint32_t fuKey = (channelBase & 0xFFFF00u) | (((value >> 2u) & 3u) << 4u) | (value & 1u) | (((value >> 6u) & 1u) << 1u);
+                std::lock_guard<std::mutex> fuLock(s_fuMutex);
+                uint32_t &fuCount = s_fuSeen[fuKey];
+                if (fuCount == 0u || (fuCount % 20000u) == 0u)
+                {
+                    std::printf("[probe] fu dma ch=0x%08X chcr=0x%08X mod=%u dir=%u tte=%u madr=0x%08X tadr=0x%08X qwc=%u count=%u\n",
+                                channelBase, value, (value >> 2u) & 3u, value & 1u, (value >> 6u) & 1u,
+                                m_ioRegisters[channelBase + 0x10u], m_ioRegisters[channelBase + 0x30u],
+                                m_ioRegisters[channelBase + 0x20u] & 0xFFFFu, fuCount);
+                    std::fflush(stdout);
+                }
+                ++fuCount;
+            }
 
             if (tryProcessScratchpadDma(channelBase, value))
             {
@@ -1644,6 +1872,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     }
 #endif
 
+                    if (channelBase == 0x10009000u && !chainBuf.empty())
+                    {
+                        static const bool s_fkOn = []() { const char *v = std::getenv("PS2X_PROBE_VU3D"); return v && v[0] == '1'; }();
+                        if (s_fkOn)
+                            ps2_fk_setSpans(static_cast<uint32_t>(chainBuf.size()), aySpans);
+                    }
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
                     m_ioRegisters[channelBase + 0x40] = asr0;
                     m_ioRegisters[channelBase + 0x50] = asr1;
@@ -1716,6 +1950,125 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
         return false;
 
     const uint32_t mode = (chcr >> 2u) & 0x3u;
+    {
+        // Task FS: log every scratchpad DMA (the normal-mode path only handles MOD=0)
+        static std::atomic<uint32_t> s_fsCount{0};
+        static std::atomic<uint32_t> s_fsNonNormal{0};
+        if (mode != 0u)
+            s_fsNonNormal.fetch_add(1, std::memory_order_relaxed);
+        if (s_fsCount.fetch_add(1, std::memory_order_relaxed) < 80u || (mode != 0u && s_fsNonNormal.load(std::memory_order_relaxed) < 40u))
+        {
+            std::printf("[probe] fs spr dma ch=%s chcr=0x%08X mode=%u madr=0x%08X tadr=0x%08X sadr=0x%08X qwc=%u handled=%s\n",
+                        channelBase == 0x1000D000u ? "fromSPR" : (channelBase == 0x1000D400u ? "toSPR" : "other"), chcr, mode,
+                        m_ioRegisters[channelBase + 0x10u], m_ioRegisters[channelBase + 0x30u], m_ioRegisters[channelBase + 0x80u],
+                        m_ioRegisters[channelBase + 0x20u] & 0xFFFFu, mode == 0u ? "normal" : "NO(returns false)");
+            std::fflush(stdout);
+        }
+    }
+    if (mode == 1u)
+    {
+        // Task FT: scratchpad chain mode.
+        //  fromSPR (ch8, destination chain): tags live in SPR at SADR; each tag = {QWC, ID, ADDR=dest in main memory};
+        //                                    QWC qwords follow the tag in SPR and go to ADDR. ID 7 (end) stops.
+        //  toSPR   (ch9, source chain):      tags live in main memory at TADR (cnt/next/ref/refs/refe/end); data goes to SPR at SADR.
+        const bool fromSpr = channelBase == kSprFromChannel;
+        uint32_t sadr = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
+        uint32_t tadr = m_ioRegisters[channelBase + 0x30u];
+        auto sprWrap = [](uint32_t v) { return v & (PS2_SCRATCHPAD_SIZE - 1u); };
+        auto sprRead32 = [&](uint32_t off) { uint32_t v = 0u; std::memcpy(&v, m_scratchpad + sprWrap(off), sizeof(v)); return v; };
+        uint32_t lastMadr = m_ioRegisters[channelBase + 0x10u];
+        for (uint32_t tagIndex = 0; tagIndex < 4096u; ++tagIndex)
+        {
+            uint32_t tagLo = 0u, tagAddr = 0u;
+            if (fromSpr)
+            {
+                tagLo = sprRead32(sadr);
+                tagAddr = sprRead32(sadr + 4u);
+                sadr = sprWrap(sadr + 16u);
+            }
+            else
+            {
+                uint32_t tagOff = 0u;
+                try { tagOff = translateAddress(tadr); }
+                catch (const std::exception &) { break; }
+                if (tagOff + 16u > PS2_RAM_SIZE) break;
+                std::memcpy(&tagLo, m_rdram + tagOff, 4);
+                std::memcpy(&tagAddr, m_rdram + tagOff + 4, 4);
+            }
+            const uint32_t tagQwc = tagLo & 0xFFFFu;
+            const uint32_t tagId = (tagLo >> 28) & 0x7u;
+            const uint32_t bytes = tagQwc * 16u;
+            {
+                static std::atomic<uint32_t> s_ftTags{0};
+                if (s_ftTags.fetch_add(1, std::memory_order_relaxed) < 60u)
+                {
+                    std::printf("[probe] ft spr chain ch=%s tag=%08X addr=%08X id=%u qwc=%u madr_reg=0x%08X sadr=0x%X tadr=0x%08X\n",
+                                fromSpr ? "fromSPR" : "toSPR", tagLo, tagAddr, tagId, tagQwc,
+                                m_ioRegisters[channelBase + 0x10u], sadr, tadr);
+                    std::fflush(stdout);
+                }
+            }
+            uint32_t mainAddr = 0u;   // main-memory address of the data
+            uint32_t nextTadr = tadr + 16u;
+            if (fromSpr)
+            {
+                mainAddr = tagAddr & 0x7FFFFFF0u;
+            }
+            else
+            {
+                switch (tagId)
+                {
+                case 0: mainAddr = tagAddr & 0x7FFFFFF0u; break;                       // refe
+                case 1: mainAddr = tadr + 16u; nextTadr = mainAddr + bytes; break;     // cnt
+                case 2: mainAddr = tadr + 16u; nextTadr = tagAddr & 0x7FFFFFF0u; break; // next
+                case 3:
+                case 4: mainAddr = tagAddr & 0x7FFFFFF0u; break;                       // ref / refs
+                case 7: mainAddr = tadr + 16u; break;                                  // end
+                default: mainAddr = tadr + 16u; nextTadr = mainAddr + bytes; break;    // call/ret unsupported: treat as cnt
+                }
+            }
+            if (bytes != 0u)
+            {
+                uint32_t mainOff = 0u;
+                try { mainOff = translateAddress(mainAddr); }
+                catch (const std::exception &) { break; }
+                if (mainOff > PS2_RAM_SIZE || bytes > PS2_RAM_SIZE - mainOff) break;
+                uint32_t done = 0u;
+                while (done < bytes)
+                {
+                    const uint32_t chunk = std::min(bytes - done, PS2_SCRATCHPAD_SIZE - sprWrap(sadr + done));
+                    if (fromSpr)
+                    {
+                        std::memcpy(m_rdram + mainOff + done, m_scratchpad + sprWrap(sadr + done), chunk);
+                        markModified(mainOff + done, chunk);
+                    }
+                    else
+                    {
+                        std::memcpy(m_scratchpad + sprWrap(sadr + done), m_rdram + mainOff + done, chunk);
+                    }
+                    done += chunk;
+                }
+                lastMadr = mainAddr + bytes;
+                sadr = sprWrap(sadr + bytes);
+            }
+            if (fromSpr)
+            {
+                if (tagId == 7u) break;
+            }
+            else
+            {
+                tadr = nextTadr;
+                if (tagId == 7u || tagId == 0u) break;
+            }
+        }
+        m_ioRegisters[channelBase + 0x10u] = lastMadr & 0x7FFFFFF0u;
+        m_ioRegisters[channelBase + 0x20u] = 0u;
+        m_ioRegisters[channelBase + 0x80u] = sadr & 0x3FF0u;
+        if (!fromSpr)
+            m_ioRegisters[channelBase + 0x30u] = tadr;
+        completeDmacChannel(channelBase, fromSpr ? 8u : 9u);
+        return true;
+    }
     if (mode != 0u)
         return false;
 
@@ -1866,6 +2219,9 @@ void PS2Memory::processPendingTransfers()
         }
     }
     m_pendingGifTransfers.clear();
+    const bool vifAsync = vif1AsyncEnabled(); // PERF-HN
+    if (vifAsync && hadGif && m_gifArbiter)
+        m_gifArbiter->drain(); // worker is idle here (submitGifPacket fenced); flush PATH3 before VIF1 jobs are queued
 
     const bool hadVif0 = !m_pendingVif0Transfers.empty();
     for (auto &p : m_pendingVif0Transfers)
@@ -1928,6 +2284,48 @@ void PS2Memory::processPendingTransfers()
     const bool hadVif1 = !m_pendingVif1Transfers.empty();
     for (auto &p : m_pendingVif1Transfers)
     {
+        if (vifAsync) // PERF-HN: copy the packet data now (the EE may reuse the buffers), process on the worker
+        {
+            if (!s_vif1Process)
+            {
+                s_vif1DrainArbiter = [this]() { if (m_gifArbiter) m_gifArbiter->drain(); };
+                s_vif1Process = [this](const uint8_t *d, uint32_t n) { processVIF1Data(d, n); };
+            }
+            if (!p.chainData.empty())
+            {
+                vif1EnqueueJob(std::move(p.chainData));
+            }
+            else if (p.qwc > 0)
+            {
+                uint32_t srcPhys = 0;
+                const uint64_t bytes64 = static_cast<uint64_t>(p.qwc) * 16ull;
+                uint32_t bytesLeft = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                try
+                {
+                    srcPhys = translateAddress(p.srcAddr);
+                }
+                catch (const std::exception &)
+                {
+                    continue;
+                }
+                const uint32_t limit = p.fromScratchpad ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                const uint8_t *base = p.fromScratchpad ? m_scratchpad : m_rdram;
+                while (bytesLeft > 0)
+                {
+                    if (srcPhys >= limit)
+                        srcPhys = 0;
+                    uint32_t chunk = bytesLeft;
+                    if (srcPhys + chunk > limit)
+                        chunk = limit - srcPhys;
+                    if (chunk == 0)
+                        break;
+                    vif1EnqueueCopy(base + srcPhys, chunk);
+                    bytesLeft -= chunk;
+                    srcPhys += chunk;
+                }
+            }
+            continue;
+        }
         if (!p.chainData.empty())
         {
             processVIF1Data(p.chainData.data(), static_cast<uint32_t>(p.chainData.size()));
@@ -1983,7 +2381,7 @@ void PS2Memory::processPendingTransfers()
     }
     m_pendingVif1Transfers.clear();
 
-    if (m_gifArbiter)
+    if (m_gifArbiter && !vifAsync)
         m_gifArbiter->drain();
 
     static constexpr uint32_t GIF_CHANNEL = 0x1000A000;
@@ -2090,9 +2488,11 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
 {
     if (!data || sizeBytes < 16)
         return;
+    ps2_vif1_fence(); // PERF-HN: EE-thread submits must not overtake / race the VIF1 worker's PATH1/PATH2 packets
 
     probe_ae::onBhSubmitGifStart();
-    auto tGifStart = std::chrono::steady_clock::now();
+    // PERF-KK: the timestamp is only read by the probe_ae block at the end of this function
+    const auto tGifStart = probe_ae::isEnabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
     if (pathId == GifPathId::Path3)
     {
@@ -2162,6 +2562,7 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
     static constexpr uint32_t D_STAT = 0x1000E010u;
     static constexpr uint32_t D_CTRL = 0x1000E000u;
 
+    ps2_vif1_fence(); // PERF-HN
     if (!m_rdram || !m_gsVRAM || m_path3Masked)
         return false;
     if (m_gifArbiter && !m_gifArbiter->empty())
@@ -2345,6 +2746,7 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
     m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
     m_seenGifCopy = true;
     m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+    ps2_gs_async_fence(); // PERF-GK: keep order vs queued GIF packets
     gs.uploadImageNative(setupRegs[0], setupRegs[1], setupRegs[2], setupRegs[3], imageData, imageBytes);
 
     m_ioRegisters[GIF_CHANNEL + 0x30u] = finalTadr;
@@ -2372,6 +2774,7 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
     static constexpr uint32_t D_STAT = 0x1000E010u;
     static constexpr uint32_t D_CTRL = 0x1000E000u;
 
+    ps2_vif1_fence(); // PERF-HN
     if (!m_rdram || !m_gsVRAM || m_path3Masked)
         return false;
     if (m_gifArbiter && !m_gifArbiter->empty())
@@ -2420,6 +2823,7 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
     const uint8_t *payload = nullptr;
     if (!resolveContiguous(tadr + 16u, payloadBytes, payload))
         return false;
+    ps2_gs_async_fence(); // PERF-GK
     if (!gs.processNativePackedGIFPacket(payload, payloadBytes))
         return false;
 
@@ -2514,6 +2918,7 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
 
     if (address == 0x10003020u) // GIF_STAT
     {
+        ps2_vif1_fence(); // PERF-HN (m_path3Masked)
         uint32_t stat = m_ioRegisters.count(address) ? m_ioRegisters[address] : 0u;
         const uint32_t mode = m_ioRegisters.count(0x10003010u) ? m_ioRegisters[0x10003010u] : 0u;
         const uint32_t ctrl = m_ioRegisters.count(0x10003000u) ? m_ioRegisters[0x10003000u] : 0u;
@@ -2530,11 +2935,13 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
 
     if (address == 0x10003C00u) // VIF1_STAT
     {
+        ps2_vif1_fence(); // PERF-HN
         return vif1_regs.stat;
     }
 
     if (address == 0x10003C30u) // VIF1_MARK
     {
+        ps2_vif1_fence(); // PERF-HN
         return vif1_regs.mark;
     }
 

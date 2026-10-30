@@ -33,6 +33,20 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA
 #include <chrono>
 #include <unordered_set>
 #include <set>
+extern "C" void ps2_vu1_dumpDyPerSec(const uint8_t *rdram);
+
+namespace probe_ae {
+    extern std::atomic<uint32_t> s_duDecodesSinceLastPresent;
+    extern std::atomic<uint32_t> s_duDecodesThisSec;
+    extern std::atomic<uint32_t> s_duPresentsThisSec;
+}
+extern "C" uint32_t ps2_getDuDecodesSinceLast() {
+    return probe_ae::s_duDecodesSinceLastPresent.exchange(0, std::memory_order_relaxed);
+}
+extern "C" void ps2_onDuPresent() {
+    probe_ae::s_duPresentsThisSec.fetch_add(1, std::memory_order_relaxed);
+}
+
 extern "C" void ps2_getDkThread1Info(int *outCurTh, const char **outTh1Status, uint32_t *outTh1Pc, uint32_t *outTh1Ra);
 
 
@@ -2006,7 +2020,7 @@ namespace probe_ae {
             s_tried = true;
             std::error_code ec;
             std::filesystem::create_directories("logs", ec);
-            s_file = std::fopen("logs/probe_bh_sink.txt", "a");
+            s_file = std::fopen("logs/probe_bh_sink.txt", "w"); // PROBE-IL: one run per file (was "a")
         }
         return s_file;
     }
@@ -3186,14 +3200,17 @@ namespace probe_ae {
 
         static std::mutex s_sigMutex;
         static std::vector<uint64_t> s_loggedSignatures;
-        {
+        // PERF-JN: this ran a mutex + vector scan + std::map increment on EVERY VU microprogram call (~450k/s). The map count is never read;
+        // the signature is logged once, so only take the lock when this thread has not yet seen the current hash.
+        static thread_local uint64_t s_lastSeenHash = 0;
+        if (hash != s_lastSeenHash) {
             std::lock_guard<std::mutex> lock(s_sigMutex);
             if (std::find(s_loggedSignatures.begin(), s_loggedSignatures.end(), hash) == s_loggedSignatures.end()) {
                 s_loggedSignatures.push_back(hash);
                 std::printf("[hle] sig=0x%016llX match=%d\n", (unsigned long long)hash, match ? 1 : 0);
                 std::fflush(stdout);
             }
-            s_sigCountsThisSec[hash]++;
+            s_lastSeenHash = hash;
         }
 
         probe_ae::recordCaMscal(startPC);
@@ -7313,6 +7330,11 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
         ev.g74 = g74;
     }
 
+    
+    std::atomic<uint32_t> s_duDecodesSinceLastPresent{0};
+    std::atomic<uint32_t> s_duDecodesThisSec{0};
+    std::atomic<uint32_t> s_duPresentsThisSec{0};
+
     static void dumpDcStatsLocked() {
         std::vector<std::pair<uint32_t, uint32_t>> raSorted(s_dcRaCounts.begin(), s_dcRaCounts.end());
         std::sort(raSorted.begin(), raSorted.end(), [](const auto &a, const auto &b) {
@@ -7422,6 +7444,15 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
             dcLog("[probe] dc5 rdcnt ring=%u video=%u disp=%u pump=%u\n",
                   ringCnt, videoCnt, dispCnt, pumpCnt);
         dcLog("[probe] dc12 sched preempt_policy=EeScheduler::checkCheckpoint on requestPreemptionIfHigher or timeslice expiry\n");
+        ps2_vu1_dumpDyPerSec(ram);
+        // Task DU: dc13 rate
+        {
+            uint32_t p = s_duPresentsThisSec.exchange(0, std::memory_order_relaxed);
+            uint32_t d = s_duDecodesThisSec.exchange(0, std::memory_order_relaxed);
+            std::printf("[probe] dc13 rate presents=%u guest_display_copies=0 decodes=%u\n", p, d);
+            std::fflush(stdout);
+        }
+
         }
 
         // Task DI: 3. Stall dump when F==0 for 3 consecutive seconds after F>0
@@ -7695,6 +7726,8 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram);
     }
 
     void onDc4DecEntry() {
+        s_duDecodesSinceLastPresent.fetch_add(1, std::memory_order_relaxed);
+        s_duDecodesThisSec.fetch_add(1, std::memory_order_relaxed);
         if (!isDcProbeEnabled()) return;
         std::lock_guard<std::mutex> lock(s_dc4Mutex);
         if (s_dc4GCalls > 200 && s_dc4LoggedCount < 150) {

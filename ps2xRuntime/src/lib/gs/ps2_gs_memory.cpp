@@ -201,6 +201,25 @@ namespace GSMem
     static P8PageLookupTable   PageTableP8{ };
     static P4PageLookupTable   PageTableP4{ };
 
+    // PERF-VK: export the page lookup tables so the Vulkan backend uses the exact same swizzle. idx: 0 C32, 1 Z32, 2 C16,
+    // 3 C16S, 4 Z16, 5 Z16S, 6 P8, 7 P4. Entries are u16, layout [block][y][x].
+    const uint16_t *ExportPageTable(int idx, size_t *entries)
+    {
+        switch (idx)
+        {
+        case 0: *entries = sizeof(PageTableC32) / 2; return reinterpret_cast<const uint16_t *>(&PageTableC32);
+        case 1: *entries = sizeof(PageTableZ32) / 2; return reinterpret_cast<const uint16_t *>(&PageTableZ32);
+        case 2: *entries = sizeof(PageTableC16) / 2; return reinterpret_cast<const uint16_t *>(&PageTableC16);
+        case 3: *entries = sizeof(PageTableC16S) / 2; return reinterpret_cast<const uint16_t *>(&PageTableC16S);
+        case 4: *entries = sizeof(PageTableZ16) / 2; return reinterpret_cast<const uint16_t *>(&PageTableZ16);
+        case 5: *entries = sizeof(PageTableZ16S) / 2; return reinterpret_cast<const uint16_t *>(&PageTableZ16S);
+        case 6: *entries = sizeof(PageTableP8) / 2; return reinterpret_cast<const uint16_t *>(&PageTableP8);
+        case 7: *entries = sizeof(PageTableP4) / 2; return reinterpret_cast<const uint16_t *>(&PageTableP4);
+        }
+        *entries = 0;
+        return nullptr;
+    }
+
     void InitLookupTables()
     {
         // 32 bit

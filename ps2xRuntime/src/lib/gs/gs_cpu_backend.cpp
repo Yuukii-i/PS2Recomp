@@ -23,7 +23,9 @@ namespace probe_ae {
 #include <fstream>
 
 #include <chrono>
+#include <intrin.h>
 
+extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
 std::atomic<uint64_t> g_profGsUs{0};
 std::atomic<uint64_t> g_profXferUs{0};
 std::atomic<uint64_t> g_profPrims{0};
@@ -41,6 +43,103 @@ static inline bool isVerboseLog()
 }
 
 // --- Task K: Offline Oracle & Diagnostic Helpers ---
+
+// =========================================================================
+// Task FA: GS cost per draw config + CLUT/texture census
+// =========================================================================
+#include <map>
+#include <set>
+#include <vector>
+#include <tuple>
+
+static inline bool isFaProbeEnabled()
+{
+    static int s_fa = -1;
+    if (s_fa == -1)
+    {
+        const char *v = std::getenv("PS2X_PROBE_GS");
+        s_fa = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+    }
+    return s_fa == 1;
+}
+
+struct FaCfgKey {
+    uint8_t primType;
+    uint8_t tme;
+    uint8_t abe;
+    uint8_t fst;
+    uint8_t linearFilter;
+    uint8_t texPsm;
+    uint8_t cpsm;
+    uint8_t csm;
+    uint8_t tfx;
+    uint8_t tcc;
+    uint8_t zte;
+    uint8_t atst;
+    uint8_t fba;
+    bool operator<(const FaCfgKey &o) const {
+        return std::tie(primType, tme, abe, fst, linearFilter, texPsm, cpsm, csm, tfx, tcc, zte, atst, fba) <
+               std::tie(o.primType, o.tme, o.abe, o.fst, o.linearFilter, o.texPsm, o.cpsm, o.csm, o.tfx, o.tcc, o.zte, o.atst, o.fba);
+    }
+};
+
+struct FaCfgVal {
+    uint64_t count = 0;
+    uint64_t bboxPixels = 0;
+    uint64_t totalUs = 0;
+};
+
+struct FaSlowPrim {
+    uint64_t us = 0;
+    uint8_t primType = 0;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    uint32_t tbp = 0;
+    uint32_t tbw = 0;
+    uint32_t psm = 0;
+    uint32_t tw = 0;
+    uint32_t th = 0;
+    uint32_t cbp = 0;
+    uint32_t csa = 0;
+    uint8_t abe = 0;
+    uint8_t lin = 0;
+};
+
+static std::map<FaCfgKey, FaCfgVal> s_faCfgStats;
+static std::vector<FaSlowPrim> s_faSlowPrims;
+static std::chrono::steady_clock::time_point s_faLastPrintTime{};
+
+struct FaClutKey {
+    uint32_t cbp;
+    uint8_t cpsm;
+    uint8_t csm;
+    uint8_t csa;
+    uint8_t texPsm;
+    uint8_t cld;
+    bool operator<(const FaClutKey &o) const {
+        return std::tie(cbp, cpsm, csm, csa, texPsm, cld) <
+               std::tie(o.cbp, o.cpsm, o.csm, o.csa, o.texPsm, o.cld);
+    }
+};
+static std::set<FaClutKey> s_faSeenClutKeys;
+
+struct FaTexPrimKey {
+    uint32_t tbp;
+    uint32_t tbw;
+    uint32_t psm;
+    uint32_t cbp;
+    uint32_t cpsm;
+    uint32_t csa;
+    uint32_t tfx;
+    uint32_t tcc;
+    uint32_t tw;
+    uint32_t th;
+    bool operator<(const FaTexPrimKey &o) const {
+        return std::tie(tbp, tbw, psm, cbp, cpsm, csa, tfx, tcc, tw, th) <
+               std::tie(o.tbp, o.tbw, o.psm, o.cbp, o.cpsm, o.csa, o.tfx, o.tcc, o.tw, o.th);
+    }
+};
+static std::set<FaTexPrimKey> s_faSeenTexPrimKeys;
+
 static uint32_t calculateCrc32(const uint8_t *data, size_t length)
 {
     static uint32_t table[256];
@@ -170,6 +269,26 @@ static uint16_t s_savedClut[512] = {0};
 static uint32_t s_savedClutCbp[2] = {0};
 static int s_clut32Swizzle = -1;
 static int s_clutDrawtimeReload = -1;
+static uint32_t s_lastLoadedClutCbp = 0xFFFFFFFFu;
+static const auto s_processStartTime = std::chrono::steady_clock::now();
+
+// =========================================================================
+// Task EC: Step through frame prim-by-prim
+// =========================================================================
+static int s_ecStepAfterS = -1;
+static int s_ecStepCount = -1;
+static uint32_t s_ecStartPrimIdx = 0xFFFFFFFFu;
+static bool s_ecActiveWindow = false;
+static uint32_t s_ecZtestFail = 0;
+static uint32_t s_ecAtestFail = 0;
+static uint32_t s_ecScissorClip = 0;
+static uint32_t s_ecDateFail = 0;
+static uint32_t s_ecZeroPxCount = 0;
+static uint32_t s_ecPngCount = 0;
+static uint64_t s_ecTotalPxWritten = 0;
+static uint32_t s_eeZPrimCount = 0;
+static uint32_t s_eeZwriters = 0;
+static uint32_t s_eeZjunk = 0;
 static int s_presentFallback = -1;
 static int s_uploadDump = -1;
 static int s_texDump = -1;
@@ -198,6 +317,15 @@ static std::vector<DumpedTexKey> s_dumpedTexKeys;
 
 
 using namespace GSInternal;
+
+// PERF-GG2: std::lround is a libm call (about 6% of GS time in bilinear texture paths). All call sites feed clampU8(), so
+// round-half-away-from-zero is only observable for x >= 0, where  (int)x + (frac >= 0.5)  is exactly lround (no x+0.5 rounding issue).
+template <typename T>
+static inline long gsRoundClamped(T x)
+{
+    const long i = static_cast<long>(x);
+    return i + ((x - static_cast<T>(i)) >= static_cast<T>(0.5) ? 1 : 0);
+}
 
 namespace
 {
@@ -474,13 +602,31 @@ namespace
         return psm == GS_PSM_T8 || psm == GS_PSM_T8H;
     }
 
+#if defined(_MSC_VER)
+    __forceinline // PERF-HO2: 4 out-of-line calls per bilinear texel were ~11% of GS time
+#else
+    inline __attribute__((always_inline))
+#endif
     uint8_t lerpChannel(uint8_t c00, uint8_t c10, uint8_t c01, uint8_t c11, float fx, float fy)
     {
         const float top = static_cast<float>(c00) + (static_cast<float>(c10) - static_cast<float>(c00)) * fx;
         const float bottom = static_cast<float>(c01) + (static_cast<float>(c11) - static_cast<float>(c01)) * fx;
-        return clampU8(static_cast<int>(std::lround(top + (bottom - top) * fy)));
+        return clampU8(static_cast<int>(gsRoundClamped(top + (bottom - top) * fy)));
     }
 }
+
+// PERF-HO2: per-primitive decoded-texel cache (key = wrapped u,v). Valid only inside one DrawPrimitive: epoch bumps per primitive,
+// and it is bypassed when the texture base aliases the frame/Z buffer (feedback draws).
+struct TexelCacheEntry
+{
+    uint32_t epoch;
+    int32_t u;
+    int32_t v;
+    uint32_t color;
+};
+static thread_local TexelCacheEntry t_texelCache[256];
+static thread_local uint32_t t_texelEpoch = 1u;
+static const bool s_ho2Off = []() { const char *e = std::getenv("PS2X_GS_HO2"); return e && e[0] == '0'; }(); // kill switch
 
 namespace
 {
@@ -654,9 +800,13 @@ void gsGetAndResetPrimsPerFbp(std::vector<std::pair<uint32_t, uint32_t>> &out)
     }
 }
 
+extern "C" bool ps2x_vk_selftest(); // PERF-VK V0 (ps2_vk_backend.cpp)
+
 GSCpuBackend::GSCpuBackend()
 {
     using namespace GSMem;
+    if (const char *vkTest = std::getenv("PS2X_VK_SELFTEST"); vkTest && vkTest[0] == '1')
+        ps2x_vk_selftest(); // PERF-VK V0
     static std::once_flag lookupTablesOnce;
     std::call_once(lookupTablesOnce, []()
                    { InitLookupTables(); });
@@ -747,6 +897,7 @@ void GSCpuBackend::ResetUnlocked()
 {
     m_clut.fill(0u);
     m_clutCbp.fill(0u);
+    s_lastLoadedClutCbp = 0xFFFFFFFFu;
     m_texturePageCache.Invalidate();
     m_transfer = {};
     m_transfer.direction = 3u;
@@ -869,6 +1020,27 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
             m_clut[destination + 256u] = static_cast<uint16_t>(raw >> 16u);
         }
     }
+    if (isFaProbeEnabled() && s_faSeenClutKeys.size() < 40u)
+    {
+        FaClutKey ck{effectiveCbp, static_cast<uint8_t>(tex0.cpsm), static_cast<uint8_t>(tex0.csm),
+                     static_cast<uint8_t>(tex0.csa), static_cast<uint8_t>(tex0.psm), static_cast<uint8_t>(tex0.cld)};
+        if (s_faSeenClutKeys.insert(ck).second)
+        {
+            char lo16Str[256]; char hi16Str[256]; char rgbaStr[256];
+            int loLen = 0, hiLen = 0, rgbaLen = 0;
+            for (int i = 0; i < 16; ++i) {
+                loLen += std::snprintf(lo16Str + loLen, sizeof(lo16Str) - loLen, "%s%04X", (i > 0 ? " " : ""), m_clut[i]);
+                hiLen += std::snprintf(hi16Str + hiLen, sizeof(hi16Str) - hiLen, "%s%04X", (i > 0 ? " " : ""), m_clut[256 + i]);
+                uint32_t cRgba = LookupCLUT(GSDrawState{}, static_cast<uint8_t>(i), static_cast<uint8_t>(tex0.cpsm),
+                                            static_cast<uint8_t>(tex0.csm), static_cast<uint8_t>(tex0.csa), static_cast<uint8_t>(tex0.psm));
+                rgbaLen += std::snprintf(rgbaStr + rgbaLen, sizeof(rgbaStr) - rgbaLen, "%s%08X", (i > 0 ? " " : ""), cRgba);
+            }
+            std::printf("[probe] fa clut cbp=0x%05X cpsm=0x%02X csm=%u csa=%u psm=0x%02X lo16[0..15]=%s hi16[0..15]=%s rgba[0..15]=%s\n",
+                        effectiveCbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, lo16Str, hi16Str, rgbaStr);
+            std::fflush(stdout);
+        }
+    }
+    s_lastLoadedClutCbp = effectiveCbp;
     std::memcpy(s_savedClut, m_clut.data(), sizeof(s_savedClut));
     s_savedClutCbp[0] = m_clutCbp[0];
     s_savedClutCbp[1] = m_clutCbp[1];
@@ -948,6 +1120,7 @@ GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
 
 void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 {
+    ++t_texelEpoch; // PERF-HO2
     probe_ae::onBxDrawPrimitive(batch);
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
@@ -1067,6 +1240,85 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     static std::atomic<uint32_t> s_globalPrimIndex{0};
     uint32_t currentPrimIdx = s_globalPrimIndex.fetch_add(1u, std::memory_order_relaxed);
 
+    // Task EC setup
+    static bool s_ecCfgDone = false; // PERF-GH: -1 means "unset", so the old -1 guard re-ran getenv on every prim
+    if (!s_ecCfgDone)
+    {
+        s_ecCfgDone = true;
+        const char *envA = std::getenv("PS2X_GS_STEP_AFTER_S");
+        s_ecStepAfterS = envA ? std::atoi(envA) : -1;
+        const char *envC = std::getenv("PS2X_GS_STEP_COUNT");
+        s_ecStepCount = envC ? std::atoi(envC) : 3000;
+    }
+    const uint64_t ecElapsedSec = (s_ecStepAfterS >= 0)
+        ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - s_processStartTime).count())
+        : 0u;
+    bool ecDoThisPrim = false;
+    if (s_ecStepAfterS >= 0 && ecElapsedSec >= static_cast<uint64_t>(s_ecStepAfterS))
+    {
+        if (s_ecStartPrimIdx == 0xFFFFFFFFu)
+        {
+            s_ecStartPrimIdx = currentPrimIdx;
+        }
+        if (currentPrimIdx >= s_ecStartPrimIdx && currentPrimIdx < s_ecStartPrimIdx + static_cast<uint32_t>(s_ecStepCount))
+        {
+            ecDoThisPrim = true;
+        }
+    }
+    s_ecActiveWindow = ecDoThisPrim;
+    s_ecZtestFail = 0;
+    s_ecAtestFail = 0;
+    s_ecScissorClip = 0;
+    s_ecDateFail = 0;
+    uint64_t ecPxBefore = g_profPixels.load(std::memory_order_relaxed);
+    int ecClampedX0 = 0, ecClampedY0 = 0, ecClampedX1 = 0, ecClampedY1 = 0;
+    if (ecDoThisPrim)
+    {
+        int ofx = ctx.xyoffset.ofx >> 4;
+        int ofy = ctx.xyoffset.ofy >> 4;
+        if (!batch.vertices.empty()) {
+            int minX = static_cast<int>(std::floor(batch.vertices[0].x - static_cast<float>(ofx)));
+            int maxX = static_cast<int>(std::ceil(batch.vertices[0].x - static_cast<float>(ofx)));
+            int minY = static_cast<int>(std::floor(batch.vertices[0].y - static_cast<float>(ofy)));
+            int maxY = static_cast<int>(std::ceil(batch.vertices[0].y - static_cast<float>(ofy)));
+            for (size_t i = 1; i < batch.vertices.size(); ++i) {
+                int vx0 = static_cast<int>(std::floor(batch.vertices[i].x - static_cast<float>(ofx)));
+                int vx1 = static_cast<int>(std::ceil(batch.vertices[i].x - static_cast<float>(ofx)));
+                int vy0 = static_cast<int>(std::floor(batch.vertices[i].y - static_cast<float>(ofy)));
+                int vy1 = static_cast<int>(std::ceil(batch.vertices[i].y - static_cast<float>(ofy)));
+                if (vx0 < minX) minX = vx0;
+                if (vx1 > maxX) maxX = vx1;
+                if (vy0 < minY) minY = vy0;
+                if (vy1 > maxY) maxY = vy1;
+            }
+            ecClampedX0 = std::max(minX, static_cast<int>(ctx.scissor.x0));
+            ecClampedX1 = std::min(maxX, static_cast<int>(ctx.scissor.x1));
+            ecClampedY0 = std::max(minY, static_cast<int>(ctx.scissor.y0));
+            ecClampedY1 = std::min(maxY, static_cast<int>(ctx.scissor.y1));
+        }
+    }
+    bool eeIsClearCandidate = false;
+    if (ecDoThisPrim)
+    {
+        uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+        if (ztst == 1u && ecClampedX0 <= 0 && ecClampedY0 <= 0 && ecClampedX1 >= 511 && ecClampedY1 >= 447)
+        {
+            eeIsClearCandidate = true;
+            uint32_t v0Z = !batch.vertices.empty() ? static_cast<uint32_t>(batch.vertices[0].z) : 0u;
+            uint32_t v0Rgba = 0;
+            if (!batch.vertices.empty()) {
+                const auto &v0 = batch.vertices[0];
+                v0Rgba = static_cast<uint32_t>(v0.r) | (static_cast<uint32_t>(v0.g) << 8u) |
+                         (static_cast<uint32_t>(v0.b) << 16u) | (static_cast<uint32_t>(v0.a) << 24u);
+            }
+            uint64_t bboxPix = static_cast<uint64_t>(ecClampedX1 - ecClampedX0 + 1) * static_cast<uint64_t>(ecClampedY1 - ecClampedY0 + 1);
+            std::printf("[probe] ee z clear idx=%u zmsk=%u v0_z=0x%08X tme=%u abe=%u rgba=0x%08X pixels=%llu\n",
+                        currentPrimIdx, (ctx.zbuf.zmask ? 1u : 0u), v0Z, (state.prim.tme ? 1u : 0u),
+                        (state.prim.abe ? 1u : 0u), v0Rgba, static_cast<unsigned long long>(bboxPix));
+            std::fflush(stdout);
+        }
+    }
+
     if (s_primLogFrom == -1)
     {
         const char *envFrom = std::getenv("PS2X_GS_PRIM_LOG_FROM");
@@ -1119,11 +1371,12 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     if (s_clutDrawtimeReload == -1)
     {
         const char *env = std::getenv("PS2X_GS_CLUT_DRAWTIME_RELOAD");
-        s_clutDrawtimeReload = (env && (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0)) ? 0 : 1;
+        s_clutDrawtimeReload = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ? 1 : 0;
     }
     if (state.prim.tme && (isFourBitIndexedPsm(ctx.tex0.psm) || isEightBitIndexedPsm(ctx.tex0.psm)))
     {
-        if (s_clutDrawtimeReload != 0 && (ctx.tex0.cbp != 0u || m_clutCbp[0] != 0u))
+        const uint32_t effCbp = (ctx.tex0.cbp != 0u) ? ctx.tex0.cbp : m_clutCbp[0];
+        if ((s_clutDrawtimeReload == 1 || effCbp != s_lastLoadedClutCbp) && effCbp != 0u)
         {
             LoadClutUnlocked(ctx.tex0, state.texclut);
         }
@@ -1135,7 +1388,15 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
         if (!env) env = std::getenv("PS2X_GS_TEXDUMP");
         s_texDump = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ? 1 : 0;
     }
-    if ((s_texDump == 1 || ctx.tex0.tbp0 == 10752u) && state.prim.tme && s_dumpedTexKeys.size() < 16u)
+    static int s_texDumpAfterS = -1;
+    if (s_texDumpAfterS == -1)
+    {
+        const char *envA = std::getenv("PS2X_TEX_DUMP_AFTER_S");
+        s_texDumpAfterS = envA ? std::atoi(envA) : 0;
+    }
+    const auto curNow = std::chrono::steady_clock::now();
+    const uint64_t elapsedSec = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(curNow - s_processStartTime).count());
+    if (s_texDump == 1 && elapsedSec >= static_cast<uint64_t>(s_texDumpAfterS) && state.prim.tme && s_dumpedTexKeys.size() < 64u)
     {
         const uint32_t effectiveCbp = (ctx.tex0.cbp != 0u) ? ctx.tex0.cbp : m_clutCbp[0];
         uint32_t clutHash = calculateCrc32(reinterpret_cast<const uint8_t*>(m_clut.data()), sizeof(m_clut));
@@ -1173,8 +1434,9 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
             }
             std::filesystem::create_directories("frames/tex");
             char fn[256];
-            std::snprintf(fn, sizeof(fn), "frames/tex/tex_%u_tbp%u_psm0x%02x_%ux%u.png",
-                          seq, ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.psm), tw_px, th_px);
+            std::snprintf(fn, sizeof(fn), "frames/tex/tex_%02u_%llus_tbp0x%05x_tbw%u_psm0x%02x_%ux%u_cbp0x%05x_csa%u.png",
+                          seq, static_cast<unsigned long long>(elapsedSec), ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw),
+                          static_cast<unsigned>(ctx.tex0.psm), tw_px, th_px, effectiveCbp, static_cast<unsigned>(ctx.tex0.csa));
             writeUncompressedPng(tw_px, th_px, sampledRgba.data(), fn);
 
             // Dump CLUT 16x16
@@ -1190,17 +1452,38 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
                 clutRgba[ci * 4u + 3] = static_cast<uint8_t>((raw >> 24u) & 0xFFu);
             }
             char clutFn[256];
-            std::snprintf(clutFn, sizeof(clutFn), "frames/tex/clut_%u_cbp%u_cpsm0x%02x.png",
-                          seq, effectiveCbp, static_cast<unsigned>(ctx.tex0.cpsm));
+            std::snprintf(clutFn, sizeof(clutFn), "frames/tex/clut_%02u_%llus_cbp0x%05x_cpsm0x%02x_csa%u.png",
+                          seq, static_cast<unsigned long long>(elapsedSec), effectiveCbp, static_cast<unsigned>(ctx.tex0.cpsm), static_cast<unsigned>(ctx.tex0.csa));
             writeUncompressedPng(16u, 16u, clutRgba.data(), clutFn);
 
             const bool csm1Remapped = (ctx.tex0.csm == 0 && (ctx.tex0.cpsm == GS_PSM_CT16 || ctx.tex0.cpsm == GS_PSM_CT16S));
-            std::fprintf(stderr, "[GS:TEXDUMP] [%u/16] tex=(tbp0=%u, tbw=%u, psm=0x%02x, tw=%u, th=%u, %ux%u) cbp=%u csa=%u csm=%u csm1_remap=%d clutHash=0x%08x -> %s\n",
+            std::fprintf(stderr, "[GS:TEXDUMP] [%u/64] tex=(tbp0=%u, tbw=%u, psm=0x%02x, tw=%u, th=%u, %ux%u) cbp=%u csa=%u csm=%u csm1_remap=%d clutHash=0x%08x -> %s\n",
                          seq, ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw), static_cast<unsigned>(ctx.tex0.psm),
                          static_cast<unsigned>(ctx.tex0.tw), static_cast<unsigned>(ctx.tex0.th), tw_px, th_px,
                          effectiveCbp, static_cast<unsigned>(ctx.tex0.csa), static_cast<unsigned>(ctx.tex0.csm),
                          csm1Remapped ? 1 : 0, clutHash, fn);
             std::fflush(stderr);
+        }
+    }
+    static std::chrono::steady_clock::time_point s_gaLastTexRowsTime{};
+    if (isFaProbeEnabled() && state.prim.tme)
+    {
+        if (std::chrono::duration_cast<std::chrono::seconds>(curNow - s_gaLastTexRowsTime).count() >= 1)
+        {
+            s_gaLastTexRowsTime = curNow;
+            uint32_t th_px = 1u << ctx.tex0.th;
+            uint32_t zeroRows = 0;
+            for (uint32_t y = 0; y < th_px; ++y) {
+                bool allZero = true;
+                for (uint32_t x = 0; x < 16u; ++x) {
+                    if (ReadTextureVramUnlocked(ctx.tex0.psm, ctx.tex0.tbp0, ctx.tex0.tbw, x, y) != 0u) {
+                        allZero = false; break;
+                    }
+                }
+                if (allZero) zeroRows++;
+            }
+            std::printf("[probe] ga texrows tbp=0x%05X rows_all_zero=%u th=%u\n", ctx.tex0.tbp0, zeroRows, th_px);
+            std::fflush(stdout);
         }
     }
 
@@ -1257,6 +1540,71 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
         }
     }
 
+    // Task FA timing & census
+    const bool faActive = isFaProbeEnabled();
+    std::chrono::steady_clock::time_point faT0;
+    int faClampedW = 0, faClampedH = 0;
+    int faMinX = 0, faMinY = 0, faMaxX = 0, faMaxY = 0;
+    if (faActive)
+    {
+        int ofx = ctx.xyoffset.ofx >> 4;
+        int ofy = ctx.xyoffset.ofy >> 4;
+        if (!batch.vertices.empty()) {
+            faMinX = static_cast<int>(std::floor(batch.vertices[0].x - static_cast<float>(ofx)));
+            faMaxX = static_cast<int>(std::ceil(batch.vertices[0].x - static_cast<float>(ofx)));
+            faMinY = static_cast<int>(std::floor(batch.vertices[0].y - static_cast<float>(ofy)));
+            faMaxY = static_cast<int>(std::ceil(batch.vertices[0].y - static_cast<float>(ofy)));
+            for (size_t i = 1; i < batch.vertices.size(); ++i) {
+                int vx0 = static_cast<int>(std::floor(batch.vertices[i].x - static_cast<float>(ofx)));
+                int vx1 = static_cast<int>(std::ceil(batch.vertices[i].x - static_cast<float>(ofx)));
+                int vy0 = static_cast<int>(std::floor(batch.vertices[i].y - static_cast<float>(ofy)));
+                int vy1 = static_cast<int>(std::ceil(batch.vertices[i].y - static_cast<float>(ofy)));
+                if (vx0 < faMinX) faMinX = vx0;
+                if (vx1 > faMaxX) faMaxX = vx1;
+                if (vy0 < faMinY) faMinY = vy0;
+                if (vy1 > faMaxY) faMaxY = vy1;
+            }
+            int cX0 = std::max(faMinX, static_cast<int>(ctx.scissor.x0));
+            int cX1 = std::min(faMaxX, static_cast<int>(ctx.scissor.x1));
+            int cY0 = std::max(faMinY, static_cast<int>(ctx.scissor.y0));
+            int cY1 = std::min(faMaxY, static_cast<int>(ctx.scissor.y1));
+            if (cX1 >= cX0 && cY1 >= cY0) {
+                faClampedW = cX1 - cX0 + 1;
+                faClampedH = cY1 - cY0 + 1;
+            }
+        }
+        if (state.prim.tme && s_faSeenTexPrimKeys.size() < 80u)
+        {
+            FaTexPrimKey tpk{ctx.tex0.tbp0, static_cast<uint32_t>(ctx.tex0.tbw), static_cast<uint32_t>(ctx.tex0.psm),
+                             (ctx.tex0.cbp != 0u ? ctx.tex0.cbp : m_clutCbp[0]), static_cast<uint32_t>(ctx.tex0.cpsm),
+                             static_cast<uint32_t>(ctx.tex0.csa), static_cast<uint32_t>(ctx.tex0.tfx),
+                             static_cast<uint32_t>(ctx.tex0.tcc), static_cast<uint32_t>(ctx.tex0.tw),
+                             static_cast<uint32_t>(ctx.tex0.th)};
+            if (s_faSeenTexPrimKeys.insert(tpk).second)
+            {
+                uint32_t v0Rgba = 0;
+                if (!batch.vertices.empty()) {
+                    const auto &v0 = batch.vertices[0];
+                    v0Rgba = static_cast<uint32_t>(v0.r) | (static_cast<uint32_t>(v0.g) << 8u) |
+                             (static_cast<uint32_t>(v0.b) << 16u) | (static_cast<uint32_t>(v0.a) << 24u);
+                }
+                uint64_t rawTexa = (static_cast<uint64_t>(state.texa.ta0) & 0xFFu) |
+                                   ((static_cast<uint64_t>(state.texa.aem) & 0x1u) << 15u) |
+                                   ((static_cast<uint64_t>(state.texa.ta1) & 0xFFu) << 32u);
+                char texelStr[256];
+                int tLen = 0;
+                for (uint32_t ti = 0; ti < 8; ++ti) {
+                    uint32_t rawVal = ReadTextureVramUnlocked(ctx.tex0.psm, ctx.tex0.tbp0, ctx.tex0.tbw, ti, 0);
+                    tLen += std::snprintf(texelStr + tLen, sizeof(texelStr) - tLen, "%s%08X", (ti > 0 ? " " : ""), rawVal);
+                }
+                std::printf("[probe] fa texprim tbp=0x%05X tbw=%u psm=0x%02X tw=%u th=%u cbp=0x%05X cpsm=0x%02X csm=%u csa=%u tfx=%u tcc=%u vtx0_rgba=0x%08X texa=0x%016llx bbox=%d,%d,%d,%d texel[0..7]=%s\n",
+                            tpk.tbp, tpk.tbw, tpk.psm, tpk.tw, tpk.th, tpk.cbp, tpk.cpsm, static_cast<unsigned>(ctx.tex0.csm), tpk.csa, tpk.tfx, tpk.tcc,
+                            v0Rgba, static_cast<unsigned long long>(rawTexa), faMinX, faMinY, faMaxX, faMaxY, texelStr);
+                std::fflush(stdout);
+            }
+        }
+        faT0 = std::chrono::steady_clock::now();
+    }
     switch (state.prim.type)
     {
     case GS_PRIM_SPRITE:
@@ -1282,6 +1630,70 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     }
     default:
         break;
+    }
+    if (faActive)
+    {
+        const auto faT1 = std::chrono::steady_clock::now();
+        uint64_t faElapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(faT1 - faT0).count());
+        uint64_t bboxPix = static_cast<uint64_t>(faClampedW) * static_cast<uint64_t>(faClampedH);
+        FaCfgKey key{
+            static_cast<uint8_t>(state.prim.type),
+            static_cast<uint8_t>(state.prim.tme ? 1u : 0u),
+            static_cast<uint8_t>(state.prim.abe ? 1u : 0u),
+            static_cast<uint8_t>(state.prim.fst ? 1u : 0u),
+            static_cast<uint8_t>(state.linearFilter ? 1u : 0u),
+            static_cast<uint8_t>(ctx.tex0.psm),
+            static_cast<uint8_t>(ctx.tex0.cpsm),
+            static_cast<uint8_t>(ctx.tex0.csm),
+            static_cast<uint8_t>(ctx.tex0.tfx),
+            static_cast<uint8_t>(ctx.tex0.tcc),
+            static_cast<uint8_t>((ctx.test >> 16u) & 1u),
+            static_cast<uint8_t>((ctx.test >> 1u) & 7u),
+            static_cast<uint8_t>(ctx.fba & 1ull)
+        };
+        auto &val = s_faCfgStats[key];
+        val.count++;
+        val.bboxPixels += bboxPix;
+        val.totalUs += faElapsedUs;
+        FaSlowPrim sp{faElapsedUs, static_cast<uint8_t>(state.prim.type), faMinX, faMinY, faMaxX, faMaxY,
+                      ctx.tex0.tbp0, static_cast<uint32_t>(ctx.tex0.tbw), static_cast<uint32_t>(ctx.tex0.psm),
+                      static_cast<uint32_t>(ctx.tex0.tw), static_cast<uint32_t>(ctx.tex0.th),
+                      (ctx.tex0.cbp != 0u ? ctx.tex0.cbp : m_clutCbp[0]), static_cast<uint32_t>(ctx.tex0.csa),
+                      static_cast<uint8_t>(state.prim.abe ? 1u : 0u), static_cast<uint8_t>(state.linearFilter ? 1u : 0u)};
+        if (s_faSlowPrims.size() < 3u) {
+            s_faSlowPrims.push_back(sp);
+            std::sort(s_faSlowPrims.begin(), s_faSlowPrims.end(), [](const auto &a, const auto &b) { return a.us > b.us; });
+        } else if (sp.us > s_faSlowPrims.back().us) {
+            s_faSlowPrims.back() = sp;
+            std::sort(s_faSlowPrims.begin(), s_faSlowPrims.end(), [](const auto &a, const auto &b) { return a.us > b.us; });
+        }
+        if (s_faLastPrintTime == std::chrono::steady_clock::time_point{}) {
+            s_faLastPrintTime = faT1;
+        } else if (std::chrono::duration_cast<std::chrono::seconds>(faT1 - s_faLastPrintTime).count() >= 5) {
+            s_faLastPrintTime = faT1;
+            std::vector<std::pair<FaCfgKey, FaCfgVal>> sortedCfgs(s_faCfgStats.begin(), s_faCfgStats.end());
+            std::sort(sortedCfgs.begin(), sortedCfgs.end(), [](const auto &a, const auto &b) {
+                return a.second.totalUs > b.second.totalUs;
+            });
+            size_t cfgCount = std::min<size_t>(10u, sortedCfgs.size());
+            for (size_t i = 0; i < cfgCount; ++i) {
+                const auto &k = sortedCfgs[i].first;
+                const auto &v = sortedCfgs[i].second;
+                uint64_t nsPerPix = (v.bboxPixels > 0) ? ((v.totalUs * 1000ull) / v.bboxPixels) : 0ull;
+                std::printf("[probe] fa cfg type=%u tme=%u abe=%u fst=%u lin=%u psm=0x%02X cpsm=0x%02X csm=%u tfx=%u tcc=%u zte=%u atst=%u n=%llu pix=%llu us=%llu ns_per_pix=%llu\n",
+                            k.primType, k.tme, k.abe, k.fst, k.linearFilter, k.texPsm, k.cpsm, k.csm, k.tfx, k.tcc, k.zte, k.atst,
+                            static_cast<unsigned long long>(v.count), static_cast<unsigned long long>(v.bboxPixels),
+                            static_cast<unsigned long long>(v.totalUs), static_cast<unsigned long long>(nsPerPix));
+            }
+            for (const auto &sp : s_faSlowPrims) {
+                std::printf("[probe] fa slow us=%llu type=%u bbox=%d,%d,%d,%d tbp=0x%05X tbw=%u psm=0x%02X tw=%u th=%u cbp=0x%05X csa=%u abe=%u lin=%u\n",
+                            static_cast<unsigned long long>(sp.us), sp.primType, sp.x0, sp.y0, sp.x1, sp.y1,
+                            sp.tbp, sp.tbw, sp.psm, sp.tw, sp.th, sp.cbp, sp.csa, sp.abe, sp.lin);
+            }
+            std::fflush(stdout);
+            s_faCfgStats.clear();
+            s_faSlowPrims.clear();
+        }
     }
 
     if (s_drawStepDump == -1)
@@ -1314,14 +1726,147 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
         std::fprintf(stderr, "[GS:STEP_DUMP] Prim %u dumped framebuffer fbp=%u to %s\n", currentPrimIdx, ctx.frame.fbp, stepFn);
         std::fflush(stderr);
     }
+
+    if (ecDoThisPrim)
+    {
+        s_ecActiveWindow = false;
+        uint64_t ecPxWritten = g_profPixels.load(std::memory_order_relaxed) - ecPxBefore;
+        s_ecTotalPxWritten += ecPxWritten;
+        if (ecPxWritten > 0)
+        {
+            uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+            uint32_t atst = static_cast<uint32_t>((ctx.test >> 1) & 7u);
+            std::printf("[probe] ec prim idx=%u type=%u fbp=%u tbp=0x%05X tpsm=0x%02X abe=%u ztst=%u atst=%u rect=%d,%d,%d,%d px=%llu zf=%u af=%u sc=%u\n",
+                        currentPrimIdx, static_cast<unsigned>(state.prim.type), ctx.frame.fbp, ctx.tex0.tbp0,
+                        static_cast<unsigned>(ctx.tex0.psm), (state.prim.abe ? 1u : 0u), ztst, atst,
+                        ecClampedX0, ecClampedY0, ecClampedX1, ecClampedY1,
+                        static_cast<unsigned long long>(ecPxWritten), s_ecZtestFail, s_ecAtestFail, s_ecScissorClip);
+            std::fflush(stdout);
+
+            // Task EE Item 1 check
+            if (ztst == 2u && s_ecZtestFail > (ecPxWritten / 10u) && s_eeZPrimCount < 6u)
+            {
+                s_eeZPrimCount++;
+                int ofx = ctx.xyoffset.ofx >> 4;
+                int ofy = ctx.xyoffset.ofy >> 4;
+                std::string vStr;
+                size_t vertLimit = std::min<size_t>(6u, batch.vertices.size());
+                for (size_t vi = 0; vi < vertLimit; ++vi) {
+                    const auto &v = batch.vertices[vi];
+                    float vx = v.x - static_cast<float>(ofx);
+                    float vy = v.y - static_cast<float>(ofy);
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "(%.1f,%.1f,0x%08X)%s", vx, vy, static_cast<uint32_t>(v.z), (vi + 1 < vertLimit ? " " : ""));
+                    vStr += buf;
+                }
+                const uint32_t zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+                const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+                uint32_t zmin = 0xFFFFFFFFu, zmax = 0u, nonzeroCount = 0u, totalBboxPx = 0u;
+                for (int y = ecClampedY0; y <= ecClampedY1; ++y) {
+                    for (int x = ecClampedX0; x <= ecClampedX1; ++x) {
+                        totalBboxPx++;
+                        uint32_t zv = ReadVramUnlocked(ctx.zbuf.psm, zbp, fbw, x, y);
+                        if (zv != 0u) nonzeroCount++;
+                        if (zv < zmin) zmin = zv;
+                        if (zv > zmax) zmax = zv;
+                    }
+                }
+                if (zmin == 0xFFFFFFFFu) zmin = 0;
+                std::printf("[probe] ee z prim idx=%u zbp=%u zpsm=0x%02X zmsk=%u ztst=%u verts: %s zbuf_min=0x%08X zbuf_max=0x%08X nonzero_px=%u total_px=%u\n",
+                            currentPrimIdx, ctx.zbuf.zbp, ctx.zbuf.psm, (ctx.zbuf.zmask ? 1u : 0u), ztst,
+                            vStr.c_str(), zmin, zmax, nonzeroCount, totalBboxPx);
+                std::fflush(stdout);
+                // Dump Z buffer 512x448 as grayscale PNG
+                std::filesystem::create_directories("logs/gs");
+                char zFn[256];
+                std::snprintf(zFn, sizeof(zFn), "logs/gs/ee_z_%u.png", currentPrimIdx);
+                std::vector<uint8_t> zRgba(512u * 448u * 4u, 0u);
+                for (uint32_t py = 0; py < 448u; ++py) {
+                    for (uint32_t px = 0; px < 512u; ++px) {
+                        uint32_t zv = ReadVramUnlocked(ctx.zbuf.psm, zbp, fbw, px, py);
+                        uint8_t g = static_cast<uint8_t>(std::min<uint32_t>(255u, zv >> 16u));
+                        zRgba[(py * 512u + px) * 4u + 0] = g;
+                        zRgba[(py * 512u + px) * 4u + 1] = g;
+                        zRgba[(py * 512u + px) * 4u + 2] = g;
+                        zRgba[(py * 512u + px) * 4u + 3] = 0xFFu;
+                    }
+                }
+                writeUncompressedPng(512u, 448u, zRgba.data(), zFn);
+            }
+            if (s_ecPngCount < 150u)
+            {
+                s_ecPngCount++;
+                std::filesystem::create_directories("logs/gs");
+                char ecFn[256];
+                std::snprintf(ecFn, sizeof(ecFn), "logs/gs/ec_%u_t%llus.png", currentPrimIdx, static_cast<unsigned long long>(ecElapsedSec));
+                std::vector<uint8_t> snapRgba(512u * 448u * 4u, 0u);
+                const uint32_t fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+                const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+                for (uint32_t py = 0; py < 448u; ++py) {
+                    for (uint32_t px = 0; px < 512u; ++px) {
+                        uint32_t raw = ReadVramUnlocked(ctx.frame.psm, fbp, fbw, px, py);
+                        uint32_t c = (ctx.frame.psm == GS_PSM_CT32) ? raw :
+                                     ((ctx.frame.psm == GS_PSM_CT16 || ctx.frame.psm == GS_PSM_CT16S) ? Rgba5551ToRgba8888(raw) : raw);
+                        snapRgba[(py * 512u + px) * 4u + 0] = static_cast<uint8_t>(c & 0xFFu);
+                        snapRgba[(py * 512u + px) * 4u + 1] = static_cast<uint8_t>((c >> 8u) & 0xFFu);
+                        snapRgba[(py * 512u + px) * 4u + 2] = static_cast<uint8_t>((c >> 16u) & 0xFFu);
+                        snapRgba[(py * 512u + px) * 4u + 3] = static_cast<uint8_t>((c >> 24u) & 0xFFu);
+                    }
+                }
+                writeUncompressedPng(512u, 448u, snapRgba.data(), ecFn);
+            }
+        }
+        else
+        {
+            s_ecZeroPxCount++;
+            if (s_ecZeroPxCount % 200u == 0u)
+            {
+                std::printf("[probe] ec zero_px count=%u idx=%u\n", s_ecZeroPxCount, currentPrimIdx);
+                std::fflush(stdout);
+            }
+        }
+        if (!ctx.zbuf.zmask && ecPxWritten > 0)
+        {
+            s_eeZwriters++;
+        }
+        uint32_t v0zVal = !batch.vertices.empty() ? static_cast<uint32_t>(batch.vertices[0].z) : 0u;
+        if (v0zVal == 0u || v0zVal >= 0xFFFu)
+        {
+            s_eeZjunk++;
+        }
+        if (eeIsClearCandidate)
+        {
+            const uint32_t zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+            const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+            uint32_t nzFull = 0;
+            for (uint32_t py = 0; py < 448u; ++py) {
+                for (uint32_t px = 0; px < 512u; ++px) {
+                    if (ReadVramUnlocked(ctx.zbuf.psm, zbp, fbw, px, py) != 0u)
+                        nzFull++;
+                }
+            }
+            std::printf("[probe] ee z clear idx=%u zbuf_nonzero_after=%u\n", currentPrimIdx, nzFull);
+            std::fflush(stdout);
+        }
+        if (currentPrimIdx + 1u == s_ecStartPrimIdx + static_cast<uint32_t>(s_ecStepCount))
+        {
+            std::printf("[probe] ec window finished total_px_written=%llu zero_px_prims=%u pngs=%u\n",
+                        static_cast<unsigned long long>(s_ecTotalPxWritten), s_ecZeroPxCount, s_ecPngCount);
+            std::printf("[probe] ee z summary zwriters=%u zjunk=%u\n", s_eeZwriters, s_eeZjunk);
+            std::fflush(stdout);
+        }
+    }
 }
 
 void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
 {
     const auto &ctx = state.context;
     if (x < ctx.scissor.x0 || x > ctx.scissor.x1 || y < ctx.scissor.y0 || y > ctx.scissor.y1)
+    {
+        if (s_ecActiveWindow) s_ecScissorClip++;
         return;
-    g_profPixels.fetch_add(1u, std::memory_order_relaxed);
+    }
+    g_profPixels.store(g_profPixels.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed); // PERF-GG2: single drawing thread => no locked RMW per pixel
 
     if (state.prim.fge)
     {
@@ -1345,6 +1890,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
     const PixelWriteMask writeMask = classifyAlphaTest(ctx.test, a, static_cast<uint8_t>(fpsm));
     if (!writeMask.writesAnything())
     {
+        if (s_ecActiveWindow) s_ecAtestFail++;
         return;
     }
 
@@ -1377,6 +1923,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
 
     if (!passesDestinationAlphaTest(ctx.test, static_cast<uint8_t>(fpsm), rawFramebufferPixel))
     {
+        if (s_ecActiveWindow) s_ecDateFail++;
         return;
     }
 
@@ -1402,6 +1949,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
 
     if (!zpass)
     {
+        if (s_ecActiveWindow) s_ecZtestFail++;
         return;
     }
 
@@ -1549,11 +2097,11 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
         texVf = t * invQ * static_cast<float>(texH);
     }
 
-    auto samplePoint = [&](int sampleU, int sampleV) -> uint32_t
-    {
-        sampleU = wrapTextureCoordinate(sampleU, texW, wrapU, minU, maxU);
-        sampleV = wrapTextureCoordinate(sampleV, texH, wrapV, minV, maxV);
+    const bool texelCacheOn = !s_ho2Off && GSInternal::framePageBaseToBlock(ctx.frame.fbp) != tex.tbp0 &&
+                              GSInternal::framePageBaseToBlock(ctx.zbuf.zbp) != tex.tbp0; // PERF-HO2
 
+    auto samplePointRaw = [&](int sampleU, int sampleV) -> uint32_t
+    {
         u32 out = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
 
         switch (tex.psm)
@@ -1577,6 +2125,23 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
         }
 
         return 0xFFFF00FFu;
+    };
+
+    auto samplePoint = [&](int sampleU, int sampleV) -> uint32_t
+    {
+        sampleU = wrapTextureCoordinate(sampleU, texW, wrapU, minU, maxU);
+        sampleV = wrapTextureCoordinate(sampleV, texH, wrapV, minV, maxV);
+        if (!texelCacheOn)
+            return samplePointRaw(sampleU, sampleV);
+        TexelCacheEntry &e = t_texelCache[static_cast<uint32_t>(sampleU + sampleV * 17) & 255u];
+        if (e.epoch == t_texelEpoch && e.u == sampleU && e.v == sampleV)
+            return e.color;
+        const uint32_t color = samplePointRaw(sampleU, sampleV);
+        e.epoch = t_texelEpoch;
+        e.u = sampleU;
+        e.v = sampleV;
+        e.color = color;
+        return color;
     };
 
     if (!state.linearFilter)
@@ -2718,10 +3283,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 16) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 16) & 0xFFu))) * cqFx;
                         const float topA = static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu)) +
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 24) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu))) * cqFx;
-                        tr_out = clampU8(static_cast<int>(std::lround(topR)));
-                        tg_out = clampU8(static_cast<int>(std::lround(topG)));
-                        tb_out = clampU8(static_cast<int>(std::lround(topB)));
-                        ta_out = clampU8(static_cast<int>(std::lround(topA)));
+                        tr_out = clampU8(static_cast<int>(gsRoundClamped(topR)));
+                        tg_out = clampU8(static_cast<int>(gsRoundClamped(topG)));
+                        tb_out = clampU8(static_cast<int>(gsRoundClamped(topB)));
+                        ta_out = clampU8(static_cast<int>(gsRoundClamped(topA)));
                     }
                     else
                     {
@@ -3064,10 +3629,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 16) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 16) & 0xFFu))) * cqFx;
                         const float topA = static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu)) +
                                            (static_cast<float>(static_cast<uint8_t>((c10 >> 24) & 0xFFu)) - static_cast<float>(static_cast<uint8_t>((c00 >> 24) & 0xFFu))) * cqFx;
-                        tr_out = clampU8(static_cast<int>(std::lround(topR)));
-                        tg_out = clampU8(static_cast<int>(std::lround(topG)));
-                        tb_out = clampU8(static_cast<int>(std::lround(topB)));
-                        ta_out = clampU8(static_cast<int>(std::lround(topA)));
+                        tr_out = clampU8(static_cast<int>(gsRoundClamped(topR)));
+                        tg_out = clampU8(static_cast<int>(gsRoundClamped(topG)));
+                        tb_out = clampU8(static_cast<int>(gsRoundClamped(topB)));
+                        ta_out = clampU8(static_cast<int>(gsRoundClamped(topA)));
                     }
                     else
                     {
@@ -3496,10 +4061,68 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     const float invAbsDenom = 1.0f / std::fabs(denom);
     constexpr float kEdgeEpsilon = 1.0e-4f;
 
+    // PERF-HO2: exact per-row x-span. w0/w1/w2 are linear in px; solve each edge in double with a generous error margin and
+    // run the original float test only inside [xs,xe] (pixels outside provably fail it, so output is unchanged).
+    const double kd = static_cast<double>(winding) * static_cast<double>(invAbsDenom);
+    const double a0 = static_cast<double>(fy1 - fy2), b0 = static_cast<double>(fx2 - fx1);
+    const double a1 = static_cast<double>(fy2 - fy0), b1 = static_cast<double>(fx0 - fx2);
+    const double s0 = kd * a0, s1 = kd * a1, s2 = -(s0 + s1);
+    const double rx = std::max({std::fabs(static_cast<double>(fx0 - fx2)), std::fabs(static_cast<double>(fx1 - fx2)),
+                                std::fabs(static_cast<double>(minX) - fx2), std::fabs(static_cast<double>(maxX + 1) - fx2)}) + 1.0;
+    const double ry = std::max({std::fabs(static_cast<double>(fy0 - fy2)), std::fabs(static_cast<double>(fy1 - fy2)),
+                                std::fabs(static_cast<double>(minY) - fy2), std::fabs(static_cast<double>(maxY + 1) - fy2)}) + 1.0;
+    const double mg0 = 4.0e-6 * std::fabs(kd) * (std::fabs(a0) * rx + std::fabs(b0) * ry) + 1.0e-4;
+    const double mg1 = 4.0e-6 * std::fabs(kd) * (std::fabs(a1) * rx + std::fabs(b1) * ry) + 1.0e-4;
+    const double t0 = -static_cast<double>(kEdgeEpsilon) - mg0;
+    const double t1 = -static_cast<double>(kEdgeEpsilon) - mg1;
+    const double t2 = -static_cast<double>(kEdgeEpsilon) - (mg0 + mg1);
+
     for (int y = minY; y <= maxY; ++y)
     {
         float py = static_cast<float>(y) + 0.5f;
-        for (int x = minX; x <= maxX; ++x)
+        int xs = minX, xe = maxX;
+        {
+            const double dpy = static_cast<double>(py);
+            const double c0 = kd * (b0 * (dpy - fy2) - a0 * fx2);
+            const double c1 = kd * (b1 * (dpy - fy2) - a1 * fx2);
+            const double c2 = 1.0 - c0 - c1;
+            double lo = -1.0e30, hi = 1.0e30;
+            bool rowEmpty = false;
+            const double cc[3] = {c0, c1, c2};
+            const double ss[3] = {s0, s1, s2};
+            const double tt[3] = {t0, t1, t2};
+            for (int i = 0; i < 3; ++i)
+            {
+                if (std::fabs(ss[i]) < 1.0e-12)
+                {
+                    if (cc[i] < tt[i])
+                        rowEmpty = true;
+                }
+                else
+                {
+                    const double edge = (tt[i] - cc[i]) / ss[i];
+                    if (ss[i] > 0.0)
+                        lo = std::max(lo, edge);
+                    else
+                        hi = std::min(hi, edge);
+                }
+            }
+            if (s_ho2Off)
+            {
+                lo = -1.0e30;
+                hi = 1.0e30;
+                rowEmpty = false;
+            }
+            if (rowEmpty || lo > hi + 4.0)
+                continue;
+            const double dxs = std::max(static_cast<double>(minX), std::floor(lo - 0.5) - 1.0);
+            const double dxe = std::min(static_cast<double>(maxX), std::ceil(hi - 0.5) + 1.0);
+            if (dxs > dxe)
+                continue;
+            xs = static_cast<int>(dxs);
+            xe = static_cast<int>(dxe);
+        }
+        for (int x = xs; x <= xe; ++x)
         {
             float px = static_cast<float>(x) + 0.5f;
 
@@ -3510,7 +4133,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
             if (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon)
                 continue;
 
-            double z = v0.z * w0 + v1.z * w1 + v2.z * w2;
+            double z = (double)v0.z + ((double)v1.z - (double)v0.z) * (double)w1 + ((double)v2.z - (double)v0.z) * (double)w2;
 
             uint8_t r, g, b, a;
             if (state.prim.iip)
@@ -4165,13 +4788,17 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
     // Snapshot local memory under the backend lock, then perform the expensive
     // display conversion without holding the producer-side raster lock.
     thread_local std::vector<uint8_t> snapshot;
+    const uint64_t pj0 = __rdtsc(); // PERF-JD
     SnapshotVram(snapshot);
     if (snapshot.empty())
         return {};
 
     thread_local GSCpuBackend snapshotBackend;
     snapshotBackend.Initialize(snapshot.data(), static_cast<uint32_t>(snapshot.size()));
+    const uint64_t pj1 = __rdtsc();
     PresentationFrame frame = snapshotBackend.PresentFromLocalMemory(request);
+    g_presTicks[4].fetch_add(pj1 - pj0, std::memory_order_relaxed);
+    g_presTicks[5].fetch_add(__rdtsc() - pj1, std::memory_order_relaxed);
     if (probe_ae::isEnabled())
     {
         static uint32_t s_frameCounter = 0;

@@ -15,6 +15,8 @@
 #include <exception>
 #include <algorithm>
 #include <cstdlib>
+#include <atomic>
+#include <cstdio>
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -22,6 +24,13 @@
 #include <thread>
 #include <cstdio>
 #include <cstring>
+#endif
+
+#if defined(_WIN32)
+// PERF-KA: the real symbol comes from clang_rt.profile when the guest code is built with -fprofile-instr-generate; otherwise this no-op is used.
+extern "C" int ps2x_profile_noop() { return 0; }
+extern "C" int __llvm_profile_write_file(void);
+#pragma comment(linker, "/alternatename:__llvm_profile_write_file=ps2x_profile_noop")
 #endif
 
 namespace
@@ -90,6 +99,55 @@ namespace
                 g_logcatThread.join();
             }
         }
+    }
+#endif
+
+#if defined(_WIN32)
+    // PERF-IY: log access violations (fault address, RIP, raw stack) so a crash can be located offline (symres.py) without a debugger.
+    // Minimal declarations on purpose: <windows.h> clashes with raylib symbols in this TU.
+    struct Ps2xExcRecord
+    {
+        unsigned long code, flags;
+        Ps2xExcRecord *next;
+        void *address;
+        unsigned long numParams;
+        unsigned long long info[15];
+    };
+    struct Ps2xExcPointers
+    {
+        Ps2xExcRecord *record;
+        void *context;
+    };
+    extern "C" __declspec(dllimport) void *__stdcall AddVectoredExceptionHandler(unsigned long, long(__stdcall *)(Ps2xExcPointers *));
+    extern "C" __declspec(dllimport) void *__stdcall GetModuleHandleW(const wchar_t *);
+    extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId();
+    extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
+
+    long __stdcall ps2xCrashHandler(Ps2xExcPointers *p)
+    {
+        static std::atomic<int> s_reports{0};
+        if (!p || !p->record || p->record->code != 0xC0000005ul || s_reports.fetch_add(1) >= 2)
+            return 0; // EXCEPTION_CONTINUE_SEARCH
+        void *frames[62];
+        const unsigned short n = RtlCaptureStackBackTrace(0, 62, frames, nullptr);
+        const unsigned long long base = reinterpret_cast<unsigned long long>(GetModuleHandleW(nullptr));
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            FILE *f = pass == 0 ? stderr : std::fopen("logs/crash_report.txt", "w");
+            if (!f)
+                continue;
+            std::fprintf(f, "[crash] access violation thread=%lu rip=0x%llX exeBase=0x%llX rip_off=0x%llX op=%llu(0=read,1=write,8=exec) addr=0x%llX\n",
+                         GetCurrentThreadId(), reinterpret_cast<unsigned long long>(p->record->address), base,
+                         reinterpret_cast<unsigned long long>(p->record->address) - base,
+                         p->record->numParams > 0 ? p->record->info[0] : 0ull, p->record->numParams > 1 ? p->record->info[1] : 0ull);
+            for (unsigned short i = 0; i < n; ++i)
+                std::fprintf(f, "[crash] frame %u 0x%llX off=0x%llX\n", i, reinterpret_cast<unsigned long long>(frames[i]),
+                             reinterpret_cast<unsigned long long>(frames[i]) - base);
+            std::fflush(f);
+            if (pass == 1)
+                std::fclose(f);
+        }
+        return 0;
     }
 #endif
 
@@ -183,6 +241,9 @@ int main(int argc, char *argv[])
     redirectStdioToLogcat();
 #endif
     setupTerminateLogger();
+#if defined(_WIN32)
+    AddVectoredExceptionHandler(1, ps2xCrashHandler); // PERF-IY
+#endif
 
     for (int i = 1; i < argc; ++i)
     {
@@ -259,6 +320,9 @@ int main(int argc, char *argv[])
 #endif
         std::cout.flush();
         std::cerr.flush();
+#if defined(_WIN32)
+        __llvm_profile_write_file(); // PERF-KA: PGO-instrumented builds only (no-op otherwise); _Exit skips the profile runtime's atexit hook
+#endif
         std::_Exit(0);
     }
     catch (const std::exception &e)

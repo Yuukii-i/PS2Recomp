@@ -199,35 +199,28 @@ static std::vector<Cid1StreamJob> s_cid1StreamJobs;
             uint8_t *dst = getMemPtr(rdram, addr);
             if (!dst) return;
 
-            dst[0x00] = 0x01; // status: DBC_STAT_CONNECTED
-            dst[0x01] = 0x00;
-            dst[0x02] = 0x20; // packet len: 32 bytes
-            dst[0x03] = 0x00;
-            dst[0x04] = 0x01; // valid / connected word
+            // Layout verified in PCSX2 (idle pad, buffer 0x784D40): header `01 0a 06 04 01`, byte +2 = payload
+            // length (6), payload at +0x1C = {buttons_lo, buttons_hi (active low), then four stick bytes},
+            // sequence counter at +0x7C. The EE copies [+2] bytes from +0x1C (func 0x405700); the old layout
+            // (len 0x20, payload starting `00 73`) made the game see START/SELECT/D-pad permanently held,
+            // so a real key press never produced a press edge.
+            std::memset(dst, 0, 0x7C);
+            dst[0x00] = 0x01;
+            dst[0x01] = 0x0A;
+            dst[0x02] = 0x06; // payload length
+            dst[0x03] = 0x04;
+            dst[0x04] = 0x01;
 
-            std::memset(dst + 0x1C, 0, 32);
-            dst[0x1C + 0x00] = 0x00; // terminal/status
-            dst[0x1C + 0x01] = 0x73; // pad type: DS2
-            dst[0x1C + 0x02] = static_cast<uint8_t>(pad.buttons & 0xFFu);
-            dst[0x1C + 0x03] = static_cast<uint8_t>((pad.buttons >> 8u) & 0xFFu);
-            dst[0x1C + 0x04] = pad.rx;
-            dst[0x1C + 0x05] = pad.ry;
-            dst[0x1C + 0x06] = pad.lx;
-            dst[0x1C + 0x07] = pad.ly;
-
-            // Pressure values: 0xFF if pressed, 0x00 if not:
-            dst[0x1C + 8]  = (pad.buttons & (1 << 5)) ? 0x00 : 0xFF; // Right
-            dst[0x1C + 9]  = (pad.buttons & (1 << 7)) ? 0x00 : 0xFF; // Left
-            dst[0x1C + 10] = (pad.buttons & (1 << 4)) ? 0x00 : 0xFF; // Up
-            dst[0x1C + 11] = (pad.buttons & (1 << 6)) ? 0x00 : 0xFF; // Down
-            dst[0x1C + 12] = (pad.buttons & (1 << 12)) ? 0x00 : 0xFF; // Triangle
-            dst[0x1C + 13] = (pad.buttons & (1 << 13)) ? 0x00 : 0xFF; // Circle
-            dst[0x1C + 14] = (pad.buttons & (1 << 14)) ? 0x00 : 0xFF; // Cross
-            dst[0x1C + 15] = (pad.buttons & (1 << 15)) ? 0x00 : 0xFF; // Square
-            dst[0x1C + 16] = (pad.buttons & (1 << 10)) ? 0x00 : 0xFF; // L1
-            dst[0x1C + 17] = (pad.buttons & (1 << 8)) ? 0x00 : 0xFF; // L2
-            dst[0x1C + 18] = (pad.buttons & (1 << 11)) ? 0x00 : 0xFF; // R1
-            dst[0x1C + 19] = (pad.buttons & (1 << 9)) ? 0x00 : 0xFF; // R2
+            dst[0x1C + 0x00] = static_cast<uint8_t>(pad.buttons & 0xFFu);
+            dst[0x1C + 0x01] = static_cast<uint8_t>((pad.buttons >> 8u) & 0xFFu);
+            dst[0x1C + 0x02] = pad.rx;
+            dst[0x1C + 0x03] = pad.ry;
+            dst[0x1C + 0x04] = pad.lx;
+            dst[0x1C + 0x05] = pad.ly;
+            // Trailing bytes seen in the real idle buffer (beyond the 6-byte payload).
+            dst[0x22] = 0xFF;
+            dst[0x23] = 0xFF;
+            dst[0x24] = 0x0F;
 
             // sequence counter at +0x7C:
             std::memcpy(dst + 0x7C, &seq, sizeof(seq));
@@ -2310,6 +2303,31 @@ uint64_t vblDiff = 0;
                 const char *pathPtr = reinterpret_cast<const char *>(src + 0x20);
                 std::string path(pathPtr ? pathPtr : "");
                 diagSetLastCid1Path(path);
+                { // PROBE-GW: dump raw path bytes + guest address when the path has non-printable bytes
+                    bool badPath = false;
+                    for (unsigned char ch : path)
+                        if (ch < 0x20 || ch > 0x7E)
+                            badPath = true;
+                    if (badPath)
+                    {
+                        char hex[256] = {0};
+                        for (int i = 0; i < 48; ++i)
+                            std::snprintf(hex + i * 3, 4, "%02X ", static_cast<unsigned>(src[0x20 + i]));
+                        ps2xSafeLog("[probe] gw badpath guest=0x%08X len=%zu bytes@+0x20: %s\n",
+                                    static_cast<unsigned>(src - rdram) + 0x20u, path.size(), hex);
+                        static bool s_gwDumped = false; // PROBE-GW2: one full RAM dump at the first bad path (diff vs PCSX2 savestate 3)
+                        if (!s_gwDumped)
+                        {
+                            s_gwDumped = true;
+                            if (FILE *gf = std::fopen("logs/ram_badpath.bin", "wb"))
+                            {
+                                std::fwrite(rdram, 1, PS2_RAM_SIZE, gf);
+                                std::fclose(gf);
+                                ps2xSafeLog("[probe] gw ram dump written logs/ram_badpath.bin\n");
+                            }
+                        }
+                    }
+                }
 
                 if (bufSize < 0x104u)
                 {
@@ -2351,12 +2369,16 @@ uint64_t vblDiff = 0;
                 uint32_t strPoolEe = ptrArrayEe + totalEntries * 4u;
                 uint32_t totalBytes = totalEntries * 64u + totalEntries * 4u + totalStrBytes;
 
-                if (totalBytes > bufSize || (dstEeAddr != 0u && dstEeAddr + totalBytes > PS2_RAM_SIZE))
+                // C330: the real file3.irx does not clamp to the caller's bufSize (the game always passes 1024 but the hub folder
+                // debug/us/stage/travel_a needs 1148 bytes and works on hardware); only refuse a write that would leave RAM.
+                if (dstEeAddr != 0u && dstEeAddr + totalBytes > PS2_RAM_SIZE)
                 {
-                    ps2xSafeLog("[CID1:EnumDir-0x0A] ERROR: totalBytes %u exceeds bufSize %u or RAM for '%s'\n", totalBytes, bufSize, path.c_str());
+                    ps2xSafeLog("[CID1:EnumDir-0x0A] ERROR: totalBytes %u exceeds RAM for '%s'\n", totalBytes, path.c_str());
                     reply.result = static_cast<uint32_t>(-12);
                     break;
                 }
+                if (totalBytes > bufSize)
+                    ps2xSafeLog("[CID1:EnumDir-0x0A] note: totalBytes %u > bufSize %u for '%s' (written in full, like file3.irx)\n", totalBytes, bufSize, path.c_str());
 
                 if (dstEeAddr != 0u && dstEeAddr + totalBytes <= PS2_RAM_SIZE)
                 {

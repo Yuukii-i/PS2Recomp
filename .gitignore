@@ -23,3 +23,5 @@ android/app/.cxx/
 android/local.properties
 android/.gradle/ 
 .idea/
+# Generated from the game VU microcode (Sony-derived): regenerate locally with tools/vu1gen in the outer repo
+ps2xRuntime/src/lib/vu/generated/

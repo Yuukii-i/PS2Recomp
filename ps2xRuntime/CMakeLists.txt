@@ -383,6 +383,8 @@ add_library(ps2_runtime STATIC
     src/lib/gs/ps2_gs_memory.cpp
     src/lib/gs/gs_frontend.cpp
     src/lib/gs/gs_cpu_backend.cpp
+    src/lib/gs/ps2_vk_backend.cpp
+    src/lib/gs/ps2_vk_gs_backend.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
@@ -393,6 +395,15 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_vu1_core.cpp
     src/lib/vu/ps2_vu1_upper.cpp
     src/lib/vu/ps2_vu1_lower.cpp
+    src/lib/vu/generated/vu1_native_exec_0.cpp
+    src/lib/vu/generated/vu1_native_exec_1.cpp
+    src/lib/vu/generated/vu1_native_exec_2.cpp
+    src/lib/vu/generated/vu1_native_exec_3.cpp
+    src/lib/vu/generated/vu1_native_dispatch.cpp
+    src/lib/vu/generated/vu1_hot_blocks.cpp
+    src/lib/vu/generated/vu0_native_exec_0.cpp
+    src/lib/vu/generated/vu0_native_dispatch.cpp
+    src/lib/vu/generated/vu0_hot_blocks.cpp
     src/lib/games_database.cpp
     src/lib/probe_prof.cpp
 )
@@ -507,6 +518,8 @@ target_include_directories(ps2_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel
 )
 
+find_package(Vulkan REQUIRED) # PERF-VK: GS Vulkan backend (docs/VULKAN_PLAN.md)
+target_link_libraries(ps2_runtime PRIVATE Vulkan::Vulkan)
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
 target_link_libraries(ps2EntryRunner
     PRIVATE

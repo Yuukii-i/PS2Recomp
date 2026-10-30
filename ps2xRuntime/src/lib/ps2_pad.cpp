@@ -2,6 +2,8 @@
 #include "ps2_host_backend.h"
 #include <cstring>
 
+extern void ps2xSafeLog(const char *fmt, ...);
+
 namespace
 {
     constexpr uint8_t kPadAnalogMarker = 0x73;
@@ -38,8 +40,23 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
 
     uint16_t btns = 0xFFFFu;
-    constexpr int kGamepad = 0;
-    const bool useGamepad = IsGamepadAvailable(kGamepad);
+    // PERF-JG: first connected pad of the 4 raylib slots (was slot 0 only), logged when it changes
+    int kGamepad = -1;
+    for (int i = 0; i < 4; ++i)
+    {
+        if (IsGamepadAvailable(i))
+        {
+            kGamepad = i;
+            break;
+        }
+    }
+    const bool useGamepad = kGamepad >= 0;
+    static int s_lastPad = -2;
+    if (kGamepad != s_lastPad)
+    {
+        ps2xSafeLog("[pad] gamepad slot %d (%s)\n", kGamepad, kGamepad >= 0 ? GetGamepadName(kGamepad) : "none, keyboard");
+        s_lastPad = kGamepad;
+    }
     auto clearBit = [&btns](uint16_t mask)
     { btns &= ~mask; };
 
@@ -82,20 +99,41 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         float ly = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_Y);
         float rx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_X);
         float ry = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_Y);
-        data[6] = static_cast<uint8_t>(128 + lx * 127);
-        data[7] = static_cast<uint8_t>(128 + ly * 127);
-        data[4] = static_cast<uint8_t>(128 + rx * 127);
-        data[5] = static_cast<uint8_t>(128 + ry * 127);
+        auto stick = [](float v) -> uint8_t
+        {
+            constexpr float kDead = 0.15f; // PERF-JG: per-axis deadzone, rescaled so full tilt still reaches 0/255
+            if (v > -kDead && v < kDead)
+                return 128;
+            const float s = (v > 0.0f ? v - kDead : v + kDead) / (1.0f - kDead);
+            const float o = 128.0f + s * 127.0f;
+            return static_cast<uint8_t>(o < 0.0f ? 0.0f : (o > 255.0f ? 255.0f : o));
+        };
+        data[6] = stick(lx);
+        data[7] = stick(ly);
+        data[4] = stick(rx);
+        data[5] = stick(ry);
     }
-    else
+    // PERF-JG: the keyboard is always active (a phantom/unmapped pad in slot 0 used to disable it); keys only override a stick axis while pressed
     {
-        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))
+        // WASD = left stick, I/J/K/L = right stick (net), arrows = D-pad
+        auto axis = [](uint8_t &out, int neg, int pos)
+        {
+            if (IsKeyDown(neg))
+                out = 0;
+            else if (IsKeyDown(pos))
+                out = 255;
+        };
+        axis(data[6], KEY_A, KEY_D);
+        axis(data[7], KEY_W, KEY_S);
+        axis(data[4], KEY_J, KEY_L);
+        axis(data[5], KEY_I, KEY_K);
+        if (IsKeyDown(KEY_UP))
             clearBit(PAD_UP);
-        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))
+        if (IsKeyDown(KEY_DOWN))
             clearBit(PAD_DOWN);
-        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))
+        if (IsKeyDown(KEY_LEFT))
             clearBit(PAD_LEFT);
-        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))
+        if (IsKeyDown(KEY_RIGHT))
             clearBit(PAD_RIGHT);
         if (IsKeyDown(KEY_X) || IsKeyDown(KEY_SPACE))
             clearBit(PAD_CROSS);

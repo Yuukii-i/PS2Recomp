@@ -2,6 +2,7 @@
 #define PS2_RUNTIME_H
 
 #include <cstring>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -237,6 +238,8 @@ inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t wat
     return static_cast<uint8_t>((valueHi >> ((byteIndex - 8u) * 8u)) & 0xFFu);
 }
 
+extern "C" void ps2x_probeBadStore(uint32_t addr, uint64_t lo, uint64_t hi, uint32_t pc, uint32_t ra);
+
 inline void ps2TraceGuestWrite(uint8_t *rdram,
                                uint32_t guestAddr,
                                uint32_t size,
@@ -248,6 +251,13 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
     (void)rdram;
     (void)size;
     (void)valueHi;
+#if !defined(PS2X_TRACE_GUEST_WRITES)
+    // PERF-IH: these debug watches ran inside every guest store of the generated code. Define PS2X_TRACE_GUEST_WRITES to restore.
+    (void)guestAddr;
+    (void)valueLo;
+    (void)op;
+    (void)ctx;
+#else
     uint32_t phys = guestAddr & 0x01FFFFFFu;
     if (phys >= 0x74B140u && phys <= 0x74B17Fu) {
         static std::atomic<uint32_t> s_vtWriteCount{0};
@@ -260,6 +270,30 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
             std::fflush(stdout);
         }
     }
+    if (phys >= 0x785AF0u && phys < 0x785C20u) {
+        uint32_t w0 = static_cast<uint32_t>(valueLo & 0xFFFFFFFFu);
+        uint32_t w1 = static_cast<uint32_t>((valueLo >> 32) & 0xFFFFFFFFu);
+        uint32_t w2 = static_cast<uint32_t>(valueHi & 0xFFFFFFFFu);
+        uint32_t w3 = static_cast<uint32_t>((valueHi >> 32) & 0xFFFFFFFFu);
+        auto isBadVal = [](uint32_t w) -> bool {
+            if (w == 0xFFFFFFFFu || w == 0x7FFFFFFFu || w == 0x7F7FFFFFu || w == 0xFF7FFFFFu || w == 0xFF7FFFFEu) return true;
+            if (((w >> 23) & 0xFFu) == 0xFFu) return true;
+            float f = 0.0f;
+            std::memcpy(&f, &w, 4);
+            return std::isnan(f) || std::isinf(f) || std::fabs(f) > 1.0e20f;
+        };
+        bool bad = false;
+        if (size >= 1u && isBadVal(w0)) bad = true;
+        if (size >= 8u && isBadVal(w1)) bad = true;
+        if (size >= 12u && isBadVal(w2)) bad = true;
+        if (size >= 16u && isBadVal(w3)) bad = true;
+        if (bad) {
+            uint32_t pc = ctx ? ctx->pc : 0u;
+            uint32_t ra = ctx ? getRegU32(const_cast<R5900Context*>(ctx), 31) : 0u;
+            ps2x_probeBadStore(guestAddr, valueLo, valueHi, pc, ra);
+        }
+    }
+#endif
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -269,6 +303,12 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
                                     const R5900Context *ctx)
 {
     (void)rdram;
+#if !defined(PS2X_TRACE_GUEST_WRITES)
+    (void)guestAddr;
+    (void)size;
+    (void)op;
+    (void)ctx;
+#else
     uint32_t start = guestAddr & 0x01FFFFFFu;
     uint32_t end = start + size;
     if (end > 0x74B140u && start <= 0x74B17Fu) {
@@ -282,6 +322,7 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
             std::fflush(stdout);
         }
     }
+#endif
 }
 
 class PS2Runtime

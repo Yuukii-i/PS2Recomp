@@ -24,14 +24,22 @@ namespace ps2_syscalls {
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_runtime.h"
 #include "Stubs/CD.h"
 
 #include <algorithm>
+#include <intrin.h>
 #include <cassert>
 #include <mutex>
+#include <thread>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+
+// PERF-KM: bumped whenever an element of EeScheduler::m_threads is erased, so checkpointDue() can cache the running thread's record pointer
+// (unordered_map nodes are stable across inserts/rehash; only erase/clear invalidate them).
+static uint32_t s_threadMapGen = 0;
 
 namespace
 {
@@ -174,6 +182,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_executorThread = std::this_thread::get_id();
     m_rdram = rdram;
     m_readyQueues = {};
+    ++s_threadMapGen; // PERF-KM
     m_threads.clear();
     m_semaphores.clear();
     m_eventFlags.clear();
@@ -520,7 +529,19 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     uint32_t pc = g_currentExecutingFunction;
     if (m_currentThreadId != 0)
     {
-        const GuestThread *running = currentThread();
+        // PERF-KM: cached record of the running guest thread (was an unordered_map lookup on every checkpoint, ~4.5M/s)
+        static thread_local const GuestThread *s_cachedThread = nullptr;
+        static thread_local int s_cachedThreadId = -1;
+        static thread_local uint32_t s_cachedGen = ~0u;
+        static thread_local const EeScheduler *s_cachedOwner = nullptr;
+        if (s_cachedOwner != this || s_cachedThreadId != m_currentThreadId || s_cachedGen != s_threadMapGen)
+        {
+            s_cachedThread = currentThread();
+            s_cachedThreadId = m_currentThreadId;
+            s_cachedGen = s_threadMapGen;
+            s_cachedOwner = this;
+        }
+        const GuestThread *running = s_cachedThread;
         if (running != nullptr)
         {
             pc = running->activeContext().pc;
@@ -542,6 +563,26 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         processPendingEvents();
 
         return false;
+    }
+
+    // PERF-KM: apply the cycle accounting (EE timers, IOP, deadline/time-slice checks) in steps of >= kBatch cycles instead of at every checkpoint
+    // (~4.5M calls/s). Total emulated cycles are unchanged; timers, deadlines and preemption fire up to kBatch cycles (~1 us at 256) late.
+    // A pending cross-thread event or stop request still takes the normal path immediately. PS2X_CKPT_BATCH=<cycles> overrides (0 = old behaviour).
+    static const uint32_t kCkptBatch = []() -> uint32_t
+    {
+        const char *e = std::getenv("PS2X_CKPT_BATCH");
+        return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 256u;
+    }();
+    static thread_local uint32_t s_ckptAcc = 0;
+    if (kCkptBatch > cycles)
+    {
+        s_ckptAcc += cycles;
+        if (s_ckptAcc < kCkptBatch && !m_checkpointPending.load(std::memory_order_acquire) && !m_stopRequested.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+        cycles = s_ckptAcc;
+        s_ckptAcc = 0;
     }
 
     accountCycles(cycles);
@@ -576,12 +617,24 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     return false;
 }
 
+extern const bool g_profCounts;                                     // PROBE-IJ (ps2_runtime.cpp)
+extern uint64_t g_pcAcctCalls, g_pcAcctTicks, g_pcIopTicks;          // PROBE-IJ
+
 void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
+    const uint64_t t0 = g_profCounts ? __rdtsc() : 0u;
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
     m_eeCycle += elapsed;
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
+    const uint64_t t1 = g_profCounts ? __rdtsc() : 0u;
     m_runtime.advanceIopEeCycles(elapsed);
+    if (g_profCounts) // PROBE-IJ
+    {
+        const uint64_t t2 = __rdtsc();
+        ++g_pcAcctCalls;
+        g_pcAcctTicks += t2 - t0;
+        g_pcIopTicks += t2 - t1;
+    }
     if (m_pendingEeTimerInterrupts != 0u)
     {
         m_checkpointPending.store(true, std::memory_order_release);
@@ -667,6 +720,7 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
     {
         ownedStack = it->second.stack;
     }
+    ++s_threadMapGen; // PERF-KM
     m_threads.erase(it);
     publishSnapshot();
     return KE_OK;
@@ -686,6 +740,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     }
 
     target->context = R5900Context{};
+    target->context.vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // vf0 is hardwired {0,0,0,1}
     target->context.pc = target->entry;
     target->arg = arg;
     target->suspendCount = 0;
@@ -729,6 +784,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     m_currentThreadId = 0;
     if (deleteThreadRecord && id != kMainThreadId)
     {
+        ++s_threadMapGen; // PERF-KM
         m_threads.erase(id);
     }
     if (ownedStack != 0u)
@@ -2192,6 +2248,87 @@ void EeScheduler::processDueDeadlines()
     }
 }
 
+
+// PERF-JF: PS2X_PRESENT_ASYNC=1 (needs PS2X_GS_ASYNC=1) runs the vblank present latch (GPU fence wait + CPU de-swizzle, ~14 ms) on its own
+// thread, ordered after the GIF packets queued at vblank time, so the EE thread no longer waits for it. A latch requested while one is still
+// running is coalesced (the worker re-latches once with the newest ticket).
+extern "C" uint64_t ps2_gs_async_ticket();
+extern "C" void ps2_gs_async_wait_ticket(uint64_t ticket);
+namespace
+{
+struct PresentLatchWorker
+{
+    std::mutex m;
+    std::condition_variable cv;
+    bool pending = false;
+    bool dirty = false;
+    bool started = false;
+    uint64_t ticket = 0;
+    GS *gs = nullptr;
+};
+
+bool isPresentAsyncEnabled()
+{
+    static const bool on = []() { const char *e = std::getenv("PS2X_PRESENT_ASYNC"); return !(e && e[0] == '0'); }(); // default on (needs PS2X_GS_ASYNC=1, else inline)
+    return on;
+}
+
+bool postPresentLatch(GS &gs)
+{
+    static PresentLatchWorker *w = new PresentLatchWorker(); // leaked on purpose: detached worker outlives static destruction
+    const uint64_t ticket = ps2_gs_async_ticket();
+    if (!ticket)
+        return false; // async GS off or not started yet: caller latches inline
+    {
+        std::lock_guard<std::mutex> lk(w->m);
+        w->ticket = ticket;
+        w->gs = &gs;
+        if (w->pending)
+        {
+            w->dirty = true;
+            return true;
+        }
+        w->pending = true;
+        if (!w->started)
+        {
+            w->started = true;
+            std::thread([w = w]() {
+                std::unique_lock<std::mutex> lk2(w->m);
+                for (;;)
+                {
+                    w->cv.wait(lk2, [&] { return w->pending; });
+                    for (;;)
+                    {
+                        const uint64_t t = w->ticket;
+                        GS *g = w->gs;
+                        w->dirty = false;
+                        lk2.unlock();
+                        ps2_gs_async_wait_ticket(t);
+                        g->latchHostPresentationFrame();
+                        lk2.lock();
+                        if (!w->dirty)
+                            break;
+                    }
+                    w->pending = false;
+                }
+            }).detach();
+        }
+    }
+    w->cv.notify_one();
+    return true;
+}
+} // namespace
+
+static bool isVblankLatchEnabled()
+{
+    static const bool s_enabled = []() {
+        const char *e = std::getenv("PS2X_VBLANK_LATCH");
+        if (e && std::strcmp(e, "0") == 0) return false;
+        return true;
+    }();
+    return s_enabled;
+}
+
 void EeScheduler::processEvent(const EeEvent &event)
 {
     switch (event.type)
@@ -2222,6 +2359,20 @@ void EeScheduler::processEvent(const EeEvent &event)
         m_vsyncFlagAddress = 0u;
         m_vsyncTickAddress = 0u;
         completeVSync(m_vsyncTick);
+
+        if (isVblankLatchEnabled())
+        {
+            extern std::atomic<uint64_t> g_gsFrameKicks;
+            static uint64_t s_lastLatchKicks = ~0ull;
+            static uint64_t s_lastLatchTick = 0;
+            if ((g_gsFrameKicks.load(std::memory_order_relaxed) != s_lastLatchKicks) || (m_vsyncTick - s_lastLatchTick >= 30))
+            {
+                if (!(isPresentAsyncEnabled() && postPresentLatch(m_runtime.gs())))
+                    m_runtime.gs().latchHostPresentationFrame();
+                s_lastLatchKicks = g_gsFrameKicks.load(std::memory_order_relaxed);
+                s_lastLatchTick = m_vsyncTick;
+            }
+        }
 
         // GameThread pad injection
         {
@@ -2306,10 +2457,21 @@ void EeScheduler::processEvent(const EeEvent &event)
                 }
             }
 
-            if (activeMask != 0) {
-                ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~activeMask), 0x80, 0x80, 0x80, 0x80);
+            // PERF-JH: this hard-wired key override (buttons only, sticks centred, W=L2, no gamepad) shadowed PSPadBackend::readState, so the
+            // real mapping and gamepads never reached the game. It is now only used for injected/auto pad input or with PS2X_LEGACY_PAD=1.
+            static const bool s_legacyPadOverride = []() {
+                const char *a = std::getenv("PS2X_AUTO_PAD");
+                const char *l = std::getenv("PS2X_LEGACY_PAD");
+                return (a && (a[0] == '1' || a[0] == 't')) || (l && l[0] == '1');
+            }();
+            if (!s_injections.empty() || s_legacyPadOverride) {
+                if (activeMask != 0) {
+                    ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~activeMask), 0x80, 0x80, 0x80, 0x80);
+                } else {
+                    ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+                }
             } else {
-                ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+                ps2_stubs::clearPadOverrideState();
             }
 
             ps2_syscalls::ps2xUpdateDbcPadBuffers(m_rdram, &m_runtime);
