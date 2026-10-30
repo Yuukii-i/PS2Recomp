@@ -10,6 +10,9 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <intrin.h>
+extern std::atomic<uint64_t> g_waitTicks[8]; // PROBE-KF, defined in ps2_memory.cpp
 
 // PERF-GK: optional asynchronous GS (PS2X_GS_ASYNC=1). drain() hands the sorted packets to a worker thread that runs the
 // process function (GS rasterization) so the EE/VU1 thread no longer pays for drawing. File-static state only (no header change).
@@ -73,7 +76,9 @@ extern "C" void ps2_gs_async_fence()
     std::unique_lock<std::mutex> lock(st.m);
     if (!st.started)
         return;
+    const uint64_t kfT0 = __rdtsc(); // PROBE-KF
     st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
+    g_waitTicks[2].fetch_add(__rdtsc() - kfT0, std::memory_order_relaxed);
 }
 
 // PERF-JF: ticket = number of packets handed to the async worker so far (0 when async is off / not started).
@@ -163,7 +168,9 @@ void GifArbiter::drain()
             auto &pkt = m_queue[i];
             if (pkt.data.empty())
                 continue;
+            const uint64_t kfT1 = __rdtsc(); // PROBE-KF
             st.cvIdle.wait(lock, [&] { return st.queuedBytes < kGsAsyncMaxBytes; }); // backpressure
+            g_waitTicks[3].fetch_add(__rdtsc() - kfT1, std::memory_order_relaxed);
             st.queuedBytes += pkt.data.size();
             ++st.enqueuedPkts;
             st.q.push_back(std::move(pkt.data));

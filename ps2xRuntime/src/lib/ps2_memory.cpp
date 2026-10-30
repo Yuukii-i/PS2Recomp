@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+void ps2xSafeLog(const char *fmt, ...);
 
 std::atomic<uint64_t> g_gsFrameKicks{0};
 
@@ -407,6 +408,10 @@ bool PS2Memory::initialize(size_t ramSize)
 #include <mutex>
 #include <map>
 #include <cstdlib>
+#include <chrono>
+#include <intrin.h>
+// PROBE-KF: wait/busy ticks: 0 vif1 fence wait, 1 vif1 enqueue wait, 2 gs fence wait, 3 gs backpressure wait, 4 vif1 worker busy, 5 fence waits (count)
+std::atomic<uint64_t> g_waitTicks[8]{};
 extern "C" void ps2_gs_async_fence(); // PERF-GK (gs/ps2_gif_arbiter.cpp)
 
 // PERF-HN: async VIF1/VU1 worker (opt-in PS2X_VIF1_ASYNC=1). The EE thread copies VIF1 packet data into jobs; one worker
@@ -468,7 +473,9 @@ static void vif1Worker()
             st.cvSpace.notify_all();
         }
         g_vif1JobFbrst = job.fbrst;
+        const uint64_t wkT0 = __rdtsc(); // PROBE-KF
         s_vif1Process(job.data.data(), static_cast<uint32_t>(job.data.size()));
+        g_waitTicks[4].fetch_add(__rdtsc() - wkT0, std::memory_order_relaxed);
         if (s_vif1DrainArbiter)
             s_vif1DrainArbiter();
         g_vif1JobFbrst = ~0u;
@@ -490,7 +497,9 @@ static void vif1EnqueueJob(std::vector<uint8_t> &&data)
     Vif1AsyncState &st = vifAsync();
     const uint32_t fbrst = g_vif1FbrstProvider ? g_vif1FbrstProvider() : 0u;
     std::unique_lock<std::mutex> lock(st.m);
+    const uint64_t eqT0 = __rdtsc(); // PROBE-KF
     st.cvSpace.wait(lock, [&] { return st.q.empty() || st.queuedBytes + data.size() <= kVif1AsyncMaxBytes; });
+    g_waitTicks[1].fetch_add(__rdtsc() - eqT0, std::memory_order_relaxed);
     if (!st.started)
     {
         st.started = true;
@@ -516,11 +525,41 @@ extern "C" void ps2_vif1_fence()
     Vif1AsyncState &st = vifAsync();
     if (st.pending.load(std::memory_order_acquire))
     {
+        const uint64_t fT0 = __rdtsc(); // PROBE-KF
         std::unique_lock<std::mutex> lock(st.m);
         st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
+        g_waitTicks[0].fetch_add(__rdtsc() - fT0, std::memory_order_relaxed);
+        g_waitTicks[5].fetch_add(1, std::memory_order_relaxed);
     }
     if (g_vif1ApplyVpuStat)
         g_vif1ApplyVpuStat();
+    // PROBE-KF: once per second (EE thread): where does the EE wait? ms/s per wait source + VIF1 worker busy
+    static uint64_t s_calls = 0;
+    if ((++s_calls & 0xFFFu) == 0u)
+    {
+        static auto s_t0 = std::chrono::steady_clock::now();
+        static uint64_t s_tsc0 = __rdtsc();
+        static uint64_t s_prev[8]{};
+        const auto now = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - s_t0).count();
+        if (ms >= 1000.0)
+        {
+            const uint64_t tsc = __rdtsc();
+            const double tpm = static_cast<double>(tsc - s_tsc0) / ms;
+            double v[8];
+            for (int i = 0; i < 6; ++i)
+            {
+                const uint64_t cur = g_waitTicks[i].load(std::memory_order_relaxed);
+                v[i] = (i == 5) ? static_cast<double>(cur - s_prev[i]) : static_cast<double>(cur - s_prev[i]) / tpm;
+                s_prev[i] = cur;
+            }
+            // global ps2xSafeLog
+            ps2xSafeLog("[wait] window_ms=%.0f EE ms: vif1_fence=%.0f (n=%.0f) vif1_enqueue=%.0f gs_fence=%.0f gs_backpressure=%.0f | vif1_worker_busy=%.0f\n", ms, v[0], v[5],
+                        v[1], v[2], v[3], v[4]);
+            s_t0 = now;
+            s_tsc0 = tsc;
+        }
+    }
 }
 static std::mutex s_fkSpanMutex;
 static std::map<uint32_t, std::vector<probe_ae::AySpan>> s_fkSpansBySize;
