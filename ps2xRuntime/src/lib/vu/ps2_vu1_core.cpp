@@ -2204,10 +2204,20 @@ void VU1Interpreter::progressXgkick()
         }
 
         const uint32_t qwordOffset = m_xgkick.copiedBytes;
-        for (uint32_t i = 0; i < 16u; ++i)
+        // PERF-KH: the byte loop did a 32-bit modulo per byte (16 per quadword, ~8% of the VU1 worker's samples). Same result: one modulo, and a plain
+        // 16-byte copy unless the quadword wraps around the end of VU data memory.
+        const uint32_t srcStart = (m_xgkick.sourceAddress + m_xgkick.copiedBytes) % m_activeVuDataSize;
+        if (srcStart + 16u <= m_activeVuDataSize)
         {
-            const uint32_t source = (m_xgkick.sourceAddress + m_xgkick.copiedBytes + i) % m_activeVuDataSize;
-            m_xgkick.packet[m_xgkick.copiedBytes + i] = m_activeVuData[source];
+            std::memcpy(m_xgkick.packet.data() + m_xgkick.copiedBytes, m_activeVuData + srcStart, 16u);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                const uint32_t source = (m_xgkick.sourceAddress + m_xgkick.copiedBytes + i) % m_activeVuDataSize;
+                m_xgkick.packet[m_xgkick.copiedBytes + i] = m_activeVuData[source];
+            }
         }
         m_xgkick.copiedBytes += 16u;
 
