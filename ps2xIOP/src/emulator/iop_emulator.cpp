@@ -171,6 +171,7 @@ namespace ps2x::iop::detail
             ioman.reset();
             pendingDmaInterrupts.clear();
             pendingGuestCallbacks.clear();
+            idleSkipUntil = 0; // PERF-KE
             nextModuleId = 1;
             moduleCursor = kModuleLoadBase;
             totalCycles = 0;
@@ -609,6 +610,15 @@ namespace ps2x::iop::detail
 
         void runCycles(uint64_t cycles) noexcept
         {
+            // PERF-KE: the EE calls this ~4.5M times per second and every call used to run one full idle iteration (DMA/callback/timer service, ready-queue
+            // scan, thread-map + timer scans for the next wake) = ~9% of the EE thread, with 0 IOP instructions executed. When the previous pass found the IOP idle
+            // until `idleSkipUntil` (earliest of: delayed-thread wake, pending DMA irq, guest callback, timer compare/overflow), nothing can happen before
+            // then, so just advance the cycle counter. Every external entry point (RPC, SIF, module load, memory write, reset) clears the hint.
+            if (idleSkipUntil != 0u && totalCycles + cycles < idleSkipUntil)
+            {
+                totalCycles += cycles;
+                return;
+            }
             const uint64_t kcR0 = __rdtsc(); // PROBE-KC
             ++g_kc.rcCalls;
             try
@@ -624,15 +634,17 @@ namespace ps2x::iop::detail
                     if (!next)
                     {
                         ++g_kc.idleIters; // PROBE-KC
-                        uint64_t nextWake = kernel.nextWakeCycle(target);
+                        uint64_t horizon = kernel.nextWakeCycle(UINT64_MAX);
                         for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
-                            nextWake = std::min(nextWake, completionCycle);
+                            horizon = std::min(horizon, completionCycle);
                         if (!pendingGuestCallbacks.empty())
-                            nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
-                        nextWake = timrman.nextEventCycle(nextWake);
-                        totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
+                            horizon = std::min(horizon, pendingGuestCallbacks.begin()->first);
+                        horizon = timrman.nextEventCycle(horizon);
+                        idleSkipUntil = horizon; // PERF-KE
+                        totalCycles = std::max(totalCycles + 1u, std::min(target, horizon));
                         continue;
                     }
+                    idleSkipUntil = 0u; // PERF-KE: a thread is runnable, the idle hint is void
                     const uint64_t before = totalCycles;
                     runCpu(next->cpu, static_cast<uint32_t>(std::min<uint64_t>(kDefaultSlice, target - totalCycles)));
                     kernel.endTimeslice(*next, kThreadReturnSentinel);
@@ -762,6 +774,7 @@ namespace ps2x::iop::detail
         uint64_t totalCycles = 0;
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;
+        uint64_t idleSkipUntil = 0; // PERF-KE: IOP cycle before which runCycles() is a no-op (0 = unknown / not idle)
         CpuState *activeCpu = nullptr;
         std::string lastError;
         bool servicingDmaInterrupts = false;
@@ -786,16 +799,19 @@ namespace ps2x::iop::detail
 
     ModuleLoadResult IopEmulator::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         return m_impl->loadModule(path, arguments, argumentSize);
     }
 
     ModuleLoadResult IopEmulator::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         return m_impl->loadModuleBuffer(guestAddress, arguments, argumentSize);
     }
 
     bool IopEmulator::stopModule(int32_t moduleId, int32_t *result)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         return m_impl->stopModule(moduleId, result);
     }
 
@@ -823,6 +839,7 @@ namespace ps2x::iop::detail
 
     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         return m_impl->rpc.handleRpc(request, *m_impl);
     }
 
@@ -833,6 +850,7 @@ namespace ps2x::iop::detail
 
     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
     {
+        m_impl->idleSkipUntil = 0; // PERF-KE
         m_impl->rpc.onSifTransfer(transfer);
     }
 
