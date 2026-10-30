@@ -26,6 +26,7 @@
 #include <sstream>
 #include <utility>
 #include <chrono>
+#include <intrin.h>
 #include <cstdio>
 #include <unordered_map>
 #include <vector>
@@ -34,6 +35,45 @@ namespace ps2x::iop::detail
 {
     namespace
     {
+        // PROBE-KC: IOP time budget, reported about once per second on stdout ("[iop] ...")
+        struct KcStats
+        {
+            uint64_t rcCalls = 0, rcTicks = 0, cpuCalls = 0, cpuTicks = 0, instrs = 0, loopIters = 0, idleIters = 0, slices = 0;
+            std::unordered_map<uint32_t, uint64_t> hot;
+            std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+            uint64_t tsc0 = __rdtsc();
+        };
+        KcStats g_kc;
+
+        void kcMaybeReport()
+        {
+            if ((g_kc.rcCalls & 0xFFFFu) != 0u)
+                return;
+            const auto now = std::chrono::steady_clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(now - g_kc.t0).count();
+            if (ms < 1000.0)
+                return;
+            const uint64_t tsc = __rdtsc();
+            const double ticksPerMs = static_cast<double>(tsc - g_kc.tsc0) / ms;
+            std::vector<std::pair<uint64_t, uint32_t>> top;
+            for (const auto &[pcb, n] : g_kc.hot)
+                top.emplace_back(n, pcb);
+            std::sort(top.begin(), top.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+            std::printf("[iop] window_ms=%.0f runCycles calls=%llu busy=%.1fms (%.1f%%) loopIters=%llu idleIters=%llu | runCpu calls=%llu busy=%.1fms instrs=%llu (%.1f M/s) top:",
+                        ms, static_cast<unsigned long long>(g_kc.rcCalls), g_kc.rcTicks / ticksPerMs, 100.0 * g_kc.rcTicks / ticksPerMs / ms,
+                        static_cast<unsigned long long>(g_kc.loopIters), static_cast<unsigned long long>(g_kc.idleIters),
+                        static_cast<unsigned long long>(g_kc.cpuCalls), g_kc.cpuTicks / ticksPerMs, static_cast<unsigned long long>(g_kc.instrs),
+                        g_kc.instrs / ms / 1000.0);
+            for (size_t i = 0; i < top.size() && i < 8; ++i)
+                std::printf(" 0x%08X=%.1f%%", top[i].second, g_kc.instrs ? 100.0 * top[i].first / g_kc.instrs : 0.0);
+            std::printf("\n");
+            std::fflush(stdout);
+            g_kc.rcCalls = g_kc.rcTicks = g_kc.cpuCalls = g_kc.cpuTicks = g_kc.instrs = g_kc.loopIters = g_kc.idleIters = 0;
+            g_kc.hot.clear();
+            g_kc.t0 = now;
+            g_kc.tsc0 = tsc;
+        }
+
         constexpr uint32_t kRamSize = IopMemory::RamSize;
         constexpr uint32_t kKernelHeapBase = IopMemory::HeapBase;
         constexpr uint32_t kKernelHeapLimit = IopMemory::HeapLimit;
@@ -404,6 +444,7 @@ namespace ps2x::iop::detail
 
         uint32_t runCpu(CpuState &cpu, uint32_t instructionBudget)
         {
+            const uint64_t kcT0 = __rdtsc(); // PROBE-KC
             CpuState *previous = activeCpu;
             activeCpu = &cpu;
             const uint64_t start = totalInstructions;
@@ -419,31 +460,11 @@ namespace ps2x::iop::detail
             activeCpu = previous;
             // PROBE-KC: where does the IOP spend its instructions? end-of-slice pc histogram (64-byte buckets) weighted by instructions run
             {
-                static std::unordered_map<uint32_t, uint64_t> s_hot;
-                static uint64_t s_ins = 0, s_calls = 0;
-                static auto s_t0 = std::chrono::steady_clock::now();
                 const uint64_t executed = totalInstructions - start;
-                s_hot[cpu.pc & ~0x3Fu] += executed;
-                s_ins += executed;
-                if ((++s_calls & 0x3FFFu) == 0u)
-                {
-                    const auto now = std::chrono::steady_clock::now();
-                    const double ms = std::chrono::duration<double, std::milli>(now - s_t0).count();
-                    std::vector<std::pair<uint64_t, uint32_t>> top;
-                    for (const auto &[pcb, n] : s_hot)
-                        top.emplace_back(n, pcb);
-                    std::sort(top.begin(), top.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-                    std::printf("[iop] window_ms=%.0f runCpu_calls=%llu instrs=%llu (%.1f M/s) top:", ms, static_cast<unsigned long long>(s_calls),
-                                static_cast<unsigned long long>(s_ins), ms > 0.0 ? s_ins / ms / 1000.0 : 0.0);
-                    for (size_t i = 0; i < top.size() && i < 8; ++i)
-                        std::printf(" 0x%08X=%.1f%%", top[i].second, s_ins ? 100.0 * top[i].first / s_ins : 0.0);
-                    std::printf("\n");
-                    std::fflush(stdout);
-                    s_hot.clear();
-                    s_ins = 0;
-                    s_calls = 0;
-                    s_t0 = now;
-                }
+                g_kc.hot[cpu.pc & ~0x3Fu] += executed;
+                g_kc.instrs += executed;
+                ++g_kc.cpuCalls;
+                g_kc.cpuTicks += __rdtsc() - kcT0;
             }
             return static_cast<uint32_t>(totalInstructions - start);
         }
@@ -588,17 +609,21 @@ namespace ps2x::iop::detail
 
         void runCycles(uint64_t cycles) noexcept
         {
+            const uint64_t kcR0 = __rdtsc(); // PROBE-KC
+            ++g_kc.rcCalls;
             try
             {
                 const uint64_t target = totalCycles + cycles;
                 while (totalCycles < target)
                 {
+                    ++g_kc.loopIters; // PROBE-KC
                     servicePendingDmaInterrupts();
                     servicePendingGuestCallbacks();
                     timrman.serviceDue(totalCycles, *this);
                     IopThread *next = kernel.beginNextReady(totalCycles);
                     if (!next)
                     {
+                        ++g_kc.idleIters; // PROBE-KC
                         uint64_t nextWake = kernel.nextWakeCycle(target);
                         for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
                             nextWake = std::min(nextWake, completionCycle);
@@ -619,6 +644,8 @@ namespace ps2x::iop::detail
             {
                 // Runtime scheduling must never throw through EeScheduler::accountCycles().
             }
+            g_kc.rcTicks += __rdtsc() - kcR0; // PROBE-KC
+            kcMaybeReport();
         }
 
         ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
