@@ -5242,6 +5242,17 @@ extern "C" void ps2x_Load128Out(PS2Runtime *rt, uint8_t *rdram, R5900Context *ct
     *out = rt->Load128(rdram, ctx, vaddr);
 }
 
+// C311: VU0 macro-mode FMAC ops must update MAC/Status (generated code calls this after each flag-producing op, mask = written lanes x=1 y=2 z=4 w=8)
+extern "C" void ps2x_vu0_flags(R5900Context *ctx, __m128 res, int laneMask)
+{
+    const int sg = _mm_movemask_ps(res) & laneMask;
+    const int zr = _mm_movemask_ps(_mm_cmpeq_ps(res, _mm_setzero_ps())) & laneMask;
+    auto rv = [](int m) { return ((m & 1) << 3) | ((m & 2) << 1) | ((m & 4) >> 1) | ((m & 8) >> 3); };
+    ctx->vu0_mac_flags = (static_cast<uint32_t>(rv(sg)) << 4) | static_cast<uint32_t>(rv(zr));
+    const uint32_t now = (zr ? 1u : 0u) | (sg ? 2u : 0u); // Z, S (U/O not modelled)
+    ctx->vu0_status = static_cast<uint16_t>((ctx->vu0_status & ~0xFu) | now | (now << 6) | (ctx->vu0_status & 0xFC0u));
+}
+
 void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
