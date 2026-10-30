@@ -422,6 +422,7 @@ void ps2xSafeLog(const char *fmt, ...)
 
 #ifdef _WIN32
 extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *hModule, char *lpFilename, unsigned long nSize);
+extern "C" __declspec(dllimport) unsigned int __stdcall timeBeginPeriod(unsigned int uPeriod); // PERF-KN (winmm, already linked by raylib)
 #endif
 
 namespace ps2_stubs
@@ -5845,7 +5846,20 @@ void PS2Runtime::run()
         {
             PollInputEvents();
             auto tYield0 = std::chrono::steady_clock::now();
-            std::this_thread::yield();
+            // PERF-KN: this loop used to spin PollInputEvents()+yield() at full speed whenever there was no new frame to present, burning a whole
+            // logical core (uProf: ~35% of the process's cycles; it competes with the EE thread for SMT/power budget). Sleep ~1 ms instead
+            // (input is still polled at ~1 kHz; a new frame waits <=1 ms). PS2X_IDLE_SPIN=1 restores the busy loop.
+            static const bool s_idleSpin = []() { const char *e = std::getenv("PS2X_IDLE_SPIN"); return e && e[0] == '1'; }();
+            if (s_idleSpin)
+                std::this_thread::yield();
+            else
+            {
+#if defined(_WIN32)
+                static const bool s_timerRes = []() { timeBeginPeriod(1); return true; }();
+                (void)s_timerRes;
+#endif
+                std::this_thread::sleep_for(std::chrono::microseconds(900));
+            }
             auto tYield1 = std::chrono::steady_clock::now();
             probe_ae::onBhSleepSiteHit(0, std::chrono::duration_cast<std::chrono::microseconds>(tYield1 - tYield0).count());
         }
