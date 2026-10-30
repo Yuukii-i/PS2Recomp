@@ -25,6 +25,10 @@
 #include <span>
 #include <sstream>
 #include <utility>
+#include <chrono>
+#include <cstdio>
+#include <unordered_map>
+#include <vector>
 
 namespace ps2x::iop::detail
 {
@@ -413,6 +417,34 @@ namespace ps2x::iop::detail
                     servicePendingGuestCallbacks();
             }
             activeCpu = previous;
+            // PROBE-KC: where does the IOP spend its instructions? end-of-slice pc histogram (64-byte buckets) weighted by instructions run
+            {
+                static std::unordered_map<uint32_t, uint64_t> s_hot;
+                static uint64_t s_ins = 0, s_calls = 0;
+                static auto s_t0 = std::chrono::steady_clock::now();
+                const uint64_t executed = totalInstructions - start;
+                s_hot[cpu.pc & ~0x3Fu] += executed;
+                s_ins += executed;
+                if ((++s_calls & 0x3FFFu) == 0u)
+                {
+                    const auto now = std::chrono::steady_clock::now();
+                    const double ms = std::chrono::duration<double, std::milli>(now - s_t0).count();
+                    std::vector<std::pair<uint64_t, uint32_t>> top;
+                    for (const auto &[pcb, n] : s_hot)
+                        top.emplace_back(n, pcb);
+                    std::sort(top.begin(), top.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+                    std::printf("[iop] window_ms=%.0f runCpu_calls=%llu instrs=%llu (%.1f M/s) top:", ms, static_cast<unsigned long long>(s_calls),
+                                static_cast<unsigned long long>(s_ins), ms > 0.0 ? s_ins / ms / 1000.0 : 0.0);
+                    for (size_t i = 0; i < top.size() && i < 8; ++i)
+                        std::printf(" 0x%08X=%.1f%%", top[i].second, s_ins ? 100.0 * top[i].first / s_ins : 0.0);
+                    std::printf("\n");
+                    std::fflush(stdout);
+                    s_hot.clear();
+                    s_ins = 0;
+                    s_calls = 0;
+                    s_t0 = now;
+                }
+            }
             return static_cast<uint32_t>(totalInstructions - start);
         }
 
