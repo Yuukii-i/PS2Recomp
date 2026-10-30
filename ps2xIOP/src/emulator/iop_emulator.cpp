@@ -749,7 +749,7 @@ namespace ps2x::iop::detail
         static const uint64_t kBatch = []() -> uint64_t
         {
             const char *e = std::getenv("PS2X_IOP_BATCH");
-            return e ? static_cast<uint64_t>(std::strtoull(e, nullptr, 10)) : 2048u;
+            return e ? static_cast<uint64_t>(std::strtoull(e, nullptr, 10)) : 0u; // default off: A/B (li vs lj) showed no gain
         }();
         if (total < kBatch)
         {

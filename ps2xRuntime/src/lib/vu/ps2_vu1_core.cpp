@@ -3754,8 +3754,11 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                         m_cachedCodeSize == codeSize && m_cachedCodeGeneration == gen;
     }
 
-    const int previousRoundingMode = std::fegetround();
-    const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
+    // PERF-JL: set MXCSR.RC directly (all VU/EE float maths is SSE); std::fesetround/fegetround also touch the x87 control word and cost ~3% of the EE thread at ~85k runs/s
+    const uint32_t previousCsr = _mm_getcsr();
+    const int previousRoundingMode = 0;
+    const bool useVuRounding = true;
+    _mm_setcsr(previousCsr | 0x6000u); // RC = 11b: toward zero
     const uint64_t budgetEnd = m_cycle + maxCycles;
     bool programEnded = false;
     // VU1 native executor (stage 1): generated per-pair functions (generated/vu1_native_*.cpp, tools/vu1gen).
@@ -5212,7 +5215,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     }
     m_state.cycles = m_cycle;
     if (useVuRounding && previousRoundingMode != -1)
-        std::fesetround(previousRoundingMode);
+        _mm_setcsr((_mm_getcsr() & ~0x6000u) | (previousCsr & 0x6000u)); // PERF-JL: restore only the rounding bits
 
     if (m_unit == Unit::VU1) { // PROBE-GE: per-second VU1 time budget (PERF-IO: VU1 only)
         static uint64_t s_geNs = 0, s_geXgNs = 0, s_geInstr = 0, s_geCalls = 0, s_geCycles = 0;
