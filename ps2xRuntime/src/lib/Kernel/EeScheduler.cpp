@@ -37,6 +37,10 @@ namespace ps2_syscalls {
 #include <limits>
 #include <stdexcept>
 
+// PERF-KM: bumped whenever an element of EeScheduler::m_threads is erased, so checkpointDue() can cache the running thread's record pointer
+// (unordered_map nodes are stable across inserts/rehash; only erase/clear invalidate them).
+static uint32_t s_threadMapGen = 0;
+
 namespace
 {
     constexpr int KE_OK = 0;
@@ -178,6 +182,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_executorThread = std::this_thread::get_id();
     m_rdram = rdram;
     m_readyQueues = {};
+    ++s_threadMapGen; // PERF-KM
     m_threads.clear();
     m_semaphores.clear();
     m_eventFlags.clear();
@@ -524,7 +529,19 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     uint32_t pc = g_currentExecutingFunction;
     if (m_currentThreadId != 0)
     {
-        const GuestThread *running = currentThread();
+        // PERF-KM: cached record of the running guest thread (was an unordered_map lookup on every checkpoint, ~4.5M/s)
+        static thread_local const GuestThread *s_cachedThread = nullptr;
+        static thread_local int s_cachedThreadId = -1;
+        static thread_local uint32_t s_cachedGen = ~0u;
+        static thread_local const EeScheduler *s_cachedOwner = nullptr;
+        if (s_cachedOwner != this || s_cachedThreadId != m_currentThreadId || s_cachedGen != s_threadMapGen)
+        {
+            s_cachedThread = currentThread();
+            s_cachedThreadId = m_currentThreadId;
+            s_cachedGen = s_threadMapGen;
+            s_cachedOwner = this;
+        }
+        const GuestThread *running = s_cachedThread;
         if (running != nullptr)
         {
             pc = running->activeContext().pc;
@@ -546,6 +563,26 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         processPendingEvents();
 
         return false;
+    }
+
+    // PERF-KM: apply the cycle accounting (EE timers, IOP, deadline/time-slice checks) in steps of >= kBatch cycles instead of at every checkpoint
+    // (~4.5M calls/s). Total emulated cycles are unchanged; timers, deadlines and preemption fire up to kBatch cycles (~1 us at 256) late.
+    // A pending cross-thread event or stop request still takes the normal path immediately. PS2X_CKPT_BATCH=<cycles> overrides (0 = old behaviour).
+    static const uint32_t kCkptBatch = []() -> uint32_t
+    {
+        const char *e = std::getenv("PS2X_CKPT_BATCH");
+        return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 256u;
+    }();
+    static thread_local uint32_t s_ckptAcc = 0;
+    if (kCkptBatch > cycles)
+    {
+        s_ckptAcc += cycles;
+        if (s_ckptAcc < kCkptBatch && !m_checkpointPending.load(std::memory_order_acquire) && !m_stopRequested.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+        cycles = s_ckptAcc;
+        s_ckptAcc = 0;
     }
 
     accountCycles(cycles);
@@ -683,6 +720,7 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
     {
         ownedStack = it->second.stack;
     }
+    ++s_threadMapGen; // PERF-KM
     m_threads.erase(it);
     publishSnapshot();
     return KE_OK;
@@ -746,6 +784,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     m_currentThreadId = 0;
     if (deleteThreadRecord && id != kMainThreadId)
     {
+        ++s_threadMapGen; // PERF-KM
         m_threads.erase(id);
     }
     if (ownedStack != 0u)
