@@ -5783,6 +5783,19 @@ void PS2Runtime::run()
                 s_consecutiveSamePc = 1;
             }
         }
+        // C312: F9 dumps all EE RAM (32 MB) to logs/ram_f9.bin for diffing against a PCSX2 save state
+        if (IsKeyPressed(KEY_F9))
+        {
+            FILE *rf = std::fopen("logs/ram_f9.bin", "wb");
+            if (!rf)
+                rf = std::fopen("ram_f9.bin", "wb");
+            if (rf)
+            {
+                std::fwrite(m_memory.getRDRAM(), 1, PS2_RAM_SIZE, rf);
+                std::fclose(rf);
+                ps2xSafeLog("[ramdump] wrote ram_f9.bin\n");
+            }
+        }
         // Sample real keyboard state from Raylib window thread
         uint16_t activeButtons = 0;
         if (IsKeyDown(KEY_ENTER)) activeButtons |= (1u << 3); // START
