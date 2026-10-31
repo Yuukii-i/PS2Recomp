@@ -457,6 +457,39 @@ namespace
     }
     thread_local bool t_onVif1Worker = false;
     constexpr size_t kVif1AsyncMaxBytes = 16u * 1024u * 1024u;
+
+    // PERF-VP: recycled DMA-chain buffers. Every EE DMA kick grew a fresh std::vector (repeated realloc + page faults for MB-sized chains) and the
+    // worker freed it again (NtFreeVirtualMemory showed up in the sampler). The worker now returns the buffer after processing it.
+    struct VifBufPool // leaked on purpose like Vif1AsyncState (detached worker)
+    {
+        std::mutex m;
+        std::vector<std::vector<uint8_t>> v;
+    };
+    VifBufPool &vifBufPool()
+    {
+        static VifBufPool *p = new VifBufPool();
+        return *p;
+    }
+    std::vector<uint8_t> takeVifBuf()
+    {
+        VifBufPool &pool = vifBufPool();
+        std::lock_guard<std::mutex> lock(pool.m);
+        if (pool.v.empty())
+            return {};
+        std::vector<uint8_t> b = std::move(pool.v.back());
+        pool.v.pop_back();
+        b.clear();
+        return b;
+    }
+    void recycleVifBuf(std::vector<uint8_t> &&b)
+    {
+        if (b.capacity() == 0u || b.capacity() > (32u << 20))
+            return;
+        VifBufPool &pool = vifBufPool();
+        std::lock_guard<std::mutex> lock(pool.m);
+        if (pool.v.size() < 8u)
+            pool.v.push_back(std::move(b));
+    }
 }
 static std::function<void(const uint8_t *, uint32_t)> s_vif1Process; // bound by a PS2Memory member (private access)
 static std::function<void()> s_vif1DrainArbiter;
@@ -488,6 +521,7 @@ static void vif1Worker()
         if (s_vif1DrainArbiter)
             s_vif1DrainArbiter();
         g_vif1JobFbrst = ~0u;
+        recycleVifBuf(std::move(job.data)); // PERF-VP
         {
             std::lock_guard<std::mutex> lock(st.m);
             st.busy = false;
@@ -524,7 +558,9 @@ static void vif1EnqueueJob(std::vector<uint8_t> &&data)
 }
 static void vif1EnqueueCopy(const uint8_t *p, uint32_t n)
 {
-    vif1EnqueueJob(std::vector<uint8_t>(p, p + n));
+    std::vector<uint8_t> v = takeVifBuf(); // PERF-VP
+    v.assign(p, p + n);
+    vif1EnqueueJob(std::move(v));
 }
 extern "C" bool ps2_vif1_on_worker() { return t_onVif1Worker; }
 extern "C" void ps2_vif1_fence()
@@ -1599,7 +1635,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
                     const int kMaxChainTags = 1 << 20;
-                    std::vector<uint8_t> chainBuf;
+                    std::vector<uint8_t> chainBuf = takeVifBuf(); // PERF-VP
                     std::vector<probe_ae::AySpan> aySpans;
                     auto tChainStart = std::chrono::steady_clock::now();
 
