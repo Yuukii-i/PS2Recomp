@@ -2216,7 +2216,9 @@ void VU1Interpreter::progressXgkick()
         const uint32_t qwordOffset = m_xgkick.copiedBytes;
         // PERF-KH: the byte loop did a 32-bit modulo per byte (16 per quadword, ~8% of the VU1 worker's samples). Same result: one modulo, and a plain
         // 16-byte copy unless the quadword wraps around the end of VU data memory.
-        const uint32_t srcStart = (m_xgkick.sourceAddress + m_xgkick.copiedBytes) % m_activeVuDataSize;
+        // PERF-XM: VU data memory sizes are powers of two (4K / 16K): mask instead of a 32-bit division per quadword
+        const uint32_t srcSum = m_xgkick.sourceAddress + m_xgkick.copiedBytes;
+        const uint32_t srcStart = (m_activeVuDataSize & (m_activeVuDataSize - 1u)) == 0u ? (srcSum & (m_activeVuDataSize - 1u)) : (srcSum % m_activeVuDataSize);
         if (srcStart + 16u <= m_activeVuDataSize)
         {
             std::memcpy(m_xgkick.packet.data() + m_xgkick.copiedBytes, m_activeVuData + srcStart, 16u);
@@ -3863,8 +3865,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     s_currentRunXgkickNs = 0;
     // PERF-IO: two clock reads per run cost ~5% of the EE thread at ~85k VU0 runs/s; PROBE-GE is a VU1 budget, so time VU1 runs only
     // (the shared, non-atomic GE counters also mixed VU0 runs from the EE thread into the "ge vu1" line).
-    const bool runTimed = m_unit == Unit::VU1 || probe_ae::isEnabled() || probe_ae::isMovieHleVerify() || probe_ae::isDcProbeEnabled();
+    // PERF-TC: the VU1 per-run budget uses the TSC (QueryPerformanceCounter was ~2.6% of the VU1 worker: two reads per run); steady_clock only for the probes
+    const bool runTimed = probe_ae::isEnabled() || probe_ae::isMovieHleVerify() || probe_ae::isDcProbeEnabled();
     const auto tRunStart = runTimed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const uint64_t tRunTsc0 = m_unit == Unit::VU1 ? __rdtsc() : 0ull;
     const uint64_t tRunStartCycle = m_cycle;
     uint32_t instrsThisRun = 0;
 
@@ -5389,19 +5393,22 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     if (phaseEp0)
         g_vuPhase[2] += __rdtsc() - phaseEp0; // PROBE-ABL: excludes the PROBE-GE block below
     if (m_unit == Unit::VU1) { // PROBE-GE: per-second VU1 time budget (PERF-IO: VU1 only)
-        static uint64_t s_geNs = 0, s_geXgNs = 0, s_geInstr = 0, s_geCalls = 0, s_geCycles = 0;
+        static uint64_t s_geTicks = 0, s_geXgNs = 0, s_geInstr = 0, s_geCalls = 0, s_geCycles = 0;
         static std::chrono::steady_clock::time_point s_geT0 = std::chrono::steady_clock::now();
-        const auto geNow = std::chrono::steady_clock::now();
-        s_geNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(geNow - tRunStart).count());
+        static uint64_t s_geTsc0 = __rdtsc();
+        s_geTicks += __rdtsc() - tRunTsc0;
         s_geXgNs += s_currentRunXgkickNs;
         s_geInstr += instrsThisRun;
         s_geCycles += (m_cycle > tRunStartCycle) ? (m_cycle - tRunStartCycle) : 0u;
         ++s_geCalls;
+        const auto geNow = (s_geCalls & 0xFFu) == 0u ? std::chrono::steady_clock::now() : s_geT0; // PERF-TC: read the clock every 256 runs only
         if (geNow - s_geT0 >= std::chrono::seconds(1))
         {
+            const double geNsPerTick = std::chrono::duration<double, std::nano>(geNow - s_geT0).count() / double(__rdtsc() - s_geTsc0);
+            const double geRunNs = double(s_geTicks) * geNsPerTick;
             std::printf("[probe] ge vu1 calls=%llu instrs=%llu cycles=%llu run_ms=%.1f xgkick_ms=%.1f\n",
                         (unsigned long long)s_geCalls, (unsigned long long)s_geInstr, (unsigned long long)s_geCycles,
-                        s_geNs / 1e6, s_geXgNs / 1e6);
+                        geRunNs / 1e6, s_geXgNs / 1e6);
             std::fflush(stdout);
             { // PERF-XG: slow-pair causes and the hot/slow time split (ticks -> ms via the invariant TSC measured against the steady clock)
                 extern uint64_t *vu1NativeStats(uint32_t);
@@ -5462,8 +5469,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 }
                 for (int b = 0; b < 512; ++b) s_geHistPtr[b] = 0;
             }
-            s_geNs = s_geXgNs = s_geInstr = s_geCalls = s_geCycles = 0;
+            s_geTicks = s_geXgNs = s_geInstr = s_geCalls = s_geCycles = 0;
             s_geT0 = geNow;
+            s_geTsc0 = __rdtsc();
         }
     }
 

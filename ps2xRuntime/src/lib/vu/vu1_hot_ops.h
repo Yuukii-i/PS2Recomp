@@ -392,4 +392,98 @@ namespace vuhot
             return v.m_viBranchBackupValue;
         return v.m_state.vi[reg];
     }
+
+    // ---- PERF-INL: inline copies of VU1Interpreter's DIV / SQRT / RSQRT / CLIP (see tools/vu1gen/patch_inline_hot.py) ----
+    VUHOT_INLINE float normResult(float value) // VU1Interpreter::normalizeResult without the flag output
+    {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        const uint32_t sign = bits & 0x80000000u;
+        const uint32_t magnitude = bits & 0x7FFFFFFFu;
+        const uint32_t exponent = (bits >> 23) & 0xFFu;
+        if (magnitude != 0u)
+        {
+            if (exponent == 0u)
+                bits = sign;
+            else if (exponent == 0xFFu)
+                bits = sign | 0x7F7FFFFFu;
+        }
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+
+    // VU1Interpreter::queueQ (non-fast mode: the native path is never used in fast mode)
+    VUHOT_INLINE void pushQ(VU1Interpreter &v, VuNativeCtx &c, float value, uint32_t latency, uint32_t statusDi)
+    {
+        v.m_fdiv.valid = true;
+        *c.nextReadyW = 0u;
+        v.m_fdiv.readyCycle = v.m_cycle + latency;
+        v.m_fdiv.value = normResult(value);
+        v.m_fdiv.statusDi = statusDi & 0x30u;
+    }
+
+    VUHOT_INLINE void divQ(VU1Interpreter &v, VuNativeCtx &c, uint32_t fs, uint32_t fsf, uint32_t ft, uint32_t ftf)
+    {
+        const float num = N(v.m_state.vf[fs][fsf]);
+        const float den = N(v.m_state.vf[ft][ftf]);
+        uint32_t statusDi = 0u;
+        float result;
+        if (den == 0.0f)
+        {
+            statusDi = num == 0.0f ? 0x10u : 0x20u;
+            result = std::signbit(num) != std::signbit(den) ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+        }
+        else
+            result = num / den;
+        pushQ(v, c, normResult(result), 7u, statusDi);
+    }
+
+    VUHOT_INLINE void sqrtQ(VU1Interpreter &v, VuNativeCtx &c, uint32_t ft, uint32_t ftf)
+    {
+        const float val = N(v.m_state.vf[ft][ftf]);
+        pushQ(v, c, std::sqrt(std::fabs(val)), 7u, val < 0.0f ? 0x10u : 0u);
+    }
+
+    VUHOT_INLINE void rsqrtQ(VU1Interpreter &v, VuNativeCtx &c, uint32_t fs, uint32_t fsf, uint32_t ft, uint32_t ftf)
+    {
+        const float num = N(v.m_state.vf[fs][fsf]);
+        const float radicand = N(v.m_state.vf[ft][ftf]);
+        const float den = std::sqrt(std::fabs(radicand));
+        uint32_t statusDi = radicand < 0.0f ? 0x10u : 0u;
+        float result;
+        if (den != 0.0f)
+            result = num / den;
+        else
+        {
+            statusDi = num == 0.0f ? 0x10u : 0x20u;
+            result = std::signbit(num) ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+        }
+        pushQ(v, c, normResult(result), 13u, statusDi);
+    }
+
+    // CLIP: VU1Interpreter::execUpper case 0x1F + queueClip (immediate-flags mode: ring push)
+    VUHOT_INLINE void clip(VU1Interpreter &v, uint32_t fs, uint32_t ft)
+    {
+        uint32_t wBits = 0u;
+        std::memcpy(&wBits, &v.m_state.vf[ft][3], sizeof(wBits));
+        const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
+        const auto exceeds = [limit](float value, uint32_t signMask)
+        {
+            uint32_t bits = 0u;
+            std::memcpy(&bits, &value, sizeof(bits));
+            bits ^= signMask;
+            int32_t ordered = 0;
+            std::memcpy(&ordered, &bits, sizeof(ordered));
+            return ordered > limit;
+        };
+        uint32_t flags = 0u;
+        if (exceeds(v.m_state.vf[fs][0], 0x00000000u)) flags |= 0x01u;
+        if (exceeds(v.m_state.vf[fs][0], 0x80000000u)) flags |= 0x02u;
+        if (exceeds(v.m_state.vf[fs][1], 0x00000000u)) flags |= 0x04u;
+        if (exceeds(v.m_state.vf[fs][1], 0x80000000u)) flags |= 0x08u;
+        if (exceeds(v.m_state.vf[fs][2], 0x00000000u)) flags |= 0x10u;
+        if (exceeds(v.m_state.vf[fs][2], 0x80000000u)) flags |= 0x20u;
+        v.m_workingClip = ((v.m_workingClip << 6) | (flags & 0x3Fu)) & 0xFFFFFFu;
+        vuflags::flgPush(vuflags::s_flgClip[v.m_unit == VU1Interpreter::Unit::VU1 ? 1u : 0u], v.m_cycle, v.m_workingClip);
+    }
 } // namespace vuhot

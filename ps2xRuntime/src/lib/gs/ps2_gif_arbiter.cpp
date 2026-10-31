@@ -23,6 +23,9 @@ struct GsAsyncState
     std::mutex m;
     std::condition_variable cvWork;
     std::condition_variable cvIdle;
+    // PERF-GN: wake-ups (NtAlertThreadByThreadId, ~5% of the GS thread) only when somebody can be waiting; both counters are guarded by `m`
+    uint32_t idleWaiters = 0;
+    bool workerWaiting = false;
     std::deque<std::vector<uint8_t>> q;
     size_t queuedBytes = 0;
     uint64_t enqueuedPkts = 0;  // PERF-JF: packets handed to the worker / finished by it (ordering ticket for the async present latch)
@@ -32,7 +35,44 @@ struct GsAsyncState
     std::function<void(const uint8_t *, uint32_t)> fn;
 };
 
-constexpr size_t kGsAsyncMaxBytes = 8u * 1024u * 1024u;
+// PERF-GQ: the GS thread is only ~70% busy but the 8 MB queue filled during texture-upload bursts and blocked the VIF1/VU1 worker (and through the VIF1
+// fence the EE) for ~25% of the time (gs_backpressure in the [wait] line). The queue is FIFO either way, so a deeper one changes no ordering.
+const size_t kGsAsyncMaxBytes = []() {
+    const char *e = std::getenv("PS2X_GS_QUEUE_MB");
+    const unsigned long mb = e ? std::strtoul(e, nullptr, 10) : 8ul;
+    return static_cast<size_t>(mb == 0ul ? 8ul : mb) * 1024u * 1024u;
+}();
+
+// PERF-GP: recycled packet buffers (the per-XGKICK vector allocation + free was ~1.7% of the VU1 worker)
+struct PacketPool // leaked on purpose like GsAsyncState: the detached GS worker may outlive static destruction
+{
+    std::mutex m;
+    std::vector<std::vector<uint8_t>> v;
+};
+PacketPool &packetPool()
+{
+    static PacketPool *p = new PacketPool();
+    return *p;
+}
+std::vector<uint8_t> takePacketBuf()
+{
+    PacketPool &pool = packetPool();
+    std::lock_guard<std::mutex> lock(pool.m);
+    if (pool.v.empty())
+        return {};
+    std::vector<uint8_t> v = std::move(pool.v.back());
+    pool.v.pop_back();
+    return v;
+}
+void recyclePacketBuf(std::vector<uint8_t> &&v)
+{
+    if (v.capacity() == 0u || v.capacity() > (1u << 20))
+        return;
+    PacketPool &pool = packetPool();
+    std::lock_guard<std::mutex> lock(pool.m);
+    if (pool.v.size() < 64u)
+        pool.v.push_back(std::move(v));
+}
 
 GsAsyncState &gsAsync()
 {
@@ -52,17 +92,22 @@ void gsAsyncWorker()
     std::unique_lock<std::mutex> lock(st.m);
     for (;;)
     {
+        st.workerWaiting = true;
         st.cvWork.wait(lock, [&] { return !st.q.empty(); });
+        st.workerWaiting = false;
         std::vector<uint8_t> pkt = std::move(st.q.front());
         st.q.pop_front();
         st.busy = true;
         lock.unlock();
-        st.fn(pkt.data(), static_cast<uint32_t>(pkt.size()));
+        const size_t pktSize = pkt.size();
+        st.fn(pkt.data(), static_cast<uint32_t>(pktSize));
+        recyclePacketBuf(std::move(pkt));
         lock.lock();
-        st.queuedBytes -= pkt.size();
+        st.queuedBytes -= pktSize;
         ++st.processedPkts;
         st.busy = false;
-        st.cvIdle.notify_all();
+        if (st.idleWaiters != 0u)
+            st.cvIdle.notify_all();
     }
 }
 } // namespace
@@ -77,7 +122,9 @@ extern "C" void ps2_gs_async_fence()
     if (!st.started)
         return;
     const uint64_t kfT0 = __rdtsc(); // PROBE-KF
+    ++st.idleWaiters;
     st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
+    --st.idleWaiters;
     g_waitTicks[2].fetch_add(__rdtsc() - kfT0, std::memory_order_relaxed);
 }
 
@@ -98,7 +145,9 @@ extern "C" void ps2_gs_async_wait_ticket(uint64_t ticket)
         return;
     GsAsyncState &st = gsAsync();
     std::unique_lock<std::mutex> lock(st.m);
+    ++st.idleWaiters;
     st.cvIdle.wait(lock, [&] { return st.processedPkts >= ticket; });
+    --st.idleWaiters;
 }
 
 GifArbiter::GifArbiter(ProcessPacketFn processFn)
@@ -129,8 +178,8 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     pkt.pathId = pathId;
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
     pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(data, sizeBytes);
-    pkt.data.resize(sizeBytes);
-    std::memcpy(pkt.data.data(), data, sizeBytes);
+    pkt.data = takePacketBuf();
+    pkt.data.assign(data, data + sizeBytes);
     m_queue.push_back(std::move(pkt));
 }
 
@@ -170,12 +219,15 @@ void GifArbiter::drain()
             if (pkt.data.empty())
                 continue;
             const uint64_t kfT1 = __rdtsc(); // PROBE-KF
+            ++st.idleWaiters;
             st.cvIdle.wait(lock, [&] { return st.queuedBytes < kGsAsyncMaxBytes; }); // backpressure
+            --st.idleWaiters;
             g_waitTicks[3].fetch_add(__rdtsc() - kfT1, std::memory_order_relaxed);
             st.queuedBytes += pkt.data.size();
             ++st.enqueuedPkts;
             st.q.push_back(std::move(pkt.data));
-            st.cvWork.notify_one();
+            if (st.workerWaiting)
+                st.cvWork.notify_one();
         }
         m_queue.clear();
         return;

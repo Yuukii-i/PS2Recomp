@@ -412,6 +412,104 @@ namespace GSMem
     {
         return 0;
     }
+
+    // PERF-GU: bulk host->local upload. Uses the very same PixelStorageTraits<>::Write as the per-pixel wrappers above; only the per-pixel
+    // indirect call, the format switch and the two divisions of the transfer bookkeeping are gone (x/y advance incrementally).
+    // kind: 0 CT32, 1 CT24, 2 CT16, 3 CT16S, 4 T8, 5 T8H, 6 T4, 7 T4HL, 8 T4HH, 9 Z32, 10 Z24, 11 Z16, 12 Z16S
+    namespace
+    {
+        template <PixelStorageMode PSM, int BYTES, typename TableT>
+        void StreamBytes(const TableT &table, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+        {
+            using Traits = PixelStorageTraits<PSM>;
+            for (u32 i = 0; i < count; ++i)
+            {
+                u32 v;
+                if constexpr (BYTES == 4)
+                    std::memcpy(&v, src + i * 4u, 4);
+                else if constexpr (BYTES == 3)
+                    v = static_cast<u32>(src[i * 3u]) | (static_cast<u32>(src[i * 3u + 1u]) << 8u) | (static_cast<u32>(src[i * 3u + 2u]) << 16u);
+                else if constexpr (BYTES == 2)
+                {
+                    uint16_t h;
+                    std::memcpy(&h, src + i * 2u, 2);
+                    v = h;
+                }
+                else
+                    v = src[i];
+                Traits::Write(table, data, bp, bw, x, y, v);
+                if (++x == xEnd)
+                {
+                    x = xBegin;
+                    ++y;
+                }
+            }
+        }
+
+        template <PixelStorageMode PSM, typename TableT>
+        void StreamNibbles(const TableT &table, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+        {
+            using Traits = PixelStorageTraits<PSM>;
+            for (u32 i = 0; i < count; ++i)
+            {
+                const u32 v = (src[i >> 1] >> ((i & 1u) * 4u)) & 0x0Fu;
+                Traits::Write(table, data, bp, bw, x, y, v);
+                if (++x == xEnd)
+                {
+                    x = xBegin;
+                    ++y;
+                }
+            }
+        }
+    }
+
+    bool UploadStream(int kind, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+    {
+        switch (kind)
+        {
+        case 0:  StreamBytes<C32, 4>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 1:  StreamBytes<C24, 3>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 2:  StreamBytes<C16, 2>(PageTableC16, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 3:  StreamBytes<C16S, 2>(PageTableC16S, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 4:  StreamBytes<P8, 1>(PageTableP8, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 5:  StreamBytes<P8H, 1>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 6:  StreamNibbles<P4>(PageTableP4, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 7:  StreamNibbles<P4HL>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 8:  StreamNibbles<P4HH>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 9:  StreamBytes<Z32, 4>(PageTableZ32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 10: StreamBytes<Z24, 3>(PageTableZ32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 11: StreamBytes<Z16, 2>(PageTableZ16, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 12: StreamBytes<Z16S, 2>(PageTableZ16S, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        default: return false;
+        }
+    }
+
+    // PERF-GR: read one row of pixels (same PixelStorageTraits<>::Read as ReadCT32/ReadCT24/ReadCT16/ReadCT16S, without the per-pixel indirect call).
+    // kind: 0 CT32, 1 CT24, 2 CT16, 3 CT16S
+    bool ReadRow(int kind, u8 *data, u32 bp, u32 bw, u32 x0, u32 y, u32 count, u32 *out)
+    {
+        switch (kind)
+        {
+        case 0:
+            for (u32 i = 0; i < count; ++i)
+                out[i] = PixelStorageTraits<C32>::Read(PageTableC32, data, bp, bw, x0 + i, y);
+            return true;
+        case 1:
+            for (u32 i = 0; i < count; ++i)
+                out[i] = PixelStorageTraits<C24>::Read(PageTableC32, data, bp, bw, x0 + i, y);
+            return true;
+        case 2:
+            for (u32 i = 0; i < count; ++i)
+                out[i] = PixelStorageTraits<C16>::Read(PageTableC16, data, bp, bw, x0 + i, y);
+            return true;
+        case 3:
+            for (u32 i = 0; i < count; ++i)
+                out[i] = PixelStorageTraits<C16S>::Read(PageTableC16S, data, bp, bw, x0 + i, y);
+            return true;
+        default:
+            return false;
+        }
+    }
 }
 
 

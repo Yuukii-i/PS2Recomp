@@ -4366,6 +4366,9 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
         PerformLocalToHostTransfer();
 }
 
+namespace GSMem { bool ReadRow(int kind, uint8_t *data, uint32_t bp, uint32_t bw, uint32_t x0, uint32_t y, uint32_t count, uint32_t *out); } // PERF-GR
+namespace GSMem { bool UploadStream(int kind, uint8_t *data, uint32_t bp, uint32_t bw, uint32_t &x, uint32_t &y, uint32_t xBegin, uint32_t xEnd, uint32_t count, const uint8_t *src); } // PERF-GU
+
 void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -4447,6 +4450,48 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
             flushCurrentUploadDump();
         }
     };
+
+    // PERF-GU: bulk path for the formats below (same writes as the per-pixel loop that follows, see GSMem::UploadStream)
+    {
+        int kind = -1;
+        uint32_t bytesPerPixel = 0u; // 0 = 4-bit (two pixels per byte)
+        switch (dpsm)
+        {
+        case GS_PSM_CT32: kind = 0; bytesPerPixel = 4u; break;
+        case GS_PSM_CT24: kind = 1; bytesPerPixel = 3u; break;
+        case GS_PSM_CT16: kind = 2; bytesPerPixel = 2u; break;
+        case GS_PSM_CT16S: kind = 3; bytesPerPixel = 2u; break;
+        case GS_PSM_T8: kind = 4; bytesPerPixel = 1u; break;
+        case GS_PSM_T8H: kind = 5; bytesPerPixel = 1u; break;
+        case GS_PSM_T4: kind = 6; break;
+        case GS_PSM_T4HL: kind = 7; break;
+        case GS_PSM_T4HH: kind = 8; break;
+        case GS_PSM_Z32: kind = 9; bytesPerPixel = 4u; break;
+        case GS_PSM_Z24: kind = 10; bytesPerPixel = 3u; break;
+        case GS_PSM_Z16: kind = 11; bytesPerPixel = 2u; break;
+        case GS_PSM_Z16S: kind = 12; bytesPerPixel = 2u; break;
+        default: break;
+        }
+        if (kind >= 0)
+        {
+            while (offset < sizeBytes && m_transferState.direction == 0u)
+            {
+                const uint32_t availPixels = bytesPerPixel != 0u ? (sizeBytes - offset) / bytesPerPixel : (sizeBytes - offset) * 2u;
+                if (availPixels == 0u)
+                    return; // a partial pixel is left: the per-pixel loop returned here too
+                const uint32_t remaining = m_transferState.totalPixels - m_transferState.copiedPixels;
+                const uint32_t n = std::min<uint32_t>(availPixels, remaining);
+                if (n == 0u)
+                    break;
+                uint32_t sx = m_transferState.x, sy = m_transferState.y;
+                GSMem::UploadStream(kind, m_vram, dbp, dbw, sx, sy, dsax, dsax + rrw, n, data + offset);
+                offset += bytesPerPixel != 0u ? n * bytesPerPixel : (n + 1u) / 2u;
+                advancePixel(n);
+            }
+            checkUploadFinished();
+            return;
+        }
+    }
 
     while (offset < sizeBytes && m_transferState.direction == 0u)
     {
@@ -4724,6 +4769,58 @@ bool GSCpuBackend::CopyFrameToHostRgba(const GSFrameReg &frame,
     const uint32_t fbw = frame.fbw ? frame.fbw : kHostFrameWidth / 64u;
     const uint32_t bytesPerPixel = (frame.psm == GS_PSM_CT16 || frame.psm == GS_PSM_CT16S) ? 2u : 4u;
     const uint32_t stride = fbw * 64u * bytesPerPixel;
+
+    // PERF-GR: the local-memory-layout read (the presentation path) was one indirect ReadVramUnlocked call per pixel (~5 ms per frame at 640x448).
+    // Same Read<> templates, row by row, then the very same colour conversion as the generic loops below.
+    int rowKind = -1;
+    if (useLocalMemoryLayout)
+    {
+        switch (frame.psm)
+        {
+        case GS_PSM_CT32: rowKind = 0; break;
+        case GS_PSM_CT24: rowKind = 1; break;
+        case GS_PSM_CT16: rowKind = 2; break;
+        case GS_PSM_CT16S: rowKind = 3; break;
+        default: break;
+        }
+    }
+    if (rowKind >= 0 && width <= kHostFrameWidth)
+    {
+        thread_local std::vector<uint32_t> rowBuf;
+        rowBuf.resize(width);
+        for (uint32_t y = 0; y < height; ++y)
+        {
+            uint8_t *dst = outPixels.data() + y * kHostFrameWidth * 4u;
+            GSMem::ReadRow(rowKind, m_vram, basePtr, fbw, sourceOriginX, sourceOriginY + y, width, rowBuf.data());
+            if (rowKind <= 1)
+            {
+                const bool keepAlpha = preserveAlpha && frame.psm != GS_PSM_CT24;
+                for (uint32_t x = 0; x < width; ++x)
+                {
+                    const uint32_t color = rowBuf[x];
+                    dst[x * 4u] = static_cast<uint8_t>(color);
+                    dst[x * 4u + 1u] = static_cast<uint8_t>(color >> 8u);
+                    dst[x * 4u + 2u] = static_cast<uint8_t>(color >> 16u);
+                    dst[x * 4u + 3u] = keepAlpha ? static_cast<uint8_t>(color >> 24u) : 255u;
+                }
+            }
+            else
+            {
+                for (uint32_t x = 0; x < width; ++x)
+                {
+                    const uint16_t color = static_cast<uint16_t>(rowBuf[x]);
+                    const uint32_t r = color & 31u;
+                    const uint32_t g = (color >> 5u) & 31u;
+                    const uint32_t b = (color >> 10u) & 31u;
+                    dst[x * 4u] = static_cast<uint8_t>((r << 3u) | (r >> 2u));
+                    dst[x * 4u + 1u] = static_cast<uint8_t>((g << 3u) | (g >> 2u));
+                    dst[x * 4u + 2u] = static_cast<uint8_t>((b << 3u) | (b >> 2u));
+                    dst[x * 4u + 3u] = preserveAlpha ? ((color & 0x8000u) ? 0x80u : 0u) : 255u;
+                }
+            }
+        }
+        return true;
+    }
 
     for (uint32_t y = 0; y < height; ++y)
     {
