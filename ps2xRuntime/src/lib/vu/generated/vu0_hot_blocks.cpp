@@ -11,133 +11,108 @@
 #include "../vu1_hot_ops.h"
 
 
+// PERF-INL: inline lower/upper ops, dead stores dropped (tools/vu1gen/patch_inline_hot.py)
+// PERF-ADV: advance1 removed from qualifying blocks (tools/vu1gen/patch_adv_hot.py)
 static int vu0H_0(VU1Interpreter &vu, VuNativeCtx &c) // pc=0000 entry=000000001234abcd exit=52cae98d82a8f168 n=17 cycles=17
 {
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 17u;
     { // pair 0 @ 0000
-    vu.m_currentUpperInstruction = 0x01e821bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 8, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0008
-    vu.m_currentUpperInstruction = 0x01e828bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 8, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0010
-    vu.m_currentUpperInstruction = 0x01e830beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 8, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0018
-    vu.m_currentUpperInstruction = 0x01e83a0bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 8, 8);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 0020
-    vu.m_currentUpperInstruction = 0x01e921bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 9, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 0028
-    vu.m_currentUpperInstruction = 0x01e928bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 9, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 0030
-    vu.m_currentUpperInstruction = 0x01e930beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 9, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 7 @ 0038
-    vu.m_currentUpperInstruction = 0x01e93a4bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 9, 9);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 8 @ 0040
-    vu.m_currentUpperInstruction = 0x01ea21bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 10, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 9 @ 0048
-    vu.m_currentUpperInstruction = 0x01ea28bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 10, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 10 @ 0050
-    vu.m_currentUpperInstruction = 0x01ea30beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 10, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 11 @ 0058
-    vu.m_currentUpperInstruction = 0x01ea3a8bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 10, 10);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 12 @ 0060
-    vu.m_currentUpperInstruction = 0x01eb21bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 11, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 13 @ 0068
-    vu.m_currentUpperInstruction = 0x01eb28bdu;
     vuhot::fmac<2, 0, 1, true, 15, true>(vu, 0u, 5, 11, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 14 @ 0070
-    vu.m_currentUpperInstruction = 0x01eb30beu;
     vuhot::fmac<2, 0, 2, true, 15, true>(vu, 0u, 6, 11, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 15 @ 0078
-    vu.m_currentUpperInstruction = 0x41eb3acbu;
     vuhot::fmac<2, 0, 3, false, 15, true>(vu, 0u, 7, 11, 11);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
     { // pair 16 @ 0080
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0088u;
     if (st.branchPending)
     {
@@ -145,7 +120,7 @@ static int vu0H_0(VU1Interpreter &vu, VuNativeCtx &c) // pc=0000 entry=000000001
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_accReady[0] = S + 15u; // PERF-LEAN
     vu.m_accReady[1] = S + 15u; // PERF-LEAN
@@ -178,29 +153,34 @@ static int vu0H_1(VU1Interpreter &vu, VuNativeCtx &c) // pc=04B0 entry=000000001
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 4u;
     { // pair 0 @ 04B0
     const int32_t oldVi = st.vi[14];
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     st.vi[14] = static_cast<int16_t>(st.vi[0] + 200);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 04B8
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 04C0
     st.pc = 0x04C0u;
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
-    op.execLower(vu, 0x4a0f7000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    { // PERF-INL
+        const uint32_t jt = (static_cast<uint32_t>(static_cast<uint16_t>(vuhot::readBranchVi(vu, 14))) * 8u) & 0xFFFu;
+        st.vi[15] = static_cast<int32_t>(0x9au);
+        st.branchPending = true; st.branchTarget = jt; st.branchDelay = 1;
+    }
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x04C8u;
     if (st.branchPending)
     {
@@ -208,12 +188,10 @@ static int vu0H_1(VU1Interpreter &vu, VuNativeCtx &c) // pc=04B0 entry=000000001
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 04C8
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x04D0u;
     if (st.branchPending)
     {
@@ -221,7 +199,7 @@ static int vu0H_1(VU1Interpreter &vu, VuNativeCtx &c) // pc=04B0 entry=000000001
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_viReady[14] = S + 1u; // PERF-LEAN
     vu.m_viReady[15] = S + 3u; // PERF-LEAN
@@ -235,115 +213,95 @@ static int vu0H_2(VU1Interpreter &vu, VuNativeCtx &c) // pc=0640 entry=000000001
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 16u;
     { // pair 0 @ 0640
-    vu.m_currentUpperInstruction = 0x01eb21bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 11, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0648
-    vu.m_currentUpperInstruction = 0x01eb28bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 11, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0650
-    vu.m_currentUpperInstruction = 0x01eb30beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 11, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0658
-    vu.m_currentUpperInstruction = 0x01eb3bcbu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 11, 15);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 0660
-    vu.m_currentUpperInstruction = 0x01ea21bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 10, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 0668
-    vu.m_currentUpperInstruction = 0x01ea28bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 10, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 0670
-    vu.m_currentUpperInstruction = 0x01ea30beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 10, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 7 @ 0678
-    vu.m_currentUpperInstruction = 0x01ea3b8bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 10, 14);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 8 @ 0680
-    vu.m_currentUpperInstruction = 0x01e921bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 9, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 9 @ 0688
-    vu.m_currentUpperInstruction = 0x01e928bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 9, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 10 @ 0690
-    vu.m_currentUpperInstruction = 0x01e930beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 9, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 11 @ 0698
-    vu.m_currentUpperInstruction = 0x01e93b4bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 9, 13);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 12 @ 06A0
-    vu.m_currentUpperInstruction = 0x01e821bcu;
     vuhot::fmac<4, 0, 0, true, 15, true>(vu, 0u, 4, 8, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 13 @ 06A8
-    vu.m_currentUpperInstruction = 0x01e828bdu;
     vuhot::fmac<2, 0, 1, true, 15, true>(vu, 0u, 5, 8, 2);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 14 @ 06B0
     st.pc = 0x06B0u;
-    vu.m_currentUpperInstruction = 0x01e830beu;
     vuhot::fmac<2, 0, 2, true, 15, true>(vu, 0u, 6, 8, 2);
-    op.execLower(vu, 0x48007800u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e830beu);
+    { // PERF-INL
+        const uint32_t jt = (static_cast<uint32_t>(static_cast<uint16_t>(vuhot::readBranchVi(vu, 15))) * 8u) & 0xFFFu;
+        st.branchPending = true; st.branchTarget = jt; st.branchDelay = 1;
+    }
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x06B8u;
     if (st.branchPending)
     {
@@ -351,13 +309,11 @@ static int vu0H_2(VU1Interpreter &vu, VuNativeCtx &c) // pc=0640 entry=000000001
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 15 @ 06B8
-    vu.m_currentUpperInstruction = 0x01e83b0bu;
     vuhot::fmac<2, 0, 3, false, 15, true>(vu, 0u, 7, 8, 12);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x06C0u;
     if (st.branchPending)
     {
@@ -365,7 +321,7 @@ static int vu0H_2(VU1Interpreter &vu, VuNativeCtx &c) // pc=0640 entry=000000001
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_accReady[0] = S + 15u; // PERF-LEAN
     vu.m_accReady[1] = S + 15u; // PERF-LEAN
@@ -397,133 +353,114 @@ static int vu0H_3(VU1Interpreter &vu, VuNativeCtx &c) // pc=04D0 entry=869a72f3f
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 18u;
     { // pair 0 @ 04D0
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x01e079bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 15, 0, 6);
     st.vi[2] = static_cast<int16_t>(st.vi[0] + 63);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 04D8
-    vu.m_currentUpperInstruction = 0x01e070ffu;
     vuhot::fmac<3, 0, 3, true, 15, false>(vu, 0u, 14, 0, 3);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 04E0
-    vu.m_currentUpperInstruction = 0x01e068ffu;
     vuhot::fmac<3, 0, 3, true, 15, false>(vu, 0u, 13, 0, 3);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 04E8
-    vu.m_currentUpperInstruction = 0x01e0604bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 12, 0, 1);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 04F0
-    vu.m_currentUpperInstruction = 0x01e0608fu;
     vuhot::fmac<3, 0, 3, false, 15, false>(vu, 0u, 12, 0, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 04F8
-    vu.m_currentUpperInstruction = 0x01e079bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 15, 0, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 0500
-    vu.m_currentUpperInstruction = 0x01e070ffu;
     vuhot::fmac<3, 0, 3, true, 15, false>(vu, 0u, 14, 0, 3);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 7 @ 0508
-    op.execUpper(vu, 0x01c109ffu);
+    vuhot::clip(vu, 1, 1); // PERF-INL
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 8 @ 0510
-    op.execUpper(vu, 0x01c211ffu);
+    vuhot::clip(vu, 2, 2); // PERF-INL
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 9 @ 0518
-    vu.m_currentUpperInstruction = 0x01e068bfu;
     vuhot::fmac<2, 0, 3, true, 15, false>(vu, 0u, 13, 0, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 10 @ 0520
-    vu.m_currentUpperInstruction = 0x01e0604bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 12, 0, 1);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 11 @ 0528
     st.pc = 0x0528u;
-    vu.m_currentUpperInstruction = 0x01e0608fu;
     vuhot::fmac<3, 0, 3, false, 15, false>(vu, 0u, 12, 0, 2);
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0608fu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 12 @ 0530
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x01e079bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 15, 0, 6);
     st.vi[2] = st.vi[2] & st.vi[3];
     vu.m_viBranchBackupValid = false;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 13 @ 0538
     st.pc = 0x0538u;
-    vu.m_currentUpperInstruction = 0x01e070bfu;
     vuhot::fmac<2, 0, 3, true, 15, true>(vu, 0u, 14, 0, 2);
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e070bfu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 14 @ 0540
     const int32_t oldVi = st.vi[2];
-    op.execUpper(vu, 0x01c109ffu);
+    vuhot::clip(vu, 1, 1); // PERF-INL
     st.vi[2] = st.vi[2] & st.vi[3];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 15 @ 0548
-    op.execUpper(vu, 0x01c211ffu);
+    vuhot::clip(vu, 2, 2); // PERF-INL
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 16 @ 0550
-    vu.m_currentUpperInstruction = 0x01e068ffu;
     vuhot::fmac<3, 0, 3, true, 15, true>(vu, 0u, 13, 0, 3);
     if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) == static_cast<int16_t>(vuhot::readBranchVi(vu, 0)))
     { st.branchPending = true; st.branchTarget = 0x05E8u; st.branchDelay = 1; }
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0558u;
     if (st.branchPending)
     {
@@ -531,13 +468,11 @@ static int vu0H_3(VU1Interpreter &vu, VuNativeCtx &c) // pc=04D0 entry=869a72f3f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 17 @ 0558
-    vu.m_currentUpperInstruction = 0x01e0604bu;
     vuhot::fmac<2, 0, 3, false, 15, true>(vu, 0u, 12, 0, 1);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0560u;
     if (st.branchPending)
     {
@@ -545,7 +480,7 @@ static int vu0H_3(VU1Interpreter &vu, VuNativeCtx &c) // pc=04D0 entry=869a72f3f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_accReady[0] = S + 17u; // PERF-LEAN
     vu.m_accReady[1] = S + 17u; // PERF-LEAN
@@ -571,56 +506,57 @@ static int vu0H_4(VU1Interpreter &vu, VuNativeCtx &c) // pc=0560 entry=68342851f
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 7u;
     { // pair 0 @ 0560
     st.pc = 0x0560u;
-    vu.m_currentUpperInstruction = 0x01e0608fu;
     vuhot::fmac<3, 0, 3, false, 15, false>(vu, 0u, 12, 0, 2);
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0608fu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0568
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x01e079bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 15, 0, 6);
     st.vi[2] = st.vi[2] & st.vi[3];
     vu.m_viBranchBackupValid = false;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0570
     st.pc = 0x0570u;
-    vu.m_currentUpperInstruction = 0x01e070bfu;
     vuhot::fmac<2, 0, 3, true, 15, true>(vu, 0u, 14, 0, 2);
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e070bfu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0578
     const int32_t oldVi = st.vi[2];
-    op.execUpper(vu, 0x01c109ffu);
+    vuhot::clip(vu, 1, 1); // PERF-INL
     st.vi[2] = st.vi[2] & st.vi[3];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 0580
-    op.execUpper(vu, 0x01c211ffu);
+    vuhot::clip(vu, 2, 2); // PERF-INL
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 0588
-    vu.m_currentUpperInstruction = 0x01e068bfu;
     vuhot::fmac<2, 0, 3, true, 15, true>(vu, 0u, 13, 0, 2);
     if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) == static_cast<int16_t>(vuhot::readBranchVi(vu, 0)))
     { st.branchPending = true; st.branchTarget = 0x05E8u; st.branchDelay = 1; }
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0590u;
     if (st.branchPending)
     {
@@ -628,13 +564,11 @@ static int vu0H_4(VU1Interpreter &vu, VuNativeCtx &c) // pc=0560 entry=68342851f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 0590
-    vu.m_currentUpperInstruction = 0x01e0604bu;
     vuhot::fmac<2, 0, 3, false, 15, true>(vu, 0u, 12, 0, 1);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0598u;
     if (st.branchPending)
     {
@@ -642,7 +576,7 @@ static int vu0H_4(VU1Interpreter &vu, VuNativeCtx &c) // pc=0560 entry=68342851f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_accReady[0] = S + 6u; // PERF-LEAN
     vu.m_accReady[1] = S + 6u; // PERF-LEAN
@@ -668,24 +602,27 @@ static int vu0H_5(VU1Interpreter &vu, VuNativeCtx &c) // pc=05E8 entry=68342851f
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 2u;
     { // pair 0 @ 05E8
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x400002ffu; // NOP
     st.vi[2] = st.vi[2] & st.vi[3];
     vu.m_viBranchBackupValid = false;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
     { // pair 1 @ 05F0
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x05F8u;
     if (st.branchPending)
     {
@@ -693,7 +630,7 @@ static int vu0H_5(VU1Interpreter &vu, VuNativeCtx &c) // pc=05E8 entry=68342851f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_viReady[2] = S + 1u; // PERF-LEAN
     c.nextHash = 0xa76c692e0f6a1f59ull; c.hashValid = true;
@@ -707,29 +644,34 @@ static int vu0H_6(VU1Interpreter &vu, VuNativeCtx &c) // pc=0348 entry=000000001
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 4u;
     { // pair 0 @ 0348
     const int32_t oldVi = st.vi[14];
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     st.vi[14] = static_cast<int16_t>(st.vi[0] + 200);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0350
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0358
     st.pc = 0x0358u;
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
-    op.execLower(vu, 0x4a0f7000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    { // PERF-INL
+        const uint32_t jt = (static_cast<uint32_t>(static_cast<uint16_t>(vuhot::readBranchVi(vu, 14))) * 8u) & 0xFFFu;
+        st.vi[15] = static_cast<int32_t>(0x6du);
+        st.branchPending = true; st.branchTarget = jt; st.branchDelay = 1;
+    }
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0360u;
     if (st.branchPending)
     {
@@ -737,12 +679,10 @@ static int vu0H_6(VU1Interpreter &vu, VuNativeCtx &c) // pc=0348 entry=000000001
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0360
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0368u;
     if (st.branchPending)
     {
@@ -750,7 +690,7 @@ static int vu0H_6(VU1Interpreter &vu, VuNativeCtx &c) // pc=0348 entry=000000001
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_viReady[14] = S + 1u; // PERF-LEAN
     vu.m_viReady[15] = S + 3u; // PERF-LEAN
@@ -764,132 +704,113 @@ static int vu0H_7(VU1Interpreter &vu, VuNativeCtx &c) // pc=0368 entry=869a72f3f
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 18u;
     { // pair 0 @ 0368
     const int32_t oldVi = st.vi[1];
-    vu.m_currentUpperInstruction = 0x01e079bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 15, 0, 6);
     st.vi[1] = static_cast<int16_t>(st.vi[0] + 63);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0370
-    vu.m_currentUpperInstruction = 0x01e070ffu;
     vuhot::fmac<3, 0, 3, true, 15, false>(vu, 0u, 14, 0, 3);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0378
-    vu.m_currentUpperInstruction = 0x01e068ffu;
     vuhot::fmac<3, 0, 3, true, 15, false>(vu, 0u, 13, 0, 3);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0380
-    vu.m_currentUpperInstruction = 0x01e0604bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 12, 0, 1);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 0388
-    vu.m_currentUpperInstruction = 0x01e0608fu;
     vuhot::fmac<3, 0, 3, false, 15, false>(vu, 0u, 12, 0, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 0390
-    vu.m_currentUpperInstruction = 0x01e079bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 15, 0, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 0398
-    vu.m_currentUpperInstruction = 0x01e070ffu;
     vuhot::fmac<3, 0, 3, true, 15, false>(vu, 0u, 14, 0, 3);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 7 @ 03A0
-    op.execUpper(vu, 0x01c109ffu);
+    vuhot::clip(vu, 1, 1); // PERF-INL
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 8 @ 03A8
-    op.execUpper(vu, 0x01c211ffu);
+    vuhot::clip(vu, 2, 2); // PERF-INL
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 9 @ 03B0
-    vu.m_currentUpperInstruction = 0x01e068bfu;
     vuhot::fmac<2, 0, 3, true, 15, false>(vu, 0u, 13, 0, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 10 @ 03B8
-    vu.m_currentUpperInstruction = 0x01e0604bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 12, 0, 1);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 11 @ 03C0
     st.pc = 0x03C0u;
-    vu.m_currentUpperInstruction = 0x01e0608fu;
     vuhot::fmac<3, 0, 3, false, 15, false>(vu, 0u, 12, 0, 2);
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0608fu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     vu.m_viBranchBackupValid = false;
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 12 @ 03C8
     st.pc = 0x03C8u;
-    vu.m_currentUpperInstruction = 0x01e079bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 15, 0, 6);
-    op.execLower(vu, 0x38040000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e079bfu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[4] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 13 @ 03D0
     const int32_t oldVi = st.vi[3];
-    vu.m_currentUpperInstruction = 0x01e070bfu;
     vuhot::fmac<2, 0, 3, true, 15, true>(vu, 0u, 14, 0, 2);
     st.vi[3] = st.vi[3] | st.vi[4];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 14 @ 03D8
     const int32_t oldVi = st.vi[2];
-    op.execUpper(vu, 0x01c109ffu);
+    vuhot::clip(vu, 1, 1); // PERF-INL
     st.vi[2] = st.vi[3] & st.vi[1];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 15 @ 03E0
-    op.execUpper(vu, 0x01c211ffu);
+    vuhot::clip(vu, 2, 2); // PERF-INL
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 16 @ 03E8
-    vu.m_currentUpperInstruction = 0x01e068ffu;
     vuhot::fmac<3, 0, 3, true, 15, true>(vu, 0u, 13, 0, 3);
     if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 0)))
     { st.branchPending = true; st.branchTarget = 0x0480u; st.branchDelay = 1; }
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x03F0u;
     if (st.branchPending)
     {
@@ -897,13 +818,11 @@ static int vu0H_7(VU1Interpreter &vu, VuNativeCtx &c) // pc=0368 entry=869a72f3f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 17 @ 03F0
-    vu.m_currentUpperInstruction = 0x01e0604bu;
     vuhot::fmac<2, 0, 3, false, 15, true>(vu, 0u, 12, 0, 1);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x03F8u;
     if (st.branchPending)
     {
@@ -911,7 +830,7 @@ static int vu0H_7(VU1Interpreter &vu, VuNativeCtx &c) // pc=0368 entry=869a72f3f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_accReady[0] = S + 17u; // PERF-LEAN
     vu.m_accReady[1] = S + 17u; // PERF-LEAN
@@ -939,24 +858,27 @@ static int vu0H_8(VU1Interpreter &vu, VuNativeCtx &c) // pc=0480 entry=68342851f
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 2u;
     { // pair 0 @ 0480
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x400002ffu; // NOP
     st.vi[2] = st.vi[3] & st.vi[1];
     vu.m_viBranchBackupValid = false;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
     { // pair 1 @ 0488
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0490u;
     if (st.branchPending)
     {
@@ -964,7 +886,7 @@ static int vu0H_8(VU1Interpreter &vu, VuNativeCtx &c) // pc=0480 entry=68342851f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_viReady[2] = S + 1u; // PERF-LEAN
     c.nextHash = 0xa76c692e0f6a1f59ull; c.hashValid = true;
@@ -978,53 +900,54 @@ static int vu0H_9(VU1Interpreter &vu, VuNativeCtx &c) // pc=0598 entry=68342851f
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 7u;
     { // pair 0 @ 0598
     st.pc = 0x0598u;
-    vu.m_currentUpperInstruction = 0x01e0608fu;
     vuhot::fmac<3, 0, 3, false, 15, true>(vu, 0u, 12, 0, 2);
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0608fu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 05A0
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     st.vi[2] = st.vi[2] & st.vi[3];
     vu.m_viBranchBackupValid = false;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 05A8
     st.pc = 0x05A8u;
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 05B0
     const int32_t oldVi = st.vi[2];
-    op.execUpper(vu, 0x01c109ffu);
+    vuhot::clip(vu, 1, 1); // PERF-INL
     st.vi[2] = st.vi[2] & st.vi[3];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 05B8
-    op.execUpper(vu, 0x01c211ffu);
+    vuhot::clip(vu, 2, 2); // PERF-INL
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 05C0
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) == static_cast<int16_t>(vuhot::readBranchVi(vu, 0)))
     { st.branchPending = true; st.branchTarget = 0x05E8u; st.branchDelay = 1; }
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x05C8u;
     if (st.branchPending)
     {
@@ -1032,12 +955,10 @@ static int vu0H_9(VU1Interpreter &vu, VuNativeCtx &c) // pc=0598 entry=68342851f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 05C8
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x05D0u;
     if (st.branchPending)
     {
@@ -1045,7 +966,7 @@ static int vu0H_9(VU1Interpreter &vu, VuNativeCtx &c) // pc=0598 entry=68342851f
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_vfReady[2][0] = S + 4u; // PERF-LEAN
     vu.m_vfReady[2][1] = S + 4u; // PERF-LEAN
@@ -1063,24 +984,27 @@ static int vu0H_10(VU1Interpreter &vu, VuNativeCtx &c) // pc=05E8 entry=e369785a
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 2u;
     { // pair 0 @ 05E8
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x400002ffu; // NOP
     st.vi[2] = st.vi[2] & st.vi[3];
     vu.m_viBranchBackupValid = false;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
     { // pair 1 @ 05F0
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x05F8u;
     if (st.branchPending)
     {
@@ -1088,7 +1012,7 @@ static int vu0H_10(VU1Interpreter &vu, VuNativeCtx &c) // pc=05E8 entry=e369785a
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_viReady[2] = S + 1u; // PERF-LEAN
     c.nextHash = 0x000000001234abcdull; c.hashValid = true;
@@ -1102,47 +1026,48 @@ static int vu0H_11(VU1Interpreter &vu, VuNativeCtx &c) // pc=05D0 entry=e369785a
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 5u;
     { // pair 0 @ 05D0
     st.pc = 0x05D0u;
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 05D8
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     st.vi[2] = st.vi[2] & st.vi[3];
     vu.m_viBranchBackupValid = false;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 05E0
     st.pc = 0x05E0u;
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 05E8
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x400002ffu; // NOP
     st.vi[2] = st.vi[2] & st.vi[3];
     vu.m_viBranchBackupValid = false;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
     { // pair 4 @ 05F0
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x05F8u;
     if (st.branchPending)
     {
@@ -1150,7 +1075,7 @@ static int vu0H_11(VU1Interpreter &vu, VuNativeCtx &c) // pc=05D0 entry=e369785a
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_viReady[2] = S + 4u; // PERF-LEAN
     vu.m_viReady[3] = S + 3u; // PERF-LEAN
@@ -1169,230 +1094,170 @@ static int vu0H_12(VU1Interpreter &vu, VuNativeCtx &c) // pc=00F0 entry=00000000
     (void)qs; (void)op;
     c.instrs += 30u;
     { // pair 0 @ 00F0
-    vu.m_currentUpperInstruction = 0x01e821bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 8, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 00F8
-    vu.m_currentUpperInstruction = 0x01e828bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 8, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0100
-    vu.m_currentUpperInstruction = 0x01e830beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 8, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0108
-    vu.m_currentUpperInstruction = 0x01e83a0bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 8, 8);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 0110
-    vu.m_currentUpperInstruction = 0x01e921bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 9, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 0118
-    vu.m_currentUpperInstruction = 0x01e928bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 9, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 0120
-    vu.m_currentUpperInstruction = 0x01e930beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 9, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 7 @ 0128
-    vu.m_currentUpperInstruction = 0x01c8406au;
     vuhot::fmac<4, 3, 0, false, 14, false>(vu, 0u, 8, 8, 1);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 8 @ 0130
-    vu.m_currentUpperInstruction = 0x01e93a4bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 9, 9);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 9 @ 0138
-    vu.m_currentUpperInstruction = 0x01ea21bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 10, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 10 @ 0140
-    vu.m_currentUpperInstruction = 0x01ea28bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 10, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 11 @ 0148
-    vu.m_currentUpperInstruction = 0x01010841u;
     vuhot::fmac<0, 0, 1, false, 8, false>(vu, 0u, 1, 1, 1);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 12 @ 0150
-    vu.m_currentUpperInstruction = 0x01c948eau;
     vuhot::fmac<4, 3, 0, false, 14, false>(vu, 0u, 9, 9, 3);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 13 @ 0158
-    vu.m_currentUpperInstruction = 0x01ea30beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 10, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 14 @ 0160
-    vu.m_currentUpperInstruction = 0x01ea3a8bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 10, 10);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 15 @ 0168
-    vu.m_currentUpperInstruction = 0x01010842u;
     vuhot::fmac<0, 0, 2, false, 8, false>(vu, 0u, 1, 1, 1);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 16 @ 0170
-    vu.m_currentUpperInstruction = 0x010318c1u;
     vuhot::fmac<0, 0, 1, false, 8, false>(vu, 0u, 3, 3, 3);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 17 @ 0178
-    vu.m_currentUpperInstruction = 0x01eb21bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 4, 11, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 18 @ 0180
-    vu.m_currentUpperInstruction = 0x01ca50aau;
     vuhot::fmac<4, 3, 0, false, 14, false>(vu, 0u, 10, 10, 2);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 19 @ 0188
     st.pc = 0x0188u;
-    vu.m_currentUpperInstruction = 0x01eb28bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 5, 11, 2);
-    op.execLower(vu, 0x806103beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01eb28bdu);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    vuhot::rsqrtQ(vu, c, 0, 3, 1, 0); // PERF-INL
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 20 @ 0190
-    vu.m_currentUpperInstruction = 0x010318c2u;
     vuhot::fmac<0, 0, 2, false, 8, false>(vu, 0u, 3, 3, 3);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 21 @ 0198
-    vu.m_currentUpperInstruction = 0x01eb30beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 6, 11, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 22 @ 01A0
-    vu.m_currentUpperInstruction = 0x01021081u;
     vuhot::fmac<0, 0, 1, false, 8, false>(vu, 0u, 2, 2, 2);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     op.advanceTo(vu, S + 32u);
     { // pair 23 @ 01A8
     st.pc = 0x01A8u;
-    vu.m_currentUpperInstruction = 0x01eb3acbu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 7, 11, 11);
-    op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01eb3acbu);
+    // WAITQ // PERF-INL
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 24 @ 01B0
     st.pc = 0x01B0u;
-    vu.m_currentUpperInstruction = 0x01c0431cu;
     vuhot::fmac<4, 1, 0, false, 14, false>(vu, 0u, 8, 0, 12);
-    op.execLower(vu, 0x806303beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c0431cu);
+    vuhot::rsqrtQ(vu, c, 0, 3, 3, 0); // PERF-INL
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     op.advanceTo(vu, S + 46u);
     { // pair 25 @ 01B8
     st.pc = 0x01B8u;
-    vu.m_currentUpperInstruction = 0x01021082u;
     vuhot::fmac<0, 0, 2, false, 8, false>(vu, 0u, 2, 2, 2);
-    op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01021082u);
+    // WAITQ // PERF-INL
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     vu.m_cycle = S + 50u; st.cycles = vu.m_cycle;
     { // pair 26 @ 01C0
     st.pc = 0x01C0u;
-    vu.m_currentUpperInstruction = 0x01c04b5cu;
     vuhot::fmac<4, 1, 0, false, 14, true>(vu, 0u, 9, 0, 13);
-    op.execLower(vu, 0x806203beu, c.vuData, c.dataSize, *c.gs, c.memory, 0x01c04b5cu);
+    vuhot::rsqrtQ(vu, c, 0, 3, 2, 0); // PERF-INL
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     op.advanceTo(vu, S + 63u);
     { // pair 27 @ 01C8
     st.pc = 0x01C8u;
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
-    op.execLower(vu, 0x800003bfu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+    // WAITQ // PERF-INL
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 28 @ 01D0
-    vu.m_currentUpperInstruction = 0x41c0539cu;
     vuhot::fmac<4, 1, 0, false, 14, true>(vu, 0u, 10, 0, 14);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
     { // pair 29 @ 01D8
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x01E0u;
     if (st.branchPending)
     {
@@ -1400,7 +1265,7 @@ static int vu0H_12(VU1Interpreter &vu, VuNativeCtx &c) // pc=00F0 entry=00000000
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_accReady[0] = S + 22u; // PERF-LEAN
     vu.m_accReady[1] = S + 22u; // PERF-LEAN
@@ -1451,99 +1316,80 @@ static int vu0H_13(VU1Interpreter &vu, VuNativeCtx &c) // pc=0088 entry=00000000
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 13u;
     { // pair 0 @ 0088
-    vu.m_currentUpperInstruction = 0x01e32118u;
     vuhot::fmac<4, 0, 0, false, 15, false>(vu, 0u, 4, 3, 4);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0090
-    vu.m_currentUpperInstruction = 0x01e33198u;
     vuhot::fmac<4, 0, 0, false, 15, false>(vu, 0u, 6, 3, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0098
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 00A0
-    vu.m_currentUpperInstruction = 0x01e029bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 5, 0, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 00A8
-    vu.m_currentUpperInstruction = 0x01e440bcu;
     vuhot::fmac<2, 0, 0, true, 15, false>(vu, 0u, 8, 4, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 00B0
-    vu.m_currentUpperInstruction = 0x01e448bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 9, 4, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 00B8
-    vu.m_currentUpperInstruction = 0x01e450beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 10, 4, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 7 @ 00C0
-    vu.m_currentUpperInstruction = 0x01e4594bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 11, 4, 5);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 8 @ 00C8
-    vu.m_currentUpperInstruction = 0x01e661bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 12, 6, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 9 @ 00D0
-    vu.m_currentUpperInstruction = 0x01e668bdu;
     vuhot::fmac<2, 0, 1, true, 15, true>(vu, 0u, 13, 6, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 10 @ 00D8
-    vu.m_currentUpperInstruction = 0x01e670beu;
     vuhot::fmac<2, 0, 2, true, 15, true>(vu, 0u, 14, 6, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 11 @ 00E0
-    vu.m_currentUpperInstruction = 0x41e039cbu;
     vuhot::fmac<2, 0, 3, false, 15, true>(vu, 0u, 7, 0, 7);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
     { // pair 12 @ 00E8
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x00F0u;
     if (st.branchPending)
     {
@@ -1551,7 +1397,7 @@ static int vu0H_13(VU1Interpreter &vu, VuNativeCtx &c) // pc=0088 entry=00000000
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_accReady[0] = S + 11u; // PERF-LEAN
     vu.m_accReady[1] = S + 11u; // PERF-LEAN
@@ -1584,99 +1430,80 @@ static int vu0H_14(VU1Interpreter &vu, VuNativeCtx &c) // pc=0CD0 entry=00000000
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 13u;
     { // pair 0 @ 0CD0
-    vu.m_currentUpperInstruction = 0x01e30858u;
     vuhot::fmac<4, 0, 0, false, 15, false>(vu, 0u, 1, 3, 1);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0CD8
-    vu.m_currentUpperInstruction = 0x01e37bd8u;
     vuhot::fmac<4, 0, 0, false, 15, false>(vu, 0u, 15, 3, 15);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0CE0
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0CE8
-    vu.m_currentUpperInstruction = 0x01e011bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 2, 0, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 0CF0
-    vu.m_currentUpperInstruction = 0x01e140bcu;
     vuhot::fmac<2, 0, 0, true, 15, false>(vu, 0u, 8, 1, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 0CF8
-    vu.m_currentUpperInstruction = 0x01e148bdu;
     vuhot::fmac<2, 0, 1, true, 15, false>(vu, 0u, 9, 1, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 0D00
-    vu.m_currentUpperInstruction = 0x01e150beu;
     vuhot::fmac<2, 0, 2, true, 15, false>(vu, 0u, 10, 1, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 7 @ 0D08
-    vu.m_currentUpperInstruction = 0x01e1588bu;
     vuhot::fmac<2, 0, 3, false, 15, false>(vu, 0u, 11, 1, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 8 @ 0D10
-    vu.m_currentUpperInstruction = 0x01ef61bcu;
     vuhot::fmac<4, 0, 0, true, 15, false>(vu, 0u, 12, 15, 6);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 9 @ 0D18
-    vu.m_currentUpperInstruction = 0x01ef68bdu;
     vuhot::fmac<2, 0, 1, true, 15, true>(vu, 0u, 13, 15, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 10 @ 0D20
-    vu.m_currentUpperInstruction = 0x01ef70beu;
     vuhot::fmac<2, 0, 2, true, 15, true>(vu, 0u, 14, 15, 2);
     vuhot::move(st, 0, 0, 0);
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 11 @ 0D28
-    vu.m_currentUpperInstruction = 0x41e0840bu;
     vuhot::fmac<2, 0, 3, false, 15, true>(vu, 0u, 16, 0, 16);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
     { // pair 12 @ 0D30
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0D38u;
     if (st.branchPending)
     {
@@ -1684,7 +1511,7 @@ static int vu0H_14(VU1Interpreter &vu, VuNativeCtx &c) // pc=0CD0 entry=00000000
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_accReady[0] = S + 11u; // PERF-LEAN
     vu.m_accReady[1] = S + 11u; // PERF-LEAN
@@ -1717,55 +1544,56 @@ static int vu0H_15(VU1Interpreter &vu, VuNativeCtx &c) // pc=03F8 entry=68342851
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 7u;
     { // pair 0 @ 03F8
     st.pc = 0x03F8u;
-    vu.m_currentUpperInstruction = 0x01e0608fu;
     vuhot::fmac<3, 0, 3, false, 15, false>(vu, 0u, 12, 0, 2);
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0608fu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     vu.m_viBranchBackupValid = false;
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0400
     st.pc = 0x0400u;
-    vu.m_currentUpperInstruction = 0x01e079bfu;
     vuhot::fmac<4, 0, 3, true, 15, false>(vu, 0u, 15, 0, 6);
-    op.execLower(vu, 0x38040000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e079bfu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[4] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0408
     const int32_t oldVi = st.vi[3];
-    vu.m_currentUpperInstruction = 0x01e070bfu;
     vuhot::fmac<2, 0, 3, true, 15, true>(vu, 0u, 14, 0, 2);
     st.vi[3] = st.vi[3] | st.vi[4];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0410
     const int32_t oldVi = st.vi[2];
-    op.execUpper(vu, 0x01c109ffu);
+    vuhot::clip(vu, 1, 1); // PERF-INL
     st.vi[2] = st.vi[3] & st.vi[1];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 0418
-    op.execUpper(vu, 0x01c211ffu);
+    vuhot::clip(vu, 2, 2); // PERF-INL
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 0420
-    vu.m_currentUpperInstruction = 0x01e068bfu;
     vuhot::fmac<2, 0, 3, true, 15, true>(vu, 0u, 13, 0, 2);
     if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 0)))
     { st.branchPending = true; st.branchTarget = 0x0480u; st.branchDelay = 1; }
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0428u;
     if (st.branchPending)
     {
@@ -1773,13 +1601,11 @@ static int vu0H_15(VU1Interpreter &vu, VuNativeCtx &c) // pc=03F8 entry=68342851
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 0428
-    vu.m_currentUpperInstruction = 0x01e0604bu;
     vuhot::fmac<2, 0, 3, false, 15, true>(vu, 0u, 12, 0, 1);
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0430u;
     if (st.branchPending)
     {
@@ -1787,7 +1613,7 @@ static int vu0H_15(VU1Interpreter &vu, VuNativeCtx &c) // pc=03F8 entry=68342851
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_accReady[0] = S + 6u; // PERF-LEAN
     vu.m_accReady[1] = S + 6u; // PERF-LEAN
@@ -1814,52 +1640,53 @@ static int vu0H_16(VU1Interpreter &vu, VuNativeCtx &c) // pc=0430 entry=68342851
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 7u;
     { // pair 0 @ 0430
     st.pc = 0x0430u;
-    vu.m_currentUpperInstruction = 0x01e0608fu;
     vuhot::fmac<3, 0, 3, false, 15, true>(vu, 0u, 12, 0, 2);
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x01e0608fu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     vu.m_viBranchBackupValid = false;
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0438
     st.pc = 0x0438u;
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
-    op.execLower(vu, 0x38040000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[4] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0440
     const int32_t oldVi = st.vi[3];
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     st.vi[3] = st.vi[3] | st.vi[4];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0448
     const int32_t oldVi = st.vi[2];
-    op.execUpper(vu, 0x01c109ffu);
+    vuhot::clip(vu, 1, 1); // PERF-INL
     st.vi[2] = st.vi[3] & st.vi[1];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 4 @ 0450
-    op.execUpper(vu, 0x01c211ffu);
+    vuhot::clip(vu, 2, 2); // PERF-INL
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 5 @ 0458
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     if (static_cast<int16_t>(vuhot::readBranchVi(vu, 2)) != static_cast<int16_t>(vuhot::readBranchVi(vu, 0)))
     { st.branchPending = true; st.branchTarget = 0x0480u; st.branchDelay = 1; }
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0460u;
     if (st.branchPending)
     {
@@ -1867,12 +1694,10 @@ static int vu0H_16(VU1Interpreter &vu, VuNativeCtx &c) // pc=0430 entry=68342851
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 6 @ 0460
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0468u;
     if (st.branchPending)
     {
@@ -1880,7 +1705,7 @@ static int vu0H_16(VU1Interpreter &vu, VuNativeCtx &c) // pc=0430 entry=68342851
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_vfReady[2][0] = S + 4u; // PERF-LEAN
     vu.m_vfReady[2][1] = S + 4u; // PERF-LEAN
@@ -1899,46 +1724,47 @@ static int vu0H_17(VU1Interpreter &vu, VuNativeCtx &c) // pc=0468 entry=e369785a
     const VuNativeOps &op = *c.ops;
     VU1State &st = vu.m_state;
     const uint64_t S = vu.m_cycle;
-    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l) { vuhot::storeFast(vu, c, a, w, l); };
+    // PERF-ADV: a store lands at the end of its own pair, so write it at issue
+    auto qs = [&](uint32_t a, const uint32_t *w, uint8_t l)
+    {
+        for (uint32_t k = 0; k < 4u; ++k)
+            if (l & (8u >> k))
+                std::memcpy(c.vuData + a + k * 4u, w + k, 4u);
+    };
     (void)qs; (void)op;
+    if (vu.m_xgkick.active) return -1; // PERF-ADV: this block no longer steps a running XGKICK transfer
     c.instrs += 5u;
     { // pair 0 @ 0468
     st.pc = 0x0468u;
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
-    op.execLower(vu, 0x38030000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[3] = static_cast<int32_t>(st.clip & 0x0FFFu);
     vu.m_viBranchBackupValid = false;
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 1 @ 0470
     st.pc = 0x0470u;
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
-    op.execLower(vu, 0x38040000u, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+    st.clip = vuflags::flgVisible(vuflags::s_flgClip[0], vu.m_cycle); // PERF-INL2
+    st.vi[4] = static_cast<int32_t>(st.clip & 0x0FFFu);
     st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 2 @ 0478
     const int32_t oldVi = st.vi[3];
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     st.vi[3] = st.vi[3] | st.vi[4];
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     { // pair 3 @ 0480
     const int32_t oldVi = st.vi[2];
-    vu.m_currentUpperInstruction = 0x400002ffu; // NOP
     st.vi[2] = st.vi[3] & st.vi[1];
     vu.m_viBranchBackupValid = false;
     vu.m_viBranchBackupValue = oldVi; vu.m_viBranchBackupReg = 2; vu.m_viBranchBackupValid = true;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.ebit = true; // PERF-IP: E bit; the program ends after the next (delay-slot) pair
     { // pair 4 @ 0488
-    vu.m_currentUpperInstruction = 0x000002ffu; // NOP
     vuhot::move(st, 0, 0, 0);
     vu.m_viBranchBackupValid = false;
-    st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
     st.pc = 0x0490u;
     if (st.branchPending)
     {
@@ -1946,7 +1772,7 @@ static int vu0H_17(VU1Interpreter &vu, VuNativeCtx &c) // pc=0468 entry=e369785a
         else { --st.branchDelay; }
     }
     }
-    ++vu.m_cycle; st.cycles = vu.m_cycle;
+    ++vu.m_cycle;
     st.cycles = vu.m_cycle; // PERF-LEAN
     vu.m_viReady[2] = S + 4u; // PERF-LEAN
     vu.m_viReady[3] = S + 3u; // PERF-LEAN

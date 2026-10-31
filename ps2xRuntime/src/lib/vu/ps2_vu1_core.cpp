@@ -3354,12 +3354,17 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
 
     } // PERF-KL: end of s_vuAnyProbe
 
-    if (probe_ae::handleMovieHleMscal(startPC, vuCode, codeSize, vuData, dataSize, top, gs, memory))
+    // PERF-V0: the movie HLE hooks (microcode hash match, batched GS packets) only concern the VU1 movie microprograms; VU0 macro-mode calls
+    // (~220k/s) paid two cross-TU calls and an atomic increment each for nothing
+    if (m_unit == Unit::VU1)
     {
-        return;
-    }
+        if (probe_ae::handleMovieHleMscal(startPC, vuCode, codeSize, vuData, dataSize, top, gs, memory))
+        {
+            return;
+        }
 
-    probe_ae::flushMovieBatch(&gs, memory);
+        probe_ae::flushMovieBatch(&gs, memory);
+    }
 
     probe_ae::onBxOrigRunStart(startPC, top, vuData, dataSize);
     probe_ae::onBzOrigRunBlock();
