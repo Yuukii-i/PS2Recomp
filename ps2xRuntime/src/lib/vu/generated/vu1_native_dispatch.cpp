@@ -10,6 +10,7 @@
 #undef private
 #include "../vu1_native_api.h"
 #include "../vu1_hot_ops.h" // PERF-LB: SIMD FMAC core for the loop kernel
+#include <bit>
 #include <limits>
 
 namespace
@@ -4065,7 +4066,7 @@ struct LbV
     __m128 A, B, S3, S2, T5, R7, S2Q, inner, BV, prod;
     float Q, Wraw;
     uint32_t di, sticky[8];
-    uint32_t macIn, curIn;
+    uint32_t macIn, curIn, macR7, curR7;
 };
 
 inline int32_t lbS16(int32_t v) { return static_cast<int16_t>(static_cast<uint16_t>(v)); }
@@ -4258,6 +4259,426 @@ bool lbLoop(VU1Interpreter &vu, VuNativeCtx &c)
                     (unsigned long long)s_lbWhy[4], (unsigned long long)s_lbWhy[5], (unsigned long long)s_lbWhy[6]);
     return true;
 }
+
+// PERF-LB full routine (PS2X_VU1_KERNEL=1): the whole skinned-vertex routine 1FE0 -> JR in closed form (prologue block + first pass + loop + tail), N >= 4 vertices.
+// Spec and validation: tools/vu1gen/lbfull.py (exit state from the entry state alone, checked against the recorded exit and the exact model).
+// Entry contract (all 1500 corpus entries): every pipeline empty, no pending DIV, no running XGKICK. Exit: pc = vi15 * 8 with the XGKICK started by the
+// real delay-slot pair, so the last two pairs are executed with the same calls as the tail block.
+constexpr uint64_t kLbEntryHash = 0xed9ddb4fd6ac295full, kLbExitHash = 0xb2116da548f0fb1bull;
+uint64_t s_lbFullTaken = 0, s_lbFullDeclined = 0, s_lbFullVerts = 0, s_lbFullWhy[10] = {};
+
+struct LbK
+{
+    __m128 vf1, vf2, vf3, vf4, vf16;
+    LbOp accw;
+};
+
+inline void lbVertex(LbV &r, int32_t idx, uint32_t s3qw, uint32_t s2qw, const LbK &k, const uint8_t *mem, uint32_t dsz)
+{
+    const auto ldq = [&](uint32_t qw) { return _mm_loadu_ps(reinterpret_cast<const float *>(mem + ((qw * 16u) & (dsz - 1u)))); };
+    const __m128 zero = _mm_setzero_ps();
+    r.idx = idx;
+    r.A = ldq(static_cast<uint32_t>(636 + idx));
+    r.B = ldq(static_cast<uint32_t>(716 + idx));
+    r.S3 = ldq(s3qw);
+    r.S2 = ldq(s2qw);
+    const LbOp mula = lbFmac<4, 15>(k.vf3, r.A, zero);
+    const LbOp t5 = lbFmac<2, 15>(k.vf4, lbBc(r.A, 3), mula.res);
+    r.T5 = t5.res;
+    const float den = vuhot::N(_mm_cvtss_f32(lbBc(r.T5, 3)));
+    float q;
+    r.di = 0u;
+    if (den == 0.0f)
+    {
+        r.di = 0x20u;
+        q = std::signbit(den) ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+    }
+    else
+        q = vuhot::normResult(1.0f / den);
+    r.Q = vuhot::normResult(q);
+    const __m128 qb = _mm_set1_ps(r.Q);
+    const LbOp r7 = lbFmac<4, 14>(r.T5, qb, zero);
+    const LbOp s2q = lbFmac<4, 14>(r.S2, qb, zero);
+    const LbOp w = lbFmac<2, 1>(k.vf1, qb, k.accw.res);
+    const LbOp bv = lbFmac<4, 15>(r.B, k.vf16, zero);
+    const LbOp in = lbFmac<2, 15>(k.vf2, k.vf16, bv.res);
+    const LbOp pr = lbFmac<4, 15>(r.S3, in.res, zero);
+    r.R7 = r7.res;
+    r.S2Q = s2q.res;
+    r.Wraw = _mm_cvtss_f32(lbBc(w.res, 3));
+    r.BV = bv.res;
+    r.inner = in.res;
+    r.prod = pr.res;
+    r.sticky[0] = mula.cur | mula.xf;
+    r.sticky[1] = t5.cur | t5.xf;
+    r.sticky[2] = r7.cur | r7.xf;
+    r.sticky[3] = s2q.cur | s2q.xf;
+    r.sticky[4] = w.cur | w.xf;
+    r.sticky[5] = bv.cur | bv.xf;
+    r.sticky[6] = in.cur | in.xf;
+    r.sticky[7] = pr.cur | pr.xf;
+    r.macIn = in.mac;
+    r.curIn = in.cur;
+    r.macR7 = r7.mac;
+    r.curR7 = r7.cur;
+}
+
+bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
+{
+    VU1State &st = vu.m_state;
+    constexpr int kMaxV = 67;
+    const auto decline = [&](int why) { ++s_lbFullDeclined; ++s_lbFullWhy[why]; return false; };
+    if (vu.m_xgkick.active || st.branchPending || st.ebit || vu.m_stopRequested || st.haltAfterDelaySlot)
+        return decline(0);
+    if (vu.m_fdiv.valid || vu.m_efu[0].valid || vu.m_efu[1].valid || *c.storeMask != 0u)
+        return decline(1);
+    for (const auto &w : vu.m_vfWritePipeline) if (w.valid) return decline(1);
+    for (const auto &w : vu.m_viWritePipeline) if (w.valid) return decline(1);
+    for (const auto &w : vu.m_accWritePipeline) if (w.valid) return decline(1);
+    for (const auto &w : vu.m_flagPipeline) if (w.valid) return decline(1);
+    for (const auto &w : vu.m_storePipeline) if (w.valid) return decline(1);
+    const uint32_t dsz = c.dataSize;
+    if (dsz != 0x4000u)
+        return decline(2);
+    const int32_t vi2 = st.vi[2], vi3 = st.vi[3], vi4 = st.vi[4], vi5 = st.vi[5], vi6 = st.vi[6], vi7 = st.vi[7], vi12 = st.vi[12], vi13 = st.vi[13], vi15 = st.vi[15];
+    if ((vi5 & 1) != 0 || vi5 < 8 || vi5 / 2 > kMaxV)
+        return decline(3);
+    const int32_t N = vi5 / 2, K = N - 3;
+    if (static_cast<int64_t>(c.budgetEnd) - static_cast<int64_t>(vu.m_cycle) <= 74 + 15 * K + 160)
+        return decline(4);
+    const uint8_t *mem = c.vuData;
+    const auto ld32 = [&](uint32_t qw, uint32_t lane) { uint32_t v; std::memcpy(&v, mem + ((qw * 16u) & (dsz - 1u)) + lane * 4u, 4); return v; };
+    const auto ldq = [&](uint32_t qw) { return _mm_loadu_ps(reinterpret_cast<const float *>(mem + ((qw * 16u) & (dsz - 1u)))); };
+    const float iReg = 255.0f; // the IMM pair (437F0000) loads I before the first MINIi
+    LbK k;
+    k.vf1 = ldq(1016);
+    k.vf2 = ldq(1014);
+    k.vf3 = ldq(1002);
+    k.vf4 = ldq(1003);
+    k.vf16 = _mm_loadu_ps(st.vf[16]);
+    k.accw = lbFmac<4, 1>(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), lbBc(k.vf1, 2), _mm_setzero_ps());
+    LbV V[kMaxV];
+    for (int32_t t = 0; t < N; ++t)
+    {
+        const int32_t idx = t == 0 ? vi7 : lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(vi4 + t)), 0)));
+        lbVertex(V[t], idx, static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t)), static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t)), k, mem, dsz);
+        if (V[t].di != 0u)
+            return decline(5);
+    }
+    // everything below only commits (reads of the old memory are done first)
+    const int32_t newVi1 = lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(vi13)), 0)));
+    const int32_t newVi11 = lbS16(static_cast<int32_t>(ld32(1023, 3)));
+    const uint32_t ctlOld = ld32(1023, 3) & 0xFFFFu;
+    const uint32_t vf27x = std::bit_cast<uint32_t>(st.vf[27][0]), vf27y = std::bit_cast<uint32_t>(st.vf[27][1]);
+    const uint32_t m1012z = ld32(1012, 2), m1012w = ld32(1012, 3);
+    const uint64_t c0 = vu.m_cycle;
+    const uint32_t ubase = static_cast<uint32_t>(static_cast<uint16_t>(vi6));
+    const auto putw = [&](uint32_t qw, int lane, uint32_t v) { std::memcpy(c.vuData + ((qw * 16u) & (dsz - 1u)) + static_cast<uint32_t>(lane) * 4u, &v, 4); };
+    putw(ubase, 0, vf27x);
+    putw(ubase, 1, vf27y);
+    putw(ubase, 2, m1012z);
+    putw(ubase, 3, m1012w);
+    alignas(16) uint32_t tmp[4];
+    for (int32_t v = 0; v < N; ++v)
+    {
+        const uint32_t q0 = ubase + 1u + 4u * static_cast<uint32_t>(v);
+        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), lbFtoi<16>(lbClamp(_mm_set1_ps(V[v].Wraw), iReg)));
+        putw(q0, 3, tmp[0]);
+        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), _mm_castps_si128(V[v].S2Q));
+        for (int l = 0; l < 3; ++l) putw(q0 + 1u, l, tmp[l]);
+        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), lbFtoi<1>(lbClamp(V[v].prod, iReg)));
+        for (int l = 0; l < 4; ++l) putw(q0 + 2u, l, tmp[l]);
+        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), lbFtoi<16>(V[v].R7));
+        for (int l = 0; l < 3; ++l) putw(q0 + 3u, l, tmp[l]);
+        putw(q0 + 3u, 3, static_cast<uint32_t>(V[v].idx) & 0xFFFFu);
+    }
+    putw(1023, 2, ctlOld);
+    putw(1023, 3, ubase);
+
+    // status: sticky OR over every stage op of every vertex, low 4 = R7 of the last vertex (last FMAC of the tail), bits 4-5 cleared by the last landing
+    uint32_t sticky = k.accw.cur | k.accw.xf;
+    for (int32_t t = 0; t < N; ++t)
+        for (int s = 0; s < 8; ++s)
+            sticky |= V[t].sticky[s];
+    const uint32_t en = st.status;
+    st.status = (en & 0xC00u) | ((en & 0x3C0u) | ((sticky & 0xFu) << 6)) | V[N - 1].curR7;
+    // MAC ring pushes at the KEEPMAC pairs: prologue 20D8 (inner of vertex 2), one per loop pass (inner of k+2), tail 21C0 (R7 of the last vertex)
+    vuflags::flgPush(vuflags::s_flgMac[1], c0 + 41u, V[2].macIn);
+    for (int32_t p = 1; p <= K; ++p)
+        vuflags::flgPush(vuflags::s_flgMac[1], c0 + 45u + 15u * static_cast<uint64_t>(p - 1) + 11u, V[p + 2].macIn);
+    vuflags::flgPush(vuflags::s_flgMac[1], c0 + 45u + 15u * static_cast<uint64_t>(K) + 10u, V[N - 1].macR7);
+
+    // vector registers
+    const LbV &L0 = V[N - 1], &L1 = V[N - 2], &L2 = V[N - 3];
+    const auto setl = [&](int r, __m128 v, int n) { float t4[4]; _mm_storeu_ps(t4, v); for (int l = 0; l < n; ++l) st.vf[r][l] = t4[l]; };
+    const auto clampW = [&](float w) { return lbClamp(_mm_set1_ps(w), iReg); };
+    setl(1, L0.T5, 3);
+    st.vf[1][3] = std::bit_cast<float>(ld32(1016, 3));
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(st.vf[2]), lbFtoi<1>(lbClamp(L1.prod, iReg)));
+    setl(3, L0.S2, 3);
+    st.vf[3][3] = std::bit_cast<float>(ld32(1002, 3));
+    setl(4, L0.S2Q, 3);
+    st.vf[4][3] = _mm_cvtss_f32(lbBc(L0.prod, 3));
+    {
+        uint32_t t5[4], w5[4];
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(t5), lbFtoi<16>(L1.R7));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(w5), lbFtoi<16>(clampW(L1.Wraw)));
+        t5[3] = w5[0];
+        std::memcpy(st.vf[5], t5, 16);
+        uint32_t t6[4], w6[4];
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(t6), lbFtoi<16>(L0.R7));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(w6), lbFtoi<16>(clampW(L0.Wraw)));
+        t6[3] = w6[0];
+        std::memcpy(st.vf[6], t6, 16);
+    }
+    setl(7, L2.R7, 3);
+    st.vf[7][3] = _mm_cvtss_f32(clampW(L2.Wraw));
+    _mm_storeu_ps(st.vf[8], lbClamp(L0.prod, iReg));
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(st.vf[9]), lbFtoi<1>(lbClamp(L0.prod, iReg)));
+    _mm_storeu_ps(st.vf[10], L0.S3);
+    _mm_storeu_ps(st.vf[11], L0.inner);
+    setl(12, L1.S2Q, 3);
+    st.vf[27][2] = std::bit_cast<float>(m1012z);
+    st.vf[27][3] = std::bit_cast<float>(m1012w);
+    {
+        float a4[4];
+        _mm_storeu_ps(a4, L0.BV);
+        st.acc[0] = a4[0];
+        st.acc[1] = a4[1];
+        st.acc[2] = a4[2];
+        st.acc[3] = _mm_cvtss_f32(lbBc(k.accw.res, 3));
+    }
+    st.q = L0.Q;
+    st.i = iReg;
+    st.vi[1] = newVi1;
+    st.vi[2] = lbS16(vi2 + vi12 + N);
+    st.vi[3] = lbS16(vi3 + N);
+    st.vi[4] = lbS16(vi4 + N);
+    st.vi[7] = L0.idx;
+    st.vi[8] = lbS16(vi6 + 2 * vi5);
+    st.vi[9] = st.vi[8];
+    st.vi[11] = newVi11;
+    st.vi[12] = V[1].idx;
+
+    // timing: prologue 45 cycles, one first-pass block (15), K-1 loop passes (15 each), then the tail (29 cycles): its last two pairs run for real
+    const uint64_t Sp = c0, S1 = c0 + 45u, Sl = c0 + 45u + 15u * static_cast<uint64_t>(K > 1 ? K - 1 : 0), St = c0 + 45u + 15u * static_cast<uint64_t>(K);
+    const VuNativeOps &op = *c.ops;
+    vu.m_cycle = St + 27u;
+    st.pc = 0x21F8u;
+    vu.m_viBranchBackupValid = false;
+    { // pair 17 @ 21F8 (JR vi15)
+        const uint32_t jt = (static_cast<uint32_t>(static_cast<uint16_t>(vuhot::readBranchVi(vu, 15))) * 8u) & 0x3FFFu;
+        (void)vi15;
+        st.branchPending = true; st.branchTarget = jt; st.branchDelay = 1;
+        vu.m_viBranchBackupValid = false;
+        st.pc = 0x2200u;
+        if (st.branchPending)
+        {
+            if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+            else { --st.branchDelay; }
+        }
+    }
+    ++vu.m_cycle;
+    if (vu.m_xgkick.active) op.xgProgress(vu);
+    { // pair 18 @ 2200 (XGKICK vi6 in the delay slot)
+        st.pc = 0x2200u;
+        op.execLower(vu, 0x800036fcu, c.vuData, c.dataSize, *c.gs, c.memory, 0x000002ffu);
+        vu.m_viBranchBackupValid = false;
+        st.vf[0][0] = 0.0f; st.vf[0][1] = 0.0f; st.vf[0][2] = 0.0f; st.vf[0][3] = 1.0f; st.vi[0] = 0;
+        st.pc = 0x2208u;
+        if (st.branchPending)
+        {
+            if (st.branchDelay == 0u) { st.pc = st.branchTarget & 0x3FFFu; st.branchPending = false; }
+            else { --st.branchDelay; }
+        }
+    }
+    op.advance1(vu);
+    st.cycles = vu.m_cycle;
+    // ready times exactly as the chain of real blocks leaves them (later blocks overwrite earlier ones)
+    vu.m_accReady[0] = Sp + 41u;
+    vu.m_accReady[1] = Sp + 41u;
+    vu.m_accReady[2] = Sp + 41u;
+    vu.m_accReady[3] = Sp + 41u;
+    vu.m_vfReady[10][0] = Sp + 42u;
+    vu.m_vfReady[10][1] = Sp + 42u;
+    vu.m_vfReady[10][2] = Sp + 42u;
+    vu.m_vfReady[10][3] = Sp + 42u;
+    vu.m_vfReady[11][0] = Sp + 45u;
+    vu.m_vfReady[11][1] = Sp + 45u;
+    vu.m_vfReady[11][2] = Sp + 45u;
+    vu.m_vfReady[11][3] = Sp + 45u;
+    vu.m_vfReady[1][2] = Sp + 9u;
+    vu.m_vfReady[1][3] = Sp + 9u;
+    vu.m_vfReady[27][3] = Sp + 41u;
+    vu.m_vfReady[2][0] = Sp + 8u;
+    vu.m_vfReady[2][1] = Sp + 8u;
+    vu.m_vfReady[2][2] = Sp + 8u;
+    vu.m_vfReady[2][3] = Sp + 8u;
+    vu.m_vfReady[3][0] = Sp + 5u;
+    vu.m_vfReady[3][1] = Sp + 5u;
+    vu.m_vfReady[3][2] = Sp + 5u;
+    vu.m_vfReady[3][3] = Sp + 5u;
+    vu.m_vfReady[4][0] = Sp + 6u;
+    vu.m_vfReady[4][1] = Sp + 6u;
+    vu.m_vfReady[4][2] = Sp + 6u;
+    vu.m_vfReady[4][3] = Sp + 6u;
+    vu.m_vfReady[5][0] = Sp + 43u;
+    vu.m_vfReady[5][1] = Sp + 43u;
+    vu.m_vfReady[5][2] = Sp + 43u;
+    vu.m_vfReady[5][3] = Sp + 43u;
+    vu.m_vfReady[6][0] = Sp + 46u;
+    vu.m_vfReady[6][1] = Sp + 46u;
+    vu.m_vfReady[6][2] = Sp + 46u;
+    vu.m_vfReady[6][3] = Sp + 46u;
+    vu.m_vfReady[7][0] = Sp + 40u;
+    vu.m_vfReady[7][1] = Sp + 40u;
+    vu.m_vfReady[7][2] = Sp + 40u;
+    vu.m_vfReady[8][0] = Sp + 47u;
+    vu.m_vfReady[8][1] = Sp + 47u;
+    vu.m_vfReady[8][2] = Sp + 47u;
+    vu.m_vfReady[8][3] = Sp + 47u;
+    vu.m_vfReady[9][0] = Sp + 43u;
+    vu.m_vfReady[9][1] = Sp + 43u;
+    vu.m_vfReady[9][2] = Sp + 43u;
+    vu.m_vfReady[9][3] = Sp + 48u;
+    vu.m_viReady[12] = Sp + 19u;
+    vu.m_viReady[2] = Sp + 33u;
+    vu.m_viReady[3] = Sp + 39u;
+    vu.m_viReady[4] = Sp + 43u;
+    vu.m_viReady[7] = Sp + 34u;
+    vu.m_viReady[8] = Sp + 34u;
+    vu.m_viReady[9] = Sp + 42u;
+    vu.m_accReady[0] = S1 + 11u;
+    vu.m_accReady[1] = S1 + 11u;
+    vu.m_accReady[2] = S1 + 11u;
+    vu.m_accReady[3] = S1 + 11u;
+    vu.m_vfReady[10][0] = S1 + 12u;
+    vu.m_vfReady[10][1] = S1 + 12u;
+    vu.m_vfReady[10][2] = S1 + 12u;
+    vu.m_vfReady[10][3] = S1 + 12u;
+    vu.m_vfReady[11][0] = S1 + 15u;
+    vu.m_vfReady[11][1] = S1 + 15u;
+    vu.m_vfReady[11][2] = S1 + 15u;
+    vu.m_vfReady[11][3] = S1 + 15u;
+    vu.m_vfReady[12][0] = S1 + 10u;
+    vu.m_vfReady[12][1] = S1 + 10u;
+    vu.m_vfReady[12][2] = S1 + 10u;
+    vu.m_vfReady[5][0] = S1 + 13u;
+    vu.m_vfReady[5][1] = S1 + 13u;
+    vu.m_vfReady[5][2] = S1 + 13u;
+    vu.m_vfReady[5][3] = S1 + 13u;
+    vu.m_vfReady[6][0] = S1 + 18u;
+    vu.m_vfReady[6][1] = S1 + 18u;
+    vu.m_vfReady[6][2] = S1 + 18u;
+    vu.m_vfReady[6][3] = S1 + 18u;
+    vu.m_vfReady[7][0] = S1 + 5u;
+    vu.m_vfReady[7][1] = S1 + 5u;
+    vu.m_vfReady[7][2] = S1 + 5u;
+    vu.m_vfReady[7][3] = S1 + 7u;
+    vu.m_vfReady[8][0] = S1 + 16u;
+    vu.m_vfReady[8][1] = S1 + 16u;
+    vu.m_vfReady[8][2] = S1 + 16u;
+    vu.m_vfReady[8][3] = S1 + 16u;
+    vu.m_vfReady[9][0] = S1 + 13u;
+    vu.m_vfReady[9][1] = S1 + 13u;
+    vu.m_vfReady[9][2] = S1 + 13u;
+    vu.m_vfReady[9][3] = S1 + 17u;
+    vu.m_viReady[2] = S1 + 2u;
+    vu.m_viReady[3] = S1 + 9u;
+    vu.m_viReady[4] = S1 + 3u;
+    vu.m_viReady[7] = S1 + 4u;
+    vu.m_viReady[9] = S1 + 12u;
+    if (K >= 2)
+    {
+        vu.m_accReady[0] = Sl + 11u;
+        vu.m_accReady[1] = Sl + 11u;
+        vu.m_accReady[2] = Sl + 11u;
+        vu.m_accReady[3] = Sl + 11u;
+        vu.m_vfReady[10][0] = Sl + 12u;
+        vu.m_vfReady[10][1] = Sl + 12u;
+        vu.m_vfReady[10][2] = Sl + 12u;
+        vu.m_vfReady[10][3] = Sl + 12u;
+        vu.m_vfReady[11][0] = Sl + 15u;
+        vu.m_vfReady[11][1] = Sl + 15u;
+        vu.m_vfReady[11][2] = Sl + 15u;
+        vu.m_vfReady[11][3] = Sl + 15u;
+        vu.m_vfReady[12][0] = Sl + 10u;
+        vu.m_vfReady[12][1] = Sl + 10u;
+        vu.m_vfReady[12][2] = Sl + 10u;
+        vu.m_vfReady[5][0] = Sl + 13u;
+        vu.m_vfReady[5][1] = Sl + 13u;
+        vu.m_vfReady[5][2] = Sl + 13u;
+        vu.m_vfReady[5][3] = Sl + 13u;
+        vu.m_vfReady[6][0] = Sl + 18u;
+        vu.m_vfReady[6][1] = Sl + 18u;
+        vu.m_vfReady[6][2] = Sl + 18u;
+        vu.m_vfReady[6][3] = Sl + 18u;
+        vu.m_vfReady[7][0] = Sl + 5u;
+        vu.m_vfReady[7][1] = Sl + 5u;
+        vu.m_vfReady[7][2] = Sl + 5u;
+        vu.m_vfReady[7][3] = Sl + 7u;
+        vu.m_vfReady[8][0] = Sl + 16u;
+        vu.m_vfReady[8][1] = Sl + 16u;
+        vu.m_vfReady[8][2] = Sl + 16u;
+        vu.m_vfReady[8][3] = Sl + 16u;
+        vu.m_vfReady[9][0] = Sl + 13u;
+        vu.m_vfReady[9][1] = Sl + 13u;
+        vu.m_vfReady[9][2] = Sl + 13u;
+        vu.m_vfReady[9][3] = Sl + 17u;
+        vu.m_viReady[2] = Sl + 2u;
+        vu.m_viReady[3] = Sl + 9u;
+        vu.m_viReady[4] = Sl + 3u;
+        vu.m_viReady[7] = Sl + 4u;
+        vu.m_viReady[9] = Sl + 12u;
+    }
+    vu.m_accReady[3] = St + 5u;
+    vu.m_vfReady[1][0] = St + 8u;
+    vu.m_vfReady[1][1] = St + 8u;
+    vu.m_vfReady[1][2] = St + 8u;
+    vu.m_vfReady[27][2] = St + 5u;
+    vu.m_vfReady[27][3] = St + 5u;
+    vu.m_vfReady[2][0] = St + 6u;
+    vu.m_vfReady[2][1] = St + 6u;
+    vu.m_vfReady[2][2] = St + 6u;
+    vu.m_vfReady[2][3] = St + 6u;
+    vu.m_vfReady[3][0] = St + 4u;
+    vu.m_vfReady[3][1] = St + 4u;
+    vu.m_vfReady[3][2] = St + 4u;
+    vu.m_vfReady[4][0] = St + 10u;
+    vu.m_vfReady[4][1] = St + 10u;
+    vu.m_vfReady[4][2] = St + 10u;
+    vu.m_vfReady[4][3] = St + 4u;
+    vu.m_vfReady[5][0] = St + 12u;
+    vu.m_vfReady[5][1] = St + 12u;
+    vu.m_vfReady[5][2] = St + 12u;
+    vu.m_vfReady[5][3] = St + 12u;
+    vu.m_vfReady[6][0] = St + 25u;
+    vu.m_vfReady[6][1] = St + 25u;
+    vu.m_vfReady[6][2] = St + 25u;
+    vu.m_vfReady[6][3] = St + 25u;
+    vu.m_vfReady[8][0] = St + 13u;
+    vu.m_vfReady[8][1] = St + 13u;
+    vu.m_vfReady[8][2] = St + 13u;
+    vu.m_vfReady[8][3] = St + 13u;
+    vu.m_vfReady[9][0] = St + 17u;
+    vu.m_vfReady[9][1] = St + 17u;
+    vu.m_vfReady[9][2] = St + 17u;
+    vu.m_vfReady[9][3] = St + 17u;
+    vu.m_viReady[11] = St + 6u;
+    vu.m_viReady[1] = St + 25u;
+    vu.m_viReady[2] = St + 1u;
+    c.instrs += 54u + 15u * static_cast<uint32_t>(K);
+    *c.nextReadyW = 0u;
+    c.nextHash = kLbExitHash;
+    c.hashValid = true;
+    ++s_lbFullTaken;
+    s_lbFullVerts += static_cast<uint64_t>(N);
+    if ((s_lbFullTaken & 0xFFFFull) == 0u)
+        std::printf("[probe] lb full kernel taken=%llu vertices=%llu declined=%llu (why0-5: %llu %llu %llu %llu %llu %llu)\n", (unsigned long long)s_lbFullTaken, (unsigned long long)s_lbFullVerts,
+                    (unsigned long long)s_lbFullDeclined, (unsigned long long)s_lbFullWhy[0], (unsigned long long)s_lbFullWhy[1], (unsigned long long)s_lbFullWhy[2], (unsigned long long)s_lbFullWhy[3],
+                    (unsigned long long)s_lbFullWhy[4], (unsigned long long)s_lbFullWhy[5]);
+    return true;
+}
 } // namespace
 
 uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : s_tsc; }
@@ -4285,6 +4706,17 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 c.hashValid = true;
             }
             // PERF-HC: direct-mapped (pc -> {entry hash, block}) cache in front of the switch lookup; misses (no block) are cached too
+            if (s_lbOn && pc == 0x1FE0u && c.nextHash == kLbEntryHash && lbFull(vu, c)) // PERF-LB: the whole routine 1FE0 -> JR in closed form
+            {
+                if (c.check && c.ops->blkHash(vu) != c.nextHash)
+                {
+                    ++c.checkFail;
+                    if (c.checkFail <= 6)
+                        std::printf("[probe] lb full kernel exit-hash MISMATCH at pc=%04X (routine entered at 1FE0)\n", vu.m_state.pc);
+                    c.hashValid = false;
+                }
+                continue;
+            }
             if (s_lbOn && pc == 0x20F8u && c.nextHash == kLbLoopHash && lbLoop(vu, c)) // PERF-LB: whole loop block in closed form
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
