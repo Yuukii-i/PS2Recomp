@@ -25,6 +25,7 @@ struct GsAsyncState
     std::condition_variable cvIdle;
     // PERF-GN: wake-ups (NtAlertThreadByThreadId, ~5% of the GS thread) only when somebody can be waiting; both counters are guarded by `m`
     uint32_t idleWaiters = 0;
+    uint32_t ticketWaiters = 0; // PERF-GH: waiters that need a wake-up after every packet (present thread waiting for its ticket)
     bool workerWaiting = false;
     std::deque<std::vector<uint8_t>> q;
     size_t queuedBytes = 0;
@@ -106,7 +107,9 @@ void gsAsyncWorker()
         st.queuedBytes -= pktSize;
         ++st.processedPkts;
         st.busy = false;
-        if (st.idleWaiters != 0u)
+        // PERF-GH: a producer blocked on the byte limit only needs to hear about it once a good part of the queue is drained (it used to be woken after every
+        // packet, pushed one packet and blocked again: a context switch per packet while the GS thread was the bottleneck). Fence and ticket waiters keep their wake-ups.
+        if (st.idleWaiters != 0u && (st.ticketWaiters != 0u || st.q.empty() || st.queuedBytes <= kGsAsyncMaxBytes / 4u * 3u))
             st.cvIdle.notify_all();
     }
 }
@@ -146,7 +149,9 @@ extern "C" void ps2_gs_async_wait_ticket(uint64_t ticket)
     GsAsyncState &st = gsAsync();
     std::unique_lock<std::mutex> lock(st.m);
     ++st.idleWaiters;
+    ++st.ticketWaiters;
     st.cvIdle.wait(lock, [&] { return st.processedPkts >= ticket; });
+    --st.ticketWaiters;
     --st.idleWaiters;
 }
 

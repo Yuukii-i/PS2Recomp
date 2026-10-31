@@ -925,10 +925,22 @@ namespace
             inPass_ = true;
         }
 
+        // PERF-GB: consecutive prims are drawn with one instanced vkCmdDraw (the shader reads its prim record by gl_InstanceIndex, and instances rasterise
+        // in order, exactly like the separate single-instance draws that were recorded back to back before)
+        void flushDraws()
+        {
+            if (pendCount_ != 0u)
+            {
+                vkCmdDraw(cb_, 4, pendCount_, 0, pendFirst_);
+                pendCount_ = 0;
+            }
+        }
+
         void endPass()
         {
             if (!inPass_)
                 return;
+            flushDraws();
             vkCmdEndRendering(cb_);
             inPass_ = false;
         }
@@ -956,6 +968,7 @@ namespace
 
         void resetRings()
         {
+            pendCount_ = 0;
             primCount_ = 0;
             clutSlots_ = 0;
             curClutSlot_ = -1;
@@ -1346,7 +1359,14 @@ namespace
             // a draw that reads what an earlier draw wrote as frame/Z must also be ordered; covered by the interlock for same-pixel,
             // and by the texture check above for sampled data.
             beginPass();
-            vkCmdDraw(cb_, 4, 1, 0, primCount_);
+            if (pendCount_ != 0u && pendFirst_ + pendCount_ == primCount_)
+                ++pendCount_;
+            else
+            {
+                flushDraws();
+                pendFirst_ = primCount_;
+                pendCount_ = 1;
+            }
             ++primCount_;
             ++primsThisFrame_;
             ++gpuPrims_;
@@ -1518,6 +1538,7 @@ namespace
         PageWriter lastWriter_[512];
         uint64_t primSerial_ = 0;
         uint32_t primCount_ = 0, clutSlots_ = 0, stagingOff_ = 0;
+        uint32_t pendFirst_ = 0, pendCount_ = 0; // PERF-GB
         int32_t curClutSlot_ = -1;
         bool clutChanged_ = true;
         uint32_t primsThisFrame_ = 0;

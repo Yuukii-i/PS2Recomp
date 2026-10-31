@@ -80,6 +80,9 @@ namespace
 
     static inline void checkPeriodicCoLog()
     {
+        static uint32_t s_coCalls = 0; // PERF-GD: one clock read per sprite draw -> one per 256 (the log is per second anyway)
+        if ((++s_coCalls & 0xFFu) != 0u)
+            return;
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - s_coLastSecLog).count() >= 1)
         {
@@ -390,6 +393,15 @@ void GS::setDebugHistoryPaused(bool paused)
     m_debugHistoryPaused = paused;
 }
 
+// PERF-GD: the GS debug history (debug panel, GS tab) was recorded for every GIF tag, register write and draw, each time taking the backend mutex
+// (GetTransferSnapshot) and copying a ~300 byte entry twice: ~100-200 ns per draw on the GS thread. It does not influence emulation. Opt in with
+// PS2X_GS_DEBUG_HISTORY=1 when the panel's history is wanted.
+static inline bool gsDebugHistoryEnabled()
+{
+    static const bool on = []() { const char *e = std::getenv("PS2X_GS_DEBUG_HISTORY"); return e && e[0] == '1'; }();
+    return on;
+}
+
 GSDebugHistoryEntry GS::makeDebugEventUnlocked(GSDebugEventKind kind) const
 {
     GSDebugHistoryEntry entry{};
@@ -413,7 +425,7 @@ GSDebugHistoryEntry GS::makeDebugEventUnlocked(GSDebugEventKind kind) const
 
 void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
 {
-    if (m_debugHistoryPaused)
+    if (m_debugHistoryPaused || !gsDebugHistoryEnabled())
     {
         return;
     }
@@ -443,7 +455,7 @@ void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
 
 void GS::recordGifTagDebugEventUnlocked(uint32_t sizeBytes, uint32_t nloop, uint8_t flg, uint32_t nreg)
 {
-    if (m_debugHistoryPaused)
+    if (m_debugHistoryPaused || !gsDebugHistoryEnabled())
     {
         return;
     }
@@ -458,7 +470,7 @@ void GS::recordGifTagDebugEventUnlocked(uint32_t sizeBytes, uint32_t nloop, uint
 
 void GS::recordRegisterDebugEventUnlocked(uint8_t regAddr, uint64_t value)
 {
-    if (m_debugHistoryPaused)
+    if (m_debugHistoryPaused || !gsDebugHistoryEnabled())
     {
         return;
     }
@@ -501,7 +513,7 @@ void GS::recordRegisterDebugEventUnlocked(uint8_t regAddr, uint64_t value)
 
 void GS::recordDrawDebugEventUnlocked(int vertexCount)
 {
-    if (m_debugHistoryPaused)
+    if (m_debugHistoryPaused || !gsDebugHistoryEnabled())
     {
         return;
     }
@@ -538,7 +550,7 @@ void GS::recordDrawDebugEventUnlocked(int vertexCount)
 
 void GS::recordTransferDebugEventUnlocked()
 {
-    if (m_debugHistoryPaused)
+    if (m_debugHistoryPaused || !gsDebugHistoryEnabled())
     {
         return;
     }
@@ -550,7 +562,7 @@ void GS::recordTransferDebugEventUnlocked()
 
 void GS::recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp, uint32_t width, uint32_t height, bool usedPreferred)
 {
-    if (m_debugHistoryPaused)
+    if (m_debugHistoryPaused || !gsDebugHistoryEnabled())
     {
         return;
     }

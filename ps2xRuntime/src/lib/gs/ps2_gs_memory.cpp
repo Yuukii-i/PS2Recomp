@@ -446,6 +446,44 @@ namespace GSMem
             }
         }
 
+        // PERF-GU2: same address as PixelStorageTraits<>::Address / Write for the non-read-modify-write formats, with everything that only depends on
+        // the row (page row, lookup-table row) hoisted out of the pixel loop. Verified against the per-pixel wrappers (tests in the scratchpad harness).
+        template <PixelStorageMode PSM, int BYTES, typename TableT>
+        void StreamBytesFast(const TableT &table, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+        {
+            using Traits = PixelStorageTraits<PSM>;
+            constexpr u32 PW = Traits::PageExtent().x;
+            constexpr u32 PH = Traits::PageExtent().y;
+            constexpr usz PPP = Traits::PixelsPerPage();
+            constexpr usz BPP = Traits::BlocksPerPage();
+            const u32 blockIdx = static_cast<u32>(bp % BPP);
+            const u32 basePage = static_cast<u32>(bp / BPP);
+            const u32 pagesPerRow = (bw * 64u) / PW;
+            u32 done = 0;
+            while (done < count)
+            {
+                const u32 n = std::min<u32>(count - done, xEnd - x);
+                const auto &trow = table[blockIdx][y % PH];
+                const usz rowPage = static_cast<usz>(basePage) + static_cast<usz>((y / PH) * pagesPerRow);
+                for (u32 k = 0; k < n; ++k)
+                {
+                    const u32 xx = x + k;
+                    const usz page = rowPage + xx / PW;
+                    const u32 pixelAddr = static_cast<u32>(page * PPP + trow[xx % PW]);
+                    const u32 bits = static_cast<u32>(static_cast<usz>(pixelAddr) * UnpackedBitWidth(PSM) + Traits::BitOffset());
+                    const u32 byteAddr = (bits / 8u) & static_cast<u32>(MEMORY_SIZE - BYTES);
+                    std::memcpy(data + byteAddr, src + (done + k) * BYTES, BYTES);
+                }
+                done += n;
+                x += n;
+                if (x == xEnd)
+                {
+                    x = xBegin;
+                    ++y;
+                }
+            }
+        }
+
         template <PixelStorageMode PSM, typename TableT>
         void StreamNibbles(const TableT &table, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
         {
@@ -467,19 +505,19 @@ namespace GSMem
     {
         switch (kind)
         {
-        case 0:  StreamBytes<C32, 4>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 0:  StreamBytesFast<C32, 4>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
         case 1:  StreamBytes<C24, 3>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
-        case 2:  StreamBytes<C16, 2>(PageTableC16, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
-        case 3:  StreamBytes<C16S, 2>(PageTableC16S, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
-        case 4:  StreamBytes<P8, 1>(PageTableP8, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 2:  StreamBytesFast<C16, 2>(PageTableC16, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 3:  StreamBytesFast<C16S, 2>(PageTableC16S, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 4:  StreamBytesFast<P8, 1>(PageTableP8, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
         case 5:  StreamBytes<P8H, 1>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
         case 6:  StreamNibbles<P4>(PageTableP4, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
         case 7:  StreamNibbles<P4HL>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
         case 8:  StreamNibbles<P4HH>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
-        case 9:  StreamBytes<Z32, 4>(PageTableZ32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 9:  StreamBytesFast<Z32, 4>(PageTableZ32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
         case 10: StreamBytes<Z24, 3>(PageTableZ32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
-        case 11: StreamBytes<Z16, 2>(PageTableZ16, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
-        case 12: StreamBytes<Z16S, 2>(PageTableZ16S, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 11: StreamBytesFast<Z16, 2>(PageTableZ16, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 12: StreamBytesFast<Z16S, 2>(PageTableZ16S, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
         default: return false;
         }
     }
