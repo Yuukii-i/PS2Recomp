@@ -1846,6 +1846,25 @@ void GS::vertexKick(bool drawing)
         }
 
         recordDrawDebugEventUnlocked(needed);
+
+        // PROBE-INTERP: per-draw log for the frame-interpolation feasibility study (PS2X_GS_INTERP_PROBE=1, file logs/interp_probe.txt)
+        static FILE *const s_ip = []() -> FILE * {
+            const char *e = std::getenv("PS2X_GS_INTERP_PROBE");
+            return (e && e[0] == '1') ? std::fopen("logs/interp_probe.txt", "w") : nullptr;
+        }();
+        static uint32_t s_ipLines = 0;
+        if (s_ip && s_ipLines < 1500000u)
+        {
+            ++s_ipLines;
+            std::fprintf(s_ip, "D %llu %u %u %u %u %u", static_cast<unsigned long long>(g_hostPresentSeq.load(std::memory_order_relaxed)),
+                         static_cast<unsigned>(m_prim.type), static_cast<unsigned>(batch.state.prim.tme),
+                         static_cast<unsigned>(batch.state.context.tex0.tbp0), static_cast<unsigned>(batch.state.context.frame.fbp), static_cast<unsigned>(needed));
+            for (int vi = 0; vi < needed && vi < 3; ++vi)
+                std::fprintf(s_ip, " %.2f %.2f %.0f", batch.vertices[vi].x, batch.vertices[vi].y, batch.vertices[vi].z);
+            std::fputc('\n', s_ip);
+            if ((s_ipLines & 0x3FFFu) == 0)
+                std::fflush(s_ip);
+        }
     }
 
     switch (m_prim.type)

@@ -2354,12 +2354,16 @@ void VU1Interpreter::finishXgkick()
     // PERF-KK: both clock reads (QueryPerformanceCounter) are only consumed by the PROBE-AE block below; they cost ~2% of the VU1 worker per XGKICK
     const bool xgTimed = probe_ae::isEnabled();
     const auto tXgkickStart = xgTimed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    extern uint64_t g_vuPhase[4]; // PROBE-EP
+    static const bool s_epTsc = []() { const char *e = std::getenv("PS2X_VU1_TSC"); return e && e[0] == '1'; }(); // PROBE-EP
+    const uint64_t epT0 = s_epTsc ? __rdtsc() : 0ull; // PROBE-EP
     if (s_vfyCapture)
         s_vfyCapture->insert(s_vfyCapture->end(), m_xgkick.packet.data(), m_xgkick.packet.data() + m_xgkick.totalBytes);
     else if (m_activeMemory)
         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
     else if (m_activeGs)
         m_activeGs->processGIFPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
+    if (epT0 && m_unit == Unit::VU1) g_vuPhase[3] += __rdtsc() - epT0; // PROBE-EP: submit ticks (all XGKICKs, inside or outside the epilogue)
     const auto tXgkickEnd = xgTimed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
     if (probe_ae::isEnabled())
@@ -2413,12 +2417,16 @@ void VU1Interpreter::finishXgkick()
     m_xgkick.active = false;
 }
 
+static bool svOn();                                                        // PROBE-SURVEY (defined before VU1Interpreter::execute)
+static void svKick(const uint8_t *data, uint32_t size, uint32_t srcAddr); // PROBE-SURVEY
+
 void VU1Interpreter::startXgkick(uint32_t qwordAddress)
 {
     if (m_unit != Unit::VU1 || !m_activeVuData || m_activeVuDataSize < 16u)
         return;
 
     const uint32_t sourceAddress = (qwordAddress * 16u) % m_activeVuDataSize;
+    if (svOn()) svKick(m_activeVuData, m_activeVuDataSize, sourceAddress); // PROBE-SURVEY
     // PERF-GH: do not zero the 64KB packet buffer (m_xgkick = {}) on every run; only control state matters
     m_xgkick.sourceAddress = 0; m_xgkick.totalBytes = 0; m_xgkick.copiedBytes = 0; m_xgkick.currentTagEnd = 0;
     m_xgkick.cycleCredit = 0; m_xgkick.issueCycle = 0; m_xgkick.active = false; m_xgkick.currentTagEop = false;
@@ -3198,6 +3206,136 @@ void VU1Interpreter::reportReservedInstruction(bool upper, uint32_t instruction)
     m_stopRequested = true;
 }
 
+// PROBE-SURVEY: which VU1 microprograms the game runs and what GIF packets they emit (PS2X_VU1_SURVEY=1 -> logs/vu1_survey.txt, rewritten every 200k runs)
+struct SvProg { uint64_t runs = 0, cycles = 0, kicks = 0, qwords = 0; };
+struct SvTag { uint32_t pc = 0, flg = 0, nreg = 0, pre = 0, prim = 0; uint64_t regs = 0, n = 0, loops = 0; };
+static uint32_t s_svPc = 0;
+static uint64_t s_svRuns = 0;
+static std::unordered_map<uint32_t, SvProg> s_svProg;
+static std::unordered_map<uint64_t, SvTag> s_svTag;
+static bool svOn() { static const bool on = []() { const char *e = std::getenv("PS2X_VU1_SURVEY"); return e && e[0] == '1'; }(); return on; }
+
+static void svDump()
+{
+    FILE *f = std::fopen("logs/vu1_survey.txt", "w");
+    if (!f) return;
+    std::vector<std::pair<uint32_t, SvProg>> pv(s_svProg.begin(), s_svProg.end());
+    std::sort(pv.begin(), pv.end(), [](const auto &a, const auto &b) { return a.second.cycles > b.second.cycles; });
+    uint64_t totC = 0, totR = 0;
+    for (auto &p : pv) { totC += p.second.cycles; totR += p.second.runs; }
+    std::fprintf(f, "# runs=%llu cycles=%llu programs=%zu\n", (unsigned long long)totR, (unsigned long long)totC, pv.size());
+    for (auto &p : pv)
+        std::fprintf(f, "P pc=%04X runs=%llu cycles=%llu (%.1f%%) cyc/run=%.0f kicks=%llu qw/kick=%.1f\n", p.first, (unsigned long long)p.second.runs,
+                     (unsigned long long)p.second.cycles, totC ? 100.0 * p.second.cycles / totC : 0.0, p.second.runs ? double(p.second.cycles) / p.second.runs : 0.0,
+                     (unsigned long long)p.second.kicks, p.second.kicks ? double(p.second.qwords) / p.second.kicks : 0.0);
+    std::vector<SvTag> tv;
+    for (auto &t : s_svTag) tv.push_back(t.second);
+    std::sort(tv.begin(), tv.end(), [](const SvTag &a, const SvTag &b) { return a.n > b.n; });
+    for (auto &t : tv)
+        std::fprintf(f, "T pc=%04X flg=%u nreg=%u pre=%u prim=%02X regs=%016llX tags=%llu avgloop=%.1f\n", t.pc, t.flg, t.nreg, t.pre, t.prim,
+                     (unsigned long long)t.regs, (unsigned long long)t.n, t.n ? double(t.loops) / t.n : 0.0);
+    std::fclose(f);
+}
+
+static void svKick(const uint8_t *data, uint32_t size, uint32_t srcAddr)
+{
+    SvProg &pr = s_svProg[s_svPc];
+    ++pr.kicks;
+    uint32_t addr = srcAddr;
+    for (int guard = 0; guard < 64; ++guard)
+    {
+        uint64_t lo, hi;
+        std::memcpy(&lo, data + (addr % size), 8);
+        std::memcpy(&hi, data + ((addr + 8) % size), 8);
+        const uint32_t nloop = lo & 0x7FFF, eop = (lo >> 15) & 1, pre = (lo >> 46) & 1, prim = (lo >> 47) & 0x7FF, flg = (lo >> 58) & 3;
+        uint32_t nreg = lo >> 60;
+        if (nreg == 0) nreg = 16;
+        const uint64_t key = (uint64_t(s_svPc) << 48) ^ (hi * 0x9E3779B97F4A7C15ull) ^ (uint64_t(flg) << 40) ^ (uint64_t(nreg) << 32) ^ (uint64_t(pre ? prim : 0xFFFF) << 8);
+        SvTag &t = s_svTag[key];
+        t.pc = s_svPc; t.flg = flg; t.nreg = nreg; t.pre = pre; t.prim = prim; t.regs = hi; ++t.n; t.loops += nloop;
+        uint32_t qw = flg == 0 ? nloop * nreg : flg == 1 ? (nloop * nreg + 1) / 2 : nloop;
+        pr.qwords += 1 + qw;
+        addr += (1 + qw) * 16u;
+        if (eop) break;
+    }
+}
+
+uint32_t vu1CoverageCount(); // PROBE-CAPTURE (generated/vu1_native_dispatch.cpp)
+
+// PROBE-CAPTURE: VU1 run corpus for the native-VU1 work (PS2X_VU1_CAPTURE=1 -> logs/vu1corpus.bin). Chunks: u32 tag, u32 bytes, payload.
+// 'HDR ' {u32 sizeof(VU1State)}, 'CODE' {u64 generation, code bytes}, 'RUN ' {see svCaptureRecord}. Kept: runs that reach a new dispatch pc, plus 1 in 400.
+static bool capOn() { static const bool on = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE"); return e && e[0] == '1'; }(); return on; }
+static FILE *s_capF = nullptr;
+static uint32_t s_capKept = 0, s_capSeen = 0, s_capCov = 0;
+static uint64_t s_capGen = ~0ull;
+
+static void capChunk(uint32_t tag, const std::vector<uint8_t> &p)
+{
+    const uint32_t n = static_cast<uint32_t>(p.size());
+    std::fwrite(&tag, 4, 1, s_capF);
+    std::fwrite(&n, 4, 1, s_capF);
+    if (n) std::fwrite(p.data(), 1, n, s_capF);
+}
+
+template <class T> static void capPut(std::vector<uint8_t> &b, const T &v)
+{
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(&v);
+    b.insert(b.end(), p, p + sizeof(T));
+}
+
+static void svCaptureRecord(const VU1State &s0, uint32_t wc0, uint64_t cyc0, const std::vector<uint8_t> &mem0,
+                            const VU1State &sA, uint32_t wcA, uint64_t cycA, const uint8_t *memA, uint32_t dataSize,
+                            const std::vector<uint8_t> &gif, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t maxCycles,
+                            const uint8_t *code, uint32_t codeSize, uint64_t gen)
+{
+    if (!s_capF)
+    {
+        s_capF = std::fopen("logs/vu1corpus.bin", "wb");
+        if (!s_capF) { s_capKept = 0xFFFFFFFFu; return; }
+        std::vector<uint8_t> h;
+        capPut(h, static_cast<uint32_t>(sizeof(VU1State)));
+        capChunk(0x20524448u, h);
+    }
+    if (gen != s_capGen)
+    {
+        std::vector<uint8_t> c;
+        capPut(c, gen);
+        c.insert(c.end(), code, code + codeSize);
+        capChunk(0x45444F43u, c);
+        s_capGen = gen;
+    }
+    std::vector<uint8_t> b;
+    b.reserve(2u * sizeof(VU1State) + dataSize + 256u + gif.size());
+    capPut(b, startPC); capPut(b, top); capPut(b, itop); capPut(b, maxCycles);
+    capPut(b, wc0); capPut(b, wcA); capPut(b, cyc0); capPut(b, cycA); capPut(b, gen); capPut(b, dataSize);
+    capPut(b, s0); capPut(b, sA);
+    b.insert(b.end(), mem0.begin(), mem0.end());
+    std::vector<uint32_t> diff;
+    for (uint32_t q = 0; q * 16u + 16u <= dataSize; ++q)
+        if (std::memcmp(mem0.data() + q * 16u, memA + q * 16u, 16) != 0) diff.push_back(q);
+    capPut(b, static_cast<uint32_t>(diff.size()));
+    for (uint32_t q : diff) { capPut(b, q); b.insert(b.end(), memA + q * 16u, memA + q * 16u + 16u); }
+    capPut(b, static_cast<uint32_t>(gif.size()));
+    b.insert(b.end(), gif.begin(), gif.end());
+    capChunk(0x204E5552u, b); // 'RUN '
+    std::fflush(s_capF);
+    ++s_capKept;
+}
+
+// PROBE-REPLAY (PS2X_VU1_REPLAY=1): replays logs/vu1corpus.bin through the current VU1 code once the main image is loaded, compares state / VU memory /
+// GIF bytes with the recording, writes logs/vu1replay.txt and exits. Proves the corpus is complete before it is used to check a new implementation.
+static bool rpOn() { static const bool on = []() { const char *e = std::getenv("PS2X_VU1_REPLAY"); return e && e[0] == '1'; }(); return on; }
+static uint32_t s_rpCalls = 0;
+static bool s_rpDone = false;
+
+template <class T> static T rpGet(const uint8_t *&p)
+{
+    T v;
+    std::memcpy(&v, p, sizeof(T));
+    p += sizeof(T);
+    return v;
+}
+
 void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint8_t *vuData, uint32_t dataSize,
                              GS &gs, PS2Memory *memory,
@@ -3207,6 +3345,23 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     if (m_unit == Unit::VU0)
         s_jmExec0 = s_jmMark = __rdtsc(); // PROBE-JM
     g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
+    struct SvGuard // PROBE-SURVEY: per-entry-pc run/cycle/kick tally, VU1 only (PS2X_VU1_SURVEY=1)
+    {
+        const uint64_t &cyc;
+        const uint32_t pc;
+        const uint64_t c0;
+        const bool on;
+        SvGuard(const uint64_t &c, uint32_t p, bool o) : cyc(c), pc(p), c0(c), on(o)
+        {
+            if (on) { s_svPc = pc; ++s_svProg[pc].runs; }
+        }
+        ~SvGuard()
+        {
+            if (!on) return;
+            s_svProg[pc].cycles += cyc - c0;
+            if ((++s_svRuns % 200000ull) == 0) svDump();
+        }
+    } svGuard(m_cycle, startPC & 0x7FFFFFFFu, m_unit == Unit::VU1 && svOn());
     // PERF-KL: everything up to the handleMovieHleMscal call below is per-run state of the PROBE-DY/DZ/VD/EE/EG/EM/EL/EK/EI probes (~40 thread_local
     // stores + memset + vector clears per call, ~40 ns x 445k VU0 calls/s). Their consumers (tail statistics, native-path gating flags) are all behind
     // the same four conditions, so skip the whole block when none of them is enabled.
@@ -3500,6 +3655,164 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         s_vfyRefTl = false;
         s_vfyCapture = nullptr;
         if (!capA.empty() && memory)
+            memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));
+        return;
+    }
+    if (m_unit == Unit::VU1 && rpOn() && !s_rpDone && memory != nullptr && codeSize == 16384u && vuCode == memory->getVU1Code() && (++s_rpCalls & 0xFFFu) == 0u) // PROBE-REPLAY
+    {
+        struct RunIdx { size_t off; size_t len; };
+        static std::vector<uint8_t> file;
+        static std::unordered_map<uint64_t, size_t> codeOff; // generation -> offset of the recorded code image
+        static std::vector<RunIdx> runsIdx;
+        static uint32_t stSize = 0;
+        static bool loaded = false;
+        if (!loaded)
+        {
+            loaded = true;
+            if (FILE *cf = std::fopen("logs/vu1corpus.bin", "rb"))
+            {
+                std::fseek(cf, 0, SEEK_END);
+                const long sz = std::ftell(cf);
+                std::fseek(cf, 0, SEEK_SET);
+                file.resize(sz > 0 ? static_cast<size_t>(sz) : 0u);
+                if (!file.empty())
+                    (void)std::fread(file.data(), 1, file.size(), cf);
+                std::fclose(cf);
+            }
+            for (size_t o = 0; o + 8u <= file.size();)
+            {
+                uint32_t tag, n;
+                std::memcpy(&tag, file.data() + o, 4);
+                std::memcpy(&n, file.data() + o + 4, 4);
+                if (o + 8u + n > file.size())
+                    break;
+                if (tag == 0x20524448u && n >= 4u)
+                    std::memcpy(&stSize, file.data() + o + 8, 4);
+                else if (tag == 0x45444F43u && n == 8u + codeSize)
+                {
+                    uint64_t g;
+                    std::memcpy(&g, file.data() + o + 8, 8);
+                    codeOff[g] = o + 16u;
+                }
+                else if (tag == 0x204E5552u)
+                    runsIdx.push_back({o + 8u, n});
+                o += 8u + n;
+            }
+        }
+        bool imageLoaded = false;
+        for (const auto &kv : codeOff)
+            if (std::memcmp(file.data() + kv.second, vuCode, codeSize) == 0)
+                imageLoaded = true;
+        FILE *out = imageLoaded ? std::fopen("logs/vu1replay.txt", "w") : nullptr;
+        if (out)
+        {
+            uint32_t total = 0, skipped = 0, bad = 0, cVf = 0, cVi = 0, cAcc = 0, cQpi = 0, cFlags = 0, cPc = 0, cCyc = 0, cWc = 0, cMem = 0, cGif = 0, cMisc = 0;
+            std::fprintf(out, "records=%zu codeImages=%zu stateSize file=%u now=%zu\n", runsIdx.size(), codeOff.size(), stSize, sizeof(VU1State));
+            if (stSize == sizeof(VU1State))
+            {
+                for (size_t ri = 0; ri < runsIdx.size(); ++ri)
+                {
+                    const uint8_t *p = file.data() + runsIdx[ri].off;
+                    const uint32_t rStart = rpGet<uint32_t>(p);
+                    (void)rpGet<uint32_t>(p); // top (already in the state)
+                    (void)rpGet<uint32_t>(p); // itop
+                    const uint32_t rMax = rpGet<uint32_t>(p);
+                    const uint32_t wc0 = rpGet<uint32_t>(p);
+                    const uint32_t wcA = rpGet<uint32_t>(p);
+                    const uint64_t cyc0 = rpGet<uint64_t>(p);
+                    const uint64_t cycA = rpGet<uint64_t>(p);
+                    const uint64_t gen = rpGet<uint64_t>(p);
+                    const uint32_t dsz = rpGet<uint32_t>(p);
+                    VU1State s0, sA;
+                    std::memcpy(&s0, p, sizeof(VU1State)); p += sizeof(VU1State);
+                    std::memcpy(&sA, p, sizeof(VU1State)); p += sizeof(VU1State);
+                    const uint8_t *mem0 = p; p += dsz;
+                    const auto it = codeOff.find(gen);
+                    if (it == codeOff.end() || dsz != dataSize || std::memcmp(file.data() + it->second, vuCode, codeSize) != 0)
+                    {
+                        ++skipped;
+                        continue;
+                    }
+                    std::vector<uint8_t> expMem(mem0, mem0 + dsz);
+                    const uint32_t nd = rpGet<uint32_t>(p);
+                    for (uint32_t k = 0; k < nd; ++k)
+                    {
+                        const uint32_t q = rpGet<uint32_t>(p);
+                        std::memcpy(expMem.data() + q * 16u, p, 16);
+                        p += 16;
+                    }
+                    const uint32_t gn = rpGet<uint32_t>(p);
+                    const uint8_t *gifRec = p;
+
+                    m_state = s0;
+                    m_workingClip = wc0;
+                    m_cycle = cyc0;
+                    std::memcpy(vuData, mem0, dsz);
+                    resetScheduler();
+                    std::vector<uint8_t> cap;
+                    s_vfyCapture = &cap;
+                    run(vuCode, codeSize, vuData, dataSize, gs, memory, rMax);
+                    s_vfyCapture = nullptr;
+
+                    ++total;
+                    const VU1State &sB = m_state;
+                    int badVf = -1, badVi = -1;
+                    for (int r = 0; r < 32 && badVf < 0; ++r)
+                        if (std::memcmp(sA.vf[r], sB.vf[r], 16) != 0) badVf = r;
+                    for (int r = 0; r < 16 && badVi < 0; ++r)
+                        if (sA.vi[r] != sB.vi[r]) badVi = r;
+                    const bool fAcc = std::memcmp(sA.acc, sB.acc, 16) != 0;
+                    const bool fQpi = std::memcmp(&sA.q, &sB.q, 4) != 0 || std::memcmp(&sA.p, &sB.p, 4) != 0 || std::memcmp(&sA.i, &sB.i, 4) != 0;
+                    const bool fFlags = sA.mac != sB.mac || sA.status != sB.status || sA.clip != sB.clip;
+                    const bool fPc = sA.pc != sB.pc;
+                    const bool fCyc = cycA != m_cycle || sA.cycles != sB.cycles;
+                    const bool fWc = wcA != m_workingClip;
+                    const bool fMisc = sA.r != sB.r || sA.ebit != sB.ebit || sA.haltAfterDelaySlot != sB.haltAfterDelaySlot || sA.stoppedByD != sB.stoppedByD ||
+                                       sA.stoppedByT != sB.stoppedByT || sA.top != sB.top || sA.itop != sB.itop || sA.branchPending != sB.branchPending ||
+                                       sA.branchTarget != sB.branchTarget || sA.branchDelay != sB.branchDelay;
+                    int badMem = -1;
+                    for (uint32_t q = 0; q * 16u + 16u <= dsz && badMem < 0; ++q)
+                        if (std::memcmp(expMem.data() + q * 16u, vuData + q * 16u, 16) != 0) badMem = static_cast<int>(q);
+                    const bool fGif = cap.size() != gn || (gn != 0u && std::memcmp(cap.data(), gifRec, gn) != 0);
+                    const bool anyBad = badVf >= 0 || badVi >= 0 || fAcc || fQpi || fFlags || fPc || fCyc || fWc || fMisc || badMem >= 0 || fGif;
+                    cVf += badVf >= 0; cVi += badVi >= 0; cAcc += fAcc; cQpi += fQpi; cFlags += fFlags; cPc += fPc; cCyc += fCyc; cWc += fWc; cMisc += fMisc;
+                    cMem += badMem >= 0; cGif += fGif;
+                    if (anyBad)
+                    {
+                        ++bad;
+                        if (bad <= 20u)
+                            std::fprintf(out, "MISMATCH rec=%zu start=%04X vf=%d vi=%d acc=%d qpi=%d flags=%d(mac %X/%X st %X/%X clip %X/%X) pc=%d cyc=%d(%llu/%llu) wc=%d misc=%d mem=%d gif=%d(%u/%zu)\n",
+                                         ri, rStart & 0xFFFFu, badVf, badVi, fAcc, fQpi, fFlags, sA.mac, sB.mac, sA.status, sB.status, sA.clip, sB.clip, fPc, fCyc,
+                                         (unsigned long long)cycA, (unsigned long long)m_cycle, fWc, fMisc, badMem, fGif, gn, cap.size());
+                    }
+                }
+            }
+            std::fprintf(out, "replayed=%u skipped(other image)=%u MISMATCHED=%u | vf=%u vi=%u acc=%u qpi=%u flags=%u pc=%u cycles=%u workingClip=%u misc=%u mem=%u gif=%u\n",
+                         total, skipped, bad, cVf, cVi, cAcc, cQpi, cFlags, cPc, cCyc, cWc, cMisc, cMem, cGif);
+            std::fclose(out);
+            s_rpDone = true;
+            std::fflush(nullptr);
+            std::_Exit(0);
+        }
+    }
+    if (m_unit == Unit::VU1 && capOn() && memory != nullptr && s_capKept < 3000u && vuCode == memory->getVU1Code()) // PROBE-CAPTURE
+    {
+        const VU1State s0 = m_state;
+        const uint32_t wc0 = m_workingClip;
+        const uint64_t cyc0 = m_cycle;
+        const std::vector<uint8_t> mem0(vuData, vuData + dataSize);
+        std::vector<uint8_t> capA;
+        s_vfyCapture = &capA;
+        run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+        s_vfyCapture = nullptr;
+        const uint32_t cov = vu1CoverageCount();
+        if (cov != s_capCov || (++s_capSeen % 400u) == 0u)
+        {
+            s_capCov = cov;
+            svCaptureRecord(s0, wc0, cyc0, mem0, m_state, m_workingClip, m_cycle, vuData, dataSize, capA, startPC, top, itop, maxCycles,
+                            vuCode, codeSize, memory->getVU1CodeGeneration());
+        }
+        if (!capA.empty())
             memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));
         return;
     }
@@ -5439,7 +5752,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                     std::printf("[probe] ge vu1d advance1_ms=%.1f advance1_calls=%llu advanceTo_commit_ms=%.1f\n",
                                 (g_vuRunTicks[3] - s_prevRt[3]) * msPerTick, (unsigned long long)(g_vuRunTicks[4] - s_prevRt[4]),
                                 (g_vuRunTicks[5] - s_prevRt[5]) * msPerTick);
-                    static uint64_t s_prevPh[3] = {}, s_prevFb[2048] = {};
+                    static uint64_t s_prevPh[4] = {}, s_prevFb[2048] = {};
                     uint64_t fbTot = 0; uint32_t fbTop[3] = {0, 0, 0};
                     for (uint32_t i = 0; i < 2048u; ++i)
                     {
@@ -5448,12 +5761,13 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                         for (int k = 0; k < 3; ++k)
                             if (d > g_vuFallbackPc[fbTop[k]] - s_prevFb[fbTop[k]]) { for (int m = 2; m > k; --m) fbTop[m] = fbTop[m - 1]; fbTop[k] = i; break; }
                     }
-                    std::printf("[probe] ge vu1e prologue_ms=%.1f loop_ms=%.1f epilogue_ms=%.1f fallbackPairs=%llu top=%04X:%llu %04X:%llu %04X:%llu\n",
+                    std::printf("[probe] ge vu1e prologue_ms=%.1f loop_ms=%.1f epilogue_ms=%.1f submit_ms=%.1f fallbackPairs=%llu top=%04X:%llu %04X:%llu %04X:%llu\n",
                                 (g_vuPhase[0] - s_prevPh[0]) * msPerTick, (g_vuPhase[1] - s_prevPh[1]) * msPerTick, (g_vuPhase[2] - s_prevPh[2]) * msPerTick,
+                                (g_vuPhase[3] - s_prevPh[3]) * msPerTick,
                                 (unsigned long long)fbTot,
                                 fbTop[0] * 8u, (unsigned long long)(g_vuFallbackPc[fbTop[0]] - s_prevFb[fbTop[0]]), fbTop[1] * 8u, (unsigned long long)(g_vuFallbackPc[fbTop[1]] - s_prevFb[fbTop[1]]),
                                 fbTop[2] * 8u, (unsigned long long)(g_vuFallbackPc[fbTop[2]] - s_prevFb[fbTop[2]]));
-                    for (int i = 0; i < 3; ++i) s_prevPh[i] = g_vuPhase[i];
+                    for (int i = 0; i < 4; ++i) s_prevPh[i] = g_vuPhase[i];
                     for (uint32_t i = 0; i < 2048u; ++i) s_prevFb[i] = g_vuFallbackPc[i];
                     for (int i = 0; i < 6; ++i) s_prevRt[i] = g_vuRunTicks[i];
                 }

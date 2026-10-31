@@ -17,14 +17,22 @@
 
 #if defined(_MSC_VER)
 #define VUHOT_INLINE __forceinline
+#define VUHOT_NOINLINE __declspec(noinline)
+#define VUHOT_VECCALL __vectorcall
 #else
 #define VUHOT_INLINE inline __attribute__((always_inline))
+#define VUHOT_NOINLINE __attribute__((noinline))
+#define VUHOT_VECCALL
 #endif
 
 namespace vuhot
 {
     // PROBE-ABL (measurement only, inexact when set): PS2X_VU1_ABL bit0 = skip classify/MAC/STATUS in fmac, bit1 = skip operand normalisation in fmac
+#ifdef PS2X_VUHOT_ABL
     inline const uint32_t g_abl = []() { const char *e = std::getenv("PS2X_VU1_ABL"); return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u; }();
+#else
+    inline constexpr uint32_t g_abl = 0u; // PERF-CS: the ablation probe was two loads and four branches in every FMAC; compiled out unless PS2X_VUHOT_ABL is defined
+#endif
 
     VUHOT_INLINE float N(float value) // VU1Interpreter::normalizeOperand
     {
@@ -89,24 +97,69 @@ namespace vuhot
         status4 = (z ? 1u : 0u) | (s ? 2u : 0u) | (u ? 4u : 0u) | (o ? 8u : 0u);
     }
 
+    // PERF-CS: slow half of fmac (some destination lane of the float result is outside the exponent window [2,253]): classify the exact double result.
+    struct FmacSlow
+    {
+        __m128i vb;
+        uint32_t mac, status4, extra;
+    };
+
+    template <int KIND, int DEST>
+    VUHOT_NOINLINE FmacSlow VUHOT_VECCALL fmacSlow(__m128 a4, __m128 b4, __m128 ac4, __m128 val)
+    {
+        constexpr bool madd = KIND == 2 || KIND == 3;
+        constexpr uint32_t D4 = rev4(static_cast<uint32_t>(DEST));
+        FmacSlow r;
+        r.vb = _mm_castps_si128(val);
+        r.extra = 0u;
+        const __m256d ad = _mm256_cvtps_pd(a4);
+        const __m256d bd = _mm256_cvtps_pd(b4);
+        __m256d exd;
+        __m256d prod = _mm256_setzero_pd();
+        if constexpr (KIND == 0)
+            exd = _mm256_add_pd(ad, bd);
+        else if constexpr (KIND == 1)
+            exd = _mm256_sub_pd(ad, bd);
+        else if constexpr (KIND == 4)
+            exd = _mm256_mul_pd(ad, bd);
+        else
+        {
+            const __m256d acd = _mm256_cvtps_pd(ac4);
+            prod = _mm256_mul_pd(ad, bd);
+            exd = (KIND == 2) ? _mm256_add_pd(acd, prod) : _mm256_sub_pd(acd, prod);
+        }
+        const Cls cx = classify(exd);
+        const __m128i sg = _mm_and_si128(laneMask4(cx.sign), _mm_set1_epi32(static_cast<int>(0x80000000u)));
+        r.vb = _mm_blendv_epi8(r.vb, sg, laneMask4(cx.zero | cx.under));
+        r.vb = _mm_blendv_epi8(r.vb, _mm_or_si128(sg, _mm_set1_epi32(0x7F7FFFFF)), laneMask4(cx.over));
+        uint32_t dummy;
+        macOf(cx, D4, r.mac, r.status4);
+        if constexpr (madd)
+            macOf(classify(prod), D4, dummy, r.extra);
+        return r;
+    }
+
     // kind: 0 add, 1 sub, 2 madd, 3 msub, 4 mul. src: 0 vt[BC], 1 q, 2 i, 3 vt[c]. DEST in VU encoding (x = 8).
-    template <int KIND, int SRC, int BC, bool TOACC, int DEST, bool KEEPMAC>
-    VUHOT_INLINE void fmac(VU1Interpreter &v, uint32_t unit, uint32_t fs, uint32_t ft, uint32_t fd)
+    // PERF-RG: `status` is the STATUS register itself (a block-local copy in the register-resident blocks, st.status otherwise)
+    // PERF-NR: NRM bit0/1/2 = the A operand / B operand / ACC are known to be normalisation fixed points (written earlier in the same block by an
+    // FMAC or MAX/MINI, whose results are always normal floats, +-0 or +-FLT_MAX), so N4/N is the identity and is skipped (generator: patch_nrm_hot.py)
+    template <int KIND, int SRC, int BC, bool TOACC, int DEST, bool KEEPMAC, int NRM = 0>
+    VUHOT_INLINE void fmacR(VU1Interpreter &v, uint32_t &status, uint32_t unit, uint32_t fs, uint32_t ft, uint32_t fd)
     {
         if constexpr (DEST == 0)
             return; // updateFmacFlags returns early and no lane is written
         constexpr bool madd = KIND == 2 || KIND == 3;
         constexpr uint32_t D4 = rev4(static_cast<uint32_t>(DEST));
         VU1State &st = v.m_state;
-        const __m128 a4 = (g_abl & 2u) ? _mm_loadu_ps(st.vf[fs]) : N4(_mm_loadu_ps(st.vf[fs]));
+        const __m128 a4 = ((NRM & 1) || (g_abl & 2u)) ? _mm_loadu_ps(st.vf[fs]) : N4(_mm_loadu_ps(st.vf[fs]));
         __m128 b4;
         if constexpr (SRC == 3)
-            b4 = N4(_mm_loadu_ps(st.vf[ft]));
+            b4 = (NRM & 2) ? _mm_loadu_ps(st.vf[ft]) : N4(_mm_loadu_ps(st.vf[ft]));
         else
         {
             float bs;
             if constexpr (SRC == 0)
-                bs = N(st.vf[ft][BC]);
+                bs = (NRM & 2) ? st.vf[ft][BC] : N(st.vf[ft][BC]);
             else if constexpr (SRC == 1)
                 bs = N(st.q);
             else
@@ -126,7 +179,7 @@ namespace vuhot
             val = _mm_mul_ps(a4, b4);
         else
         {
-            ac4 = N4(_mm_loadu_ps(st.acc));
+            ac4 = (NRM & 4) ? _mm_loadu_ps(st.acc) : N4(_mm_loadu_ps(st.acc));
             val = (KIND == 2) ? _mm_fmadd_ps(a4, b4, ac4) : _mm_fnmadd_ps(a4, b4, ac4);
         }
         const __m128i i2 = _mm_set1_epi32(2), i253 = _mm_set1_epi32(253), iFF = _mm_set1_epi32(0xFF);
@@ -157,52 +210,40 @@ namespace vuhot
         }
         else
         {
-            const __m256d ad = _mm256_cvtps_pd(a4);
-            const __m256d bd = _mm256_cvtps_pd(b4);
-            __m256d exd;
-            __m256d prod = _mm256_setzero_pd();
-            if constexpr (KIND == 0)
-                exd = _mm256_add_pd(ad, bd);
-            else if constexpr (KIND == 1)
-                exd = _mm256_sub_pd(ad, bd);
-            else if constexpr (KIND == 4)
-                exd = _mm256_mul_pd(ad, bd);
-            else
-            {
-                const __m256d acd = _mm256_cvtps_pd(ac4);
-                prod = _mm256_mul_pd(ad, bd);
-                exd = (KIND == 2) ? _mm256_add_pd(acd, prod) : _mm256_sub_pd(acd, prod);
-            }
-            const Cls cx = classify(exd);
-            const __m128i sg = _mm_and_si128(laneMask4(cx.sign), _mm_set1_epi32(static_cast<int>(0x80000000u)));
-            vb = _mm_blendv_epi8(vb, sg, laneMask4(cx.zero | cx.under));
-            vb = _mm_blendv_epi8(vb, _mm_or_si128(sg, _mm_set1_epi32(0x7F7FFFFF)), laneMask4(cx.over));
-            uint32_t dummy;
-            macOf(cx, D4, mac, status4);
-            if constexpr (madd)
-                macOf(classify(prod), D4, dummy, extra);
+            // PERF-CS: the double-precision classification runs out of line, so the fast path stays contiguous in the instruction cache
+            const FmacSlow sl = fmacSlow<KIND, DEST>(a4, b4, ac4, val);
+            vb = sl.vb;
+            mac = sl.mac;
+            status4 = sl.status4;
+            extra = sl.extra;
         }
         if constexpr (KEEPMAC)
             vuflags::flgPush(vuflags::s_flgMac[unit], v.m_cycle, mac);
         const uint32_t current = status4 & 0xFu;
-        st.status = (st.status & 0xFF0u) | current | ((current | extra) << 6);
+        status = (status & 0xFF0u) | current | ((current | extra) << 6);
         float *dst = TOACC ? st.acc : st.vf[fd];
         _mm_storeu_ps(dst, _mm_blend_ps(_mm_loadu_ps(dst), _mm_castsi128_ps(vb), D4));
     }
 
+    template <int KIND, int SRC, int BC, bool TOACC, int DEST, bool KEEPMAC>
+    VUHOT_INLINE void fmac(VU1Interpreter &v, uint32_t unit, uint32_t fs, uint32_t ft, uint32_t fd)
+    {
+        fmacR<KIND, SRC, BC, TOACC, DEST, KEEPMAC>(v, v.m_state.status, unit, fs, ft, fd);
+    }
+
     // MAX / MINI (no flags): src 0 = vt[BC], 2 = i, 3 = vt[c]
-    template <bool IS_MAX, int SRC, int BC, int DEST>
+    template <bool IS_MAX, int SRC, int BC, int DEST, int NRM = 0>
     VUHOT_INLINE void maxmini(VU1State &st, uint32_t fs, uint32_t ft, uint32_t fd)
     {
         if constexpr (DEST == 0)
             return;
         constexpr uint32_t D4 = rev4(static_cast<uint32_t>(DEST));
-        const __m128 a4 = N4(_mm_loadu_ps(st.vf[fs]));
+        const __m128 a4 = (NRM & 1) ? _mm_loadu_ps(st.vf[fs]) : N4(_mm_loadu_ps(st.vf[fs]));
         __m128 b4;
         if constexpr (SRC == 3)
-            b4 = N4(_mm_loadu_ps(st.vf[ft]));
+            b4 = (NRM & 2) ? _mm_loadu_ps(st.vf[ft]) : N4(_mm_loadu_ps(st.vf[ft]));
         else if constexpr (SRC == 0)
-            b4 = _mm_set1_ps(N(st.vf[ft][BC]));
+            b4 = _mm_set1_ps((NRM & 2) ? st.vf[ft][BC] : N(st.vf[ft][BC]));
         else
             b4 = _mm_set1_ps(N(st.i));
         const __m128 res = IS_MAX ? _mm_max_ps(a4, b4) : _mm_min_ps(a4, b4); // == (a > b) ? a : b  /  (a < b) ? a : b

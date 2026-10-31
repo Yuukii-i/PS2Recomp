@@ -3840,18 +3840,50 @@ HotSlot s_hotSlot[sizeof(kVu1HotStart) / sizeof(kVu1HotStart[0])] = {}; // PERF-
 uint64_t s_tsc[4] = {}; // hot ticks, slow ticks, hot blocks timed, slow pairs timed
 const bool s_xgHot = []() { const char *e = std::getenv("PS2X_VU1_XG_HOT"); return e && e[0] == '1'; }();
 const bool s_tscOn = []() { const char *e = std::getenv("PS2X_VU1_TSC"); return e && e[0] == '1'; }();
+// PROBE-SURVEY: entries and cycles per dispatch-loop pc (PS2X_VU1_SURVEY=1 -> logs/vu1_pc_survey.txt); generated file only, template not synced
+const bool s_svOn = []() { const char *e = std::getenv("PS2X_VU1_SURVEY"); const char *c = std::getenv("PS2X_VU1_CAPTURE"); return (e && e[0] == '1') || (c && c[0] == '1'); }();
+uint64_t s_svN[2048] = {}, s_svC[2048] = {}, s_svIter = 0;
+uint32_t s_svCov = 0; // distinct dispatch pcs seen so far (PROBE-CAPTURE keeps runs that raise it)
+void svPcDump()
+{
+    FILE *f = std::fopen("logs/vu1_pc_survey.txt", "w");
+    if (!f) return;
+    for (uint32_t i = 0; i < 2048u; ++i)
+        if (s_svN[i])
+            std::fprintf(f, "%04X n=%llu cyc=%llu\n", i * 8u, (unsigned long long)s_svN[i], (unsigned long long)s_svC[i]);
+    std::fclose(f);
+}
+struct SvPcGuard
+{
+    const uint64_t &cyc;
+    uint32_t prev = 0xFFFFFFFFu;
+    uint64_t c0 = 0;
+    explicit SvPcGuard(const uint64_t &c) : cyc(c) {}
+    void at(uint32_t pc)
+    {
+        if (prev != 0xFFFFFFFFu) s_svC[prev >> 3] += cyc - c0;
+        prev = pc;
+        c0 = cyc;
+        if (s_svN[pc >> 3]++ == 0u) ++s_svCov;
+        if ((++s_svIter & 0x1FFFFFull) == 0u) svPcDump();
+    }
+    ~SvPcGuard() { if (prev != 0xFFFFFFFFu) s_svC[prev >> 3] += cyc - c0; }
+};
 }
 
 uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : s_tsc; }
+uint32_t vu1CoverageCount() { return s_svCov; } // PROBE-CAPTURE
 
 int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
 {
     c.hashValid = false; // the interpreter may have executed pairs since the last hot block
+    SvPcGuard svg(vu.m_cycle); // PROBE-SURVEY
     while (vu.m_cycle < c.budgetEnd && !vu.m_stopRequested)
     {
         const uint32_t pc = vu.m_state.pc;
         if ((pc & 7u) != 0u || pc >= 0x4000u)
             return 2;
+        if (s_svOn && pc < 0x4000u) svg.at(pc); // PROBE-SURVEY
         // PERF-IE: hot blocks with static timing (generated/vu1_hot_blocks.cpp); any unknown state falls back to the pair executors
         if (kVu1HotStart[pc >> 3] && (s_xgHot || !vu.m_xgkick.active) && !vu.m_state.branchPending && !vu.m_state.ebit &&
             !vu.m_state.haltAfterDelaySlot && c.budgetEnd - vu.m_cycle > 160u)
