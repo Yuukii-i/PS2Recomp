@@ -847,11 +847,21 @@ const StepFn kStep[512] = {
 }
 
 #include <cstdio>
+#include <cstdlib>
+#include <intrin.h>
 
 namespace
 {
 uint64_t s_hotBlocks = 0, s_hotPairs = 0, s_slowPairs = 0;
+// PERF-XG: slow-pair causes {0 no hot block starts at pc, 1 xgkick active (PS2X_VU1_XG_HOT off), 2 branch/ebit/halt/budget state,
+// 3 hash miss, 4 hot block declined, 5 slow pair executed while a transfer was active} and an optional TSC split (PS2X_VU1_TSC=1)
+uint64_t s_cause[6] = {};
+uint64_t s_tsc[4] = {}; // hot ticks, slow ticks, hot blocks timed, slow pairs timed
+const bool s_xgHot = []() { const char *e = std::getenv("PS2X_VU1_XG_HOT"); return e && e[0] == '1'; }();
+const bool s_tscOn = []() { const char *e = std::getenv("PS2X_VU1_TSC"); return e && e[0] == '1'; }();
 }
+
+uint64_t *vu0NativeStats(uint32_t which) { return which == 0u ? s_cause : s_tsc; }
 
 int vu0NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
 {
@@ -862,7 +872,7 @@ int vu0NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
         if ((pc & 7u) != 0u || pc >= 0x1000u)
             return 2;
         // PERF-IE: hot blocks with static timing (generated/vu1_hot_blocks.cpp); any unknown state falls back to the pair executors
-        if (kVu0HotStart[pc >> 3] && !vu.m_xgkick.active && !vu.m_state.branchPending && !vu.m_state.ebit &&
+        if (kVu0HotStart[pc >> 3] && (s_xgHot || !vu.m_xgkick.active) && !vu.m_state.branchPending && !vu.m_state.ebit &&
             !vu.m_state.haltAfterDelaySlot && c.budgetEnd - vu.m_cycle > 160u)
         {
             if (!c.hashValid)
@@ -874,31 +884,57 @@ int vu0NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
             if (hf)
             {
                 const uint64_t i0 = c.instrs;
+                const uint64_t tH0 = s_tscOn ? __rdtsc() : 0ull;
                 const int hr = hf(vu, c);
-                s_hotPairs += c.instrs - i0;
-                ++s_hotBlocks;
-                if (c.check && c.ops->blkHash(vu) != c.nextHash)
+                if (s_tscOn)
                 {
-                    ++c.checkFail;
-                    if (c.checkFail <= 6)
-                        std::printf("[probe] hot block exit-hash MISMATCH at pc=%04X (block entered at %04X)\n", vu.m_state.pc, pc);
-                    c.hashValid = false;
+                    s_tsc[0] += __rdtsc() - tH0;
+                    ++s_tsc[2];
                 }
-                if ((s_hotBlocks & 0x7FFFFFull) == 0u)
-                    std::printf("[probe] hot0 blocks=%llu hotPairs=%llu slowPairs=%llu hotShare=%.1f%% checkFail=%llu\n", (unsigned long long)s_hotBlocks,
-                                (unsigned long long)s_hotPairs, (unsigned long long)s_slowPairs,
-                                100.0 * s_hotPairs / double(s_hotPairs + s_slowPairs + 1), (unsigned long long)c.checkFail);
-                if (hr != 0)
-                    return hr;
-                continue;
+                if (hr >= 0)
+                {
+                    s_hotPairs += c.instrs - i0;
+                    ++s_hotBlocks;
+                    if (c.check && c.ops->blkHash(vu) != c.nextHash)
+                    {
+                        ++c.checkFail;
+                        if (c.checkFail <= 6)
+                            std::printf("[probe] hot block exit-hash MISMATCH at pc=%04X (block entered at %04X)\n", vu.m_state.pc, pc);
+                        c.hashValid = false;
+                    }
+                    if ((s_hotBlocks & 0x7FFFFFull) == 0u)
+                        std::printf("[probe] hot0 blocks=%llu hotPairs=%llu slowPairs=%llu hotShare=%.1f%% checkFail=%llu\n", (unsigned long long)s_hotBlocks,
+                                    (unsigned long long)s_hotPairs, (unsigned long long)s_slowPairs,
+                                    100.0 * s_hotPairs / double(s_hotPairs + s_slowPairs + 1), (unsigned long long)c.checkFail);
+                    if (hr != 0)
+                        return hr;
+                    continue;
+                }
+                ++s_cause[4]; // declined before executing anything
             }
+            else
+                ++s_cause[3];
         }
+        else if (!kVu0HotStart[pc >> 3])
+            ++s_cause[0];
+        else if (vu.m_xgkick.active && !s_xgHot)
+            ++s_cause[1];
+        else
+            ++s_cause[2];
         c.hashValid = false;
         const StepFn fn = kStep[pc >> 3];
         if (!fn)
             return 2;
         ++s_slowPairs;
+        if (vu.m_xgkick.active)
+            ++s_cause[5];
+        const uint64_t tS0 = s_tscOn ? __rdtsc() : 0ull;
         const int r = fn(vu, c);
+        if (s_tscOn)
+        {
+            s_tsc[1] += __rdtsc() - tS0;
+            ++s_tsc[3];
+        }
         if (r != 0)
             return r;
     }

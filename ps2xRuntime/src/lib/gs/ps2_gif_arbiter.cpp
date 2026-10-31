@@ -139,6 +139,7 @@ void GifArbiter::drain()
     if (!m_processFn)
         return;
 
+    if (m_queue.size() > 1u) // PERF-FN: a one-packet queue (the usual XGKICK case) needs no sort
     std::stable_sort(m_queue.begin(), m_queue.end(),
                      [](const GifArbiterPacket &a, const GifArbiterPacket &b)
                      {

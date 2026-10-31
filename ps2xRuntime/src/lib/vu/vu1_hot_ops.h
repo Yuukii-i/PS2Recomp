@@ -8,6 +8,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <immintrin.h>
 #include <limits>
@@ -22,6 +23,9 @@
 
 namespace vuhot
 {
+    // PROBE-ABL (measurement only, inexact when set): PS2X_VU1_ABL bit0 = skip classify/MAC/STATUS in fmac, bit1 = skip operand normalisation in fmac
+    inline const uint32_t g_abl = []() { const char *e = std::getenv("PS2X_VU1_ABL"); return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u; }();
+
     VUHOT_INLINE float N(float value) // VU1Interpreter::normalizeOperand
     {
         uint32_t bits = 0;
@@ -94,7 +98,7 @@ namespace vuhot
         constexpr bool madd = KIND == 2 || KIND == 3;
         constexpr uint32_t D4 = rev4(static_cast<uint32_t>(DEST));
         VU1State &st = v.m_state;
-        const __m128 a4 = N4(_mm_loadu_ps(st.vf[fs]));
+        const __m128 a4 = (g_abl & 2u) ? _mm_loadu_ps(st.vf[fs]) : N4(_mm_loadu_ps(st.vf[fs]));
         __m128 b4;
         if constexpr (SRC == 3)
             b4 = N4(_mm_loadu_ps(st.vf[ft]));
@@ -109,51 +113,75 @@ namespace vuhot
                 bs = N(st.i);
             b4 = _mm_set1_ps(bs);
         }
-        const __m256d ad = _mm256_cvtps_pd(a4);
-        const __m256d bd = _mm256_cvtps_pd(b4);
+        // PERF-FC: the float result is computed first. When every destination lane of it (and, for madd/msub, of the product) has a biased
+        // exponent in [2,253], the exact double result is a normal in-range number (rounding moves it by < 1 ulp), so zero/underflow/overflow
+        // are all false and only the sign bits matter: the double-precision classification is skipped. Otherwise the original path runs.
         __m128 val;
-        __m256d exd;
-        __m256d prod = _mm256_setzero_pd();
+        __m128 ac4 = _mm_setzero_ps();
         if constexpr (KIND == 0)
-        {
             val = _mm_add_ps(a4, b4);
-            exd = _mm256_add_pd(ad, bd);
-        }
         else if constexpr (KIND == 1)
-        {
             val = _mm_sub_ps(a4, b4);
-            exd = _mm256_sub_pd(ad, bd);
-        }
         else if constexpr (KIND == 4)
-        {
             val = _mm_mul_ps(a4, b4);
-            exd = _mm256_mul_pd(ad, bd);
+        else
+        {
+            ac4 = N4(_mm_loadu_ps(st.acc));
+            val = (KIND == 2) ? _mm_fmadd_ps(a4, b4, ac4) : _mm_fnmadd_ps(a4, b4, ac4);
+        }
+        const __m128i i2 = _mm_set1_epi32(2), i253 = _mm_set1_epi32(253), iFF = _mm_set1_epi32(0xFF);
+        const __m128i ev = _mm_and_si128(_mm_srli_epi32(_mm_castps_si128(val), 23), iFF);
+        uint32_t bad = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_cmplt_epi32(ev, i2), _mm_cmpgt_epi32(ev, i253)))));
+        __m128 prodf = _mm_setzero_ps();
+        if constexpr (madd)
+        {
+            prodf = _mm_mul_ps(a4, b4);
+            const __m128i ep = _mm_and_si128(_mm_srli_epi32(_mm_castps_si128(prodf), 23), iFF);
+            bad |= static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_cmplt_epi32(ep, i2), _mm_cmpgt_epi32(ep, i253)))));
+        }
+        if (g_abl & 1u) // PROBE-ABL
+        {
+            float *d0 = TOACC ? st.acc : st.vf[fd];
+            _mm_storeu_ps(d0, _mm_blend_ps(_mm_loadu_ps(d0), val, D4));
+            return;
+        }
+        uint32_t mac, status4, extra = 0u;
+        __m128i vb = _mm_castps_si128(val);
+        if ((bad & D4) == 0u)
+        {
+            const uint32_t s = static_cast<uint32_t>(_mm_movemask_ps(val)) & D4;
+            mac = rev4(s) << 4;
+            status4 = s ? 2u : 0u;
+            if constexpr (madd)
+                extra = (static_cast<uint32_t>(_mm_movemask_ps(prodf)) & D4) ? 2u : 0u;
         }
         else
         {
-            const __m128 ac4 = N4(_mm_loadu_ps(st.acc));
-            const __m256d acd = _mm256_cvtps_pd(ac4);
-            prod = _mm256_mul_pd(ad, bd);
-            if constexpr (KIND == 2)
-            {
-                val = _mm_fmadd_ps(a4, b4, ac4);
-                exd = _mm256_add_pd(acd, prod);
-            }
+            const __m256d ad = _mm256_cvtps_pd(a4);
+            const __m256d bd = _mm256_cvtps_pd(b4);
+            __m256d exd;
+            __m256d prod = _mm256_setzero_pd();
+            if constexpr (KIND == 0)
+                exd = _mm256_add_pd(ad, bd);
+            else if constexpr (KIND == 1)
+                exd = _mm256_sub_pd(ad, bd);
+            else if constexpr (KIND == 4)
+                exd = _mm256_mul_pd(ad, bd);
             else
             {
-                val = _mm_fnmadd_ps(a4, b4, ac4);
-                exd = _mm256_sub_pd(acd, prod);
+                const __m256d acd = _mm256_cvtps_pd(ac4);
+                prod = _mm256_mul_pd(ad, bd);
+                exd = (KIND == 2) ? _mm256_add_pd(acd, prod) : _mm256_sub_pd(acd, prod);
             }
+            const Cls cx = classify(exd);
+            const __m128i sg = _mm_and_si128(laneMask4(cx.sign), _mm_set1_epi32(static_cast<int>(0x80000000u)));
+            vb = _mm_blendv_epi8(vb, sg, laneMask4(cx.zero | cx.under));
+            vb = _mm_blendv_epi8(vb, _mm_or_si128(sg, _mm_set1_epi32(0x7F7FFFFF)), laneMask4(cx.over));
+            uint32_t dummy;
+            macOf(cx, D4, mac, status4);
+            if constexpr (madd)
+                macOf(classify(prod), D4, dummy, extra);
         }
-        const Cls cx = classify(exd);
-        __m128i vb = _mm_castps_si128(val);
-        const __m128i sg = _mm_and_si128(laneMask4(cx.sign), _mm_set1_epi32(static_cast<int>(0x80000000u)));
-        vb = _mm_blendv_epi8(vb, sg, laneMask4(cx.zero | cx.under));
-        vb = _mm_blendv_epi8(vb, _mm_or_si128(sg, _mm_set1_epi32(0x7F7FFFFF)), laneMask4(cx.over));
-        uint32_t mac, status4, extra = 0u, dummy;
-        macOf(cx, D4, mac, status4);
-        if constexpr (madd)
-            macOf(classify(prod), D4, dummy, extra);
         if constexpr (KEEPMAC)
             vuflags::flgPush(vuflags::s_flgMac[unit], v.m_cycle, mac);
         const uint32_t current = status4 & 0xFu;
@@ -210,6 +238,25 @@ namespace vuhot
             dst[2] = result[2];
         if (dest & 0x1u)
             dst[3] = result[3];
+    }
+
+    // PERF-XG: cycle advance without pipeline commits (the recorded block has none there) that still lets a running XGKICK transfer
+    // consume its quadwords cycle by cycle, exactly like VU1Interpreter::advanceOneCycle does after its (empty) commit.
+    VUHOT_INLINE void setCycleXg(VU1Interpreter &v, const VuNativeOps &op, uint64_t target)
+    {
+        if (!v.m_xgkick.active)
+        {
+            v.m_cycle = target;
+            v.m_state.cycles = target;
+            return;
+        }
+        while (v.m_cycle < target)
+        {
+            ++v.m_cycle;
+            v.m_state.cycles = v.m_cycle;
+            if (v.m_xgkick.active)
+                op.xgProgress(v);
+        }
     }
 
     // VU1Interpreter::queueStore for the native (probe-free) path: first free pending-store slot, ready next cycle

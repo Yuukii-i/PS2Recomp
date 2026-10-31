@@ -2065,12 +2065,16 @@ void VU1Interpreter::commitReadyPipelines()
         }
         return;
     }
+    uint64_t nr = ~0ull; // PERF-FN: earliest pending ready cycle, gathered while committing (was a second pass over all masks)
     for (uint32_t mk = PM().flag; mk != 0u; mk &= mk - 1u)
     {
         const uint32_t slot = pmCtz(mk);
         FlagPipelineEntry &entry = m_flagPipeline[slot];
         if (!entry.valid || entry.readyCycle > m_cycle)
+        {
+            nr = std::min<uint64_t>(nr, entry.readyCycle);
             continue;
+        }
         PM().flag &= ~(1u << slot);
 
         if (entry.writesMac)
@@ -2111,7 +2115,10 @@ void VU1Interpreter::commitReadyPipelines()
         const uint32_t slot = pmCtz(mk);
         PendingStore &store = m_storePipeline[slot];
         if (!store.valid || store.readyCycle > m_cycle)
+        {
+            nr = std::min<uint64_t>(nr, store.readyCycle);
             continue;
+        }
         PM().store &= ~(1u << slot);
         if (m_activeVuData && store.address + 16u <= m_activeVuDataSize)
         {
@@ -2132,7 +2139,10 @@ void VU1Interpreter::commitReadyPipelines()
         const uint32_t slot = pmCtz(mk);
         PendingVfWrite &write = m_vfWritePipeline[slot];
         if (!write.valid || write.readyCycle > m_cycle)
+        {
+            nr = std::min<uint64_t>(nr, write.readyCycle);
             continue;
+        }
         PM().vf &= ~(1u << slot);
         for (uint32_t component = 0; component < 4u; ++component)
         {
@@ -2150,7 +2160,10 @@ void VU1Interpreter::commitReadyPipelines()
         const uint32_t slot = pmCtz(mk);
         PendingViWrite &write = m_viWritePipeline[slot];
         if (!write.valid || write.readyCycle > m_cycle)
+        {
+            nr = std::min<uint64_t>(nr, write.readyCycle);
             continue;
+        }
         PM().vi &= ~(1u << slot);
         if (m_viLatestWrite[write.reg] == write.sequence)
             m_state.vi[write.reg] = static_cast<int16_t>(write.value);
@@ -2162,7 +2175,10 @@ void VU1Interpreter::commitReadyPipelines()
         const uint32_t slot = pmCtz(mk);
         PendingAccWrite &write = m_accWritePipeline[slot];
         if (!write.valid || write.readyCycle > m_cycle)
+        {
+            nr = std::min<uint64_t>(nr, write.readyCycle);
             continue;
+        }
         PM().acc &= ~(1u << slot);
         for (uint32_t component = 0; component < 4u; ++component)
         {
@@ -2175,13 +2191,7 @@ void VU1Interpreter::commitReadyPipelines()
         write = {};
     }
 
-    // PERF-HM: recompute the earliest pending ready cycle
-    uint64_t nr = ~0ull;
-    for (uint32_t mk = PM().flag; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_flagPipeline[pmCtz(mk)].readyCycle);
-    for (uint32_t mk = PM().store; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_storePipeline[pmCtz(mk)].readyCycle);
-    for (uint32_t mk = PM().vf; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_vfWritePipeline[pmCtz(mk)].readyCycle);
-    for (uint32_t mk = PM().vi; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_viWritePipeline[pmCtz(mk)].readyCycle);
-    for (uint32_t mk = PM().acc; mk != 0u; mk &= mk - 1u) nr = std::min<uint64_t>(nr, m_accWritePipeline[pmCtz(mk)].readyCycle);
+    // PERF-HM: earliest pending ready cycle (the mask entries were folded in above)
     if (m_fdiv.valid) nr = std::min<uint64_t>(nr, m_fdiv.readyCycle);
     for (const ScalarPipelineEntry &entry : m_efu) if (entry.valid) nr = std::min<uint64_t>(nr, entry.readyCycle);
     NR() = nr;
@@ -2432,7 +2442,8 @@ void VU1Interpreter::advanceOneCycle()
     // LSU commits become visible at the cycle boundary before PATH1 consumes
     // its next qword from VU memory.
     commitReadyPipelines();
-    progressXgkick();
+    if (m_xgkick.active) // PERF-FN: skip the call when no transfer runs
+        progressXgkick();
 }
 
 void VU1Interpreter::advanceTo(uint64_t targetCycle)
@@ -2468,8 +2479,43 @@ bool VU1Interpreter::pipelinesPending() const
 
 void VU1Interpreter::flushPipelines()
 {
-    while (pipelinesPending())
+    // PERF-FP: pipelinesPending() scans every pipeline slot and was re-run for every cycle of the final XGKICK transfer (2 cycles per quadword,
+    // ~1 us per run in the epilogue). Drain the real pipelines first, then step the transfer alone: with nothing else pending a cycle is
+    // exactly ++m_cycle + progressXgkick() (commitReadyPipelines would be a no-op).
+    const auto othersPending = [this]()
+    {
+        if (m_fdiv.valid)
+            return true;
+        for (const ScalarPipelineEntry &entry : m_efu)
+            if (entry.valid)
+                return true;
+        for (const FlagPipelineEntry &entry : m_flagPipeline)
+            if (entry.valid)
+                return true;
+        for (const PendingStore &store : m_storePipeline)
+            if (store.valid)
+                return true;
+        for (const PendingVfWrite &write : m_vfWritePipeline)
+            if (write.valid)
+                return true;
+        for (const PendingViWrite &write : m_viWritePipeline)
+            if (write.valid)
+                return true;
+        for (const PendingAccWrite &write : m_accWritePipeline)
+            if (write.valid)
+                return true;
+        return false;
+    };
+    while (othersPending())
         advanceOneCycle();
+    if (m_xgkick.active && s_eiCurRunActive)
+        advanceOneCycle(); // records the probe history entry exactly as the first cycle of the old loop did
+    while (m_xgkick.active && m_activeVuData && m_activeVuDataSize != 0u)
+    {
+        ++m_cycle;
+        m_state.cycles = m_cycle;
+        progressXgkick();
+    }
     if (s_vuImmFlags && !s_vfyRef) // PERF-HV: everything has landed -> architectural flags = newest writes
     {
         const uint32_t u = m_unit == Unit::VU1 ? 1u : 0u;
@@ -3790,12 +3836,24 @@ namespace
     }
 }
 
+uint64_t g_vuPhase[4] = {}; // PROBE-ABL: prologue ticks (entry -> loop), loop ticks, epilogue ticks (loop end -> guard)
+uint64_t g_vuFallbackPc[2048] = {}; // PROBE-ABL: pairs interpreted outside vu1NativeRun, by pc>>3
+uint64_t g_vuRunTicks[6] = {}; // PROBE-ABL: total run() ticks, vu1NativeRun ticks, run count (PS2X_VU1_TSC=1)
+static const bool g_vuRunTicksOn = []() { const char *e = std::getenv("PS2X_VU1_TSC"); return e && e[0] == '1'; }();
+
 void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                          uint8_t *vuData, uint32_t dataSize,
                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
 {
     if (m_unit == Unit::VU0)
         s_jmRunEntry = __rdtsc(); // PROBE-JM
+    struct RunTickGuard // PROBE-ABL: whole-run ticks for VU1 (g_vuRunTicks[0]); set up / tear down = total - native
+    {
+        const bool on;
+        const uint64_t t0;
+        explicit RunTickGuard(bool o) : on(o), t0(o ? __rdtsc() : 0ull) {}
+        ~RunTickGuard() { if (on) { g_vuRunTicks[0] += __rdtsc() - t0; ++g_vuRunTicks[2]; } }
+    } runTickGuard(m_unit == Unit::VU1 && g_vuRunTicksOn);
     m_activeVuData = vuData;
     m_activeVuDataSize = dataSize;
     m_activeGs = &gs;
@@ -4010,14 +4068,32 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
         if (v.m_viBranchBackupValid)
             emit("b", v.m_viBranchBackupReg, 0, 0);
-        if (v.m_xgkick.active)
+        // PERF-XG: with PS2X_VU1_XG_HOT=1 the hot blocks advance a running XGKICK transfer themselves, so the timing signature
+        // must not depend on it (otherwise no block recorded without a transfer could ever match).
+        static const bool xgHot = []() { const char *e = std::getenv("PS2X_VU1_XG_HOT"); return e && e[0] == '1'; }();
+        if (v.m_xgkick.active && !xgHot)
             emit("x", 1, 0, 0);
     };
 
     static const VuNativeOps vuNativeOps = {
-        [](VU1Interpreter &v) { v.commitReadyPipelines(); },
-        [](VU1Interpreter &v, uint64_t t) { v.advanceTo(t); },
-        [](VU1Interpreter &v) { v.advanceOneCycle(); },
+        [](VU1Interpreter &v)
+        {
+            const uint64_t t0 = g_vuRunTicksOn ? __rdtsc() : 0ull; // PROBE-ABL
+            v.commitReadyPipelines();
+            if (t0) g_vuRunTicks[5] += __rdtsc() - t0;
+        },
+        [](VU1Interpreter &v, uint64_t t)
+        {
+            const uint64_t t0 = g_vuRunTicksOn ? __rdtsc() : 0ull; // PROBE-ABL
+            v.advanceTo(t);
+            if (t0) g_vuRunTicks[5] += __rdtsc() - t0;
+        },
+        [](VU1Interpreter &v)
+        {
+            const uint64_t t0 = g_vuRunTicksOn ? __rdtsc() : 0ull; // PROBE-ABL
+            v.advanceOneCycle();
+            if (t0) { g_vuRunTicks[3] += __rdtsc() - t0; ++g_vuRunTicks[4]; }
+        },
         [](VU1Interpreter &v, uint32_t u)
         {
             static const bool hlCheck = []() { const char *e = std::getenv("PS2X_HL_CHECK"); return e && e[0] == '1'; }();
@@ -4169,12 +4245,18 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         s_jmT[2] += jmNow - s_jmRunEntry;
         s_jmMark = jmNow;
     }
+    const uint64_t phaseLoop0 = (m_unit == Unit::VU1 && g_vuRunTicksOn) ? __rdtsc() : 0ull; // PROBE-ABL
+    if (phaseLoop0)
+        g_vuPhase[0] += phaseLoop0 - runTickGuard.t0;
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
         if (vuNativeOn)
         {
             const uint64_t jmN0 = m_unit == Unit::VU0 ? __rdtsc() : 0u; // PROBE-JM
+            const uint64_t ablN0 = (m_unit == Unit::VU1 && g_vuRunTicksOn) ? __rdtsc() : 0ull; // PROBE-ABL
             const int nativeResult = m_unit == Unit::VU1 ? vu1NativeRun(*this, vuNativeCtx) : vu0NativeRun(*this, vuNativeCtx);
+            if (ablN0)
+                g_vuRunTicks[1] += __rdtsc() - ablN0;
             if (m_unit == Unit::VU0)
                 s_jmT[6] += __rdtsc() - jmN0;
             instrsThisRun += vuNativeCtx.instrs;
@@ -4184,6 +4266,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             if (nativeResult == 1)
                 break;
             // nativeResult == 2: this pair has no native executor -> interpret it below
+            if (ablN0 && (m_state.pc >> 3) < 2048u)
+                ++g_vuFallbackPc[m_state.pc >> 3]; // PROBE-ABL
         }
         commitReadyPipelines();
         if (m_state.pc + 8u > codeSize)
@@ -4997,6 +5081,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             break;
     }
 
+    const uint64_t phaseEp0 = phaseLoop0 ? __rdtsc() : 0ull; // PROBE-ABL
+    if (phaseLoop0)
+        g_vuPhase[1] += phaseEp0 - phaseLoop0;
     if (programEnded)
     {
         flushPipelines();
@@ -5299,6 +5386,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     if (useVuRounding && previousRoundingMode != -1)
         _mm_setcsr((_mm_getcsr() & ~0x6000u) | (previousCsr & 0x6000u)); // PERF-JL: restore only the rounding bits
 
+    if (phaseEp0)
+        g_vuPhase[2] += __rdtsc() - phaseEp0; // PROBE-ABL: excludes the PROBE-GE block below
     if (m_unit == Unit::VU1) { // PROBE-GE: per-second VU1 time budget (PERF-IO: VU1 only)
         static uint64_t s_geNs = 0, s_geXgNs = 0, s_geInstr = 0, s_geCalls = 0, s_geCycles = 0;
         static std::chrono::steady_clock::time_point s_geT0 = std::chrono::steady_clock::now();
@@ -5314,6 +5403,51 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                         (unsigned long long)s_geCalls, (unsigned long long)s_geInstr, (unsigned long long)s_geCycles,
                         s_geNs / 1e6, s_geXgNs / 1e6);
             std::fflush(stdout);
+            { // PERF-XG: slow-pair causes and the hot/slow time split (ticks -> ms via the invariant TSC measured against the steady clock)
+                extern uint64_t *vu1NativeStats(uint32_t);
+                static uint64_t s_prevCause[6] = {}, s_prevTsc[4] = {};
+                static const uint64_t s_tscT0 = __rdtsc();
+                static const auto s_tscC0 = std::chrono::steady_clock::now();
+                const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_tscC0).count();
+                const double msPerTick = secs > 0.5 ? (secs * 1e3) / double(__rdtsc() - s_tscT0) : 0.0;
+                const uint64_t *ca = vu1NativeStats(0), *ts = vu1NativeStats(1);
+                std::printf("[probe] ge vu1b slow: noStart=%llu xgActive=%llu state=%llu miss=%llu declined=%llu xgActiveSlowPairs=%llu | hot_ms=%.1f slow_ms=%.1f hotBlocks=%llu slowTimed=%llu\n",
+                            (unsigned long long)(ca[0] - s_prevCause[0]), (unsigned long long)(ca[1] - s_prevCause[1]), (unsigned long long)(ca[2] - s_prevCause[2]),
+                            (unsigned long long)(ca[3] - s_prevCause[3]), (unsigned long long)(ca[4] - s_prevCause[4]), (unsigned long long)(ca[5] - s_prevCause[5]),
+                            (ts[0] - s_prevTsc[0]) * msPerTick, (ts[1] - s_prevTsc[1]) * msPerTick,
+                            (unsigned long long)(ts[2] - s_prevTsc[2]), (unsigned long long)(ts[3] - s_prevTsc[3]));
+                std::fflush(stdout);
+                {
+                    static uint64_t s_prevRt[6] = {};
+                    std::printf("[probe] ge vu1c run_total_ms=%.1f native_ms=%.1f setup_ms=%.1f runs=%llu hot_ns_per_pair=%.2f\n",
+                                (g_vuRunTicks[0] - s_prevRt[0]) * msPerTick, (g_vuRunTicks[1] - s_prevRt[1]) * msPerTick,
+                                ((g_vuRunTicks[0] - s_prevRt[0]) - (g_vuRunTicks[1] - s_prevRt[1])) * msPerTick,
+                                (unsigned long long)(g_vuRunTicks[2] - s_prevRt[2]),
+                                s_geInstr ? (ts[0] - s_prevTsc[0]) * msPerTick * 1e6 / double(s_geInstr) : 0.0);
+                    std::printf("[probe] ge vu1d advance1_ms=%.1f advance1_calls=%llu advanceTo_commit_ms=%.1f\n",
+                                (g_vuRunTicks[3] - s_prevRt[3]) * msPerTick, (unsigned long long)(g_vuRunTicks[4] - s_prevRt[4]),
+                                (g_vuRunTicks[5] - s_prevRt[5]) * msPerTick);
+                    static uint64_t s_prevPh[3] = {}, s_prevFb[2048] = {};
+                    uint64_t fbTot = 0; uint32_t fbTop[3] = {0, 0, 0};
+                    for (uint32_t i = 0; i < 2048u; ++i)
+                    {
+                        const uint64_t d = g_vuFallbackPc[i] - s_prevFb[i];
+                        fbTot += d;
+                        for (int k = 0; k < 3; ++k)
+                            if (d > g_vuFallbackPc[fbTop[k]] - s_prevFb[fbTop[k]]) { for (int m = 2; m > k; --m) fbTop[m] = fbTop[m - 1]; fbTop[k] = i; break; }
+                    }
+                    std::printf("[probe] ge vu1e prologue_ms=%.1f loop_ms=%.1f epilogue_ms=%.1f fallbackPairs=%llu top=%04X:%llu %04X:%llu %04X:%llu\n",
+                                (g_vuPhase[0] - s_prevPh[0]) * msPerTick, (g_vuPhase[1] - s_prevPh[1]) * msPerTick, (g_vuPhase[2] - s_prevPh[2]) * msPerTick,
+                                (unsigned long long)fbTot,
+                                fbTop[0] * 8u, (unsigned long long)(g_vuFallbackPc[fbTop[0]] - s_prevFb[fbTop[0]]), fbTop[1] * 8u, (unsigned long long)(g_vuFallbackPc[fbTop[1]] - s_prevFb[fbTop[1]]),
+                                fbTop[2] * 8u, (unsigned long long)(g_vuFallbackPc[fbTop[2]] - s_prevFb[fbTop[2]]));
+                    for (int i = 0; i < 3; ++i) s_prevPh[i] = g_vuPhase[i];
+                    for (uint32_t i = 0; i < 2048u; ++i) s_prevFb[i] = g_vuFallbackPc[i];
+                    for (int i = 0; i < 6; ++i) s_prevRt[i] = g_vuRunTicks[i];
+                }
+                for (int i = 0; i < 6; ++i) s_prevCause[i] = ca[i];
+                for (int i = 0; i < 4; ++i) s_prevTsc[i] = ts[i];
+            }
             if (s_geHistPtr)
             {
                 uint64_t tot = 0;
