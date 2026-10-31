@@ -9,6 +9,8 @@
 #include "runtime/ps2_vu1.h"
 #undef private
 #include "../vu1_native_api.h"
+#include "../vu1_hot_ops.h" // PERF-LB: SIMD FMAC core for the loop kernel
+#include <limits>
 
 namespace
 {
@@ -3827,6 +3829,7 @@ const StepFn kStep[2048] = {
 
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 #include <intrin.h>
 
 namespace
@@ -3869,7 +3872,393 @@ struct SvPcGuard
     }
     ~SvPcGuard() { if (prev != 0xFFFFFFFFu) s_svC[prev >> 3] += cyc - c0; }
 };
+
+// PROBE-REGION (PS2X_VU1_REGION=1 -> logs/vu1region.bin): entry/exit snapshots of the skinned-vertex loop region [1FE0,2200) for the Level B kernel.
+// Record: u32 'RGN ', u32 bytes, then ENTRY {u32 pc, u64 cycle, state, u32 dsz, data, pending} EXIT {u32 pc, u64 cycle, state, u32 nDiff, {u32 qw, 16B}*, pending}.
+// pending = vf{i64 rel,u8 reg,u8 mask,f32[4]}* vi{i64 rel,u8 reg,i32}* acc{i64 rel,u8 mask,f32[4]}* flag{i64 rel,i64 issueRel,u32 mac,status,sticky,clip,u8 bits}*
+//           store{i64 rel,u32 addr,u32[4],u8 mask}* then fdiv,efu0,efu1 {u8 valid,i64 rel,f32,u32 statusDi} and u8 xgkick.active.
+const bool s_rgOn = []() { const char *e = std::getenv("PS2X_VU1_REGION"); return e && e[0] == '1'; }();
+struct RgBuf
+{
+    std::vector<uint8_t> b;
+    template <class T> void put(const T &v) { const uint8_t *p = reinterpret_cast<const uint8_t *>(&v); b.insert(b.end(), p, p + sizeof(T)); }
+    void raw(const void *p, size_t n) { const uint8_t *q = static_cast<const uint8_t *>(p); b.insert(b.end(), q, q + n); }
+};
+void rgPending(RgBuf &o, VU1Interpreter &vu, uint64_t cyc)
+{
+    const auto rel = [&](uint64_t t) { return static_cast<int64_t>(t) - static_cast<int64_t>(cyc); };
+    uint32_t n = 0;
+    for (const auto &w : vu.m_vfWritePipeline) n += w.valid;
+    o.put(n);
+    for (const auto &w : vu.m_vfWritePipeline) if (w.valid) { o.put(rel(w.readyCycle)); o.put(w.reg); o.put(w.laneMask); o.raw(w.value.data(), 16); }
+    n = 0;
+    for (const auto &w : vu.m_viWritePipeline) n += w.valid;
+    o.put(n);
+    for (const auto &w : vu.m_viWritePipeline) if (w.valid) { o.put(rel(w.readyCycle)); o.put(w.reg); o.put(w.value); }
+    n = 0;
+    for (const auto &w : vu.m_accWritePipeline) n += w.valid;
+    o.put(n);
+    for (const auto &w : vu.m_accWritePipeline) if (w.valid) { o.put(rel(w.readyCycle)); o.put(w.laneMask); o.raw(w.value.data(), 16); }
+    n = 0;
+    for (const auto &w : vu.m_flagPipeline) n += w.valid;
+    o.put(n);
+    for (const auto &w : vu.m_flagPipeline)
+        if (w.valid)
+        {
+            o.put(rel(w.readyCycle)); o.put(rel(w.issueCycle)); o.put(w.mac); o.put(w.status); o.put(w.extraSticky); o.put(w.clip);
+            const uint8_t bits = uint8_t((w.writesMac ? 1 : 0) | (w.writesStatus ? 2 : 0) | (w.writesSticky ? 4 : 0) | (w.writesClip ? 8 : 0));
+            o.put(bits);
+        }
+    n = 0;
+    for (const auto &w : vu.m_storePipeline) n += w.valid;
+    o.put(n);
+    for (const auto &w : vu.m_storePipeline) if (w.valid) { o.put(rel(w.readyCycle)); o.put(w.address); o.raw(w.words.data(), 16); o.put(w.laneMask); }
+    const auto sc = [&](const auto &e) { const uint8_t v = e.valid ? 1 : 0; o.put(v); o.put(rel(e.readyCycle)); o.put(e.value); o.put(e.statusDi); };
+    sc(vu.m_fdiv); sc(vu.m_efu[0]); sc(vu.m_efu[1]);
+    const uint8_t xg = vu.m_xgkick.active ? 1 : 0;
+    o.put(xg);
 }
+bool s_rgIn = false;
+uint32_t s_rgSeen = 0, s_rgKept = 0;
+RgBuf s_rgRec;
+std::vector<uint8_t> s_rgMem0;
+FILE *s_rgFile = nullptr;
+void rgStep(VU1Interpreter &vu, VuNativeCtx &c, uint32_t pc)
+{
+    const bool inRegion = pc >= 0x1FE0u && pc < 0x2200u;
+    if (!s_rgIn)
+    {
+        if (pc != 0x1FE0u || s_rgKept >= 1500u || vu.m_xgkick.active || vu.m_state.branchPending || vu.m_state.ebit) return;
+        const uint32_t seen = s_rgSeen++;
+        if (seen >= 300u && (seen & 511u) != 0u) return;
+        s_rgRec.b.clear();
+        s_rgRec.put(pc);
+        s_rgRec.put(static_cast<uint64_t>(vu.m_cycle));
+        s_rgRec.raw(&vu.m_state, sizeof(vu.m_state));
+        const uint32_t dsz = c.dataSize;
+        s_rgRec.put(dsz);
+        s_rgRec.raw(c.vuData, dsz);
+        rgPending(s_rgRec, vu, vu.m_cycle);
+        s_rgMem0.assign(c.vuData, c.vuData + dsz);
+        s_rgIn = true;
+        return;
+    }
+    if (inRegion) return;
+    s_rgIn = false;
+    s_rgRec.put(pc);
+    s_rgRec.put(static_cast<uint64_t>(vu.m_cycle));
+    s_rgRec.raw(&vu.m_state, sizeof(vu.m_state));
+    uint32_t nd = 0;
+    const size_t ndAt = s_rgRec.b.size();
+    s_rgRec.put(nd);
+    for (uint32_t q = 0; q < c.dataSize / 16u; ++q)
+        if (std::memcmp(s_rgMem0.data() + q * 16u, c.vuData + q * 16u, 16u) != 0) { s_rgRec.put(q); s_rgRec.raw(c.vuData + q * 16u, 16u); ++nd; }
+    std::memcpy(s_rgRec.b.data() + ndAt, &nd, 4);
+    rgPending(s_rgRec, vu, vu.m_cycle);
+    if (!s_rgFile) s_rgFile = std::fopen("logs/vu1region.bin", "wb");
+    if (!s_rgFile) return;
+    const uint32_t tag = 0x204E4752u, bytes = static_cast<uint32_t>(s_rgRec.b.size());
+    std::fwrite(&tag, 4, 1, s_rgFile);
+    std::fwrite(&bytes, 4, 1, s_rgFile);
+    std::fwrite(s_rgRec.b.data(), 1, bytes, s_rgFile);
+    std::fflush(s_rgFile);
+    ++s_rgKept;
+}
+}
+
+namespace
+{
+// PERF-LB (Level B, PS2X_VU1_KERNEL=1): closed-form replacement of the whole skinned-vertex loop block (pc 20F8, steady-state entry hash 11f8...).
+// The model, provenance and teleport checks are tools/vu1gen/lbmodel.py, lbprov*.py, lbtele.py (50k teleports over the region corpus, 0 mismatches).
+// Entry at boundary p (before pass p), K = (vi8 - vi9) / 4 passes remain; the block's own exit state is boundary b = p + K. Every pass is nine FMACs on
+// fixed stage values (vertex t: T5, Q, R7 = T5*Q, S2Q = S2*Q, Wraw, BV = B*vf16, inner, prod = S3*inner) so the whole loop is computed per vertex.
+// Declines (returns false, nothing touched) whenever a precondition is not provably the steady state; the real block then runs.
+const bool s_lbOn = []() { const char *e = std::getenv("PS2X_VU1_KERNEL"); return e && e[0] == '1'; }();
+constexpr uint64_t kLbLoopHash = 0x11f866f1c074d242ull;
+uint64_t s_lbTaken = 0, s_lbDeclined = 0, s_lbPasses = 0, s_lbWhy[8] = {};
+
+struct LbOp
+{
+    __m128 res;
+    uint32_t cur, xf, mac;
+};
+
+template <int KIND, int DEST>
+inline LbOp lbFmac(__m128 a, __m128 b, __m128 ac) // operands as in fmacR (normalised here); result lanes outside DEST are unspecified
+{
+    constexpr bool madd = KIND == 2 || KIND == 3;
+    constexpr uint32_t D4 = vuhot::rev4(static_cast<uint32_t>(DEST));
+    const __m128 a4 = vuhot::N4(a), b4 = vuhot::N4(b);
+    __m128 ac4 = _mm_setzero_ps();
+    __m128 val;
+    if constexpr (KIND == 4)
+        val = _mm_mul_ps(a4, b4);
+    else
+    {
+        ac4 = vuhot::N4(ac);
+        val = (KIND == 2) ? _mm_fmadd_ps(a4, b4, ac4) : _mm_fnmadd_ps(a4, b4, ac4);
+    }
+    const __m128i i2 = _mm_set1_epi32(2), i253 = _mm_set1_epi32(253), iFF = _mm_set1_epi32(0xFF);
+    const __m128i ev = _mm_and_si128(_mm_srli_epi32(_mm_castps_si128(val), 23), iFF);
+    uint32_t bad = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_cmplt_epi32(ev, i2), _mm_cmpgt_epi32(ev, i253)))));
+    __m128 prodf = _mm_setzero_ps();
+    if constexpr (madd)
+    {
+        prodf = _mm_mul_ps(a4, b4);
+        const __m128i ep = _mm_and_si128(_mm_srli_epi32(_mm_castps_si128(prodf), 23), iFF);
+        bad |= static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_cmplt_epi32(ep, i2), _mm_cmpgt_epi32(ep, i253)))));
+    }
+    uint32_t mac, status4, extra = 0u;
+    __m128i vb = _mm_castps_si128(val);
+    if ((bad & D4) == 0u)
+    {
+        const uint32_t s = static_cast<uint32_t>(_mm_movemask_ps(val)) & D4;
+        mac = vuhot::rev4(s) << 4;
+        status4 = s ? 2u : 0u;
+        if constexpr (madd)
+            extra = (static_cast<uint32_t>(_mm_movemask_ps(prodf)) & D4) ? 2u : 0u;
+    }
+    else
+    {
+        const vuhot::FmacSlow sl = vuhot::fmacSlow<KIND, DEST>(a4, b4, ac4, val);
+        vb = sl.vb;
+        mac = sl.mac;
+        status4 = sl.status4;
+        extra = sl.extra;
+    }
+    return LbOp{_mm_castsi128_ps(vb), status4 & 0xFu, extra, mac};
+}
+
+inline __m128 lbBc(__m128 v, int lane) // broadcast one lane (operand normalisation happens in lbFmac)
+{
+    switch (lane)
+    {
+    case 0: return _mm_shuffle_ps(v, v, 0x00);
+    case 1: return _mm_shuffle_ps(v, v, 0x55);
+    case 2: return _mm_shuffle_ps(v, v, 0xAA);
+    default: return _mm_shuffle_ps(v, v, 0xFF);
+    }
+}
+
+inline __m128 lbClamp(__m128 x, float iReg) // MAXx.xyzw (vf0.x = 0) then MINIi.xyzw
+{
+    const __m128 a = vuhot::N4(x);
+    return _mm_min_ps(_mm_max_ps(a, _mm_setzero_ps()), _mm_set1_ps(vuhot::N(iReg)));
+}
+
+template <int SCALE>
+inline __m128i lbFtoi(__m128 a) // vuhot::ftoi core
+{
+    const __m128 a4 = vuhot::N4(a);
+    const __m256d sc = _mm256_mul_pd(_mm256_cvtps_pd(a4), _mm256_set1_pd(static_cast<double>(static_cast<float>(SCALE))));
+    __m128i t = _mm256_cvttpd_epi32(sc);
+    const uint32_t ge = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_cmp_pd(sc, _mm256_set1_pd(static_cast<double>(std::numeric_limits<int32_t>::max())), _CMP_GE_OQ)));
+    const uint32_t le = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_cmp_pd(sc, _mm256_set1_pd(static_cast<double>(std::numeric_limits<int32_t>::min())), _CMP_LE_OQ)));
+    t = _mm_blendv_epi8(t, _mm_set1_epi32(std::numeric_limits<int32_t>::max()), vuhot::laneMask4(ge));
+    t = _mm_blendv_epi8(t, _mm_set1_epi32(std::numeric_limits<int32_t>::min()), vuhot::laneMask4(le));
+    return t;
+}
+
+struct LbV
+{
+    int32_t idx;
+    __m128 A, B, S3, S2, T5, R7, S2Q, inner, BV, prod;
+    float Q, Wraw;
+    uint32_t di, sticky[8];
+    uint32_t macIn, curIn;
+};
+
+inline int32_t lbS16(int32_t v) { return static_cast<int16_t>(static_cast<uint16_t>(v)); }
+
+bool lbLoop(VU1Interpreter &vu, VuNativeCtx &c)
+{
+    VU1State &st = vu.m_state;
+    constexpr int kMaxPasses = 64;
+    const auto decline = [&](int why) { ++s_lbDeclined; ++s_lbWhy[why]; return false; };
+    if (vu.m_xgkick.active || st.branchPending || st.ebit || vu.m_stopRequested || st.haltAfterDelaySlot)
+        return decline(0);
+    const int32_t vi2 = st.vi[2], vi3 = st.vi[3], vi4 = st.vi[4], vi5 = st.vi[5], vi6 = st.vi[6], vi8 = st.vi[8], vi9 = st.vi[9];
+    const int32_t dd = lbS16(vi8 - vi9), d9 = lbS16(vi9 - vi6 - 12);
+    if (dd <= 0 || (dd & 3) != 0 || d9 < 0 || (d9 & 3) != 0)
+        return decline(1);
+    const int32_t K = dd / 4, p = d9 / 4 + 1, b = p + K;
+    if (K > kMaxPasses || p < 2 || vi5 != 2 * (b + 2))
+        return decline(2);
+    if (static_cast<int64_t>(c.budgetEnd) - static_cast<int64_t>(vu.m_cycle) <= 15 * K + 160)
+        return decline(3);
+    if (!vu.m_fdiv.valid || (vu.m_fdiv.statusDi & 0x30u) != 0u || vu.m_fdiv.readyCycle != vu.m_cycle + 6u)
+        return decline(4);
+    const uint32_t dsz = c.dataSize;
+    const uint8_t *mem = c.vuData;
+    if (dsz < 0x4000u || (dsz & (dsz - 1u)) != 0u)
+        return decline(5);
+    const auto ld32 = [&](uint32_t qw, uint32_t lane) { uint32_t v; std::memcpy(&v, mem + ((qw * 16u) & (dsz - 1u)) + lane * 4u, 4); return v; };
+    const auto ldq = [&](uint32_t qw) { return _mm_loadu_ps(reinterpret_cast<const float *>(mem + ((qw * 16u) & (dsz - 1u)))); };
+
+    const __m128 vf1 = _mm_loadu_ps(st.vf[1]), vf2 = _mm_loadu_ps(st.vf[2]), vf3 = _mm_loadu_ps(st.vf[3]), vf4 = _mm_loadu_ps(st.vf[4]), vf16 = _mm_loadu_ps(st.vf[16]);
+    const float iReg = st.i;
+    const __m128 zero = _mm_setzero_ps(), vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    const int32_t idxBase = vi4 - (p + 2), s3Base = vi3 - (p + 2), s2Base = vi2 - (p + 1);
+    const LbOp accw = lbFmac<4, 1>(vf0, lbBc(vf1, 2), zero); // MULAz.w ACC = vf0 * vf1.z
+
+    // stage values of vertices p-1 .. b+1
+    LbV V[kMaxPasses + 3];
+    const int32_t t0v = p - 1, nV = K + 3;
+    for (int i = 0; i < nV; ++i)
+    {
+        const int32_t t = t0v + i;
+        LbV &r = V[i];
+        r.idx = lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(idxBase + t)), 0)));
+        r.A = ldq(static_cast<uint32_t>(636 + r.idx));
+        r.B = ldq(static_cast<uint32_t>(716 + r.idx));
+        r.S3 = ldq(static_cast<uint32_t>(static_cast<uint16_t>(s3Base + t)));
+        r.S2 = ldq(static_cast<uint32_t>(static_cast<uint16_t>(s2Base + t)));
+        const LbOp mula = lbFmac<4, 15>(vf3, r.A, zero);
+        const LbOp t5 = lbFmac<2, 15>(vf4, lbBc(r.A, 3), mula.res);
+        r.T5 = t5.res;
+        const float den = vuhot::N(_mm_cvtss_f32(lbBc(r.T5, 3)));
+        float q;
+        r.di = 0u;
+        if (den == 0.0f)
+        {
+            r.di = 0x20u; // num is 1.0
+            q = std::signbit(den) ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+        }
+        else
+            q = vuhot::normResult(1.0f / den);
+        r.Q = vuhot::normResult(q);
+        const __m128 qb = _mm_set1_ps(r.Q);
+        const LbOp r7 = lbFmac<4, 14>(r.T5, qb, zero);
+        const LbOp s2q = lbFmac<4, 14>(r.S2, qb, zero);
+        const LbOp w = lbFmac<2, 1>(vf1, qb, accw.res);
+        const LbOp bv = lbFmac<4, 15>(r.B, vf16, zero);
+        const LbOp in = lbFmac<2, 15>(vf2, vf16, bv.res);
+        const LbOp pr = lbFmac<4, 15>(r.S3, in.res, zero);
+        r.R7 = r7.res;
+        r.S2Q = s2q.res;
+        r.Wraw = _mm_cvtss_f32(lbBc(w.res, 3));
+        r.BV = bv.res;
+        r.inner = in.res;
+        r.prod = pr.res;
+        r.sticky[0] = mula.cur | mula.xf;
+        r.sticky[1] = t5.cur | t5.xf;
+        r.sticky[2] = r7.cur | r7.xf;
+        r.sticky[3] = s2q.cur | s2q.xf;
+        r.sticky[4] = w.cur | w.xf;
+        r.sticky[5] = bv.cur | bv.xf;
+        r.sticky[6] = in.cur | in.xf;
+        r.sticky[7] = pr.cur | pr.xf;
+        r.macIn = in.mac;
+        r.curIn = in.cur;
+    }
+    const auto V_ = [&](int32_t t) -> LbV & { return V[t - t0v]; };
+    // every DIV that lands inside the range must be free of D/I flags (the landing would set status bits); the pending one (b+1) may carry any
+    for (int32_t t = p + 1; t <= b; ++t)
+        if (V_(t).di != 0u)
+            return decline(6);
+
+    // ---- commit ----
+    const uint64_t cycle0 = vu.m_cycle;
+    uint32_t status = st.status;
+    const uint32_t ubase = static_cast<uint32_t>(static_cast<uint16_t>(vi6));
+    const auto putw = [&](int32_t qwOff, int lane, uint32_t v)
+    {
+        const uint32_t qw = ubase + static_cast<uint32_t>(qwOff);
+        std::memcpy(c.vuData + ((qw * 16u) & (dsz - 1u)) + static_cast<uint32_t>(lane) * 4u, &v, 4);
+    };
+    const uint32_t accwSticky = accw.cur | accw.xf;
+    for (int32_t k = p; k < b; ++k)
+    {
+        const LbV &vm1 = V_(k - 1), &v0 = V_(k), &v1 = V_(k + 1), &v2 = V_(k + 2);
+        const uint32_t sticky = v1.sticky[7] | v0.sticky[2] | accwSticky | v1.sticky[3] | v1.sticky[4] | v2.sticky[0] | v2.sticky[1] | v2.sticky[5] | v2.sticky[6];
+        status = (status & 0xC00u) | ((status & 0x3C0u) | ((sticky & 0xFu) << 6)) | v2.curIn;
+        vuflags::flgPush(vuflags::s_flgMac[1], cycle0 + 15u * static_cast<uint64_t>(k - p) + 11u, v2.macIn);
+        alignas(16) uint32_t tmp[4];
+        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), lbFtoi<16>(lbClamp(_mm_set1_ps(vm1.Wraw), iReg)));
+        putw(4 * k - 3, 3, tmp[0]);
+        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), lbFtoi<16>(vm1.R7));
+        for (int l = 0; l < 3; ++l) putw(4 * k, l, tmp[l]);
+        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), lbFtoi<1>(lbClamp(v0.prod, iReg)));
+        for (int l = 0; l < 4; ++l) putw(4 * k + 3, l, tmp[l]);
+        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), _mm_castps_si128(v1.S2Q));
+        for (int l = 0; l < 3; ++l) putw(4 * k + 6, l, tmp[l]);
+        putw(4 * k + 12, 3, static_cast<uint32_t>(v2.idx) & 0xFFFFu);
+    }
+    status &= ~0x30u; // the pending DIV landed during the first pass; its D/I bits are 0 (checked above)
+    const LbV &eM1 = V_(b - 1), &e0 = V_(b), &e1 = V_(b + 1);
+    const auto setv = [&](int r, __m128 v) { _mm_storeu_ps(st.vf[r], v); };
+    const auto setv3 = [&](int r, __m128 v) { float t4[4]; _mm_storeu_ps(t4, v); st.vf[r][0] = t4[0]; st.vf[r][1] = t4[1]; st.vf[r][2] = t4[2]; };
+    setv(5, e1.T5);
+    {
+        alignas(16) uint32_t t6[4];
+        _mm_store_si128(reinterpret_cast<__m128i *>(t6), lbFtoi<16>(eM1.R7));
+        uint32_t w6[4];
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(w6), lbFtoi<16>(lbClamp(_mm_set1_ps(eM1.Wraw), iReg)));
+        t6[3] = w6[0];
+        std::memcpy(st.vf[6], t6, 16);
+    }
+    {
+        const __m128 cw = lbClamp(_mm_set1_ps(eM1.Wraw), iReg);
+        setv3(7, eM1.R7);
+        st.vf[7][3] = _mm_cvtss_f32(cw);
+    }
+    setv(8, lbClamp(e0.prod, iReg));
+    setv3(9, e0.T5);
+    st.vf[9][3] = _mm_cvtss_f32(_mm_max_ps(vuhot::N4(_mm_set1_ps(e0.Wraw)), _mm_setzero_ps()));
+    setv(10, e1.S3);
+    setv(11, e1.inner);
+    setv3(12, e0.S2Q);
+    _mm_storeu_ps(st.acc, e1.BV);
+    st.q = e0.Q;
+    for (int i = 2; i <= 4; ++i) st.vi[i] = lbS16(st.vi[i] + K);
+    st.vi[7] = e1.idx;
+    st.vi[9] = lbS16(vi9 + 4 * K);
+    st.status = status;
+    const uint64_t S = cycle0 + 15u * static_cast<uint64_t>(K - 1); // start of the last pass: the block's exit bookkeeping is relative to it
+    vu.m_cycle = S + 15u;
+    st.cycles = vu.m_cycle;
+    vu.m_fdiv.valid = true;
+    vu.m_fdiv.readyCycle = S + 21u;
+    vu.m_fdiv.value = e1.Q;
+    vu.m_fdiv.statusDi = e1.di & 0x30u;
+    st.pc = 0x2170u;
+    st.branchPending = false;
+    vu.m_viBranchBackupValid = false;
+    c.instrs += 15u * static_cast<uint32_t>(K);
+    *c.nextReadyW = 0u;
+    for (int l = 0; l < 4; ++l)
+    {
+        vu.m_accReady[l] = S + 11u;
+        vu.m_vfReady[10][l] = S + 12u;
+        vu.m_vfReady[11][l] = S + 15u;
+        vu.m_vfReady[5][l] = S + 13u;
+        vu.m_vfReady[6][l] = S + 18u;
+        vu.m_vfReady[8][l] = S + 16u;
+    }
+    for (int l = 0; l < 3; ++l)
+    {
+        vu.m_vfReady[12][l] = S + 10u;
+        vu.m_vfReady[7][l] = S + 5u;
+        vu.m_vfReady[9][l] = S + 13u;
+    }
+    vu.m_vfReady[7][3] = S + 7u;
+    vu.m_vfReady[9][3] = S + 17u;
+    vu.m_viReady[2] = S + 2u;
+    vu.m_viReady[3] = S + 9u;
+    vu.m_viReady[4] = S + 3u;
+    vu.m_viReady[7] = S + 4u;
+    vu.m_viReady[9] = S + 12u;
+    c.nextHash = kLbLoopHash;
+    c.hashValid = true;
+    ++s_lbTaken;
+    s_lbPasses += static_cast<uint64_t>(K);
+    if ((s_lbTaken & 0xFFFFull) == 0u)
+        std::printf("[probe] lb kernel taken=%llu passes=%llu declined=%llu (why0-6: %llu %llu %llu %llu %llu %llu %llu)\n", (unsigned long long)s_lbTaken, (unsigned long long)s_lbPasses,
+                    (unsigned long long)s_lbDeclined, (unsigned long long)s_lbWhy[0], (unsigned long long)s_lbWhy[1], (unsigned long long)s_lbWhy[2], (unsigned long long)s_lbWhy[3],
+                    (unsigned long long)s_lbWhy[4], (unsigned long long)s_lbWhy[5], (unsigned long long)s_lbWhy[6]);
+    return true;
+}
+} // namespace
 
 uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : s_tsc; }
 uint32_t vu1CoverageCount() { return s_svCov; } // PROBE-CAPTURE
@@ -3878,12 +4267,14 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
 {
     c.hashValid = false; // the interpreter may have executed pairs since the last hot block
     SvPcGuard svg(vu.m_cycle); // PROBE-SURVEY
+    s_rgIn = false; // PROBE-REGION: a region interrupted by the end of a run is discarded
     while (vu.m_cycle < c.budgetEnd && !vu.m_stopRequested)
     {
         const uint32_t pc = vu.m_state.pc;
         if ((pc & 7u) != 0u || pc >= 0x4000u)
             return 2;
         if (s_svOn && pc < 0x4000u) svg.at(pc); // PROBE-SURVEY
+        if (s_rgOn) rgStep(vu, c, pc); // PROBE-REGION
         // PERF-IE: hot blocks with static timing (generated/vu1_hot_blocks.cpp); any unknown state falls back to the pair executors
         if (kVu1HotStart[pc >> 3] && (s_xgHot || !vu.m_xgkick.active) && !vu.m_state.branchPending && !vu.m_state.ebit &&
             !vu.m_state.haltAfterDelaySlot && c.budgetEnd - vu.m_cycle > 160u)
@@ -3894,6 +4285,17 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 c.hashValid = true;
             }
             // PERF-HC: direct-mapped (pc -> {entry hash, block}) cache in front of the switch lookup; misses (no block) are cached too
+            if (s_lbOn && pc == 0x20F8u && c.nextHash == kLbLoopHash && lbLoop(vu, c)) // PERF-LB: whole loop block in closed form
+            {
+                if (c.check && c.ops->blkHash(vu) != c.nextHash)
+                {
+                    ++c.checkFail;
+                    if (c.checkFail <= 6)
+                        std::printf("[probe] lb kernel exit-hash MISMATCH at pc=%04X (loop entered at 20F8)\n", vu.m_state.pc);
+                    c.hashValid = false;
+                }
+                continue;
+            }
             HotSlot &hs = s_hotSlot[pc >> 3];
             VuHotFn hf;
             if (hs.ok && hs.h == c.nextHash)
