@@ -3812,6 +3812,49 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                 const double mpt = rpRunTicks ? (static_cast<double>(rpRunNs) / 1e6) / static_cast<double>(rpRunTicks) : 0.0;
                 std::fprintf(out, "kernels (calls taken / ms over all reps): vertex=%llu/%.2f copy=%llu/%.2f skinFull=%llu/%.2f skinLoop=%llu/%.2f\n", (unsigned long long)kc[0], kt[0] * mpt,
                              (unsigned long long)kc[1], kt[1] * mpt, (unsigned long long)kc[2], kt[2] * mpt, (unsigned long long)kc[3], kt[3] * mpt);
+                const uint64_t *ts = vu1NativeStats(1);
+                std::fprintf(out, "run_ms %.2f = kernels %.2f + hot blocks %.2f (%llu timed) + slow pairs %.2f (%llu timed) + other %.2f\n", static_cast<double>(rpRunNs) / 1e6,
+                             (kt[0] + kt[1] + kt[2] + kt[3]) * mpt, ts[0] * mpt, (unsigned long long)ts[2], ts[1] * mpt, (unsigned long long)ts[3],
+                             static_cast<double>(rpRunNs) / 1e6 - (kt[0] + kt[1] + kt[2] + kt[3] + ts[0] + ts[1]) * mpt);
+                {
+                    const uint32_t eN = *reinterpret_cast<const uint32_t *>(vu1NativeStats(14));
+                    struct EH { uint32_t pc, act; uint64_t hash, n; };
+                    const EH *eh = reinterpret_cast<const EH *>(vu1NativeStats(13));
+                    std::fprintf(out, "kernel entry hashes (pc act hash count):");
+                    for (uint32_t i = 0; i < eN; ++i)
+                        std::fprintf(out, " %04X/%u/%016llx/%llu", eh[i].pc, eh[i].act, (unsigned long long)eh[i].hash, (unsigned long long)eh[i].n);
+                    std::fprintf(out, "\n");
+                    const uint64_t *xk = vu1NativeStats(9);
+                    std::fprintf(out, "xg kernel runs=%llu overlap declines=%llu\n", (unsigned long long)xk[0], (unsigned long long)xk[1]);
+                }
+                {
+                    const uint64_t *ca = vu1NativeStats(0);
+                    std::fprintf(out, "slow-pair causes: noStart=%llu xgActive=%llu state=%llu miss=%llu declined=%llu\n", (unsigned long long)ca[0], (unsigned long long)ca[1], (unsigned long long)ca[2],
+                                 (unsigned long long)ca[3], (unsigned long long)ca[4]);
+                    static const char *const nm[3] = {"noStart", "miss", "declined"};
+                    for (int w = 0; w < 3; ++w)
+                    {
+                        const uint64_t *pn = vu1NativeStats(10 + w);
+                        uint32_t idx[0x800];
+                        for (uint32_t i = 0; i < 0x800; ++i) idx[i] = i;
+                        std::partial_sort(idx, idx + 16, idx + 0x800, [&](uint32_t a, uint32_t b) { return pn[a] > pn[b]; });
+                        std::fprintf(out, "%s pcs (pc:count):", nm[w]);
+                        for (int k = 0; k < 16; ++k)
+                            std::fprintf(out, " %04X:%llu", idx[k] << 3, (unsigned long long)pn[idx[k]]);
+                        std::fprintf(out, "\n");
+                    }
+                }
+                for (int w = 0; w < 2; ++w) // top entry pcs by time over the whole corpus: hot blocks, then slow pairs
+                {
+                    const uint64_t *pt = vu1NativeStats(4 + 2 * w), *pn = vu1NativeStats(5 + 2 * w);
+                    uint32_t idx[0x800];
+                    for (uint32_t i = 0; i < 0x800; ++i) idx[i] = i;
+                    std::partial_sort(idx, idx + 24, idx + 0x800, [&](uint32_t a, uint32_t b) { return pt[a] > pt[b]; });
+                    std::fprintf(out, "%s top (pc:ms/calls):", w ? "slow" : "hot");
+                    for (int k = 0; k < 24; ++k)
+                        std::fprintf(out, " %04X:%.1f/%llu", idx[k] << 3, pt[idx[k]] * mpt, (unsigned long long)pn[idx[k]]);
+                    std::fprintf(out, "\n");
+                }
             }
             std::fclose(out);
             s_rpDone = true;
@@ -4417,7 +4460,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             emit("b", v.m_viBranchBackupReg, 0, 0);
         // PERF-XG: with PS2X_VU1_XG_HOT=1 the hot blocks advance a running XGKICK transfer themselves, so the timing signature
         // must not depend on it (otherwise no block recorded without a transfer could ever match).
-        static const bool xgHot = []() { const char *e = std::getenv("PS2X_VU1_XG_HOT"); return e && e[0] == '1'; }();
+        static const bool xgHot = []() { const char *e = std::getenv("PS2X_VU1_XG_HOT"); return !(e && e[0] == '0'); }(); // default on, see s_xgHot in vu1_native_dispatch.cpp
         if (v.m_xgkick.active && !xgHot)
             emit("x", 1, 0, 0);
     };

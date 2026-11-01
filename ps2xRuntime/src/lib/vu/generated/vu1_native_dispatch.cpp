@@ -3835,6 +3835,8 @@ const StepFn kStep[2048] = {
 #include <vector>
 #include <intrin.h>
 
+VuHotFn vu1HotLookupXg(uint32_t pc, uint64_t entryHash); // generated/vu1_hot_blocks.cpp: transfer-aware block family
+
 namespace
 {
 uint64_t s_hotBlocks = 0, s_hotPairs = 0, s_slowPairs = 0;
@@ -3843,12 +3845,28 @@ uint64_t s_hotBlocks = 0, s_hotPairs = 0, s_slowPairs = 0;
 uint64_t s_cause[6] = {};
 struct HotSlot { uint64_t h; VuHotFn fn; bool ok; };
 HotSlot s_hotSlot[sizeof(kVu1HotStart) / sizeof(kVu1HotStart[0])] = {}; // PERF-HC
+HotSlot s_hotSlotX[sizeof(kVu1HotStart) / sizeof(kVu1HotStart[0])] = {}; // PERF-HC: same cache for the transfer-aware block family (used while an XGKICK transfer runs)
 const bool s_fuseOn = []() { const char *e = std::getenv("PS2X_VU1_FUSE"); return e && e[0] == '1'; }();
 uint64_t s_fused = 0; // PERF-FUSE iterations run without a dispatcher round
 uint64_t s_tsc[4] = {}; // hot ticks, slow ticks, hot blocks timed, slow pairs timed
 uint64_t s_pcT[2][0x800] = {}, s_pcN[2][0x800] = {}; // PERF-LB per-entry-pc ticks/count (PS2X_VU1_TSC=1): [0] hot blocks, [1] slow pairs; index pc>>3
+struct EntryHashRec { uint32_t pc, act; uint64_t hash, n; };
+EntryHashRec s_entryHash[96] = {}; // PERF-LB (PS2X_VU1_TSC=1): timing hash seen at the kernel entry pcs, split by XGKICK-active, to see why a kernel's entry hash does not match
+uint32_t s_entryHashN = 0;
+inline void noteEntryHash(uint32_t pc, uint64_t hash, bool act)
+{
+    for (uint32_t i = 0; i < s_entryHashN; ++i)
+        if (s_entryHash[i].pc == pc && s_entryHash[i].hash == hash && s_entryHash[i].act == (act ? 1u : 0u))
+        {
+            ++s_entryHash[i].n;
+            return;
+        }
+    if (s_entryHashN < 96u)
+        s_entryHash[s_entryHashN++] = EntryHashRec{pc, act ? 1u : 0u, hash, 1u};
+}
+uint64_t s_causePc[3][0x800] = {}; // PERF-LB: slow-pair cause by pc (PS2X_VU1_TSC=1): [0] not a hot start, [1] hot start but no block for this timing state (miss), [2] block declined
 uint64_t s_kTicks[4] = {}, s_kCalls[4] = {}; // PERF-LB kernel time (PS2X_VU1_TSC=1): vertex routine, copy, skinned full, skinned loop; declined attempts are timed too
-const bool s_xgHot = []() { const char *e = std::getenv("PS2X_VU1_XG_HOT"); return e && e[0] == '1'; }();
+const bool s_xgHot = []() { const char *e = std::getenv("PS2X_VU1_XG_HOT"); return !(e && e[0] == '0'); }(); // PERF-XG: on by default (PS2X_VU1_XG_HOT=0 restores the old split); must match the timing hash in ps2_vu1_core.cpp
 const bool s_tscOn = []() { const char *e = std::getenv("PS2X_VU1_TSC"); return e && e[0] == '1'; }();
 // PROBE-SURVEY: entries and cycles per dispatch-loop pc (PS2X_VU1_SURVEY=1 -> logs/vu1_pc_survey.txt); generated file only, template not synced
 const bool s_svOn = []() { const char *e = std::getenv("PS2X_VU1_SURVEY"); const char *c = std::getenv("PS2X_VU1_CAPTURE"); return (e && e[0] == '1') || (c && c[0] == '1'); }();
@@ -4376,7 +4394,7 @@ bool lbLoop(VU1Interpreter &vu, VuNativeCtx &c)
 // Spec and validation: tools/vu1gen/lbfull.py (exit state from the entry state alone, checked against the recorded exit and the exact model).
 // Entry contract (all 1500 corpus entries): every pipeline empty, no pending DIV, no running XGKICK. Exit: pc = vi15 * 8 with the XGKICK started by the
 // real delay-slot pair, so the last two pairs are executed with the same calls as the tail block.
-constexpr uint64_t kLbEntryHash = 0xed9ddb4fd6ac295full, kLbExitHash = 0xb2116da548f0fb1bull;
+constexpr uint64_t kLbEntryHash = 0xed9ddb4fd6ac295full, kLbExitHash = 0x1234ABCDull; // PERF-XG: empty token list (the old value was this state plus the transfer-active token, which the hash no longer carries)
 uint64_t s_lbFullTaken = 0, s_lbFullDeclined = 0, s_lbFullVerts = 0, s_lbFullWhy[10] = {};
 
 struct LbK
@@ -5399,7 +5417,7 @@ bool lbVert(VU1Interpreter &vu, VuNativeCtx &c)
 }
 } // namespace
 
-uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : (which == 2u ? s_kTicks : (which == 3u ? s_kCalls : (which == 4u ? s_pcT[0] : (which == 5u ? s_pcN[0] : (which == 6u ? s_pcT[1] : (which == 7u ? s_pcN[1] : (which == 8u ? &s_fused : (which == 9u ? s_xgK : s_tsc)))))))); }
+uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : (which == 2u ? s_kTicks : (which == 3u ? s_kCalls : (which == 4u ? s_pcT[0] : (which == 5u ? s_pcN[0] : (which == 6u ? s_pcT[1] : (which == 7u ? s_pcN[1] : (which == 8u ? &s_fused : (which == 9u ? s_xgK : (which >= 10u && which <= 12u ? s_causePc[which - 10u] : (which == 13u ? reinterpret_cast<uint64_t *>(s_entryHash) : (which == 14u ? reinterpret_cast<uint64_t *>(&s_entryHashN) : s_tsc))))))))))); }
 
 template <class F>
 static inline bool lbTimed(uint32_t k, F &&f)
@@ -5481,13 +5499,15 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 continue;
             }
             if (s_svOn) svNovelPair(pc, c.nextHash); // PROBE-CAPTURE
-            HotSlot &hs = s_hotSlot[pc >> 3];
+            if (s_tscOn && (pc == 0x2440u || pc == 0x1FE0u || pc == 0x0C80u || pc == 0x20F8u)) noteEntryHash(pc, c.nextHash, vu.m_xgkick.active);
+            const bool xa = vu.m_xgkick.active; // the optimised family declines while a transfer runs; the transfer-aware family steps it every cycle
+            HotSlot &hs = (xa ? s_hotSlotX : s_hotSlot)[pc >> 3];
             VuHotFn hf;
             if (hs.ok && hs.h == c.nextHash)
                 hf = hs.fn;
             else
             {
-                hf = vu1HotLookup(pc, c.nextHash);
+                hf = xa ? vu1HotLookupXg(pc, c.nextHash) : vu1HotLookup(pc, c.nextHash);
                 hs.h = c.nextHash;
                 hs.fn = hf;
                 hs.ok = true;
@@ -5544,12 +5564,19 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                     continue;
                 }
                 ++s_cause[4]; // declined before executing anything
+                ++s_causePc[2][(pc >> 3) & 0x7FFu];
             }
             else
+            {
                 ++s_cause[3];
+                ++s_causePc[1][(pc >> 3) & 0x7FFu];
+            }
         }
         else if (!kVu1HotStart[pc >> 3])
+        {
             ++s_cause[0];
+            ++s_causePc[0][(pc >> 3) & 0x7FFu];
+        }
         else if (vu.m_xgkick.active && !s_xgHot)
             ++s_cause[1];
         else
