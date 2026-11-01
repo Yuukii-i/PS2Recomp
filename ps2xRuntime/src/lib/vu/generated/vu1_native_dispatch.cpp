@@ -3843,6 +3843,7 @@ uint64_t s_cause[6] = {};
 struct HotSlot { uint64_t h; VuHotFn fn; bool ok; };
 HotSlot s_hotSlot[sizeof(kVu1HotStart) / sizeof(kVu1HotStart[0])] = {}; // PERF-HC
 uint64_t s_tsc[4] = {}; // hot ticks, slow ticks, hot blocks timed, slow pairs timed
+uint64_t s_kTicks[4] = {}, s_kCalls[4] = {}; // PERF-LB kernel time (PS2X_VU1_TSC=1): vertex routine, copy, skinned full, skinned loop; declined attempts are timed too
 const bool s_xgHot = []() { const char *e = std::getenv("PS2X_VU1_XG_HOT"); return e && e[0] == '1'; }();
 const bool s_tscOn = []() { const char *e = std::getenv("PS2X_VU1_TSC"); return e && e[0] == '1'; }();
 // PROBE-SURVEY: entries and cycles per dispatch-loop pc (PS2X_VU1_SURVEY=1 -> logs/vu1_pc_survey.txt); generated file only, template not synced
@@ -5269,7 +5270,19 @@ bool lbVert(VU1Interpreter &vu, VuNativeCtx &c)
 }
 } // namespace
 
-uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : s_tsc; }
+uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : (which == 2u ? s_kTicks : (which == 3u ? s_kCalls : s_tsc)); }
+
+template <class F>
+static inline bool lbTimed(uint32_t k, F &&f)
+{
+    if (!s_tscOn)
+        return f();
+    const uint64_t t0 = __rdtsc();
+    const bool r = f();
+    s_kTicks[k] += __rdtsc() - t0;
+    s_kCalls[k] += r ? 1u : 0u;
+    return r;
+}
 uint32_t vu1CoverageCount() { return s_svCov; } // PROBE-CAPTURE
 
 int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
@@ -5294,7 +5307,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 c.hashValid = true;
             }
             // PERF-HC: direct-mapped (pc -> {entry hash, block}) cache in front of the switch lookup; misses (no block) are cached too
-            if (s_lbOn && pc == 0x2440u && c.nextHash == kHashVertEntry && lbVert(vu, c)) // PERF-LB: per-vertex routine
+            if (s_lbOn && pc == 0x2440u && c.nextHash == kHashVertEntry && lbTimed(0, [&] { return lbVert(vu, c); })) // PERF-LB: per-vertex routine
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
                 {
@@ -5305,7 +5318,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 }
                 continue;
             }
-            if (s_lbOn && pc == 0x0C80u && c.nextHash == kHashCopyEntry && lbCopy(vu, c)) // PERF-LB: stream copy command
+            if (s_lbOn && pc == 0x0C80u && c.nextHash == kHashCopyEntry && lbTimed(1, [&] { return lbCopy(vu, c); })) // PERF-LB: stream copy command
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
                 {
@@ -5316,7 +5329,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 }
                 continue;
             }
-            if (s_lbOn && pc == 0x1FE0u && c.nextHash == kLbEntryHash && lbFull(vu, c)) // PERF-LB: the whole routine 1FE0 -> JR in closed form
+            if (s_lbOn && pc == 0x1FE0u && c.nextHash == kLbEntryHash && lbTimed(2, [&] { return lbFull(vu, c); })) // PERF-LB: the whole routine 1FE0 -> JR in closed form
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
                 {
@@ -5327,7 +5340,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 }
                 continue;
             }
-            if (s_lbOn && pc == 0x20F8u && c.nextHash == kLbLoopHash && lbLoop(vu, c)) // PERF-LB: whole loop block in closed form
+            if (s_lbOn && pc == 0x20F8u && c.nextHash == kLbLoopHash && lbTimed(3, [&] { return lbLoop(vu, c); })) // PERF-LB: whole loop block in closed form
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
                 {

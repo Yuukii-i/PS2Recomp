@@ -5753,6 +5753,14 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                             (unsigned long long)(ts[2] - s_prevTsc[2]), (unsigned long long)(ts[3] - s_prevTsc[3]));
                 std::fflush(stdout);
                 {
+                    static uint64_t s_prevK[4] = {}, s_prevKc[4] = {};
+                    const uint64_t *kt = vu1NativeStats(2), *kc = vu1NativeStats(3);
+                    std::printf("[probe] ge vu1k kernel_ms: vertex=%.1f copy=%.1f skinFull=%.1f skinLoop=%.1f | calls: %llu %llu %llu %llu\n",
+                                (kt[0] - s_prevK[0]) * msPerTick, (kt[1] - s_prevK[1]) * msPerTick, (kt[2] - s_prevK[2]) * msPerTick, (kt[3] - s_prevK[3]) * msPerTick,
+                                (unsigned long long)(kc[0] - s_prevKc[0]), (unsigned long long)(kc[1] - s_prevKc[1]), (unsigned long long)(kc[2] - s_prevKc[2]), (unsigned long long)(kc[3] - s_prevKc[3]));
+                    for (int k = 0; k < 4; ++k) { s_prevK[k] = kt[k]; s_prevKc[k] = kc[k]; }
+                }
+                {
                     static uint64_t s_prevRt[6] = {};
                     std::printf("[probe] ge vu1c run_total_ms=%.1f native_ms=%.1f setup_ms=%.1f runs=%llu hot_ns_per_pair=%.2f\n",
                                 (g_vuRunTicks[0] - s_prevRt[0]) * msPerTick, (g_vuRunTicks[1] - s_prevRt[1]) * msPerTick,
