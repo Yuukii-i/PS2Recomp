@@ -4074,7 +4074,11 @@ inline LbOp lbFmac(__m128 a, __m128 b, __m128 ac) // operands as in fmacR (norma
     const __m128 a4 = vuhot::N4(a), b4 = vuhot::N4(b);
     __m128 ac4 = _mm_setzero_ps();
     __m128 val;
-    if constexpr (KIND == 4)
+    if constexpr (KIND == 0)
+        val = _mm_add_ps(a4, b4);
+    else if constexpr (KIND == 1)
+        val = _mm_sub_ps(a4, b4);
+    else if constexpr (KIND == 4)
         val = _mm_mul_ps(a4, b4);
     else
     {
@@ -4848,6 +4852,421 @@ bool lbCopy(VU1Interpreter &vu, VuNativeCtx &c)
         std::printf("[probe] lb copy handler taken=%llu quads=%llu declined=%llu\n", (unsigned long long)s_hCopyTaken, (unsigned long long)s_hCopyQuads, (unsigned long long)s_hCopyDeclined);
     return true;
 }
+
+// PERF-LB handler 2440 (PS2X_VU1_KERNEL=1): the per-vertex transform / clip / assemble routine (vertex loop 24C8..25B0 with the trivial-reject chain 28A0..28F8).
+// Python spec and checks: tools/vu1gen/vspec.py (control, memory, integer regs, STATUS, vf / ACC / Q / I, clip: exact on every non-clipping record),
+// vcyc.py (cycles = 25 + 27 A + 28 B + 35 C0 + 41 C3 + 43 C4 + 45 C5; C1 / C2 unseen -> declined). Runs on a private copy of VU memory (the routine works in place and
+// can reach real clipping at 2900+, which is declined without side effects) and stops at the epilogue entry 25B8, whose hot block does XTOP / the 1023 swap / XGKICK.
+constexpr uint64_t kHashVertEntry = 0xb4f4b1b4da29db30ull, kHashVertExit = 0xc946c511275567c5ull;
+uint64_t s_vTaken = 0, s_vDeclined = 0, s_vVerts = 0, s_vWhy[8] = {};
+
+inline uint32_t lbClipBits(__m128 v)
+{
+    uint32_t w[4];
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(v));
+    const int32_t limit = (w[3] & 0x7F800000u) != 0u ? static_cast<int32_t>(w[3] & 0x7FFFFFFFu) : 0x007FFFFF;
+    uint32_t fl = 0u;
+    for (int k = 0; k < 3; ++k)
+    {
+        int32_t o0 = static_cast<int32_t>(w[k]);
+        int32_t o1 = static_cast<int32_t>(w[k] ^ 0x80000000u);
+        if (o0 > limit) fl |= 1u << (2 * k);
+        if (o1 > limit) fl |= 1u << (2 * k + 1);
+    }
+    return fl;
+}
+
+inline float lbDivQ(__m128 t, uint32_t &di) // DIV Q, vf0.w, T.w : 1.0 / den with the VU's zero-divisor result
+{
+    const float den = vuhot::N(_mm_cvtss_f32(lbBc(t, 3)));
+    float q;
+    di = 0u;
+    if (den == 0.0f)
+    {
+        di = 0x20u;
+        q = std::signbit(den) ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+    }
+    else
+        q = vuhot::normResult(1.0f / den);
+    return vuhot::normResult(q);
+}
+
+bool lbVert(VU1Interpreter &vu, VuNativeCtx &c)
+{
+    VU1State &st = vu.m_state;
+    constexpr int kMaxN = 300;
+    const auto decline = [&](int why) { ++s_vDeclined; ++s_vWhy[why]; return false; };
+    const uint32_t dsz = c.dataSize;
+    if (vu.m_xgkick.active || st.branchPending || st.ebit || vu.m_stopRequested || st.haltAfterDelaySlot || dsz != 0x4000u || !lbPipesEmpty(vu, c))
+        return decline(0);
+    const int32_t N = st.vi[5];
+    if (N < 1 || N > kMaxN)
+        return decline(1);
+    if (static_cast<int64_t>(c.budgetEnd) - static_cast<int64_t>(vu.m_cycle) <= 45 * static_cast<int64_t>(N) + 200)
+        return decline(2);
+
+    alignas(16) uint8_t mem[0x4000];
+    std::memcpy(mem, c.vuData, 0x4000);
+    const auto qa = [](int32_t qw) { return (static_cast<uint32_t>(qw) * 16u) & 0x3FFFu; };
+    const auto ldw = [&](int32_t qw, int lane) { uint32_t v; std::memcpy(&v, mem + qa(qw) + 4u * static_cast<uint32_t>(lane), 4); return v; };
+    const auto ldq = [&](int32_t qw) { return _mm_loadu_ps(reinterpret_cast<const float *>(mem + qa(qw))); };
+    const auto putw = [&](int32_t qw, int lane, uint32_t v) { std::memcpy(mem + qa(qw) + 4u * static_cast<uint32_t>(lane), &v, 4); };
+    const auto putq = [&](int32_t qw, __m128 v) { _mm_storeu_ps(reinterpret_cast<float *>(mem + qa(qw)), v); };
+
+    const __m128 c1v = ldq(1002), c2v = ldq(1003), c5v = ldq(1016), c14v = ldq(1014), q1012 = ldq(1012);
+    const __m128 vf16 = _mm_loadu_ps(st.vf[16]);
+    const __m128 zero = _mm_setzero_ps(), vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), one4 = _mm_set1_ps(1.0f), v2048 = _mm_set1_ps(2048.0f);
+    const float iReg = std::bit_cast<float>(0x437F0000u);
+    const auto V7 = [&](const __m128 &s) { return _mm_blend_ps(s, v2048, 8); };
+
+    const uint64_t c0 = vu.m_cycle;
+    uint32_t sticky = st.status & 0xFC0u, lastCur = 0u;
+    const auto acc = [&](const LbOp &o) { sticky |= (o.cur | o.xf) << 6; lastCur = o.cur; };
+
+    __m128 Ps[kMaxN + 2], As[kMaxN + 2], Ss[kMaxN + 2], Cs[kMaxN + 2], Tv[kMaxN + 2], Lit[kMaxN + 2];
+    float Qf[kMaxN + 2];
+    uint32_t Di[kMaxN + 2], Fb[kMaxN + 2];
+    int32_t Wd[kMaxN + 2];
+    char Pth[kMaxN + 2];
+    int Hit[kMaxN + 2];
+
+    int32_t vi1 = 0, vi2 = lbS16(st.vi[2] + st.vi[12]), vi3 = st.vi[3], vi4 = st.vi[4], vi5 = N, vi6 = st.vi[6], vi8 = -2, vi9 = -2, vi10 = 0;
+    const int32_t vi4_0 = vi4;
+    Wd[0] = lbS16(st.vi[7]);
+    const int32_t ix0 = Wd[0] & 0x7FFF;
+    uint32_t wclip = vu.m_workingClip;
+    uint64_t pendingPush[2 * kMaxN + 8][2]; // (cycle, value)
+    int nPush = 0;
+    uint64_t macPush[4 * kMaxN + 8][2]; // MAC ring pushes at the KEEPMAC pairs: 24B8 24C0 (prologue), 24D8 2588 25A8 25B0 (per iteration)
+    int nMac = 0;
+    const auto macP = [&](uint64_t cyc, uint32_t m) { macPush[nMac][0] = cyc; macPush[nMac][1] = m; ++nMac; };
+    const auto clipPush = [&](uint64_t cyc, uint32_t bits) { wclip = ((wclip << 6) | (bits & 0x3Fu)) & 0xFFFFFFu; pendingPush[nPush][0] = cyc; pendingPush[nPush][1] = wclip; ++nPush; };
+
+    // ---- prologue (pairs 2440..24C0): P0, header store, C0, A0, S0
+    Ps[0] = ldq(636 + ix0);
+    {
+        float h[4] = {st.vf[27][0], st.vf[27][1], 0.0f, 0.0f};
+        std::memcpy(&h[2], reinterpret_cast<const uint8_t *>(&q1012) + 8, 8);
+        putq(vi6, _mm_loadu_ps(h));
+    }
+    vi6 = lbS16(vi6 + 1);
+    Cs[0] = ldq(vi3);
+    int32_t pC = lbS16(vi3 + 1), pS = vi2;
+    As[0] = ldq(716 + ix0);
+    Ss[0] = ldq(pS);
+    pS = lbS16(pS + 1);
+    Fb[0] = lbClipBits(Ps[0]);
+    clipPush(c0 + 9u, Fb[0]);
+    vi1 = (Fb[0] & 0x3Fu) ? 1 : 0;
+    {
+        const LbOp p1 = lbFmac<4, 15>(c1v, Ps[0], zero);
+        acc(p1);
+        const LbOp p2 = lbFmac<2, 15>(c2v, lbBc(Ps[0], 3), p1.res);
+        acc(p2);
+        Tv[0] = p2.res;
+        const LbOp p3 = lbFmac<4, 15>(Cs[0], vf16, zero);
+        acc(p3);
+        acc(lbFmac<4, 1>(one4, v2048, zero));
+        const LbOp p5 = lbFmac<4, 15>(c14v, p3.res, zero);
+        acc(p5);
+        macP(c0 + 15u, p5.mac);
+        const LbOp p6 = lbFmac<2, 15>(As[0], p3.res, p5.res);
+        acc(p6);
+        macP(c0 + 16u, p6.mac);
+        Lit[0] = p6.res;
+        Qf[0] = lbDivQ(Tv[0], Di[0]);
+    }
+
+    // ---- vertex loop
+    uint64_t cur = c0 + 17u;
+    for (int32_t it = 1; it <= N; ++it)
+    {
+        const int32_t j = it - 1;
+        vi10 = vi1;
+        char pth;
+        int hit = -1;
+        if (Wd[j] < 0)
+            pth = 'A';
+        else if (vi8 <= 0)
+            pth = 'B';
+        else
+        {
+            pth = 'C';
+            const uint32_t cl0 = j >= 2 ? Fb[j - 2] : 0u, cl1 = j >= 1 ? Fb[j - 1] : 0u, cl2 = Fb[j];
+            const uint32_t vis = (cl0 << 12) | (cl1 << 6) | cl2;
+            static constexpr uint32_t kMasks[6] = {0xFDF7DFu, 0xFEFBEFu, 0xFF7DF7u, 0xFFBEFBu, 0xFFDF7Du, 0xFFEFBEu};
+            for (int m = 0; m < 6; ++m)
+                if ((vis | kMasks[m]) == 0xFFFFFFu) { hit = m; break; }
+            if (hit < 0)
+                return decline(3); // real clipping (2900+)
+            // reject at test 1 / 2: cost 35 + 2 m is extrapolated from m = 0, 3, 4, 5 (never seen in the capture); the verifier compares cycles exactly
+            if (hit == 5)
+                putw(1022, 0, static_cast<uint32_t>(vi5)); // ISW.x vi5 in the delay slot of the IBNE at 28F8
+        }
+        Pth[j] = pth;
+        Hit[j] = hit;
+        const uint32_t cost = pth == 'A' ? 27u : (pth == 'B' ? 28u : 35u + 2u * static_cast<uint32_t>(hit));
+        const uint64_t at24F8 = cur + cost - 24u;
+
+        // vertex j outputs (closed form); flags of every FMAC pair of this iteration, collected in program order
+        const __m128 qb = _mm_set1_ps(Qf[j]);
+        if (pth != 'A')
+        {
+            const LbOp f1 = lbFmac<1, 1>(one4, one4, zero);                             // 24D8 SUB.w vf15
+            acc(f1);
+            macP(cur + 2u, f1.mac);
+        }
+        const LbOp f2 = lbFmac<4, 1>(vf0, lbBc(c5v, 2), zero);                         // 24F8 MULAz.w
+        acc(f2);
+        const LbOp f3 = lbFmac<2, 1>(lbBc(c5v, 3), qb, f2.res);                        // 2500 MADDq.w
+        acc(f3);
+        const __m128 v31 = it == 1 ? _mm_loadu_ps(st.vf[31]) : V7(Ss[it - 2]);
+        acc(lbFmac<0, 15>(v31, zero, zero));                                            // 2508 ADDz
+        const LbOp f5 = lbFmac<4, 14>(Tv[j], qb, zero);                                 // 2510 MULq.xyz
+        acc(f5);
+        const LbOp f6 = lbFmac<4, 14>(V7(Ss[j]), qb, zero);                             // 2518 MULq.xyz
+        acc(f6);
+
+        // loads / stores in program order
+        Wd[it] = lbS16(static_cast<int32_t>(ldw(vi4_0 + it, 0) & 0xFFFFu));
+        const int32_t ix = Wd[it] & 0x7FFF;
+        Ps[it] = ldq(636 + ix);
+        vi6 = lbS16(vi6 + 4);
+        {
+            float s3[4];
+            _mm_storeu_ps(s3, f6.res);
+            for (int l = 0; l < 3; ++l)
+                putw(vi6 - 3, l, std::bit_cast<uint32_t>(s3[l]));
+        }
+        As[it] = ldq(716 + ix);
+        Ss[it] = ldq(pS);
+        pS = lbS16(pS + 1);
+        Cs[it] = ldq(pC);
+        pC = lbS16(pC + 1);
+        {
+            const LbOp f7 = lbFmac<4, 15>(c1v, Ps[it], zero);                           // 2550 MULA
+            acc(f7);
+            const __m128 tw = lbClamp(f3.res, iReg);
+            const float vf15w = pth == 'B' ? 0.0f : 2048.0f;
+            const LbOp f8 = lbFmac<0, 1>(tw, _mm_set1_ps(vf15w), zero);                // 2560 ADD.w
+            acc(f8);
+            const LbOp f9 = lbFmac<2, 15>(c2v, lbBc(Ps[it], 3), f7.res);               // 2568 MADDw
+            acc(f9);
+            Tv[it] = f9.res;
+            const __m128 v12 = it == 1 ? _mm_loadu_ps(st.vf[12]) : lbClamp(Lit[it - 2], iReg);
+            acc(lbFmac<0, 15>(v12, zero, zero));                                         // 2570 ADDx
+            const LbOp f11 = lbFmac<4, 15>(Cs[it], vf16, zero);                         // 2588 MUL
+            acc(f11);
+            macP(at24F8 + 18u, f11.mac);
+            const LbOp f12 = lbFmac<4, 15>(c14v, f11.res, zero);                        // 25A8 MULA
+            acc(f12);
+            macP(at24F8 + 22u, f12.mac);
+            const LbOp f13 = lbFmac<2, 15>(As[it], f11.res, f12.res);                   // 25B0 MADD
+            acc(f13);
+            macP(at24F8 + 23u, f13.mac);
+            Lit[it] = f13.res;
+            // outputs of vertex j: RGBA, XYZ (x2) with the w lane = ftoi4(clamp + adc)
+            alignas(16) uint32_t rg[4], xy[4], ww[4];
+            _mm_store_si128(reinterpret_cast<__m128i *>(rg), lbFtoi<1>(lbClamp(Lit[j], iReg)));
+            _mm_store_si128(reinterpret_cast<__m128i *>(xy), lbFtoi<16>(f5.res));
+            _mm_store_si128(reinterpret_cast<__m128i *>(ww), lbFtoi<16>(f8.res));
+            xy[3] = ww[3];
+            for (int l = 0; l < 4; ++l)
+            {
+                putw(vi6 - 2, l, rg[l]);
+                putw(vi6 - 4, l, xy[l]);
+                putw(vi6 - 1, l, xy[l]);
+            }
+        }
+        Fb[it] = lbClipBits(Ps[it]);
+        {
+            float e29[4];
+            std::memcpy(e29, st.vf[29], 16);
+            const uint32_t v28bits = it == 1 ? lbClipBits(_mm_loadu_ps(e29)) : Fb[it - 2];
+            clipPush(at24F8 + 6u, v28bits);
+            clipPush(at24F8 + 7u, Fb[it - 1]);
+            clipPush(at24F8 + 10u, Fb[it]);
+        }
+        Qf[it] = lbDivQ(Tv[it], Di[it]);
+        vi1 = (Fb[it] & 0x3Fu) ? 1 : 0;
+        vi8 = lbS16(vi9 + vi10 + vi1);
+        vi9 = vi10;
+        vi5 = lbS16(vi5 - 1);
+        vi4 = lbS16(vi4 + 1);
+        cur += cost;
+    }
+
+    // ---- commit (nothing above touched the VU state)
+    std::memcpy(c.vuData, mem, 0x4000);
+    const int32_t j = N - 1;
+    static const bool vdbg = []() { const char *e = std::getenv("PS2X_VU1_VDBG"); return e && e[0] == '1'; }();
+    if (vdbg && s_vTaken < 600)
+    {
+        char buf[1400];
+        int n = std::snprintf(buf, sizeof(buf), "[probe] vdbg call=%llu N=%d vi6=%d paths:", (unsigned long long)s_vTaken, N, st.vi[6]);
+        for (int32_t k = 0; k < N && n < 1200; ++k)
+            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %c%d/%04X/f%u", Pth[k], Hit[k], static_cast<unsigned>(Wd[k]) & 0xFFFFu, (Fb[k] & 0x3Fu) ? 1u : 0u);
+        std::printf("%s\n", buf);
+    }
+    {
+        const __m128 e = _mm_loadu_ps(st.vf[0]); // keep vf0
+        (void)e;
+        const auto setv = [&](int r, __m128 v) { _mm_storeu_ps(st.vf[r], v); };
+        const auto setl = [&](int r, __m128 v, int mask) { float t4[4]; _mm_storeu_ps(t4, v); for (int l = 0; l < 4; ++l) if (mask & (1 << l)) st.vf[r][l] = t4[l]; };
+        const __m128 qb1 = _mm_set1_ps(Qf[j]);
+        const LbOp f5 = lbFmac<4, 14>(Tv[j], qb1, zero);
+        const LbOp f6 = lbFmac<4, 14>(V7(Ss[j]), qb1, zero);
+        const LbOp f2 = lbFmac<4, 1>(vf0, lbBc(c5v, 2), zero);
+        const LbOp f3 = lbFmac<2, 1>(lbBc(c5v, 3), qb1, f2.res);
+        const char pth = Pth[j];
+        const LbOp f8 = lbFmac<0, 1>(lbClamp(f3.res, iReg), _mm_set1_ps(pth == 'B' ? 0.0f : 2048.0f), zero);
+        alignas(16) uint32_t xy[4], ww[4], rg[4];
+        _mm_store_si128(reinterpret_cast<__m128i *>(xy), lbFtoi<16>(f5.res));
+        _mm_store_si128(reinterpret_cast<__m128i *>(ww), lbFtoi<16>(f8.res));
+        _mm_store_si128(reinterpret_cast<__m128i *>(rg), lbFtoi<1>(lbClamp(Lit[j], iReg)));
+        xy[3] = ww[3];
+        setv(1, c1v);
+        setv(2, c2v);
+        setl(5, c5v, 0xC);
+        setv(14, c14v);
+        setl(27, q1012, 0xC);
+        setv(6, Tv[N]);
+        setv(7, V7(Ss[N]));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(st.vf[8]), _mm_load_si128(reinterpret_cast<const __m128i *>(xy)));
+        setv(9, As[N]);
+        setv(10, Ps[N]);
+        const __m128 zero4 = zero;
+        const __m128 v12n = N == 1 ? _mm_loadu_ps(st.vf[12]) : lbClamp(Lit[N - 2], iReg); // vf12 as read by the ADDx of the last iteration
+        setv(11, lbFmac<0, 15>(v12n, zero4, zero4).res);
+        setv(12, lbClamp(Lit[j], iReg));
+        setv(13, Lit[N]);
+        st.vf[15][3] = pth == 'B' ? 0.0f : 2048.0f;
+        setl(17, f6.res, 0x7);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(st.vf[18]), _mm_load_si128(reinterpret_cast<const __m128i *>(rg)));
+        const __m128 v31n = N == 1 ? _mm_loadu_ps(st.vf[31]) : V7(Ss[N - 2]);
+        const __m128 e29v = _mm_loadu_ps(st.vf[29]);
+        setv(28, N == 1 ? e29v : Ps[N - 2]);
+        setv(29, Ps[N - 1]);
+        setv(30, lbFmac<0, 15>(v31n, zero4, zero4).res);
+        setv(31, V7(Ss[N - 1]));
+        const __m128 clN = lbFmac<4, 15>(Cs[N], vf16, zero).res;
+        _mm_storeu_ps(st.acc, lbFmac<4, 15>(c14v, clN, zero).res);
+    }
+    for (int32_t k = 0; k < N; ++k)
+        sticky |= Di[k] << 6;
+    st.status = (sticky & 0xFC0u) | lastCur | Di[N - 1];
+    st.q = Qf[N - 1];
+    st.i = iReg;
+    st.vi[1] = vi1;
+    st.vi[2] = pS;
+    st.vi[3] = pC;
+    st.vi[4] = vi4;
+    st.vi[5] = vi5;
+    st.vi[6] = vi6;
+    st.vi[7] = Wd[N];
+    st.vi[8] = vi8;
+    st.vi[9] = vi9;
+    st.vi[10] = vi10;
+    st.vi[11] = 0x7FFF;
+    st.vi[12] = Wd[N] & 0x7FFF;
+    for (int k = 0; k < nPush; ++k)
+        vuflags::flgPush(vuflags::s_flgClip[1], pendingPush[k][0], static_cast<uint32_t>(pendingPush[k][1]));
+    for (int k = 0; k < nMac; ++k)
+        vuflags::flgPush(vuflags::s_flgMac[1], macPush[k][0], static_cast<uint32_t>(macPush[k][1]));
+    vu.m_workingClip = wclip;
+    st.clip = wclip;
+
+    const uint64_t SA = cur - 24u;
+    vu.m_cycle = cur;
+    st.cycles = cur;
+    vu.m_fdiv.valid = true;
+    vu.m_fdiv.readyCycle = SA + 26u;
+    vu.m_fdiv.value = Qf[N];
+    vu.m_fdiv.statusDi = Di[N] & 0x30u;
+    st.pc = 0x25B8u;
+    st.branchPending = false;
+    st.branchDelay = 0u;
+    st.branchTarget = Pth[j] == 'A' ? 0x24F0u : 0x24F8u;
+    vu.m_viBranchBackupValid = false;
+    vu.m_accReady[0] = SA + 23u;
+    vu.m_accReady[1] = SA + 23u;
+    vu.m_accReady[2] = SA + 23u;
+    vu.m_accReady[3] = SA + 23u;
+    vu.m_vfReady[10][0] = SA + 9u;
+    vu.m_vfReady[10][1] = SA + 9u;
+    vu.m_vfReady[10][2] = SA + 9u;
+    vu.m_vfReady[10][3] = SA + 9u;
+    vu.m_vfReady[11][0] = SA + 19u;
+    vu.m_vfReady[11][1] = SA + 19u;
+    vu.m_vfReady[11][2] = SA + 19u;
+    vu.m_vfReady[11][3] = SA + 19u;
+    vu.m_vfReady[12][0] = SA + 20u;
+    vu.m_vfReady[12][1] = SA + 20u;
+    vu.m_vfReady[12][2] = SA + 20u;
+    vu.m_vfReady[12][3] = SA + 20u;
+    vu.m_vfReady[13][0] = SA + 27u;
+    vu.m_vfReady[13][1] = SA + 27u;
+    vu.m_vfReady[13][2] = SA + 27u;
+    vu.m_vfReady[13][3] = SA + 27u;
+    vu.m_vfReady[17][0] = SA + 8u;
+    vu.m_vfReady[17][1] = SA + 8u;
+    vu.m_vfReady[17][2] = SA + 8u;
+    vu.m_vfReady[18][0] = SA + 20u;
+    vu.m_vfReady[18][1] = SA + 20u;
+    vu.m_vfReady[18][2] = SA + 20u;
+    vu.m_vfReady[18][3] = SA + 20u;
+    vu.m_vfReady[28][0] = SA + 5u;
+    vu.m_vfReady[28][1] = SA + 5u;
+    vu.m_vfReady[28][2] = SA + 5u;
+    vu.m_vfReady[28][3] = SA + 5u;
+    vu.m_vfReady[29][0] = SA + 6u;
+    vu.m_vfReady[29][1] = SA + 6u;
+    vu.m_vfReady[29][2] = SA + 6u;
+    vu.m_vfReady[29][3] = SA + 6u;
+    vu.m_vfReady[30][0] = SA + 6u;
+    vu.m_vfReady[30][1] = SA + 6u;
+    vu.m_vfReady[30][2] = SA + 6u;
+    vu.m_vfReady[30][3] = SA + 6u;
+    vu.m_vfReady[31][0] = SA + 14u;
+    vu.m_vfReady[31][1] = SA + 14u;
+    vu.m_vfReady[31][2] = SA + 14u;
+    vu.m_vfReady[31][3] = SA + 14u;
+    vu.m_vfReady[6][0] = SA + 18u;
+    vu.m_vfReady[6][1] = SA + 18u;
+    vu.m_vfReady[6][2] = SA + 18u;
+    vu.m_vfReady[6][3] = SA + 18u;
+    vu.m_vfReady[7][0] = SA + 15u;
+    vu.m_vfReady[7][1] = SA + 15u;
+    vu.m_vfReady[7][2] = SA + 15u;
+    vu.m_vfReady[8][0] = SA + 21u;
+    vu.m_vfReady[8][1] = SA + 21u;
+    vu.m_vfReady[8][2] = SA + 21u;
+    vu.m_vfReady[8][3] = SA + 21u;
+    vu.m_vfReady[9][0] = SA + 13u;
+    vu.m_vfReady[9][1] = SA + 13u;
+    vu.m_vfReady[9][2] = SA + 13u;
+    vu.m_vfReady[9][3] = SA + 13u;
+    vu.m_viReady[12] = SA + 5u;
+    vu.m_viReady[1] = SA + 15u;
+    vu.m_viReady[2] = SA + 12u;
+    vu.m_viReady[3] = SA + 14u;
+    vu.m_viReady[4] = SA + 7u;
+    vu.m_viReady[5] = SA + 19u;
+    vu.m_viReady[6] = SA + 8u;
+    vu.m_viReady[7] = SA + 4u;
+    vu.m_viReady[8] = SA + 16u;
+    vu.m_viReady[9] = SA + 18u;
+    c.instrs += static_cast<uint32_t>(cur - c0);
+    *c.nextReadyW = 0u;
+    c.nextHash = kHashVertExit;
+    c.hashValid = true;
+    ++s_vTaken;
+    s_vVerts += static_cast<uint64_t>(N);
+    if ((s_vTaken & 0x3FFFu) == 0u)
+        std::printf("[probe] lb vertex routine taken=%llu verts=%llu declined=%llu (why0-4: %llu %llu %llu %llu %llu)\n", (unsigned long long)s_vTaken, (unsigned long long)s_vVerts,
+                    (unsigned long long)s_vDeclined, (unsigned long long)s_vWhy[0], (unsigned long long)s_vWhy[1], (unsigned long long)s_vWhy[2], (unsigned long long)s_vWhy[3], (unsigned long long)s_vWhy[4]);
+    return true;
+}
 } // namespace
 
 uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : s_tsc; }
@@ -4875,6 +5294,17 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 c.hashValid = true;
             }
             // PERF-HC: direct-mapped (pc -> {entry hash, block}) cache in front of the switch lookup; misses (no block) are cached too
+            if (s_lbOn && pc == 0x2440u && c.nextHash == kHashVertEntry && lbVert(vu, c)) // PERF-LB: per-vertex routine
+            {
+                if (c.check && c.ops->blkHash(vu) != c.nextHash)
+                {
+                    ++c.checkFail;
+                    if (c.checkFail <= 6)
+                        std::printf("[probe] lb vertex routine exit-hash MISMATCH at pc=%04X (routine entered at 2440)\n", vu.m_state.pc);
+                    c.hashValid = false;
+                }
+                continue;
+            }
             if (s_lbOn && pc == 0x0C80u && c.nextHash == kHashCopyEntry && lbCopy(vu, c)) // PERF-LB: stream copy command
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)

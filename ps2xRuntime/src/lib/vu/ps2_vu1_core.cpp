@@ -3706,6 +3706,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         FILE *out = imageLoaded ? std::fopen("logs/vu1replay.txt", "w") : nullptr;
         if (out)
         {
+            uint64_t rpRunNs = 0;
+            const uint32_t rpReps = []() { const char *e = std::getenv("PS2X_VU1_REPLAY_REPS"); const unsigned long n = e ? std::strtoul(e, nullptr, 10) : 1ul; return static_cast<uint32_t>(n ? n : 1ul); }();
             uint32_t total = 0, skipped = 0, bad = 0, cVf = 0, cVi = 0, cAcc = 0, cQpi = 0, cFlags = 0, cPc = 0, cCyc = 0, cWc = 0, cMem = 0, cGif = 0, cMisc = 0;
             std::fprintf(out, "records=%zu codeImages=%zu stateSize file=%u now=%zu\n", runsIdx.size(), codeOff.size(), stSize, sizeof(VU1State));
             if (stSize == sizeof(VU1State))
@@ -3744,15 +3746,21 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                     const uint32_t gn = rpGet<uint32_t>(p);
                     const uint8_t *gifRec = p;
 
-                    m_state = s0;
-                    m_workingClip = wc0;
-                    m_cycle = cyc0;
-                    std::memcpy(vuData, mem0, dsz);
-                    resetScheduler();
                     std::vector<uint8_t> cap;
-                    s_vfyCapture = &cap;
-                    run(vuCode, codeSize, vuData, dataSize, gs, memory, rMax);
-                    s_vfyCapture = nullptr;
+                    for (uint32_t rep = 0; rep < rpReps; ++rep) // PS2X_VU1_REPLAY_REPS=N: run every call N times, only run() is timed, the last run is compared
+                    {
+                        m_state = s0;
+                        m_workingClip = wc0;
+                        m_cycle = cyc0;
+                        std::memcpy(vuData, mem0, dsz);
+                        resetScheduler();
+                        cap.clear();
+                        s_vfyCapture = &cap;
+                        const auto rpT0 = std::chrono::steady_clock::now();
+                        run(vuCode, codeSize, vuData, dataSize, gs, memory, rMax);
+                        rpRunNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rpT0).count());
+                        s_vfyCapture = nullptr;
+                    }
 
                     ++total;
                     const VU1State &sB = m_state;
@@ -3789,6 +3797,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             }
             std::fprintf(out, "replayed=%u skipped(other image)=%u MISMATCHED=%u | vf=%u vi=%u acc=%u qpi=%u flags=%u pc=%u cycles=%u workingClip=%u misc=%u mem=%u gif=%u\n",
                          total, skipped, bad, cVf, cVi, cAcc, cQpi, cFlags, cPc, cCyc, cWc, cMisc, cMem, cGif);
+            std::fprintf(out, "run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);
+            std::printf("[probe] replay run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);
             std::fclose(out);
             s_rpDone = true;
             std::fflush(nullptr);
