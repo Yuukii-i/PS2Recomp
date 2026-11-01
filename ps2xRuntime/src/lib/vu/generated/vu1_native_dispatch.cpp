@@ -13,6 +13,7 @@
 #include <bit>
 #include <map>
 #include <limits>
+#include <unordered_set>
 
 namespace
 {
@@ -3842,7 +3843,10 @@ uint64_t s_hotBlocks = 0, s_hotPairs = 0, s_slowPairs = 0;
 uint64_t s_cause[6] = {};
 struct HotSlot { uint64_t h; VuHotFn fn; bool ok; };
 HotSlot s_hotSlot[sizeof(kVu1HotStart) / sizeof(kVu1HotStart[0])] = {}; // PERF-HC
+const bool s_fuseOn = []() { const char *e = std::getenv("PS2X_VU1_FUSE"); return e && e[0] == '1'; }();
+uint64_t s_fused = 0; // PERF-FUSE iterations run without a dispatcher round
 uint64_t s_tsc[4] = {}; // hot ticks, slow ticks, hot blocks timed, slow pairs timed
+uint64_t s_pcT[2][0x800] = {}, s_pcN[2][0x800] = {}; // PERF-LB per-entry-pc ticks/count (PS2X_VU1_TSC=1): [0] hot blocks, [1] slow pairs; index pc>>3
 uint64_t s_kTicks[4] = {}, s_kCalls[4] = {}; // PERF-LB kernel time (PS2X_VU1_TSC=1): vertex routine, copy, skinned full, skinned loop; declined attempts are timed too
 const bool s_xgHot = []() { const char *e = std::getenv("PS2X_VU1_XG_HOT"); return e && e[0] == '1'; }();
 const bool s_tscOn = []() { const char *e = std::getenv("PS2X_VU1_TSC"); return e && e[0] == '1'; }();
@@ -3859,6 +3863,16 @@ void svPcDump()
             std::fprintf(f, "%04X n=%llu cyc=%llu\n", i * 8u, (unsigned long long)s_svN[i], (unsigned long long)s_svC[i]);
     std::fclose(f);
 }
+// PROBE-CAPTURE: finer novelty than "a pc never visited": a (prev dispatch pc -> pc) transition never seen, or a (pc, timing hash) pair never seen, also counts as coverage,
+// so the corpus keeps the runs that take rare paths and rare pipeline states. The hash set is capped (a runaway hash population stops adding).
+uint64_t s_svEdge[2048u * 2048u / 64u] = {};
+std::unordered_set<uint64_t> s_svPairs;
+inline void svNovelPair(uint32_t pc, uint64_t hash)
+{
+    if (s_svPairs.size() < 400000u && s_svPairs.insert(hash * 0x9E3779B97F4A7C15ull ^ pc).second)
+        ++s_svCov;
+}
+
 struct SvPcGuard
 {
     const uint64_t &cyc;
@@ -3867,7 +3881,18 @@ struct SvPcGuard
     explicit SvPcGuard(const uint64_t &c) : cyc(c) {}
     void at(uint32_t pc)
     {
-        if (prev != 0xFFFFFFFFu) s_svC[prev >> 3] += cyc - c0;
+        if (prev != 0xFFFFFFFFu)
+        {
+            s_svC[prev >> 3] += cyc - c0;
+            const uint32_t e = (prev >> 3) * 2048u + (pc >> 3);
+            uint64_t &w = s_svEdge[e >> 6];
+            const uint64_t m = 1ull << (e & 63u);
+            if (!(w & m))
+            {
+                w |= m;
+                ++s_svCov;
+            }
+        }
         prev = pc;
         c0 = cyc;
         if (s_svN[pc >> 3]++ == 0u) ++s_svCov;
@@ -4785,11 +4810,90 @@ bool lbPipesEmpty(VU1Interpreter &vu, VuNativeCtx &c)
     return true;
 }
 
+// PERF-LB-XG (PS2X_VU1_XG_HOT=1): kernels may run while an XGKICK transfer is in flight. The transfer copies one VU-memory quadword every 2 cycles
+// (VU1Interpreter::progressXgkick, called once per cycle), so running the kernel first and then advancing the transfer by the kernel's cycle count is exact
+// when nothing the kernel writes lies in the part of the packet that has not been copied yet. That remaining extent is found by walking the GIF tags from the
+// current copy position (tags not yet copied are read from memory the kernel must not touch). Anything unusual declines.
+struct LbXg
+{
+    bool act = false;
+    uint32_t a = 0, len = 0; // remaining source bytes of the running transfer, circular in VU data memory
+};
+uint64_t s_xgK[2] = {}; // kernel runs completed with a transfer in flight, declines because the kernel writes into the remaining extent
+
+inline bool lbXgBegin(VU1Interpreter &vu, VuNativeCtx &c, LbXg &x)
+{
+    x = LbXg{};
+    if (!vu.m_xgkick.active)
+        return true;
+    if (!s_xgHot || c.dataSize != 0x4000u)
+        return false;
+    const auto &g = vu.m_xgkick;
+    const uint32_t mask = c.dataSize - 1u;
+    uint32_t pos = g.copiedBytes, tagEnd = g.currentTagEnd;
+    bool eop = g.currentTagEop;
+    for (int guard = 0; guard < 64; ++guard)
+    {
+        if (tagEnd == 0u)
+        {
+            uint64_t tagLo;
+            std::memcpy(&tagLo, c.vuData + ((g.sourceAddress + pos) & mask), 8);
+            const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu), format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
+            uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
+            if (nreg == 0u)
+                nreg = 16u;
+            uint64_t tagBytes = 16u;
+            if (format == 0u)
+                tagBytes += static_cast<uint64_t>(nloop) * nreg * 16u;
+            else if (format == 1u)
+                tagBytes += ((static_cast<uint64_t>(nloop) * nreg + 1u) & ~1ull) * 8u;
+            else if (format == 2u)
+                tagBytes += static_cast<uint64_t>(nloop) * 16u;
+            else
+                return false;
+            if (pos > g.packet.size() || tagBytes > g.packet.size() - pos)
+                return false;
+            tagEnd = pos + static_cast<uint32_t>(tagBytes);
+            eop = ((tagLo >> 15) & 1u) != 0u;
+        }
+        if (eop)
+        {
+            x.act = true;
+            x.a = (g.sourceAddress + g.copiedBytes) & mask;
+            x.len = tagEnd - g.copiedBytes;
+            return true;
+        }
+        pos = tagEnd;
+        tagEnd = 0u;
+    }
+    return false;
+}
+
+inline bool lbXgOverlap(const LbXg &x, uint32_t b, uint32_t blen, uint32_t mask) // does [b, b + blen) (circular) touch the remaining extent?
+{
+    if (!x.act || x.len == 0u || blen == 0u)
+        return false;
+    if (x.len > mask || blen > mask)
+        return true;
+    b &= mask;
+    return ((b - x.a) & mask) < x.len || ((x.a - b) & mask) < blen;
+}
+
+inline void lbXgEnd(VU1Interpreter &vu, VuNativeCtx &c, const LbXg &x, uint64_t cycles) // advance the transfer by the cycles the kernel consumed
+{
+    if (!x.act || cycles == 0u)
+        return;
+    vu.m_xgkick.cycleCredit += static_cast<decltype(vu.m_xgkick.cycleCredit)>(cycles - 1u);
+    c.ops->xgProgress(vu); // adds the last cycle and copies / finishes
+    ++s_xgK[0];
+}
+
 bool lbCopy(VU1Interpreter &vu, VuNativeCtx &c)
 {
     VU1State &st = vu.m_state;
     const uint32_t dsz = c.dataSize;
-    if (vu.m_xgkick.active || st.branchPending || st.ebit || vu.m_stopRequested || st.haltAfterDelaySlot || dsz != 0x4000u || !lbPipesEmpty(vu, c))
+    LbXg xg;
+    if (st.branchPending || st.ebit || vu.m_stopRequested || st.haltAfterDelaySlot || dsz != 0x4000u || !lbPipesEmpty(vu, c) || !lbXgBegin(vu, c, xg))
     {
         ++s_hCopyDeclined;
         return false;
@@ -4803,6 +4907,12 @@ bool lbCopy(VU1Interpreter &vu, VuNativeCtx &c)
     if (n == 0 || n > 1024 || static_cast<int64_t>(c.budgetEnd) - static_cast<int64_t>(vu.m_cycle) <= 5 * n + 5 + 160)
     {
         ++s_hCopyDeclined;
+        return false;
+    }
+    if (lbXgOverlap(xg, qwAt(vi3), static_cast<uint32_t>(n) * 16u, dsz - 1u))
+    {
+        ++s_hCopyDeclined;
+        ++s_xgK[1];
         return false;
     }
     for (int32_t i = 0; i < n; ++i) // forward, one quad per iteration: load then store, as LQI / SQ do
@@ -4844,6 +4954,7 @@ bool lbCopy(VU1Interpreter &vu, VuNativeCtx &c)
     }
     vu.m_viReady[1] = St + 5u;
     c.instrs += 6u + 5u * static_cast<uint32_t>(n - 1) + 2u;
+    lbXgEnd(vu, c, xg, vu.m_cycle - Sp);
     *c.nextReadyW = 0u;
     c.nextHash = kHashCopyExit;
     c.hashValid = true;
@@ -4898,7 +5009,8 @@ bool lbVert(VU1Interpreter &vu, VuNativeCtx &c)
     constexpr int kMaxN = 300;
     const auto decline = [&](int why) { ++s_vDeclined; ++s_vWhy[why]; return false; };
     const uint32_t dsz = c.dataSize;
-    if (vu.m_xgkick.active || st.branchPending || st.ebit || vu.m_stopRequested || st.haltAfterDelaySlot || dsz != 0x4000u || !lbPipesEmpty(vu, c))
+    LbXg xg;
+    if (st.branchPending || st.ebit || vu.m_stopRequested || st.haltAfterDelaySlot || dsz != 0x4000u || !lbPipesEmpty(vu, c) || !lbXgBegin(vu, c, xg))
         return decline(0);
     const int32_t N = st.vi[5];
     if (N < 1 || N > kMaxN)
@@ -5098,6 +5210,22 @@ bool lbVert(VU1Interpreter &vu, VuNativeCtx &c)
     }
 
     // ---- commit (nothing above touched the VU state)
+    if (xg.act) // a transfer is running: the quadwords this call changes must lie outside the part of the packet not yet copied
+    {
+        int32_t lo = -1, hi = -1;
+        for (int32_t q = 0; q < 1024; ++q)
+            if (std::memcmp(mem + q * 16, c.vuData + q * 16, 16) != 0)
+            {
+                if (lo < 0)
+                    lo = q;
+                hi = q;
+            }
+        if (lo >= 0 && lbXgOverlap(xg, static_cast<uint32_t>(lo) * 16u, static_cast<uint32_t>(hi - lo + 1) * 16u, 0x3FFFu))
+        {
+            ++s_xgK[1];
+            return decline(4);
+        }
+    }
     std::memcpy(c.vuData, mem, 0x4000);
     const int32_t j = N - 1;
     static const bool vdbg = []() { const char *e = std::getenv("PS2X_VU1_VDBG"); return e && e[0] == '1'; }();
@@ -5258,6 +5386,7 @@ bool lbVert(VU1Interpreter &vu, VuNativeCtx &c)
     vu.m_viReady[8] = SA + 16u;
     vu.m_viReady[9] = SA + 18u;
     c.instrs += static_cast<uint32_t>(cur - c0);
+    lbXgEnd(vu, c, xg, cur - c0);
     *c.nextReadyW = 0u;
     c.nextHash = kHashVertExit;
     c.hashValid = true;
@@ -5270,7 +5399,7 @@ bool lbVert(VU1Interpreter &vu, VuNativeCtx &c)
 }
 } // namespace
 
-uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : (which == 2u ? s_kTicks : (which == 3u ? s_kCalls : s_tsc)); }
+uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : (which == 2u ? s_kTicks : (which == 3u ? s_kCalls : (which == 4u ? s_pcT[0] : (which == 5u ? s_pcN[0] : (which == 6u ? s_pcT[1] : (which == 7u ? s_pcN[1] : (which == 8u ? &s_fused : (which == 9u ? s_xgK : s_tsc)))))))); }
 
 template <class F>
 static inline bool lbTimed(uint32_t k, F &&f)
@@ -5351,6 +5480,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 }
                 continue;
             }
+            if (s_svOn) svNovelPair(pc, c.nextHash); // PROBE-CAPTURE
             HotSlot &hs = s_hotSlot[pc >> 3];
             VuHotFn hf;
             if (hs.ok && hs.h == c.nextHash)
@@ -5365,17 +5495,39 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
             if (hf)
             {
                 const uint64_t i0 = c.instrs;
+                const uint64_t eh = c.nextHash;
                 const uint64_t tH0 = s_tscOn ? __rdtsc() : 0ull;
-                const int hr = hf(vu, c);
+                int hr = hf(vu, c);
                 if (s_tscOn)
                 {
-                    s_tsc[0] += __rdtsc() - tH0;
+                    const uint64_t dH = __rdtsc() - tH0;
+                    s_tsc[0] += dH;
                     ++s_tsc[2];
+                    s_pcT[0][(pc >> 3) & 0x7FFu] += dH;
+                    ++s_pcN[0][(pc >> 3) & 0x7FFu];
                 }
                 if (hr >= 0)
                 {
                     s_hotPairs += c.instrs - i0;
                     ++s_hotBlocks;
+                    if (s_fuseOn && hr == 0 && !s_rgOn && !s_svOn) // PERF-FUSE: self-looping block (exit hash == entry hash, same pc): re-run it without the dispatcher round
+                    {
+                        while (c.hashValid && c.nextHash == eh && vu.m_state.pc == pc && vu.m_cycle < c.budgetEnd && c.budgetEnd - vu.m_cycle > 160u &&
+                               !vu.m_stopRequested && !vu.m_state.branchPending && !vu.m_state.ebit && !vu.m_state.haltAfterDelaySlot &&
+                               (s_xgHot || !vu.m_xgkick.active))
+                        {
+                            const uint64_t j0 = c.instrs;
+                            const int r2 = hf(vu, c);
+                            if (r2 < 0)
+                                break;
+                            s_hotPairs += c.instrs - j0;
+                            ++s_hotBlocks;
+                            ++s_fused;
+                            hr = r2;
+                            if (r2 != 0)
+                                break;
+                        }
+                    }
                     if (c.check && c.ops->blkHash(vu) != c.nextHash)
                     {
                         ++c.checkFail;
@@ -5413,8 +5565,11 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
         const int r = fn(vu, c);
         if (s_tscOn)
         {
-            s_tsc[1] += __rdtsc() - tS0;
+            const uint64_t dS = __rdtsc() - tS0;
+            s_tsc[1] += dS;
             ++s_tsc[3];
+            s_pcT[1][(pc >> 3) & 0x7FFu] += dS;
+            ++s_pcN[1][(pc >> 3) & 0x7FFu];
         }
         if (r != 0)
             return r;

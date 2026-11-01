@@ -3265,8 +3265,10 @@ uint32_t vu1CoverageCount(); // PROBE-CAPTURE (generated/vu1_native_dispatch.cpp
 // PROBE-CAPTURE: VU1 run corpus for the native-VU1 work (PS2X_VU1_CAPTURE=1 -> logs/vu1corpus.bin). Chunks: u32 tag, u32 bytes, payload.
 // 'HDR ' {u32 sizeof(VU1State)}, 'CODE' {u64 generation, code bytes}, 'RUN ' {see svCaptureRecord}. Kept: runs that reach a new dispatch pc, plus 1 in 400.
 static bool capOn() { static const bool on = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE"); return e && e[0] == '1'; }(); return on; }
+static uint32_t capMaxRecords() { static const uint32_t m = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE_MAX"); const unsigned long n = e ? std::strtoul(e, nullptr, 10) : 0ul; return static_cast<uint32_t>(n ? n : 30000ul); }(); return m; }
 static FILE *s_capF = nullptr;
 static uint32_t s_capKept = 0, s_capSeen = 0, s_capCov = 0;
+static uint64_t s_capRuns = 0;
 static uint64_t s_capGen = ~0ull;
 
 static void capChunk(uint32_t tag, const std::vector<uint8_t> &p)
@@ -3320,6 +3322,8 @@ static void svCaptureRecord(const VU1State &s0, uint32_t wc0, uint64_t cyc0, con
     capChunk(0x204E5552u, b); // 'RUN '
     std::fflush(s_capF);
     ++s_capKept;
+    if ((s_capKept % 250u) == 0u)
+        std::printf("[probe] capture kept=%u of runs=%llu (cap %u)\n", s_capKept, (unsigned long long)s_capRuns, capMaxRecords());
 }
 
 // PROBE-REPLAY (PS2X_VU1_REPLAY=1): replays logs/vu1corpus.bin through the current VU1 code once the main image is loaded, compares state / VU memory /
@@ -3706,7 +3710,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         FILE *out = imageLoaded ? std::fopen("logs/vu1replay.txt", "w") : nullptr;
         if (out)
         {
-            uint64_t rpRunNs = 0;
+            uint64_t rpRunNs = 0, rpRunTicks = 0;
             const uint32_t rpReps = []() { const char *e = std::getenv("PS2X_VU1_REPLAY_REPS"); const unsigned long n = e ? std::strtoul(e, nullptr, 10) : 1ul; return static_cast<uint32_t>(n ? n : 1ul); }();
             uint32_t total = 0, skipped = 0, bad = 0, cVf = 0, cVi = 0, cAcc = 0, cQpi = 0, cFlags = 0, cPc = 0, cCyc = 0, cWc = 0, cMem = 0, cGif = 0, cMisc = 0;
             std::fprintf(out, "records=%zu codeImages=%zu stateSize file=%u now=%zu\n", runsIdx.size(), codeOff.size(), stSize, sizeof(VU1State));
@@ -3757,7 +3761,9 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                         cap.clear();
                         s_vfyCapture = &cap;
                         const auto rpT0 = std::chrono::steady_clock::now();
+                        const uint64_t rpC0 = __rdtsc();
                         run(vuCode, codeSize, vuData, dataSize, gs, memory, rMax);
+                        rpRunTicks += __rdtsc() - rpC0;
                         rpRunNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rpT0).count());
                         s_vfyCapture = nullptr;
                     }
@@ -3799,13 +3805,21 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                          total, skipped, bad, cVf, cVi, cAcc, cQpi, cFlags, cPc, cCyc, cWc, cMisc, cMem, cGif);
             std::fprintf(out, "run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);
             std::printf("[probe] replay run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);
+            {
+                // per-kernel calls and time (needs PS2X_VU1_TSC=1): which kernels the corpus exercises, and how much of the replay time they take
+                extern uint64_t *vu1NativeStats(uint32_t);
+                const uint64_t *kt = vu1NativeStats(2), *kc = vu1NativeStats(3);
+                const double mpt = rpRunTicks ? (static_cast<double>(rpRunNs) / 1e6) / static_cast<double>(rpRunTicks) : 0.0;
+                std::fprintf(out, "kernels (calls taken / ms over all reps): vertex=%llu/%.2f copy=%llu/%.2f skinFull=%llu/%.2f skinLoop=%llu/%.2f\n", (unsigned long long)kc[0], kt[0] * mpt,
+                             (unsigned long long)kc[1], kt[1] * mpt, (unsigned long long)kc[2], kt[2] * mpt, (unsigned long long)kc[3], kt[3] * mpt);
+            }
             std::fclose(out);
             s_rpDone = true;
             std::fflush(nullptr);
             std::_Exit(0);
         }
     }
-    if (m_unit == Unit::VU1 && capOn() && memory != nullptr && s_capKept < 3000u && vuCode == memory->getVU1Code()) // PROBE-CAPTURE
+    if (m_unit == Unit::VU1 && capOn() && memory != nullptr && s_capKept < capMaxRecords() && vuCode == memory->getVU1Code()) // PROBE-CAPTURE
     {
         const VU1State s0 = m_state;
         const uint32_t wc0 = m_workingClip;
@@ -3816,7 +3830,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
         s_vfyCapture = nullptr;
         const uint32_t cov = vu1CoverageCount();
-        if (cov != s_capCov || (++s_capSeen % 400u) == 0u)
+        ++s_capRuns;
+        if ((cov != s_capCov || (++s_capSeen % 200u) == 0u)) // new edge / pc / (pc, hash) pair, or 1 run in 200; PS2X_VU1_CAPTURE_MAX caps the records
         {
             s_capCov = cov;
             svCaptureRecord(s0, wc0, cyc0, mem0, m_state, m_workingClip, m_cycle, vuData, dataSize, capA, startPC, top, itop, maxCycles,
@@ -5759,6 +5774,29 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                                 (kt[0] - s_prevK[0]) * msPerTick, (kt[1] - s_prevK[1]) * msPerTick, (kt[2] - s_prevK[2]) * msPerTick, (kt[3] - s_prevK[3]) * msPerTick,
                                 (unsigned long long)(kc[0] - s_prevKc[0]), (unsigned long long)(kc[1] - s_prevKc[1]), (unsigned long long)(kc[2] - s_prevKc[2]), (unsigned long long)(kc[3] - s_prevKc[3]));
                     for (int k = 0; k < 4; ++k) { s_prevK[k] = kt[k]; s_prevKc[k] = kc[k]; }
+                    {
+                        static uint64_t s_prevFu = 0;
+                        const uint64_t fu = *vu1NativeStats(8);
+                        static uint64_t s_prevXg[2] = {};
+                        const uint64_t *xk = vu1NativeStats(9);
+                        std::printf("[probe] ge vu1f fused_iters=%llu xg_kernel_runs=%llu xg_overlap_declines=%llu\n", (unsigned long long)(fu - s_prevFu),
+                                    (unsigned long long)(xk[0] - s_prevXg[0]), (unsigned long long)(xk[1] - s_prevXg[1]));
+                        s_prevXg[0] = xk[0]; s_prevXg[1] = xk[1];
+                        s_prevFu = fu;
+                    }
+                    for (int w = 0; w < 2; ++w) // top entry pcs by time, hot blocks then slow pairs
+                    {
+                        static uint64_t s_prevPT[2][0x800] = {}, s_prevPN[2][0x800] = {};
+                        const uint64_t *pt = vu1NativeStats(4 + 2 * w), *pn = vu1NativeStats(5 + 2 * w);
+                        uint32_t idx[0x800];
+                        for (uint32_t i = 0; i < 0x800; ++i) idx[i] = i;
+                        std::partial_sort(idx, idx + 14, idx + 0x800, [&](uint32_t a, uint32_t b) { return pt[a] - s_prevPT[w][a] > pt[b] - s_prevPT[w][b]; });
+                        std::printf("[probe] ge vu1p %s top (pc:ms/calls):", w ? "slow" : "hot");
+                        for (int k = 0; k < 14; ++k)
+                            std::printf(" %04X:%.1f/%llu", idx[k] << 3, (pt[idx[k]] - s_prevPT[w][idx[k]]) * msPerTick, (unsigned long long)(pn[idx[k]] - s_prevPN[w][idx[k]]));
+                        std::printf("\n");
+                        for (uint32_t i = 0; i < 0x800; ++i) { s_prevPT[w][i] = pt[i]; s_prevPN[w][i] = pn[i]; }
+                    }
                 }
                 {
                     static uint64_t s_prevRt[6] = {};
