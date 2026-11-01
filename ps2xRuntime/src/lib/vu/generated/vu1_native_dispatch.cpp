@@ -3956,6 +3956,7 @@ void rgPending(RgBuf &o, VU1Interpreter &vu, uint64_t cyc)
 int s_rgActive = -1;
 uint32_t s_rgEntryPc = 0;
 RgBuf s_rgRec;
+RgBuf s_rgRing;
 std::vector<uint8_t> s_rgMem0;
 std::vector<uint16_t> s_rgTrace; // dispatch pcs visited inside the active region run (capped)
 FILE *s_rgFile = nullptr;
@@ -3990,6 +3991,19 @@ void rgStep(VU1Interpreter &vu, VuNativeCtx &c, uint32_t pc)
             s_rgRec.raw(c.vuData, dsz);
             rgPending(s_rgRec, vu, vu.m_cycle);
             s_rgMem0.assign(c.vuData, c.vuData + dsz);
+            s_rgRing.b.clear(); // v3: flag rings (oldest first) and the working clip, which the VU1State snapshot does not carry
+            for (const vuflags::FlgRing *ring : {&vuflags::s_flgClip[1], &vuflags::s_flgMac[1]})
+            {
+                s_rgRing.put(static_cast<uint32_t>(ring->count));
+                s_rgRing.put(static_cast<uint32_t>(ring->base));
+                for (uint32_t k = 0; k < ring->count; ++k)
+                {
+                    const uint32_t idx = (ring->head + 8u - ring->count + k) & 7u;
+                    s_rgRing.put(static_cast<uint64_t>(ring->cyc[idx]));
+                    s_rgRing.put(static_cast<uint32_t>(ring->val[idx]));
+                }
+            }
+            s_rgRing.put(static_cast<uint32_t>(vu.m_workingClip));
             s_rgTrace.clear();
             s_rgTrace.push_back(static_cast<uint16_t>(pc));
             s_rgEntryPc = pc;
@@ -4021,6 +4035,8 @@ void rgStep(VU1Interpreter &vu, VuNativeCtx &c, uint32_t pc)
     const uint32_t nt = static_cast<uint32_t>(s_rgTrace.size());
     s_rgRec.put(nt);
     s_rgRec.raw(s_rgTrace.data(), nt * sizeof(uint16_t));
+    s_rgRec.put(static_cast<uint32_t>(0x33565247u)); // 'GRV3' marker, then the entry ring dump
+    s_rgRec.raw(s_rgRing.b.data(), s_rgRing.b.size());
     if (!s_rgFile) s_rgFile = std::fopen("logs/vu1regions.bin", "wb");
     if (!s_rgFile) return;
     const uint32_t tag = 0x204D4752u /* 'RGM ' */, bytes = static_cast<uint32_t>(s_rgRec.b.size());

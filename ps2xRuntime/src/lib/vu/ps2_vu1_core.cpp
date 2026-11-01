@@ -5253,8 +5253,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                     }
                     if (bf)
                     {
-                        std::fprintf(bf, "B pc=%04X sig=%016llx exitsig=%016llx n=%zu xg=%d next=%04X\n", blkStartPc, (unsigned long long)blkEntryHash,
-                                     (unsigned long long)exitHash, blkIssue.size(), blkXgEntry ? 1 : 0, m_state.pc);
+                        std::fprintf(bf, "B pc=%04X sig=%016llx exitsig=%016llx n=%zu xg=%d next=%04X cyc=%llu\n", blkStartPc, (unsigned long long)blkEntryHash,
+                                     (unsigned long long)exitHash, blkIssue.size(), blkXgEntry ? 1 : 0, m_state.pc, (unsigned long long)(m_cycle - blkStartCycle));
                         std::fprintf(bf, "  entry: %s\n  issue:", blkEntryText.c_str());
                         for (uint32_t o : blkIssue)
                             std::fprintf(bf, " %u", o);
