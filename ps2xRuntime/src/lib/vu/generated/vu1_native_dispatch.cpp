@@ -11,6 +11,7 @@
 #include "../vu1_native_api.h"
 #include "../vu1_hot_ops.h" // PERF-LB: SIMD FMAC core for the loop kernel
 #include <bit>
+#include <map>
 #include <limits>
 
 namespace
@@ -3878,7 +3879,40 @@ struct SvPcGuard
 // Record: u32 'RGN ', u32 bytes, then ENTRY {u32 pc, u64 cycle, state, u32 dsz, data, pending} EXIT {u32 pc, u64 cycle, state, u32 nDiff, {u32 qw, 16B}*, pending}.
 // pending = vf{i64 rel,u8 reg,u8 mask,f32[4]}* vi{i64 rel,u8 reg,i32}* acc{i64 rel,u8 mask,f32[4]}* flag{i64 rel,i64 issueRel,u32 mac,status,sticky,clip,u8 bits}*
 //           store{i64 rel,u32 addr,u32[4],u8 mask}* then fdiv,efu0,efu1 {u8 valid,i64 rel,f32,u32 statusDi} and u8 xgkick.active.
-const bool s_rgOn = []() { const char *e = std::getenv("PS2X_VU1_REGION"); return e && e[0] == '1'; }();
+struct RgRange
+{
+    uint32_t a, b, seen, kept, stride;
+    std::map<uint32_t, std::array<uint32_t, 2>> byPc; // entry pc -> {entries seen, records kept}: every handler gets its own sampling
+};
+std::vector<RgRange> s_rgRanges = []()
+{
+    std::vector<RgRange> v;
+    const char *e = std::getenv("PS2X_VU1_REGIONS");
+    if (e)
+    {
+        while (*e)
+        {
+            char *end = nullptr;
+            const unsigned long a = std::strtoul(e, &end, 16);
+            if (!end || *end != ':')
+                break;
+            const unsigned long b = std::strtoul(end + 1, &end, 16);
+            v.push_back(RgRange{static_cast<uint32_t>(a), static_cast<uint32_t>(b), 0u, 0u, 16u, {}});
+            if (*end != ',')
+                break;
+            e = end + 1;
+        }
+    }
+    else
+    {
+        const char *r = std::getenv("PS2X_VU1_REGION");
+        if (r && r[0] == '1')
+            v.push_back(RgRange{0x1FE0u, 0x2200u, 0u, 0u, 16u, {}});
+    }
+    return v;
+}();
+const bool s_rgOn = !s_rgRanges.empty();
+const uint32_t s_rgCap = []() { const char *e = std::getenv("PS2X_VU1_REGION_CAP"); const unsigned long n = e ? std::strtoul(e, nullptr, 10) : 300ul; return static_cast<uint32_t>(n ? n : 300ul); }();
 struct RgBuf
 {
     std::vector<uint8_t> b;
@@ -3919,33 +3953,60 @@ void rgPending(RgBuf &o, VU1Interpreter &vu, uint64_t cyc)
     const uint8_t xg = vu.m_xgkick.active ? 1 : 0;
     o.put(xg);
 }
-bool s_rgIn = false;
-uint32_t s_rgSeen = 0, s_rgKept = 0;
+int s_rgActive = -1;
+uint32_t s_rgEntryPc = 0;
 RgBuf s_rgRec;
 std::vector<uint8_t> s_rgMem0;
+std::vector<uint16_t> s_rgTrace; // dispatch pcs visited inside the active region run (capped)
 FILE *s_rgFile = nullptr;
+// Record 'RGM ': u32 region index, u64 entry block hash, then ENTRY and EXIT as documented above, u64 exit block hash, u32 trace length, u16 trace pcs.
+// A region run starts at the first dispatch pc inside [a,b) (not while an XGKICK runs or a branch is pending) and ends at the first dispatch pc outside it.
+// Sampling is per (region, entry pc): the first 100 entries, then sparser and sparser as more are kept (cap PS2X_VU1_REGION_CAP per entry pc).
 void rgStep(VU1Interpreter &vu, VuNativeCtx &c, uint32_t pc)
 {
-    const bool inRegion = pc >= 0x1FE0u && pc < 0x2200u;
-    if (!s_rgIn)
+    if (s_rgActive < 0)
     {
-        if (pc != 0x1FE0u || s_rgKept >= 1500u || vu.m_xgkick.active || vu.m_state.branchPending || vu.m_state.ebit) return;
-        const uint32_t seen = s_rgSeen++;
-        if (seen >= 300u && (seen & 511u) != 0u) return;
-        s_rgRec.b.clear();
-        s_rgRec.put(pc);
-        s_rgRec.put(static_cast<uint64_t>(vu.m_cycle));
-        s_rgRec.raw(&vu.m_state, sizeof(vu.m_state));
-        const uint32_t dsz = c.dataSize;
-        s_rgRec.put(dsz);
-        s_rgRec.raw(c.vuData, dsz);
-        rgPending(s_rgRec, vu, vu.m_cycle);
-        s_rgMem0.assign(c.vuData, c.vuData + dsz);
-        s_rgIn = true;
+        for (size_t i = 0; i < s_rgRanges.size(); ++i)
+        {
+            RgRange &r = s_rgRanges[i];
+            if (pc < r.a || pc >= r.b || vu.m_xgkick.active || vu.m_state.branchPending || vu.m_state.ebit)
+                continue;
+            std::array<uint32_t, 2> &kv = r.byPc[pc];
+            if (kv[1] >= s_rgCap)
+                return;
+            const uint32_t seen = kv[0]++;
+            const uint32_t shift = kv[1] > 100u ? (std::min)((kv[1] - 100u) / 50u, 16u) : 0u;
+            const uint32_t stride = 16u << shift; // the more a handler has kept, the sparser it samples, so the records span the whole session
+            if (seen >= 100u && ((seen - 100u) % stride) != 0u)
+                return;
+            s_rgRec.b.clear();
+            s_rgRec.put(static_cast<uint32_t>(i));
+            s_rgRec.put(static_cast<uint64_t>(c.hashValid ? c.nextHash : c.ops->blkHash(vu)));
+            s_rgRec.put(pc);
+            s_rgRec.put(static_cast<uint64_t>(vu.m_cycle));
+            s_rgRec.raw(&vu.m_state, sizeof(vu.m_state));
+            const uint32_t dsz = c.dataSize;
+            s_rgRec.put(dsz);
+            s_rgRec.raw(c.vuData, dsz);
+            rgPending(s_rgRec, vu, vu.m_cycle);
+            s_rgMem0.assign(c.vuData, c.vuData + dsz);
+            s_rgTrace.clear();
+            s_rgTrace.push_back(static_cast<uint16_t>(pc));
+            s_rgEntryPc = pc;
+            s_rgActive = static_cast<int>(i);
+            return;
+        }
         return;
     }
-    if (inRegion) return;
-    s_rgIn = false;
+    const RgRange &r = s_rgRanges[static_cast<size_t>(s_rgActive)];
+    if (pc >= r.a && pc < r.b)
+    {
+        if (s_rgTrace.size() < 4096u)
+            s_rgTrace.push_back(static_cast<uint16_t>(pc));
+        return;
+    }
+    const int idx = s_rgActive;
+    s_rgActive = -1;
     s_rgRec.put(pc);
     s_rgRec.put(static_cast<uint64_t>(vu.m_cycle));
     s_rgRec.raw(&vu.m_state, sizeof(vu.m_state));
@@ -3956,14 +4017,19 @@ void rgStep(VU1Interpreter &vu, VuNativeCtx &c, uint32_t pc)
         if (std::memcmp(s_rgMem0.data() + q * 16u, c.vuData + q * 16u, 16u) != 0) { s_rgRec.put(q); s_rgRec.raw(c.vuData + q * 16u, 16u); ++nd; }
     std::memcpy(s_rgRec.b.data() + ndAt, &nd, 4);
     rgPending(s_rgRec, vu, vu.m_cycle);
-    if (!s_rgFile) s_rgFile = std::fopen("logs/vu1region.bin", "wb");
+    s_rgRec.put(static_cast<uint64_t>(c.ops->blkHash(vu)));
+    const uint32_t nt = static_cast<uint32_t>(s_rgTrace.size());
+    s_rgRec.put(nt);
+    s_rgRec.raw(s_rgTrace.data(), nt * sizeof(uint16_t));
+    if (!s_rgFile) s_rgFile = std::fopen("logs/vu1regions.bin", "wb");
     if (!s_rgFile) return;
-    const uint32_t tag = 0x204E4752u, bytes = static_cast<uint32_t>(s_rgRec.b.size());
+    const uint32_t tag = 0x204D4752u /* 'RGM ' */, bytes = static_cast<uint32_t>(s_rgRec.b.size());
     std::fwrite(&tag, 4, 1, s_rgFile);
     std::fwrite(&bytes, 4, 1, s_rgFile);
     std::fwrite(s_rgRec.b.data(), 1, bytes, s_rgFile);
     std::fflush(s_rgFile);
-    ++s_rgKept;
+    ++s_rgRanges[static_cast<size_t>(idx)].byPc[s_rgEntryPc][1];
+    ++s_rgRanges[static_cast<size_t>(idx)].kept;
 }
 }
 
@@ -4679,6 +4745,93 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
                     (unsigned long long)s_lbFullWhy[4], (unsigned long long)s_lbFullWhy[5]);
     return true;
 }
+
+// PERF-LB handler 0C80 (PS2X_VU1_KERNEL=1): the stream -> VU memory copy command. n = vi2 - vi3 quads are copied from the command stream (vi13) to vi3 (forward, one
+// quad at a time exactly like the loop), vf1 = the last quad, vi3 = vi2, vi13 += n, vi1 = the next command address loaded after the copy, JR vi15. Cycles: 5n + 5.
+// Spec and check: tools/vu1gen/h_copy.py (900 records, 0 mismatches). Replaces blocks vuH_10 (first iteration), vuH_4 (loop), vuH_17 (JR tail).
+constexpr uint64_t kHashCopyEntry = 0xcd057af54d65447full, kHashCopyExit = 0x8aba1b92c58909d9ull;
+uint64_t s_hCopyTaken = 0, s_hCopyDeclined = 0, s_hCopyQuads = 0;
+
+bool lbPipesEmpty(VU1Interpreter &vu, VuNativeCtx &c)
+{
+    if (vu.m_fdiv.valid || vu.m_efu[0].valid || vu.m_efu[1].valid || *c.storeMask != 0u)
+        return false;
+    for (const auto &w : vu.m_vfWritePipeline) if (w.valid) return false;
+    for (const auto &w : vu.m_viWritePipeline) if (w.valid) return false;
+    for (const auto &w : vu.m_accWritePipeline) if (w.valid) return false;
+    for (const auto &w : vu.m_flagPipeline) if (w.valid) return false;
+    for (const auto &w : vu.m_storePipeline) if (w.valid) return false;
+    return true;
+}
+
+bool lbCopy(VU1Interpreter &vu, VuNativeCtx &c)
+{
+    VU1State &st = vu.m_state;
+    const uint32_t dsz = c.dataSize;
+    if (vu.m_xgkick.active || st.branchPending || st.ebit || vu.m_stopRequested || st.haltAfterDelaySlot || dsz != 0x4000u || !lbPipesEmpty(vu, c))
+    {
+        ++s_hCopyDeclined;
+        return false;
+    }
+    const int32_t vi2 = st.vi[2], vi13 = st.vi[13], vi15 = st.vi[15];
+    const auto qwAt = [&](int32_t qw) { return (static_cast<uint32_t>(qw) * 16u) & (dsz - 1u); };
+    uint32_t zw;
+    std::memcpy(&zw, c.vuData + qwAt(vi13 - 1) + 8u, 4); // ILW.z vi3, -1(vi13)
+    const int32_t vi3 = lbS16(static_cast<int32_t>(zw & 0xFFFFu));
+    const int32_t n = (vi2 - vi3) & 0xFFFF;
+    if (n == 0 || n > 1024 || static_cast<int64_t>(c.budgetEnd) - static_cast<int64_t>(vu.m_cycle) <= 5 * n + 5 + 160)
+    {
+        ++s_hCopyDeclined;
+        return false;
+    }
+    for (int32_t i = 0; i < n; ++i) // forward, one quad per iteration: load then store, as LQI / SQ do
+    {
+        uint8_t q[16];
+        std::memcpy(q, c.vuData + qwAt(static_cast<int32_t>(static_cast<uint16_t>(vi13 + i))), 16);
+        std::memcpy(c.vuData + qwAt(static_cast<int32_t>(static_cast<uint16_t>(vi3 + i))), q, 16);
+        if (i == n - 1)
+            std::memcpy(st.vf[1], q, 16);
+    }
+    const int32_t newVi13 = lbS16(vi13 + n);
+    uint32_t nx;
+    std::memcpy(&nx, c.vuData + qwAt(static_cast<int32_t>(static_cast<uint16_t>(newVi13))), 4); // ILW.x vi1, 0(vi13) in the JR delay slot
+    st.vi[3] = vi2;
+    st.vi[13] = newVi13;
+    st.vi[1] = lbS16(static_cast<int32_t>(nx & 0xFFFFu));
+    const uint64_t Sp = vu.m_cycle, Sl = Sp + 8u + 5u * static_cast<uint64_t>(n >= 2 ? n - 2 : 0), St = Sp + 8u + 5u * static_cast<uint64_t>(n - 1);
+    vu.m_cycle = St + 2u;
+    st.cycles = vu.m_cycle;
+    st.pc = (static_cast<uint32_t>(static_cast<uint16_t>(vi15)) * 8u) & 0x3FFFu; // JR vi15 (the delay slot has run)
+    st.branchPending = false;
+    st.branchTarget = st.pc; // the interpreter leaves the landed JR target here, with the delay counter at 0
+    st.branchDelay = 0u;
+    vu.m_viBranchBackupValid = false;
+    vu.m_vfReady[1][0] = Sp + 5u;
+    vu.m_vfReady[1][1] = Sp + 5u;
+    vu.m_vfReady[1][2] = Sp + 5u;
+    vu.m_vfReady[1][3] = Sp + 5u;
+    vu.m_viReady[13] = Sp + 2u;
+    vu.m_viReady[3] = Sp + 5u;
+    if (n >= 2)
+    {
+        vu.m_vfReady[1][0] = Sl + 4u;
+        vu.m_vfReady[1][1] = Sl + 4u;
+        vu.m_vfReady[1][2] = Sl + 4u;
+        vu.m_vfReady[1][3] = Sl + 4u;
+        vu.m_viReady[13] = Sl + 1u;
+        vu.m_viReady[3] = Sl + 2u;
+    }
+    vu.m_viReady[1] = St + 5u;
+    c.instrs += 6u + 5u * static_cast<uint32_t>(n - 1) + 2u;
+    *c.nextReadyW = 0u;
+    c.nextHash = kHashCopyExit;
+    c.hashValid = true;
+    ++s_hCopyTaken;
+    s_hCopyQuads += static_cast<uint64_t>(n);
+    if ((s_hCopyTaken & 0xFFFFFull) == 0u)
+        std::printf("[probe] lb copy handler taken=%llu quads=%llu declined=%llu\n", (unsigned long long)s_hCopyTaken, (unsigned long long)s_hCopyQuads, (unsigned long long)s_hCopyDeclined);
+    return true;
+}
 } // namespace
 
 uint64_t *vu1NativeStats(uint32_t which) { return which == 0u ? s_cause : s_tsc; }
@@ -4688,7 +4841,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
 {
     c.hashValid = false; // the interpreter may have executed pairs since the last hot block
     SvPcGuard svg(vu.m_cycle); // PROBE-SURVEY
-    s_rgIn = false; // PROBE-REGION: a region interrupted by the end of a run is discarded
+    s_rgActive = -1; // PROBE-REGION: a region interrupted by the end of a run is discarded
     while (vu.m_cycle < c.budgetEnd && !vu.m_stopRequested)
     {
         const uint32_t pc = vu.m_state.pc;
@@ -4706,6 +4859,17 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 c.hashValid = true;
             }
             // PERF-HC: direct-mapped (pc -> {entry hash, block}) cache in front of the switch lookup; misses (no block) are cached too
+            if (s_lbOn && pc == 0x0C80u && c.nextHash == kHashCopyEntry && lbCopy(vu, c)) // PERF-LB: stream copy command
+            {
+                if (c.check && c.ops->blkHash(vu) != c.nextHash)
+                {
+                    ++c.checkFail;
+                    if (c.checkFail <= 6)
+                        std::printf("[probe] lb copy handler exit-hash MISMATCH at pc=%04X (handler entered at 0C80)\n", vu.m_state.pc);
+                    c.hashValid = false;
+                }
+                continue;
+            }
             if (s_lbOn && pc == 0x1FE0u && c.nextHash == kLbEntryHash && lbFull(vu, c)) // PERF-LB: the whole routine 1FE0 -> JR in closed form
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
