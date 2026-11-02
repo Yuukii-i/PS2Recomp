@@ -601,6 +601,34 @@ namespace
             }
         }
 
+        void SubmitRun(const GSDrawState &state, const GSRunPrim *prims, size_t count) override // PERF-GR
+        {
+            const uint64_t gqL0 = __rdtsc(); // PROBE-GQ2
+            std::lock_guard<std::mutex> lk(m_);
+            g_gqLockWait.fetch_add(__rdtsc() - gqL0, std::memory_order_relaxed);
+            g_gqLockWaits.fetch_add(1, std::memory_order_relaxed);
+            GSPrimitiveBatch batch;
+            batch.state = state;
+            for (size_t i = 0; i < count; ++i)
+            {
+                batch.vertices = prims[i].vertices;
+                batch.vertexCount = prims[i].vertexCount;
+                if (ref_)
+                    ref_->Submit(batch);
+                if (!vkReady_ || batch.vertexCount == 0u)
+                {
+                    cpuDraw(batch);
+                    continue;
+                }
+                const int reason = gpuDraw(batch);
+                if (reason > 0)
+                {
+                    ++fallback_[std::min(reason, 15)];
+                    cpuDraw(batch);
+                }
+            }
+        }
+
         void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override
         {
             const uint64_t gqL0 = __rdtsc(); // PROBE-GQ2

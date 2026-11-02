@@ -220,8 +220,9 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 void GS::reset()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    flushDeferredDisplayCopy(m_backend.get());
+    flushDeferredOrdered();
     std::memset(m_ctx, 0, sizeof(m_ctx));
+    m_stateDirty = true; // PERF-GR
     m_prim = {};
     m_primRegister = {};
     m_prmodeRegister = {};
@@ -257,9 +258,10 @@ void GS::reset()
     m_hasPreferredDisplaySource = false;
     if (m_backend)
     {
-        m_backend->Flush();
+        (flushPendingDraws(), m_backend.get())->Flush();
         m_backend->Sync(GSSyncReason::Reset);
         m_backend->Reset();
+        m_stateDirty = true;
     }
     {
         std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
@@ -299,7 +301,7 @@ void GS::snapshotVRAM()
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
     if (!m_backend)
         return;
-    flushDeferredDisplayCopy(m_backend.get());
+    flushDeferredDisplayCopy(m_backend.get()); // outside m_stateMutex: no pending run here
     std::vector<uint8_t> snapshot;
     m_backend->Sync(GSSyncReason::DebugReadback);
     m_backend->SnapshotVram(snapshot);
@@ -839,6 +841,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     }
 
     std::unique_lock<std::recursive_mutex> lock(m_stateMutex);
+    struct RunFlush { const GS *g; ~RunFlush() { g->flushPendingDraws(); } } runFlush{this}; // PERF-GR
 
     if (probeActive) {
         auto tLockAcquired = std::chrono::steady_clock::now();
@@ -1269,6 +1272,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    struct RunFlush { const GS *g; ~RunFlush() { g->flushPendingDraws(); } } runFlush{this}; // PERF-GR
     writeRegisterUnlocked(regAddr, value);
 }
 
@@ -1348,6 +1352,16 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
                         << std::endl);
         }
     });
+
+    switch (regAddr) // PERF-GR: anything but per-vertex data can change the draw state
+    {
+    case GS_REG_RGBAQ: case GS_REG_ST: case GS_REG_UV: case GS_REG_XYZF2: case GS_REG_XYZ2:
+    case GS_REG_XYZF3: case GS_REG_XYZ3: case GS_REG_FOG:
+        break;
+    default:
+        m_stateDirty = true;
+        break;
+    }
 
     switch (regAddr)
     {
@@ -1451,7 +1465,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
-        m_backend->LoadClut(t, m_texclut);
+        (flushPendingDraws(), m_backend.get())->LoadClut(t, m_texclut);
         break;
     }
     case GS_REG_CLAMP_1:
@@ -1482,7 +1496,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
-        m_backend->LoadClut(t, m_texclut);
+        (flushPendingDraws(), m_backend.get())->LoadClut(t, m_texclut);
         break;
     }
     case GS_REG_XYOFFSET_1:
@@ -1606,18 +1620,18 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
                 if (m_trxdir == 1) // local to host reads from sbp
                 {
                     if (frameOverlaps(m_bitbltbuf.sbp, m_bitbltbuf.sbw, defDstFbp, defDstFbw))
-                        flushDeferredDisplayCopy(m_backend.get());
+                        flushDeferredOrdered();
                 }
                 else if (m_trxdir == 2) // local to local reads sbp, writes dbp
                 {
                     if (frameOverlaps(m_bitbltbuf.sbp, m_bitbltbuf.sbw, defDstFbp, defDstFbw) ||
                         frameOverlaps(m_bitbltbuf.dbp, m_bitbltbuf.dbw, defDstFbp, defDstFbw))
-                        flushDeferredDisplayCopy(m_backend.get());
+                        flushDeferredOrdered();
                 }
                 else if (m_trxdir == 0) // host to local writes to dbp
                 {
                     if (frameOverlaps(m_bitbltbuf.dbp, m_bitbltbuf.dbw, defDstFbp, defDstFbw))
-                        flushDeferredDisplayCopy(m_backend.get());
+                        flushDeferredOrdered();
                 }
             }
 
@@ -1626,7 +1640,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             command.trxpos = m_trxpos;
             command.trxreg = m_trxreg;
             command.direction = m_trxdir;
-            m_backend->BeginTransfer(command);
+            (flushPendingDraws(), m_backend.get())->BeginTransfer(command);
         }
         recordTransferDebugEventUnlocked();
         break;
@@ -1648,7 +1662,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         break;
     case GS_REG_TEXFLUSH:
         if (m_backend)
-            m_backend->TextureFlush();
+            (flushPendingDraws(), m_backend.get())->TextureFlush();
         break;
     case GS_REG_SCANMSK:
         m_scanmsk = value;
@@ -1713,7 +1727,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     {
         if (m_backend)
         {
-            m_backend->Flush();
+            (flushPendingDraws(), m_backend.get())->Flush();
             m_backend->Sync(GSSyncReason::Finish);
         }
         if (m_privRegs)
@@ -1810,7 +1824,8 @@ void GS::vertexKick(bool drawing)
     if (drawing && m_backend)
     {
         const uint64_t gqT0 = __rdtsc(); // PROBE-GQ2
-        GSPrimitiveBatch batch = buildDrawBatch(needed);
+        refreshDrawBatch(needed); // PERF-GR
+        GSPrimitiveBatch &batch = m_drawBatch;
         updatePreferredDisplaySourceForDraw(batch);
         g_gqBuild.fetch_add(__rdtsc() - gqT0, std::memory_order_relaxed);
 
@@ -1824,7 +1839,7 @@ void GS::vertexKick(bool drawing)
             if (s_hasDeferredDisplayCopy &&
                 s_deferredDisplayCopyBatch.state.context.frame.fbp != batch.state.context.frame.fbp)
             {
-                flushDeferredDisplayCopy(m_backend.get());
+                flushDeferredOrdered();
             }
             s_deferredDisplayCopyBatch = batch;
             s_hasDeferredDisplayCopy = true;
@@ -1844,13 +1859,10 @@ void GS::vertexKick(bool drawing)
                 if (batch.state.context.frame.fbp == defDstFbp ||
                     (batch.state.prim.tme && frameOverlaps(batch.state.context.tex0.tbp0, batch.state.context.tex0.tbw, defDstFbp, defDstFbw)))
                 {
-                    flushDeferredDisplayCopy(m_backend.get());
+                    flushDeferredOrdered();
                 }
             }
-            const uint64_t gqS0 = __rdtsc(); // PROBE-GQ2
-            m_backend->Submit(batch);
-            g_gqSubmit.fetch_add(__rdtsc() - gqS0, std::memory_order_relaxed);
-            g_gqDraws.fetch_add(1, std::memory_order_relaxed);
+            queueDraw(batch); // PERF-GR
         }
 
         recordDrawDebugEventUnlocked(needed);
@@ -1905,26 +1917,26 @@ void GS::vertexKick(bool drawing)
 void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 {
     if (m_backend)
-        m_backend->UploadImage(data, sizeBytes);
+        (flushPendingDraws(), m_backend.get())->UploadImage(data, sizeBytes);
 }
 
 
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+    return m_backend && (flushPendingDraws(), m_backend.get())->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
 }
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
+    return m_backend && (flushPendingDraws(), m_backend.get())->ClearFramebuffer(activeContext(), rgba);
 }
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+    return m_backend ? (flushPendingDraws(), m_backend.get())->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
 }
 
 void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
@@ -1936,7 +1948,7 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
     if (m_backend)
     {
-        m_backend->Flush();
+        (flushPendingDraws(), m_backend.get())->Flush();
         m_backend->Sync(GSSyncReason::Reset);
 
         // The external 4 MiB GS allocation is the backend hand-off format.
@@ -1953,20 +1965,93 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
     }
 
     m_backend = std::move(backend);
+    m_stateDirty = true;
     m_backend->Initialize(m_localMemoryStorage, m_localMemorySize);
 }
 
 uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    return m_backend ? m_backend->ReadVram(psm, base, bw, x, y) : 0u;
+    return m_backend ? (flushPendingDraws(), m_backend.get())->ReadVram(psm, base, bw, x, y) : 0u;
 }
 
 void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (m_backend)
-        m_backend->WriteVram(psm, base, bw, x, y, value);
+        (flushPendingDraws(), m_backend.get())->WriteVram(psm, base, bw, x, y, value);
+}
+
+// PERF-GR: the draw state is rebuilt only after a state register write; per prim only the vertices change
+void GS::refreshDrawBatch(int vertexCount)
+{
+    GSPrimitiveBatch &batch = m_drawBatch;
+    if (m_stateDirty)
+    {
+        m_stateDirty = false;
+        ++m_stateSerial;
+        GSDrawState &s = batch.state;
+        s.context = m_ctx[m_prim.ctxt ? 1 : 0];
+        s.prim = m_prim;
+        s.texa = m_texa;
+        s.texclut = m_texclut;
+        s.pabe = m_pabe;
+        s.scanmsk = m_scanmsk;
+        s.dimx = m_dimx;
+        s.dthe = m_dthe;
+        s.colclamp = m_colclamp;
+        s.fogR = m_fogR;
+        s.fogG = m_fogG;
+        s.fogB = m_fogB;
+        s.textureWidth = static_cast<uint16_t>(1u << std::min<uint32_t>(s.context.tex0.tw, 10u));
+        s.textureHeight = static_cast<uint16_t>(1u << std::min<uint32_t>(s.context.tex0.th, 10u));
+        const uint64_t tex1 = s.context.tex1;
+        const uint8_t mmag = static_cast<uint8_t>((tex1 >> 5u) & 0x1u);
+        const uint8_t mmin = static_cast<uint8_t>((tex1 >> 6u) & 0x7u);
+        s.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
+    }
+    batch.vertexCount = static_cast<uint8_t>(std::min(vertexCount, 3));
+    for (int i = 0; i < 3; ++i)
+        batch.vertices[static_cast<size_t>(i)] = (i < batch.vertexCount) ? m_vtxQueue[i] : GSVertex{};
+}
+
+void GS::queueDraw(const GSPrimitiveBatch &batch)
+{
+    if (!m_runPrims.empty() && m_runSerial != m_stateSerial)
+        flushPendingDraws();
+    if (m_runPrims.empty())
+    {
+        m_runState = batch.state;
+        m_runSerial = m_stateSerial;
+        if (m_runPrims.capacity() < 512u)
+            m_runPrims.reserve(512u);
+    }
+    GSRunPrim rp;
+    rp.vertices = batch.vertices;
+    rp.vertexCount = batch.vertexCount;
+    m_runPrims.push_back(rp);
+    if (m_runPrims.size() >= 512u)
+        flushPendingDraws();
+}
+
+void GS::flushPendingDraws() const
+{
+    if (m_runPrims.empty())
+        return;
+    if (m_backend)
+    {
+        const uint64_t gqS0 = __rdtsc(); // PROBE-GQ2
+        m_backend->SubmitRun(m_runState, m_runPrims.data(), m_runPrims.size());
+        g_gqSubmit.fetch_add(__rdtsc() - gqS0, std::memory_order_relaxed);
+        g_gqDraws.fetch_add(m_runPrims.size(), std::memory_order_relaxed);
+    }
+    m_runPrims.clear();
+}
+
+void GS::flushDeferredOrdered()
+{
+    flushPendingDraws();
+    flushDeferredDisplayCopy(m_backend.get());
 }
 
 GSPrimitiveBatch GS::buildDrawBatch(int vertexCount) const
@@ -2003,7 +2088,7 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
     if (m_hasPreferredDisplaySource && ctx.frame.fbp == m_preferredDisplayDestFbp)
     {
         m_hasPreferredDisplaySource = false;
-        flushDeferredDisplayCopy(m_backend.get());
+        flushDeferredOrdered();
     }
     if (state.prim.type != GS_PRIM_SPRITE || batch.vertexCount < 2u)
         return;

@@ -171,11 +171,24 @@ private:
     void processImageData(const uint8_t *data, uint32_t sizeBytes);
     bool tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeBytes);
     GSPrimitiveBatch buildDrawBatch(int vertexCount) const;
+    // PERF-GR: draw runs
+    void refreshDrawBatch(int vertexCount);
+    void queueDraw(const GSPrimitiveBatch &batch);
+    void flushPendingDraws() const;
+    void flushDeferredOrdered();
     void updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch);
     GSPresentationRequest buildPresentationRequestUnlocked() const;
 
 
     GSContext &activeContext();
+
+    // PERF-GR
+    GSPrimitiveBatch m_drawBatch{};
+    bool m_stateDirty = true;
+    uint64_t m_stateSerial = 1;
+    mutable GSDrawState m_runState{};
+    mutable uint64_t m_runSerial = 0;
+    mutable std::vector<GSRunPrim> m_runPrims;
 
     uint8_t *m_localMemoryStorage = nullptr;
     uint32_t m_localMemorySize = 0u;

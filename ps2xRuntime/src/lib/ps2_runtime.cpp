@@ -6005,10 +6005,12 @@ void PS2Runtime::run()
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
             const float screenWidth = static_cast<float>(GetScreenWidth());
             const float screenHeight = static_cast<float>(GetScreenHeight());
-            // PS2X_ASPECT=16:9 | 4:3 | fill: shape of the displayed box (default: keep the frame's own 640x448 shape)
+            // PS2X_ASPECT=16:9 | 4:3 | fill | native: shape of the displayed box. Default 4:3: the console stretches its
+            // 512x448 / 640x448 frame over the whole 4:3 screen (non-square pixels), as PCSX2 does.
             static const float s_aspect = []() {
                 const char *a = getenv("PS2X_ASPECT");
-                if (!a || !*a) return 0.0f;
+                if (!a || !*a) return 4.0f / 3.0f;
+                if (!std::strcmp(a, "native")) return 0.0f;
                 if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f;
                 if (!std::strcmp(a, "16:10")) return 1.6f;
                 if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f;

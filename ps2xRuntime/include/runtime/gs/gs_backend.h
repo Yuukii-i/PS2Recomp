@@ -2,8 +2,17 @@
 
 #include "runtime/gs/gs_types.h"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
+
+// PERF-GR: one primitive of a draw run (the run shares one GSDrawState)
+struct GSRunPrim
+{
+    std::array<GSVertex, 3> vertices{};
+    uint8_t vertexCount = 0;
+};
 
 class GSRasterBackend
 {
@@ -14,6 +23,18 @@ public:
     virtual void Reset() = 0;
 
     virtual void Submit(const GSPrimitiveBatch &batch) = 0;
+    // PERF-GR: consecutive prims with identical draw state; same effect as calling Submit once per prim
+    virtual void SubmitRun(const GSDrawState &state, const GSRunPrim *prims, size_t count)
+    {
+        GSPrimitiveBatch b;
+        b.state = state;
+        for (size_t i = 0; i < count; ++i)
+        {
+            b.vertices = prims[i].vertices;
+            b.vertexCount = prims[i].vertexCount;
+            Submit(b);
+        }
+    }
     virtual void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) = 0;
 
     virtual void BeginTransfer(const GSTransferCommand &command) = 0;
