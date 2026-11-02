@@ -4151,11 +4151,30 @@ inline LbOp lbFmac(__m128 a, __m128 b, __m128 ac) // operands as in fmacR (norma
     }
     else
     {
-        const vuhot::FmacSlow sl = vuhot::fmacSlow<KIND, DEST>(a4, b4, ac4, val);
-        vb = sl.vb;
-        mac = sl.mac;
-        status4 = sl.status4;
-        extra = sl.extra;
+        uint32_t zl = 0u; // PERF-FZ (as in fmacR): out-of-window lanes whose float result is exactly +-0 and whose exact result is certainly zero
+        if constexpr (!madd)
+        {
+            const uint32_t zv = static_cast<uint32_t>(_mm_movemask_ps(_mm_cmpeq_ps(val, _mm_setzero_ps())));
+            uint32_t g = 0xFu;
+            if constexpr (KIND == 4)
+                g = static_cast<uint32_t>(_mm_movemask_ps(_mm_cmpeq_ps(a4, _mm_setzero_ps()))) |
+                    static_cast<uint32_t>(_mm_movemask_ps(_mm_cmpeq_ps(b4, _mm_setzero_ps())));
+            zl = zv & g & bad & D4;
+        }
+        if (!madd && ((bad & D4) & ~zl) == 0u)
+        {
+            const uint32_t s = static_cast<uint32_t>(_mm_movemask_ps(val)) & D4;
+            mac = (vuhot::rev4(s) << 4) | vuhot::rev4(zl);
+            status4 = (s ? 2u : 0u) | (zl ? 1u : 0u);
+        }
+        else
+        {
+            const vuhot::FmacSlow sl = vuhot::fmacSlow<KIND, DEST>(a4, b4, ac4, val);
+            vb = sl.vb;
+            mac = sl.mac;
+            status4 = sl.status4;
+            extra = sl.extra;
+        }
     }
     return LbOp{_mm_castsi128_ps(vb), status4 & 0xFu, extra, mac};
 }
@@ -4180,14 +4199,13 @@ inline __m128 lbClamp(__m128 x, float iReg) // MAXx.xyzw (vf0.x = 0) then MINIi.
 template <int SCALE>
 inline __m128i lbFtoi(__m128 a) // vuhot::ftoi core
 {
+    // PERF-FT: SCALE is a power of two, so the float product is exact (or inf, which saturates); cvtt gives INT_MIN for everything out of range, which
+    // is already the <= INT_MIN result. Floats are never strictly between 2147483520 and 2^31, so `>= 2^31` equals the old double `>= INT_MAX`.
     const __m128 a4 = vuhot::N4(a);
-    const __m256d sc = _mm256_mul_pd(_mm256_cvtps_pd(a4), _mm256_set1_pd(static_cast<double>(static_cast<float>(SCALE))));
-    __m128i t = _mm256_cvttpd_epi32(sc);
-    const uint32_t ge = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_cmp_pd(sc, _mm256_set1_pd(static_cast<double>(std::numeric_limits<int32_t>::max())), _CMP_GE_OQ)));
-    const uint32_t le = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_cmp_pd(sc, _mm256_set1_pd(static_cast<double>(std::numeric_limits<int32_t>::min())), _CMP_LE_OQ)));
-    t = _mm_blendv_epi8(t, _mm_set1_epi32(std::numeric_limits<int32_t>::max()), vuhot::laneMask4(ge));
-    t = _mm_blendv_epi8(t, _mm_set1_epi32(std::numeric_limits<int32_t>::min()), vuhot::laneMask4(le));
-    return t;
+    const __m128 sc = _mm_mul_ps(a4, _mm_set1_ps(static_cast<float>(SCALE)));
+    const __m128i t = _mm_cvttps_epi32(sc);
+    const __m128 ge = _mm_cmpge_ps(sc, _mm_set1_ps(2147483648.0f));
+    return _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(t), _mm_castsi128_ps(_mm_set1_epi32(std::numeric_limits<int32_t>::max())), ge));
 }
 
 struct LbV
@@ -4508,19 +4526,18 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
     putw(ubase, 1, vf27y);
     putw(ubase, 2, m1012z);
     putw(ubase, 3, m1012w);
-    alignas(16) uint32_t tmp[4];
-    for (int32_t v = 0; v < N; ++v)
+    for (int32_t v = 0; v < N; ++v) // PERF-FT: whole-quad stores (blend with the old quad where only some lanes are written)
     {
         const uint32_t q0 = ubase + 1u + 4u * static_cast<uint32_t>(v);
-        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), lbFtoi<16>(lbClamp(_mm_set1_ps(V[v].Wraw), iReg)));
-        putw(q0, 3, tmp[0]);
-        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), _mm_castps_si128(V[v].S2Q));
-        for (int l = 0; l < 3; ++l) putw(q0 + 1u, l, tmp[l]);
-        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), lbFtoi<1>(lbClamp(V[v].prod, iReg)));
-        for (int l = 0; l < 4; ++l) putw(q0 + 2u, l, tmp[l]);
-        _mm_store_si128(reinterpret_cast<__m128i *>(tmp), lbFtoi<16>(V[v].R7));
-        for (int l = 0; l < 3; ++l) putw(q0 + 3u, l, tmp[l]);
-        putw(q0 + 3u, 3, static_cast<uint32_t>(V[v].idx) & 0xFFFFu);
+        __m128i *p0 = reinterpret_cast<__m128i *>(c.vuData + ((q0 * 16u) & (dsz - 1u)));
+        __m128i *p1 = reinterpret_cast<__m128i *>(c.vuData + (((q0 + 1u) * 16u) & (dsz - 1u)));
+        __m128i *p2 = reinterpret_cast<__m128i *>(c.vuData + (((q0 + 2u) * 16u) & (dsz - 1u)));
+        __m128i *p3 = reinterpret_cast<__m128i *>(c.vuData + (((q0 + 3u) * 16u) & (dsz - 1u)));
+        const int32_t w0 = _mm_cvtsi128_si32(lbFtoi<16>(lbClamp(_mm_set1_ps(V[v].Wraw), iReg)));
+        _mm_storeu_si128(p0, _mm_insert_epi32(_mm_loadu_si128(p0), w0, 3));
+        _mm_storeu_si128(p1, _mm_castps_si128(_mm_blend_ps(_mm_castsi128_ps(_mm_loadu_si128(p1)), V[v].S2Q, 0x7)));
+        _mm_storeu_si128(p2, lbFtoi<1>(lbClamp(V[v].prod, iReg)));
+        _mm_storeu_si128(p3, _mm_insert_epi32(lbFtoi<16>(V[v].R7), static_cast<int32_t>(static_cast<uint32_t>(V[v].idx) & 0xFFFFu), 3));
     }
     putw(1023, 2, ctlOld);
     putw(1023, 3, ubase);
