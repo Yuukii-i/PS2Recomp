@@ -1,6 +1,7 @@
 #if defined(_MSC_VER)
 #include <intrin.h>
 #include <immintrin.h>
+#include <bit>
 #endif
 #include "runtime/ps2_vu1.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
@@ -4519,10 +4520,20 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                 *text += buf;
             }
         };
-        for (uint32_t reg = 1; reg < 32u; ++reg)
-            for (uint32_t l = 0; l < 4u; ++l)
-                if (v.m_vfReady[reg][l] > c)
+        { // PERF-SH: four ready times per register compared in one AVX2 op; usually no register is pending, so most iterations only test a mask
+            const __m256i cv = _mm256_set1_epi64x(static_cast<long long>(c));
+            for (uint32_t reg = 1; reg < 32u; ++reg)
+            {
+                const __m256i rv = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(v.m_vfReady[reg].data()));
+                uint32_t m = static_cast<uint32_t>(_mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpgt_epi64(rv, cv))));
+                while (m != 0u)
+                {
+                    const uint32_t l = static_cast<uint32_t>(std::countr_zero(m));
+                    m &= m - 1u;
                     emit("f", reg, l, static_cast<int64_t>(v.m_vfReady[reg][l] - c));
+                }
+            }
+        }
         for (uint32_t reg = 1; reg < 16u; ++reg)
             if (v.m_viReady[reg] > c)
                 emit("i", reg, 0, static_cast<int64_t>(v.m_viReady[reg] - c));

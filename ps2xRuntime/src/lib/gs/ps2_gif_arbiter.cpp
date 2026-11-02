@@ -48,31 +48,57 @@ const size_t kGsAsyncMaxBytes = []() {
 struct PacketPool // leaked on purpose like GsAsyncState: the detached GS worker may outlive static destruction
 {
     std::mutex m;
-    std::vector<std::vector<uint8_t>> v;
+    std::vector<std::vector<uint8_t>> b[22]; // PERF-CT: power-of-two capacity buckets (256 B .. 1 MB); the VIF1 worker holds thousands of packets per frame
+    size_t bytes = 0;
 };
 PacketPool &packetPool()
 {
     static PacketPool *p = new PacketPool();
     return *p;
 }
-std::vector<uint8_t> takePacketBuf()
+inline int packetBucket(size_t n) // smallest b >= 8 with 2^b >= n
 {
-    PacketPool &pool = packetPool();
-    std::lock_guard<std::mutex> lock(pool.m);
-    if (pool.v.empty())
+    int b = 8;
+    while ((static_cast<size_t>(1) << b) < n)
+        ++b;
+    return b;
+}
+std::vector<uint8_t> takePacketBuf(size_t need)
+{
+    const int b = packetBucket(need);
+    if (b > 20)
         return {};
-    std::vector<uint8_t> v = std::move(pool.v.back());
-    pool.v.pop_back();
-    return v;
+    PacketPool &pool = packetPool();
+    {
+        std::lock_guard<std::mutex> lock(pool.m);
+        auto &v = pool.b[b];
+        if (!v.empty())
+        {
+            std::vector<uint8_t> r = std::move(v.back());
+            v.pop_back();
+            pool.bytes -= r.capacity();
+            return r;
+        }
+    }
+    std::vector<uint8_t> r;
+    r.reserve(static_cast<size_t>(1) << b);
+    return r;
 }
 void recyclePacketBuf(std::vector<uint8_t> &&v)
 {
-    if (v.capacity() == 0u || v.capacity() > (1u << 20))
+    const size_t cap = v.capacity();
+    if (cap < 256u || cap > (1u << 20))
         return;
+    int b = 8;
+    while ((static_cast<size_t>(2) << b) <= cap)
+        ++b; // floor(log2(cap)): a buffer in bucket b holds at least 2^b bytes
     PacketPool &pool = packetPool();
     std::lock_guard<std::mutex> lock(pool.m);
-    if (pool.v.size() < 64u)
-        pool.v.push_back(std::move(v));
+    if (pool.bytes + cap <= (64u << 20))
+    {
+        pool.bytes += cap;
+        pool.b[b].push_back(std::move(v));
+    }
 }
 
 GsAsyncState &gsAsync()
@@ -243,9 +269,7 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     pkt.pathId = pathId;
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
     pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(data, sizeBytes);
-    pkt.data = takePacketBuf();
-    if (pkt.data.capacity() < sizeBytes) // PERF-CT: grow pooled buffers in big steps so they stop reallocating
-        pkt.data.reserve(std::max<size_t>(sizeBytes, 32768u));
+    pkt.data = takePacketBuf(sizeBytes);
     pkt.data.assign(data, data + sizeBytes);
     m_queue.push_back(std::move(pkt));
 }
