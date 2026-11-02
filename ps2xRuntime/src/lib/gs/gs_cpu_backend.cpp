@@ -4906,7 +4906,11 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
 }
 
 // PERF-AP: the Vulkan backend converts its own VRAM snapshot through this (an access-specifier hack there would change the mangled name)
-PresentationFrame ps2x_cpu_present_from_local(GSCpuBackend &b, const GSPresentationRequest &request) { return b.PresentFromLocalMemory(request); }
+using PfmFn = PresentationFrame (GSCpuBackend::*)(const GSPresentationRequest &);
+PfmFn ps2x_pfm_get();
+template <PfmFn P> struct PfmRob { friend PfmFn ps2x_pfm_get() { return P; } }; // explicit instantiation ignores access control
+template struct PfmRob<&GSCpuBackend::PresentFromLocalMemory>;
+PresentationFrame ps2x_cpu_present_from_local(GSCpuBackend &b, const GSPresentationRequest &request) { return (b.*ps2x_pfm_get())(request); }
 
 PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationRequest &request)
 {
