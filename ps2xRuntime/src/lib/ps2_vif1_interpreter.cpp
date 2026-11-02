@@ -7,6 +7,7 @@ extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint1
                                     uint8_t cl, uint8_t wl, uint8_t flg, uint16_t tops, uint32_t src_ea);
 #include "probe_ae.h"
 #include <cstring>
+#include <immintrin.h>
 #include <cstdio>
 #include <chrono>
 #include <map>
@@ -661,6 +662,109 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
     }
 }
 
+// PERF-UV: UNPACK writes for cl >= wl in one SIMD loop. Every destination lane is exactly one of decoded / constant (row, col) / protected
+// (keeps the old VU data word), selected per write-cycle position by the masks the caller derives from the same act[][] table as the scalar loop.
+namespace
+{
+    template <int VL, int VN, bool ZX>
+    inline __m128i vifDecode(const uint8_t *p)
+    {
+        if constexpr (VL == 0)
+        {
+            if constexpr (VN == 0)
+            {
+                uint32_t s;
+                std::memcpy(&s, p, 4);
+                return _mm_set1_epi32(static_cast<int>(s));
+            }
+            else if constexpr (VN == 1)
+                return _mm_loadl_epi64(reinterpret_cast<const __m128i *>(p));
+            else if constexpr (VN == 2)
+            {
+                uint32_t w[3];
+                std::memcpy(w, p, 12);
+                return _mm_set_epi32(0, static_cast<int>(w[2]), static_cast<int>(w[1]), static_cast<int>(w[0]));
+            }
+            else
+                return _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
+        }
+        else if constexpr (VL == 1)
+        {
+            if constexpr (VN == 0)
+            {
+                uint16_t r;
+                std::memcpy(&r, p, 2);
+                return _mm_set1_epi32(ZX ? static_cast<int>(r) : static_cast<int>(static_cast<int16_t>(r)));
+            }
+            else
+            {
+                uint64_t t = 0;
+                std::memcpy(&t, p, VN == 1 ? 4 : (VN == 2 ? 6 : 8));
+                const __m128i v = _mm_cvtsi64_si128(static_cast<long long>(t));
+                return ZX ? _mm_cvtepu16_epi32(v) : _mm_cvtepi16_epi32(v);
+            }
+        }
+        else
+        {
+            if constexpr (VN == 0)
+                return _mm_set1_epi32(ZX ? static_cast<int>(p[0]) : static_cast<int>(static_cast<int8_t>(p[0])));
+            else
+            {
+                uint32_t t = 0;
+                std::memcpy(&t, p, VN == 1 ? 2 : (VN == 2 ? 3 : 4));
+                const __m128i v = _mm_cvtsi32_si128(static_cast<int>(t));
+                return ZX ? _mm_cvtepu8_epi32(v) : _mm_cvtepi8_epi32(v);
+            }
+        }
+    }
+
+    template <int VL, int VN, bool ZX>
+    void vifUnpackLoop(uint8_t *vuData, const uint8_t *src, uint32_t count, uint32_t destVec, uint32_t cl, uint32_t wl, uint32_t bytesPerVector,
+                       const __m128i *dm, const __m128i *cv, const __m128i *pm)
+    {
+        uint32_t cyclePos = 0;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const __m128i dec = vifDecode<VL, VN, ZX>(src);
+            const uint32_t c = (cyclePos > 3u) ? 3u : cyclePos;
+            __m128i *d = reinterpret_cast<__m128i *>(vuData) + destVec;
+            const __m128i old = _mm_loadu_si128(d);
+            _mm_storeu_si128(d, _mm_or_si128(_mm_or_si128(_mm_and_si128(dec, dm[c]), cv[c]), _mm_and_si128(old, pm[c])));
+            src += bytesPerVector;
+            ++cyclePos;
+            ++destVec;
+            if (cyclePos == wl)
+            {
+                cyclePos = 0;
+                destVec += (cl - wl);
+            }
+        }
+    }
+
+    template <int VL, int VN>
+    void vifUnpackZx(bool zx, uint8_t *vuData, const uint8_t *src, uint32_t count, uint32_t destVec, uint32_t cl, uint32_t wl, uint32_t bpv,
+                     const __m128i *dm, const __m128i *cv, const __m128i *pm)
+    {
+        if (zx)
+            vifUnpackLoop<VL, VN, true>(vuData, src, count, destVec, cl, wl, bpv, dm, cv, pm);
+        else
+            vifUnpackLoop<VL, VN, false>(vuData, src, count, destVec, cl, wl, bpv, dm, cv, pm);
+    }
+
+    template <int VL>
+    void vifUnpackVn(uint32_t vn, bool zx, uint8_t *vuData, const uint8_t *src, uint32_t count, uint32_t destVec, uint32_t cl, uint32_t wl,
+                     uint32_t bpv, const __m128i *dm, const __m128i *cv, const __m128i *pm)
+    {
+        switch (vn)
+        {
+        case 0: vifUnpackZx<VL, 0>(zx, vuData, src, count, destVec, cl, wl, bpv, dm, cv, pm); break;
+        case 1: vifUnpackZx<VL, 1>(zx, vuData, src, count, destVec, cl, wl, bpv, dm, cv, pm); break;
+        case 2: vifUnpackZx<VL, 2>(zx, vuData, src, count, destVec, cl, wl, bpv, dm, cv, pm); break;
+        default: vifUnpackZx<VL, 3>(zx, vuData, src, count, destVec, cl, wl, bpv, dm, cv, pm); break;
+        }
+    }
+} // namespace
+
 void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u || srcPhys >= PS2_RAM_SIZE)
@@ -1121,6 +1225,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 std::memcpy(w0, srcBaseAt974, avail);
             }
 
+            if (isVu3dProbeEnabled()) // PERF-UV: 24 variadic arguments were pushed for every UNPACK even when the probe is off
             recordEpEvent("UNPACK cmd=0x%02X dest=%u num=%u cl=%u wl=%u flg=%u tops=%u src=0x%08X w0=%08X %08X %08X %08X mask=%08X mode=%u row=%08X %08X %08X %08X col=%08X %08X %08X %08X",
                           opcode, vuAddr, writeVectorCount,
                           cl, wl, (imm & 0x8000u) ? 1u : 0u, vif1_regs.tops & 0x3FFu,
@@ -1361,6 +1466,35 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                             }
                             return;
                         }
+                    }
+
+                    static const bool s_uvOn = []() { const char *e = std::getenv("PS2X_UNPACK_SIMD"); return !(e && e[0] == '0'); }(); // PERF-UV
+                    if (s_uvOn)
+                    {
+                        alignas(16) uint32_t dmA[4][4] = {}, pmA[4][4] = {}, cvA[4][4] = {};
+                        const uint32_t maxC = std::min<uint32_t>(wl, 4u);
+                        for (uint32_t c = 0u; c < maxC; ++c)
+                            for (uint32_t f = 0u; f < 4u; ++f)
+                            {
+                                dmA[c][f] = (act[c][f] == ACT_DECODED) ? 0xFFFFFFFFu : 0u;
+                                pmA[c][f] = (act[c][f] == ACT_PROTECT) ? 0xFFFFFFFFu : 0u;
+                                cvA[c][f] = (act[c][f] == ACT_CONST) ? constVal[c][f] : 0u;
+                            }
+                        __m128i dm[4], pm[4], cv[4];
+                        for (uint32_t c = 0u; c < 4u; ++c)
+                        {
+                            const uint32_t k = std::min(c, maxC - 1u);
+                            dm[c] = _mm_load_si128(reinterpret_cast<const __m128i *>(dmA[k]));
+                            pm[c] = _mm_load_si128(reinterpret_cast<const __m128i *>(pmA[k]));
+                            cv[c] = _mm_load_si128(reinterpret_cast<const __m128i *>(cvA[k]));
+                        }
+                        switch (vl)
+                        {
+                        case 0: vifUnpackVn<0>(vn, zeroExtend, targetVuData, srcBase, writeVectorCount, vuAddr, cl, wl, bytesPerVector, dm, cv, pm); break;
+                        case 1: vifUnpackVn<1>(vn, zeroExtend, targetVuData, srcBase, writeVectorCount, vuAddr, cl, wl, bytesPerVector, dm, cv, pm); break;
+                        default: vifUnpackVn<2>(vn, zeroExtend, targetVuData, srcBase, writeVectorCount, vuAddr, cl, wl, bytesPerVector, dm, cv, pm); break;
+                        }
+                        return;
                     }
 
                     const uint8_t *srcPtr = srcBase;
@@ -1779,7 +1913,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                                 vif1_regs.mask, vif1_regs.row, vif1_regs.col);
                     }
                 }
-                if (m_vu1Data)
+                if (m_vu1Data && isVu3dProbeEnabled()) // PERF-UV
                 {
                     uint32_t eff = vuAddr;
                     uint32_t lastVec = (cl >= wl) ? ((eff + ((writeVectorCount - 1u) / wl) * cl + ((writeVectorCount - 1u) % wl)) & 0x3FFu) : ((eff + writeVectorCount - 1u) & 0x3FFu);
