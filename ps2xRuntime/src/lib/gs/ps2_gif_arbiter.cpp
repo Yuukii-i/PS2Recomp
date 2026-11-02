@@ -93,6 +93,7 @@ thread_local bool t_gsBatch = false;
 thread_local std::vector<std::vector<uint8_t>> t_gsPending;
 thread_local size_t t_gsPendingBytes = 0;
 std::atomic<bool> s_gsAsyncStarted{false};
+std::atomic<uint64_t> g_gsqBusy{0}, g_gsqIdle{0}, g_gsqBlocked{0}, g_gsqPeak{0}, g_gsqPkts{0}; // PROBE-GQ
 
 void gsFlushPending()
 {
@@ -106,8 +107,10 @@ void gsFlushPending()
         ++st.idleWaiters;
         st.cvIdle.wait(lock, [&] { return st.queuedBytes < kGsAsyncMaxBytes; }); // backpressure
         --st.idleWaiters;
+        if (__rdtsc() - kfT1 > 20000ull) g_gsqBlocked.fetch_add(1, std::memory_order_relaxed); // PROBE-GQ: blocked for more than ~5 us
         g_waitTicks[3].fetch_add(__rdtsc() - kfT1, std::memory_order_relaxed);
         st.queuedBytes += d.size();
+        if (st.queuedBytes > g_gsqPeak.load(std::memory_order_relaxed)) g_gsqPeak.store(st.queuedBytes, std::memory_order_relaxed); // PROBE-GQ
         ++st.enqueuedPkts;
         st.q.push_back(std::move(d));
     }
@@ -124,14 +127,19 @@ void gsAsyncWorker()
     for (;;)
     {
         st.workerWaiting = true;
+        const uint64_t gqI0 = __rdtsc(); // PROBE-GQ
         st.cvWork.wait(lock, [&] { return !st.q.empty(); });
+        g_gsqIdle.fetch_add(__rdtsc() - gqI0, std::memory_order_relaxed);
         st.workerWaiting = false;
         std::vector<uint8_t> pkt = std::move(st.q.front());
         st.q.pop_front();
         st.busy = true;
         lock.unlock();
         const size_t pktSize = pkt.size();
+        const uint64_t gqB0 = __rdtsc(); // PROBE-GQ
         st.fn(pkt.data(), static_cast<uint32_t>(pktSize));
+        g_gsqBusy.fetch_add(__rdtsc() - gqB0, std::memory_order_relaxed);
+        g_gsqPkts.fetch_add(1, std::memory_order_relaxed);
         recyclePacketBuf(std::move(pkt));
         lock.lock();
         st.queuedBytes -= pktSize;
@@ -160,6 +168,15 @@ extern "C" void ps2_gs_async_fence()
     st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
     --st.idleWaiters;
     g_waitTicks[2].fetch_add(__rdtsc() - kfT0, std::memory_order_relaxed);
+}
+
+extern "C" void ps2_gs_async_stats(uint64_t *out) // PROBE-GQ: busy, idle ticks, blocked count, peak bytes, packets (all reset on read)
+{
+    out[0] = g_gsqBusy.exchange(0);
+    out[1] = g_gsqIdle.exchange(0);
+    out[2] = g_gsqBlocked.exchange(0);
+    out[3] = g_gsqPeak.exchange(0);
+    out[4] = g_gsqPkts.exchange(0);
 }
 
 // PERF-GB: batch mode for the calling thread (VIF1 worker, around one job); turning it off flushes.
