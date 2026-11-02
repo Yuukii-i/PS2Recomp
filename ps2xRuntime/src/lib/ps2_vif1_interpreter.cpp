@@ -684,11 +684,14 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
     probe_ae::onBhVif1Start();
     probe_ae::onBxKick();
-    uint32_t mscal0x48Count = count0x48MscalsInKick(data, sizeBytes);
+    // PERF-CU: the MSCAL scan, the clock reads and the movie bookkeeping only feed probes / the movie HLE
+    const bool cuProbe = probe_ae::isEnabled();
+    static const bool s_cuMovie = probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify();
+    uint32_t mscal0x48Count = (cuProbe || s_cuMovie) ? count0x48MscalsInKick(data, sizeBytes) : 0u;
     probe_ae::onMovieKickMscalCount(mscal0x48Count);
     uint32_t kickUnpacksSkipped = 0;
     uint32_t kickBytesSkipped = 0;
-    auto tVif1Start = std::chrono::steady_clock::now();
+    const auto tVif1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
 #if defined(PS2X_PROBE_AE) || 1
     if (probe_ae::isEnabled()) {
@@ -896,7 +899,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
             const bool skipMscal = probe_ae::isMovieSkipUnpackEnabled() && probe_ae::isMovieKickNative();
             if (!skipMscal && m_vu1MscalCallback) {
-                auto tVu1Start = std::chrono::steady_clock::now();
+                const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 m_vu1MscalCallback(startPC, runTop, runItop);
 #if defined(PS2X_PROBE_AE) || 1
                 if (probe_ae::isEnabled()) {
@@ -926,7 +929,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
             probe_ae::flushMovieBatch(nullptr, this);
             if (m_vu1MscntCallback) {
-                auto tVu1Start = std::chrono::steady_clock::now();
+                const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 m_vu1MscntCallback(runTop, runItop);
 #if defined(PS2X_PROBE_AE) || 1
                 if (probe_ae::isEnabled()) {
