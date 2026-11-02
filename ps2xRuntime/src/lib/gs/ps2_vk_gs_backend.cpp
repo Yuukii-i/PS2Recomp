@@ -40,6 +40,7 @@ namespace GSMem
 }
 
 #include "vk/ps2_vk_shaders.inc"
+#include "vk/ps2_vk_present_shader.inc" // PERF-PG
 
 #include <atomic>
 #include <intrin.h>
@@ -234,6 +235,7 @@ namespace
         VkPipelineLayout pipeLayout = VK_NULL_HANDLE;
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+        bool qCompute = false; // PERF-PG: the chosen queue family can run compute
         VkBuffer tables = VK_NULL_HANDLE;
         VkDeviceMemory tablesMem = VK_NULL_HANDLE;
         VkDeviceSize tablesSize = 0;
@@ -385,12 +387,14 @@ namespace
         std::vector<VkQueueFamilyProperties> qfs(qn);
         vkGetPhysicalDeviceQueueFamilyProperties(g_vk.pd, &qn, qfs.data());
         g_vk.qf = ~0u;
-        for (uint32_t i = 0; i < qn; ++i)
-            if (qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
-            {
-                g_vk.qf = i;
-                break;
-            }
+        for (uint32_t pass = 0; pass < 2 && g_vk.qf == ~0u; ++pass) // PERF-PG: prefer a graphics family that can also run compute
+            for (uint32_t i = 0; i < qn; ++i)
+                if ((qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (pass == 1 || (qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT)))
+                {
+                    g_vk.qf = i;
+                    g_vk.qCompute = (qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
+                    break;
+                }
         if (g_vk.qf == ~0u)
             return false;
         float prio = 1.0f;
@@ -533,6 +537,13 @@ namespace
         g_vk.ok = true;
         return true;
     }
+
+    // PERF-PG: what the GPU display conversion has to read (see GSVulkanBackend::planGpuPresent)
+    struct GpuPlan
+    {
+        bool ok = false, usedPreferred = false, fieldMode = false, oddField = false;
+        uint32_t base = 0, fbw = 0, psm = 0, x0 = 0, y0 = 0, w = 0, h = 0, displayFbp = 0, sourceFbp = 0;
+    };
 
     // ---------------------------------------------------------------- the backend
     class GSVulkanBackend final : public GSRasterBackend
@@ -795,44 +806,56 @@ namespace
                 vkFailed_ = true;
                 return false;
             }
-            std::vector<std::pair<uint32_t, uint32_t>> runs;
-            pageRuns(asyncPages_, runs);
-            for (const auto &run : runs)
+            if (asyncKind_ & 1)
             {
-                const size_t off = static_cast<size_t>(run.first) * 8192u, len = static_cast<size_t>(run.second) * 8192u;
-                std::memcpy(presVram_.data() + off, snap_.map + off, len);
-                downloadBytes_ += len;
+                std::vector<std::pair<uint32_t, uint32_t>> runs;
+                pageRuns(asyncPages_, runs);
+                for (const auto &run : runs)
+                {
+                    const size_t off = static_cast<size_t>(run.first) * 8192u, len = static_cast<size_t>(run.second) * 8192u;
+                    std::memcpy(presVram_.data() + off, snap_.map + off, len);
+                    downloadBytes_ += len;
+                }
             }
             return true;
         }
 
-        // PERF-AP: queue the copy of the display pages (vram_ is authoritative after ensureUpload) without waiting for the GPU
-        void startAsync(const GSPresentationRequest &request)
+        // PERF-AP: queue the copy of the display pages (vram_ is authoritative after ensureUpload) without waiting for the GPU.
+        // PERF-PG: with a plan the display conversion is dispatched on the GPU as well; pages=false skips the page copy (and leaves presDirty_ alone).
+        void startAsync(const GSPresentationRequest &request, const GpuPlan *gp = nullptr, bool pages = true)
         {
             if (!ensureUpload())
                 return;
             PageSet need;
-            addPresentPages(need, request);
-            need.orWith(presDirty_); // the CPU presenter may read any colour page: keep presVram_ equal to vram_, not just the display pages
-            presDirty_.clear();
             std::vector<std::pair<uint32_t, uint32_t>> runs;
-            pageRuns(need, runs);
+            if (pages)
+            {
+                addPresentPages(need, request);
+                need.orWith(presDirty_); // the CPU presenter may read any colour page: keep presVram_ equal to vram_, not just the display pages
+                presDirty_.clear();
+                pageRuns(need, runs);
+            }
             beginRecording();
             endPass();
-            std::vector<VkBufferCopy> regions;
-            for (const auto &run : runs)
-                regions.push_back(VkBufferCopy{static_cast<VkDeviceSize>(run.first) * 8192u, static_cast<VkDeviceSize>(run.first) * 8192u,
-                                               static_cast<VkDeviceSize>(run.second) * 8192u});
-            bufBarrier(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-            if (!regions.empty())
-                vkCmdCopyBuffer(cb_, vram_.b, snap_.b, static_cast<uint32_t>(regions.size()), regions.data());
-            VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-            hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-            hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            hb.buffer = snap_.b;
-            hb.size = VK_WHOLE_SIZE;
-            vkCmdPipelineBarrier(cb_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
+            if (pages)
+            {
+                std::vector<VkBufferCopy> regions;
+                for (const auto &run : runs)
+                    regions.push_back(VkBufferCopy{static_cast<VkDeviceSize>(run.first) * 8192u, static_cast<VkDeviceSize>(run.first) * 8192u,
+                                                   static_cast<VkDeviceSize>(run.second) * 8192u});
+                bufBarrier(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                if (!regions.empty())
+                    vkCmdCopyBuffer(cb_, vram_.b, snap_.b, static_cast<uint32_t>(regions.size()), regions.data());
+                VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                hb.buffer = snap_.b;
+                hb.size = VK_WHOLE_SIZE;
+                vkCmdPipelineBarrier(cb_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
+            }
+            if (gp)
+                recordGpuConvert(*gp);
             vkEndCommandBuffer(cb_);
             recording_ = false;
             VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -843,6 +866,8 @@ namespace
                 asyncPending_ = true;
                 asyncPages_ = need;
                 asyncReq_ = request;
+                asyncKind_ = (pages ? 1 : 0) | (gp ? 2 : 0);
+                gpuPlan_ = gp ? *gp : GpuPlan{};
                 orderAfterAsync_ = true;
                 ++submits_;
                 resetRings();
@@ -866,8 +891,25 @@ namespace
                 if (vkReady_)
                 {
                     const uint64_t gqP0 = __rdtsc(), pj0 = gqP0;
+                    const int doneKind = asyncKind_;
+                    const GpuPlan donePlan = gpuPlan_;
                     const bool haveSnap = completeAsync();
                     const GSPresentationRequest doneReq = asyncReq_;
+                    PresentationFrame gpuFrame;
+                    bool gpuNeedCpu = false;
+                    if (haveSnap && (doneKind & 2))
+                    {
+                        readGpuFrame(donePlan, gpuFrame, gpuNeedCpu);
+                        if (gpuNeedCpu)
+                        {
+                            ++pgBlack_;
+                            syncPages(gpuColor_, 0); // (nearly) black frame: the presenter tries the other context frames, which only the CPU path knows
+                        }
+                        else
+                            ++pgGpu_;
+                    }
+                    else if (haveSnap)
+                        ++pgPages_;
                     if (vkReady_ && !haveSnap)
                     {
                         PageSet first; // first present: the synchronous path supplies this frame
@@ -875,16 +917,63 @@ namespace
                         syncPages(first, 0);
                     }
                     if (vkReady_)
-                        startAsync(request);
+                    {
+                        GpuPlan plan;
+                        uint32_t why = 0;
+                        const bool useGpu = gpuPresOk_ && planGpuPresent(request, plan, why);
+                        if (gpuPresOk_ && !useGpu)
+                            ++pgIneligible_[why & 3u];
+                        startAsync(request, useGpu ? &plan : nullptr, !useGpu || gpuVerify_);
+                    }
                     g_presTicks[3].fetch_add(__rdtsc() - pj0, std::memory_order_relaxed);
                     ++presents_;
                     maybePrintStats();
+                    if (gpuPresOk_ && presents_ % 240u == 0u)
+                        std::printf("[presgpu] gpu=%llu pages=%llu blackFallback=%llu ineligible(none/both/format)=%llu/%llu/%llu verify: frames=%llu mismatched=%llu\n",
+                                    static_cast<unsigned long long>(pgGpu_), static_cast<unsigned long long>(pgPages_), static_cast<unsigned long long>(pgBlack_),
+                                    static_cast<unsigned long long>(pgIneligible_[0]), static_cast<unsigned long long>(pgIneligible_[1]),
+                                    static_cast<unsigned long long>(pgIneligible_[2]), static_cast<unsigned long long>(pgVerified_), static_cast<unsigned long long>(pgMismatch_));
                     primsThisFrame_ = 0;
                     g_gqPresentHold.fetch_add(__rdtsc() - gqP0, std::memory_order_relaxed);
                     g_gqPresents.fetch_add(1, std::memory_order_relaxed);
                     lk.unlock();
                     if (haveSnap)
                     {
+                        if ((doneKind & 2) && !gpuNeedCpu)
+                        {
+                            if (doneKind & 1) // verify: convert the same request from the page copy and compare
+                            {
+                                if (!presCpu_)
+                                    presCpu_ = std::make_unique<GSCpuBackend>();
+                                presCpu_->Initialize(presVram_.data(), static_cast<uint32_t>(presVram_.size()));
+                                const PresentationFrame ref = ps2x_cpu_present_from_local(*presCpu_, doneReq);
+                                ++pgVerified_;
+                                bool same = ref.width == gpuFrame.width && ref.height == gpuFrame.height && ref.displayFbp == gpuFrame.displayFbp &&
+                                            ref.sourceFbp == gpuFrame.sourceFbp && ref.usedPreferred == gpuFrame.usedPreferred;
+                                uint32_t badPx = 0, fx = 0, fy = 0;
+                                if (same)
+                                    for (uint32_t y = 0; y < ref.height; ++y)
+                                        for (uint32_t x = 0; x < ref.width; ++x)
+                                            if (std::memcmp(ref.pixels.data() + (static_cast<size_t>(y) * 640u + x) * 4u, gpuFrame.pixels.data() + (static_cast<size_t>(y) * 640u + x) * 4u, 4) != 0)
+                                            {
+                                                if (badPx++ == 0)
+                                                {
+                                                    fx = x;
+                                                    fy = y;
+                                                }
+                                            }
+                                if (!same || badPx)
+                                {
+                                    if (pgMismatch_++ < 8)
+                                        std::printf("[presgpu] MISMATCH dims gpu=%ux%u ref=%ux%u fbp gpu=%u/%u ref=%u/%u pref %d/%d differingPixels=%u first=(%u,%u)\n", gpuFrame.width, gpuFrame.height,
+                                                    ref.width, ref.height, gpuFrame.displayFbp, gpuFrame.sourceFbp, ref.displayFbp, ref.sourceFbp, gpuFrame.usedPreferred ? 1 : 0,
+                                                    ref.usedPreferred ? 1 : 0, badPx, fx, fy);
+                                }
+                            }
+                            return gpuFrame;
+                        }
+                        if (doneKind & 2) // black-frame fallback: the old path on the current VRAM
+                            return cpu_->Present(doneReq);
                         if (!presCpu_)
                             presCpu_ = std::make_unique<GSCpuBackend>();
                         presCpu_->Initialize(presVram_.data(), static_cast<uint32_t>(presVram_.size()));
@@ -1044,6 +1133,8 @@ namespace
             primMap_ = reinterpret_cast<uint32_t *>(prims_.map);
             if (asyncPresentWanted())
                 asyncOk_ = createAltSlot(hv);
+            if (asyncOk_ && gpuPresentWanted())
+                gpuPresOk_ = createPresentGpu();
             return true;
         }
 
@@ -1094,6 +1185,212 @@ namespace
                 return false;
             presVram_.assign(kVramSize, 0u);
             return true;
+        }
+
+        // PERF-PG: PS2X_PRESENT_GPU=1 converts the display image on the GPU (gs_present.comp) and reads back only the visible rows; PS2X_PRESENT_GPU_VERIFY=1
+        // does that AND the old page copy + CPU conversion and compares both frames (counted in the [presgpu] line). Needs PS2X_PRESENT_ASYNC=1.
+        static bool gpuPresentWanted()
+        {
+            static const bool on = []() { const char *a = std::getenv("PS2X_PRESENT_GPU"); const char *b = std::getenv("PS2X_PRESENT_GPU_VERIFY"); return (a && a[0] == '1') || (b && b[0] == '1'); }();
+            return on;
+        }
+
+        bool createPresentGpu()
+        {
+            if (!g_vk.qCompute)
+            {
+                std::printf("[vk] GPU present: the graphics queue family has no compute, using the CPU presenter\n");
+                return false;
+            }
+            const VkMemoryPropertyFlags hv = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            if (!makeBuf(presOut_, 16u + 640u * 512u * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true, VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
+                return false;
+            std::memset(presOut_.map, 0, 16);
+            VkDescriptorSetLayoutBinding bnd[3]{};
+            for (uint32_t i = 0; i < 3; ++i)
+            {
+                bnd[i].binding = i;
+                bnd[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                bnd[i].descriptorCount = 1;
+                bnd[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            }
+            VkDescriptorSetLayoutCreateInfo dsl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            dsl.bindingCount = 3;
+            dsl.pBindings = bnd;
+            if (vkCreateDescriptorSetLayout(g_vk.dev, &dsl, nullptr, &cSetLayout_) != VK_SUCCESS)
+                return false;
+            VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+            VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            plci.setLayoutCount = 1;
+            plci.pSetLayouts = &cSetLayout_;
+            plci.pushConstantRangeCount = 1;
+            plci.pPushConstantRanges = &pcr;
+            if (vkCreatePipelineLayout(g_vk.dev, &plci, nullptr, &cPipeLayout_) != VK_SUCCESS)
+                return false;
+            VkShaderModule sm = makeShader(kPresentCompSpv, sizeof(kPresentCompSpv) / 4);
+            if (!sm)
+                return false;
+            VkComputePipelineCreateInfo cpci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            cpci.stage.module = sm;
+            cpci.stage.pName = "main";
+            cpci.layout = cPipeLayout_;
+            const VkResult pr = vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &cpci, nullptr, &cPipeline_);
+            vkDestroyShaderModule(g_vk.dev, sm, nullptr);
+            if (pr != VK_SUCCESS)
+                return false;
+            VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
+            VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+            dpi.maxSets = 1;
+            dpi.poolSizeCount = 1;
+            dpi.pPoolSizes = &ps;
+            if (vkCreateDescriptorPool(g_vk.dev, &dpi, nullptr, &cPool_) != VK_SUCCESS)
+                return false;
+            VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            dai.descriptorPool = cPool_;
+            dai.descriptorSetCount = 1;
+            dai.pSetLayouts = &cSetLayout_;
+            if (vkAllocateDescriptorSets(g_vk.dev, &dai, &cDesc_) != VK_SUCCESS)
+                return false;
+            VkDescriptorBufferInfo bi[3] = {{vram_.b, 0, VK_WHOLE_SIZE}, {g_vk.tables, 0, VK_WHOLE_SIZE}, {presOut_.b, 0, VK_WHOLE_SIZE}};
+            VkWriteDescriptorSet w[3]{};
+            for (uint32_t i = 0; i < 3; ++i)
+            {
+                w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[i].dstSet = cDesc_;
+                w[i].dstBinding = i;
+                w[i].descriptorCount = 1;
+                w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                w[i].pBufferInfo = &bi[i];
+            }
+            vkUpdateDescriptorSets(g_vk.dev, 3, w, 0, nullptr);
+            const char *v = std::getenv("PS2X_PRESENT_GPU_VERIFY");
+            gpuVerify_ = v && v[0] == '1';
+            std::printf("[vk] GPU present ready (%s)\n", gpuVerify_ ? "verify: also CPU conversion, compared" : "display converted on the GPU");
+            return true;
+        }
+
+        // Mirrors the decisions of GSCpuBackend::PresentFromLocalMemory for the common case: exactly one display circuit and a colour format the shader reads.
+        // Anything else (both circuits blended, other formats, nothing enabled) returns false and keeps the page-copy + CPU conversion.
+        static bool planGpuPresent(const GSPresentationRequest &rq, GpuPlan &p, uint32_t &why)
+        {
+            const auto sizeOf = [](uint64_t d, uint32_t &w, uint32_t &h)
+            {
+                const uint32_t dw = static_cast<uint32_t>((d >> 32) & 0x0FFFu);
+                const uint32_t dh = static_cast<uint32_t>((d >> 44) & 0x07FFu);
+                const uint32_t magh = static_cast<uint32_t>((d >> 23) & 0x0Fu);
+                w = (dw + 1u) / (magh + 1u);
+                h = dh + 1u;
+                if (h > 448u && h <= 896u)
+                    h = (h + 1u) / 2u;
+                if (w < 64u || h < 64u)
+                {
+                    w = 640u;
+                    h = 448u;
+                }
+                w = std::min<uint32_t>(w, 640u);
+                h = std::min<uint32_t>(h, 512u);
+            };
+            const auto setup = [](uint64_t disp, uint64_t fb)
+            {
+                const uint32_t dw = static_cast<uint32_t>((disp >> 32) & 0x0FFFu);
+                const uint32_t dh = static_cast<uint32_t>((disp >> 44) & 0x07FFu);
+                const uint32_t magh = static_cast<uint32_t>((disp >> 23) & 0x0Fu);
+                return ((fb >> 9) & 0x3Fu) != 0u || dw != 0u || dh != 0u || magh != 0u;
+            };
+            const bool valid1 = (rq.pmode & 1ull) != 0ull && setup(rq.display1, rq.dispfb1);
+            const bool valid2 = (rq.pmode & 2ull) != 0ull && setup(rq.display2, rq.dispfb2);
+            if (valid1 == valid2)
+            {
+                why = valid1 ? 1u : 0u; // 0 none enabled, 1 both circuits blended
+                return false;
+            }
+            const uint64_t fb = valid1 ? rq.dispfb1 : rq.dispfb2;
+            const uint64_t disp = valid1 ? rq.display1 : rq.display2;
+            const uint32_t dFbp = static_cast<uint32_t>(fb & 0x1FFu), dFbw = static_cast<uint32_t>((fb >> 9) & 0x3Fu), dPsm = static_cast<uint32_t>((fb >> 15) & 0x1Fu);
+            sizeOf(disp, p.w, p.h);
+            const bool usePref = rq.hasPreferredSource && rq.preferredDestFbp == dFbp && (rq.preferredSource.fbw != 0u || rq.preferredSource.fbp != dFbp);
+            if (usePref)
+            {
+                p.fbw = rq.preferredSource.fbw ? rq.preferredSource.fbw : 10u;
+                p.psm = rq.preferredSource.psm;
+                p.base = rq.preferredSource.fbp;
+                p.x0 = p.y0 = 0u;
+                p.sourceFbp = rq.preferredSource.fbp;
+            }
+            else
+            {
+                p.fbw = dFbw ? dFbw : 10u;
+                p.psm = dPsm;
+                p.base = dFbp << 5u;
+                p.x0 = static_cast<uint32_t>((fb >> 32) & 0x7FFu);
+                p.y0 = static_cast<uint32_t>((fb >> 43) & 0x7FFu);
+                p.sourceFbp = dFbp;
+            }
+            if (!(p.psm == 0u || p.psm == 1u || p.psm == 2u || p.psm == 10u))
+            {
+                why = 2u; // a format the shader does not read
+                return false;
+            }
+            p.usedPreferred = usePref;
+            p.displayFbp = dFbp;
+            p.fieldMode = (rq.smode2 & 1ull) != 0ull && ((rq.smode2 >> 1) & 1ull) == 0ull;
+            p.oddField = (rq.vsyncTick & 1ull) != 0ull;
+            p.ok = true;
+            return true;
+        }
+
+        // records the conversion dispatch into cb_ (outside a render pass), then makes the result visible to the host
+        void recordGpuConvert(const GpuPlan &gp)
+        {
+            bufBarrier(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            vkCmdBindPipeline(cb_, VK_PIPELINE_BIND_POINT_COMPUTE, cPipeline_);
+            vkCmdBindDescriptorSets(cb_, VK_PIPELINE_BIND_POINT_COMPUTE, cPipeLayout_, 0, 1, &cDesc_, 0, nullptr);
+            const uint32_t pc[8] = {gp.base, gp.fbw, gp.psm, gp.x0, gp.y0, gp.w, gp.h, 0u};
+            vkCmdPushConstants(cb_, cPipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
+            vkCmdDispatch(cb_, (gp.w + 15u) / 16u, (gp.h + 15u) / 16u, 1);
+            VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            hb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            hb.buffer = presOut_.b;
+            hb.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cb_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
+        }
+
+        // takes the converted rows out of presOut_; needCpu = the frame is (nearly) black and the presenter would try the other context frames
+        void readGpuFrame(const GpuPlan &gp, PresentationFrame &out, bool &needCpu)
+        {
+            needCpu = false;
+            uint32_t cnt = 0, zero = 0;
+            std::memcpy(&cnt, presOut_.map, 4);
+            std::memcpy(presOut_.map, &zero, 4);
+            static const bool s_fallbackOn = []() { const char *e = std::getenv("PS2X_GS_PRESENT_FALLBACK"); return !(e && (std::strcmp(e, "0") == 0 || std::strcmp(e, "false") == 0)); }();
+            if (s_fallbackOn && !gp.usedPreferred && cnt <= 256u)
+            {
+                needCpu = true;
+                return;
+            }
+            out.pixels.assign(640u * 512u * 4u, 0u);
+            const uint8_t *src = presOut_.map + 16;
+            for (uint32_t y = 0; y < gp.h; ++y)
+            {
+                uint32_t sy = y;
+                if (gp.fieldMode && gp.h >= 2u)
+                {
+                    sy = ((y >> 1u) << 1u) + (gp.oddField ? 1u : 0u);
+                    if (sy >= gp.h)
+                        sy = gp.h - 1u;
+                }
+                std::memcpy(out.pixels.data() + static_cast<size_t>(y) * 640u * 4u, src + static_cast<size_t>(sy) * 640u * 4u, static_cast<size_t>(gp.w) * 4u);
+            }
+            out.width = gp.w;
+            out.height = gp.h;
+            out.displayFbp = gp.displayFbp;
+            out.sourceFbp = gp.sourceFbp;
+            out.usedPreferred = gp.usedPreferred;
         }
 
         void swapSlot()
@@ -1762,6 +2059,17 @@ namespace
         Range unfenced_;
         PageSet gpuColor_, gpuZ_, hostNewer_;
         PageSet presDirty_; // PERF-AP: pages changed in vram_ (GPU colour writes, host uploads) since the last async present snapshot
+        // PERF-PG: GPU display conversion
+        Buf presOut_;
+        VkDescriptorSetLayout cSetLayout_ = VK_NULL_HANDLE;
+        VkPipelineLayout cPipeLayout_ = VK_NULL_HANDLE;
+        VkPipeline cPipeline_ = VK_NULL_HANDLE;
+        VkDescriptorPool cPool_ = VK_NULL_HANDLE;
+        VkDescriptorSet cDesc_ = VK_NULL_HANDLE;
+        bool gpuPresOk_ = false, gpuVerify_ = false;
+        int asyncKind_ = 0; // what the in-flight submission holds: bit 0 page copy, bit 1 GPU conversion
+        GpuPlan gpuPlan_;
+        uint64_t pgGpu_ = 0, pgPages_ = 0, pgBlack_ = 0, pgIneligible_[4] = {}, pgVerified_ = 0, pgMismatch_ = 0;
         uint64_t syncReason_[10] = {};
         std::unordered_map<uint32_t, uint64_t> clutDiag_; // (page<<2 | colour | z<<1) -> CLUT loads that forced a sync
         uint64_t cmpHist_[4] = {0, 0, 0, 0};              // differing words by max channel diff: <=1, <=3, <=15, >15
