@@ -813,6 +813,8 @@ namespace
                 return;
             PageSet need;
             addPresentPages(need, request);
+            need.orWith(presDirty_); // the CPU presenter may read any colour page: keep presVram_ equal to vram_, not just the display pages
+            presDirty_.clear();
             std::vector<std::pair<uint32_t, uint32_t>> runs;
             pageRuns(need, runs);
             beginRecording();
@@ -1335,6 +1337,7 @@ namespace
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
             stagingOff_ = off;
             uploadBytes_ += total;
+            presDirty_.orWith(hostNewer_);
             hostNewer_.clear();
             return true;
         }
@@ -1587,7 +1590,10 @@ namespace
             ++primCount_;
             ++primsThisFrame_;
             ++gpuPrims_;
-            pagesForRect(gpuColor_, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, bminX, bmaxX, bminY, bmaxY);
+            PageSet drawPg;
+            pagesForRect(drawPg, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, bminX, bmaxX, bminY, bmaxY);
+            gpuColor_.orWith(drawPg);
+            presDirty_.orWith(drawPg);
             if (compare_)
             {
                 ++primSerial_;
@@ -1755,6 +1761,7 @@ namespace
 
         Range unfenced_;
         PageSet gpuColor_, gpuZ_, hostNewer_;
+        PageSet presDirty_; // PERF-AP: pages changed in vram_ (GPU colour writes, host uploads) since the last async present snapshot
         uint64_t syncReason_[10] = {};
         std::unordered_map<uint32_t, uint64_t> clutDiag_; // (page<<2 | colour | z<<1) -> CLUT loads that forced a sync
         uint64_t cmpHist_[4] = {0, 0, 0, 0};              // differing words by max channel diff: <=1, <=3, <=15, >15
