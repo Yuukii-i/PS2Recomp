@@ -3862,6 +3862,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                     const uint64_t *ca = vu1NativeStats(0);
                     std::fprintf(out, "slow-pair causes: noStart=%llu xgActive=%llu state=%llu miss=%llu declined=%llu\n", (unsigned long long)ca[0], (unsigned long long)ca[1], (unsigned long long)ca[2],
                                  (unsigned long long)ca[3], (unsigned long long)ca[4]);
+                    std::fprintf(out, "state split: branchPending=%llu ebit=%llu halt=%llu budget=%llu\n", (unsigned long long)ca[6], (unsigned long long)ca[7], (unsigned long long)ca[8], (unsigned long long)ca[9]);
                     static const char *const nm[3] = {"noStart", "miss", "declined"};
                     for (int w = 0; w < 3; ++w)
                     {

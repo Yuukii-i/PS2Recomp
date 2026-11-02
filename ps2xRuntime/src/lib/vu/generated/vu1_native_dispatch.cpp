@@ -3842,7 +3842,7 @@ namespace
 uint64_t s_hotBlocks = 0, s_hotPairs = 0, s_slowPairs = 0;
 // PERF-XG: slow-pair causes {0 no hot block starts at pc, 1 xgkick active (PS2X_VU1_XG_HOT off), 2 branch/ebit/halt/budget state,
 // 3 hash miss, 4 hot block declined, 5 slow pair executed while a transfer was active} and an optional TSC split (PS2X_VU1_TSC=1)
-uint64_t s_cause[6] = {};
+uint64_t s_cause[10] = {}; // [6..9] state split: branchPending, ebit, haltAfterDelaySlot, budget
 struct HotSlot { uint64_t h; VuHotFn fn; bool ok; };
 HotSlot s_hotSlot[sizeof(kVu1HotStart) / sizeof(kVu1HotStart[0])] = {}; // PERF-HC
 HotSlot s_hotSlotX[sizeof(kVu1HotStart) / sizeof(kVu1HotStart[0])] = {}; // PERF-HC: same cache for the transfer-aware block family (used while an XGKICK transfer runs)
@@ -5642,7 +5642,13 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
         else if (vu.m_xgkick.active && !s_xgHot)
             ++s_cause[1];
         else
+        {
             ++s_cause[2];
+            if (vu.m_state.branchPending) ++s_cause[6];
+            else if (vu.m_state.ebit) ++s_cause[7];
+            else if (vu.m_state.haltAfterDelaySlot) ++s_cause[8];
+            else ++s_cause[9];
+        }
         c.hashValid = false;
         StepFn fn = kStep[pc >> 3];
         if (s_same && !s_same[pc >> 3])
