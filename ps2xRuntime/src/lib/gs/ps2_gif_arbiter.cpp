@@ -68,27 +68,17 @@ std::vector<uint8_t> takePacketBuf(size_t need)
     const int b = packetBucket(need);
     if (b > 20)
         return {};
-    // PERF-XP: the producer (VIF1 worker) took the pool mutex once per XGKICK while the GS thread recycles under it. Refill a thread-local stash of up to
-    // 16 buffers per lock instead; buffers are interchangeable, so nothing observable changes.
-    thread_local std::vector<std::vector<uint8_t>> t_stash[22];
-    auto &stash = t_stash[b];
-    if (stash.empty())
+    PacketPool &pool = packetPool();
     {
-        PacketPool &pool = packetPool();
         std::lock_guard<std::mutex> lock(pool.m);
         auto &v = pool.b[b];
-        for (int i = 0; i < 16 && !v.empty(); ++i)
+        if (!v.empty())
         {
-            pool.bytes -= v.back().capacity();
-            stash.push_back(std::move(v.back()));
+            std::vector<uint8_t> r = std::move(v.back());
             v.pop_back();
+            pool.bytes -= r.capacity();
+            return r;
         }
-    }
-    if (!stash.empty())
-    {
-        std::vector<uint8_t> r = std::move(stash.back());
-        stash.pop_back();
-        return r;
     }
     std::vector<uint8_t> r;
     r.reserve(static_cast<size_t>(1) << b);
