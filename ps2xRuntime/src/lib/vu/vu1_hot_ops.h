@@ -210,12 +210,31 @@ namespace vuhot
         }
         else
         {
-            // PERF-CS: the double-precision classification runs out of line, so the fast path stays contiguous in the instruction cache
-            const FmacSlow sl = fmacSlow<KIND, DEST>(a4, b4, ac4, val);
-            vb = sl.vb;
-            mac = sl.mac;
-            status4 = sl.status4;
-            extra = sl.extra;
+            uint32_t zl = 0u; // PERF-FZ: out-of-window lanes whose float result is exactly +-0 and whose exact result is certainly zero
+            if constexpr (!madd)
+            {
+                const uint32_t zv = static_cast<uint32_t>(_mm_movemask_ps(_mm_cmpeq_ps(val, _mm_setzero_ps())));
+                uint32_t g = 0xFu;
+                if constexpr (KIND == 4)
+                    g = static_cast<uint32_t>(_mm_movemask_ps(_mm_cmpeq_ps(a4, _mm_setzero_ps()))) |
+                        static_cast<uint32_t>(_mm_movemask_ps(_mm_cmpeq_ps(b4, _mm_setzero_ps())));
+                zl = zv & g & bad & D4;
+            }
+            if (!madd && ((bad & D4) & ~zl) == 0u)
+            {
+                const uint32_t s = static_cast<uint32_t>(_mm_movemask_ps(val)) & D4;
+                mac = (rev4(s) << 4) | rev4(zl);
+                status4 = (s ? 2u : 0u) | (zl ? 1u : 0u);
+            }
+            else
+            {
+                // PERF-CS: the double-precision classification runs out of line, so the fast path stays contiguous in the instruction cache
+                const FmacSlow sl = fmacSlow<KIND, DEST>(a4, b4, ac4, val);
+                vb = sl.vb;
+                mac = sl.mac;
+                status4 = sl.status4;
+                extra = sl.extra;
+            }
         }
         if constexpr (KEEPMAC)
             vuflags::flgPush(vuflags::s_flgMac[unit], v.m_cycle, mac);
@@ -508,22 +527,13 @@ namespace vuhot
         uint32_t wBits = 0u;
         std::memcpy(&wBits, &v.m_state.vf[ft][3], sizeof(wBits));
         const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
-        const auto exceeds = [limit](float value, uint32_t signMask)
-        {
-            uint32_t bits = 0u;
-            std::memcpy(&bits, &value, sizeof(bits));
-            bits ^= signMask;
-            int32_t ordered = 0;
-            std::memcpy(&ordered, &bits, sizeof(ordered));
-            return ordered > limit;
-        };
-        uint32_t flags = 0u;
-        if (exceeds(v.m_state.vf[fs][0], 0x00000000u)) flags |= 0x01u;
-        if (exceeds(v.m_state.vf[fs][0], 0x80000000u)) flags |= 0x02u;
-        if (exceeds(v.m_state.vf[fs][1], 0x00000000u)) flags |= 0x04u;
-        if (exceeds(v.m_state.vf[fs][1], 0x80000000u)) flags |= 0x08u;
-        if (exceeds(v.m_state.vf[fs][2], 0x00000000u)) flags |= 0x10u;
-        if (exceeds(v.m_state.vf[fs][2], 0x80000000u)) flags |= 0x20u;
+        // PERF-CL: flag bit 2k = +component k exceeds, bit 2k+1 = -component k exceeds (signed compare of the sign-folded integer value)
+        const __m128i vi = _mm_castps_si128(_mm_loadu_ps(v.m_state.vf[fs]));
+        const __m128i lim = _mm_set1_epi32(limit);
+        const uint32_t pm = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(vi, lim)))) & 7u;
+        const uint32_t nm = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(_mm_xor_si128(vi, _mm_set1_epi32(static_cast<int>(0x80000000u))), lim)))) & 7u;
+        const auto spread = [](uint32_t b) { return (b & 1u) | ((b & 2u) << 1) | ((b & 4u) << 2); };
+        const uint32_t flags = spread(pm) | (spread(nm) << 1);
         v.m_workingClip = ((v.m_workingClip << 6) | (flags & 0x3Fu)) & 0xFFFFFFu;
         vuflags::flgPush(vuflags::s_flgClip[v.m_unit == VU1Interpreter::Unit::VU1 ? 1u : 0u], v.m_cycle, v.m_workingClip);
     }
