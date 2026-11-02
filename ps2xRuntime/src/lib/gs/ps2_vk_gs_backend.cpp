@@ -42,6 +42,8 @@ namespace GSMem
 
 #include <atomic>
 #include <intrin.h>
+static std::atomic<uint64_t> g_gqLockWait{0}, g_gqLockWaits{0}, g_gqPresentHold{0}, g_gqPresents{0}; // PROBE-GQ2
+extern "C" void ps2_gs_vk_stats(uint64_t *out) { out[0] = g_gqLockWait.exchange(0); out[1] = g_gqLockWaits.exchange(0); out[2] = g_gqPresentHold.exchange(0); out[3] = g_gqPresents.exchange(0); }
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
 
 namespace
@@ -580,7 +582,10 @@ namespace
 
         void Submit(const GSPrimitiveBatch &batch) override
         {
+            const uint64_t gqL0 = __rdtsc(); // PROBE-GQ2
             std::lock_guard<std::mutex> lk(m_);
+            g_gqLockWait.fetch_add(__rdtsc() - gqL0, std::memory_order_relaxed);
+            g_gqLockWaits.fetch_add(1, std::memory_order_relaxed);
             if (ref_)
                 ref_->Submit(batch);
             if (!vkReady_ || batch.vertexCount == 0u)
@@ -598,7 +603,10 @@ namespace
 
         void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override
         {
+            const uint64_t gqL0 = __rdtsc(); // PROBE-GQ2
             std::lock_guard<std::mutex> lk(m_);
+            g_gqLockWait.fetch_add(__rdtsc() - gqL0, std::memory_order_relaxed);
+            g_gqLockWaits.fetch_add(1, std::memory_order_relaxed);
             if (ref_)
                 ref_->LoadClut(tex0, texclut);
             if (vkReady_)
@@ -747,6 +755,11 @@ namespace
         PresentationFrame Present(const GSPresentationRequest &request) override
         {
             std::lock_guard<std::mutex> lk(m_);
+            struct GqHold // PROBE-GQ2: time the lock is held
+            {
+                uint64_t t0 = __rdtsc();
+                ~GqHold() { g_gqPresentHold.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); g_gqPresents.fetch_add(1, std::memory_order_relaxed); }
+            } gqHold;
             if (vkReady_)
             {
                 // the CPU presenter only reads colour surfaces; Z pages stay GPU-newer unless the compare mode needs everything

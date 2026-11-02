@@ -17,6 +17,9 @@ namespace probe_ae {
 #include <cstdlib>
 #include <chrono>
 #include <intrin.h>
+#include <atomic>
+std::atomic<uint64_t> g_gqBuild{0}, g_gqSubmit{0}, g_gqDraws{0}; // PROBE-GQ2
+extern "C" void ps2_gs_front_stats(uint64_t *out) { out[0] = g_gqBuild.exchange(0); out[1] = g_gqSubmit.exchange(0); out[2] = g_gqDraws.exchange(0); }
 
 std::atomic<uint64_t> g_hostPresentSeq{0};
 // PERF-JD: rdtsc ticks per stage of the vblank present latch: 0 total, 1 Flush+Sync, 2 backend Present, 3 Vk syncPages (in Present), 4 VRAM snapshot, 5 CPU de-swizzle, 7 count
@@ -1806,8 +1809,10 @@ void GS::vertexKick(bool drawing)
 
     if (drawing && m_backend)
     {
+        const uint64_t gqT0 = __rdtsc(); // PROBE-GQ2
         GSPrimitiveBatch batch = buildDrawBatch(needed);
         updatePreferredDisplaySourceForDraw(batch);
+        g_gqBuild.fetch_add(__rdtsc() - gqT0, std::memory_order_relaxed);
 
         bool skipBatch = false;
         if (m_hasPreferredDisplaySource &&
@@ -1842,7 +1847,10 @@ void GS::vertexKick(bool drawing)
                     flushDeferredDisplayCopy(m_backend.get());
                 }
             }
+            const uint64_t gqS0 = __rdtsc(); // PROBE-GQ2
             m_backend->Submit(batch);
+            g_gqSubmit.fetch_add(__rdtsc() - gqS0, std::memory_order_relaxed);
+            g_gqDraws.fetch_add(1, std::memory_order_relaxed);
         }
 
         recordDrawDebugEventUnlocked(needed);

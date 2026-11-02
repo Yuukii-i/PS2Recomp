@@ -598,6 +598,8 @@ extern "C" void ps2_vif1_sync_lag(uint32_t lag)
     }
 }
 extern "C" void ps2_gs_async_stats(uint64_t *out); // PROBE-GQ
+extern "C" void ps2_gs_front_stats(uint64_t *out); // PROBE-GQ2
+extern "C" void ps2_gs_vk_stats(uint64_t *out);
 extern "C" uint32_t probe_getNewestDistinctFn(); // PROBE-FS
 extern thread_local uint32_t g_currentExecutingFunction;
 struct FenceSite { uint32_t fn, cur; uintptr_t ra; uint64_t ticks, n; };
@@ -656,6 +658,13 @@ extern "C" void ps2_vif1_fence()
                 ps2_gs_async_stats(g);
                 ps2xSafeLog("[gsq] gs_busy_ms=%.0f gs_idle_ms=%.0f producer_blocks=%llu peak_queue_kb=%.0f packets=%llu\n", static_cast<double>(g[0]) / tpm, static_cast<double>(g[1]) / tpm,
                             (unsigned long long)g[2], static_cast<double>(g[3]) / 1024.0, (unsigned long long)g[4]);
+            }
+            { // PROBE-GQ2
+                uint64_t f[3], k[4];
+                ps2_gs_front_stats(f);
+                ps2_gs_vk_stats(k);
+                ps2xSafeLog("[gsq2] draws=%llu build_ms=%.0f submit_ms=%.0f | vk_lock_wait_ms=%.0f (n=%llu) present_hold_ms=%.0f (n=%llu)\n", (unsigned long long)f[2], static_cast<double>(f[0]) / tpm,
+                            static_cast<double>(f[1]) / tpm, static_cast<double>(k[0]) / tpm, (unsigned long long)k[1], static_cast<double>(k[2]) / tpm, (unsigned long long)k[3]);
             }
             { // PROBE-FS: the heaviest waiting call sites of this window
                 for (int pass = 0; pass < 4; ++pass)
