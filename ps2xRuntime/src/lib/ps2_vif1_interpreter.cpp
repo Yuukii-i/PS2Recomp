@@ -1871,7 +1871,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 }
             }
 
-            auto now = std::chrono::steady_clock::now();
+            static thread_local uint32_t s_ciClkTick = 0; // PERF-CT: read the clock once per 256 unpacks, not on every one
+            auto now = ((++s_ciClkTick & 255u) == 0u) ? std::chrono::steady_clock::now() : s_ciLastSecLog;
             if (std::chrono::duration_cast<std::chrono::seconds>(now - s_ciLastSecLog).count() >= 1) {
                 s_ciLastSecLog = now;
                 char buf[256];

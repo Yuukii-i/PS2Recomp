@@ -236,8 +236,6 @@ bool GifArbiter::isImagePacket(const uint8_t *data, uint32_t sizeBytes)
 void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
 {
     probe_ae::onBhRecordQueueDepth(static_cast<uint32_t>(m_queue.size()));
-    probe_ae::onBhRecordQueueDepth(static_cast<uint32_t>(m_queue.size()));
-    probe_ae::onBhRecordQueueDepth(static_cast<uint32_t>(m_queue.size()));
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
 
@@ -246,6 +244,8 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
     pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(data, sizeBytes);
     pkt.data = takePacketBuf();
+    if (pkt.data.capacity() < sizeBytes) // PERF-CT: grow pooled buffers in big steps so they stop reallocating
+        pkt.data.reserve(std::max<size_t>(sizeBytes, 32768u));
     pkt.data.assign(data, data + sizeBytes);
     m_queue.push_back(std::move(pkt));
 }
