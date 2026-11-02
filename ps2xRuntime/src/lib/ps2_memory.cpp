@@ -493,6 +493,7 @@ namespace
 }
 static std::function<void(const uint8_t *, uint32_t)> s_vif1Process; // bound by a PS2Memory member (private access)
 static std::function<void()> s_vif1DrainArbiter;
+extern "C" void ps2_gs_async_batch(bool on); // PERF-GB: gs/ps2_gif_arbiter.cpp
 static void vif1Worker()
 {
     t_onVif1Worker = true;
@@ -516,7 +517,9 @@ static void vif1Worker()
         }
         g_vif1JobFbrst = job.fbrst;
         const uint64_t wkT0 = __rdtsc(); // PROBE-KF
+        ps2_gs_async_batch(true); // PERF-GB
         s_vif1Process(job.data.data(), static_cast<uint32_t>(job.data.size()));
+        ps2_gs_async_batch(false); // PERF-GB: hand the job's GIF packets to the GS queue under one lock
         g_waitTicks[4].fetch_add(__rdtsc() - wkT0, std::memory_order_relaxed);
         if (s_vif1DrainArbiter)
             s_vif1DrainArbiter();

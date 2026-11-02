@@ -87,6 +87,36 @@ bool gsAsyncEnabled()
     return on;
 }
 
+// PERF-GB: while the calling thread is in batch mode (the VIF1 worker, around one job) async GIF packets are collected thread-locally and handed to the queue
+// under ONE lock at the end of the job (was a lock + possible notify + pool lock per XGKICK). Order is unchanged: single producer, FIFO queue.
+thread_local bool t_gsBatch = false;
+thread_local std::vector<std::vector<uint8_t>> t_gsPending;
+thread_local size_t t_gsPendingBytes = 0;
+std::atomic<bool> s_gsAsyncStarted{false};
+
+void gsFlushPending()
+{
+    if (t_gsPending.empty())
+        return;
+    GsAsyncState &st = gsAsync();
+    std::unique_lock<std::mutex> lock(st.m);
+    for (auto &d : t_gsPending)
+    {
+        const uint64_t kfT1 = __rdtsc(); // PROBE-KF
+        ++st.idleWaiters;
+        st.cvIdle.wait(lock, [&] { return st.queuedBytes < kGsAsyncMaxBytes; }); // backpressure
+        --st.idleWaiters;
+        g_waitTicks[3].fetch_add(__rdtsc() - kfT1, std::memory_order_relaxed);
+        st.queuedBytes += d.size();
+        ++st.enqueuedPkts;
+        st.q.push_back(std::move(d));
+    }
+    if (st.workerWaiting)
+        st.cvWork.notify_one();
+    t_gsPending.clear();
+    t_gsPendingBytes = 0;
+}
+
 void gsAsyncWorker()
 {
     GsAsyncState &st = gsAsync();
@@ -120,6 +150,7 @@ extern "C" void ps2_gs_async_fence()
 {
     if (!gsAsyncEnabled())
         return;
+    gsFlushPending(); // PERF-GB
     GsAsyncState &st = gsAsync();
     std::unique_lock<std::mutex> lock(st.m);
     if (!st.started)
@@ -129,6 +160,16 @@ extern "C" void ps2_gs_async_fence()
     st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
     --st.idleWaiters;
     g_waitTicks[2].fetch_add(__rdtsc() - kfT0, std::memory_order_relaxed);
+}
+
+// PERF-GB: batch mode for the calling thread (VIF1 worker, around one job); turning it off flushes.
+extern "C" void ps2_gs_async_batch(bool on)
+{
+    if (!gsAsyncEnabled())
+        return;
+    if (!on)
+        gsFlushPending();
+    t_gsBatch = on;
 }
 
 // PERF-JF: ticket = number of packets handed to the async worker so far (0 when async is off / not started).
@@ -146,6 +187,7 @@ extern "C" void ps2_gs_async_wait_ticket(uint64_t ticket)
 {
     if (!ticket)
         return;
+    gsFlushPending(); // PERF-GB
     GsAsyncState &st = gsAsync();
     std::unique_lock<std::mutex> lock(st.m);
     ++st.idleWaiters;
@@ -208,6 +250,22 @@ void GifArbiter::drain()
                          return pathPriority(a.pathId) < pathPriority(b.pathId);
                      });
 
+    if (gsAsyncEnabled() && t_gsBatch && s_gsAsyncStarted.load(std::memory_order_acquire)) // PERF-GB
+    {
+        for (size_t i = 0; i < m_queue.size(); ++i)
+        {
+            auto &pkt = m_queue[i];
+            if (pkt.data.empty())
+                continue;
+            t_gsPendingBytes += pkt.data.size();
+            t_gsPending.push_back(std::move(pkt.data));
+        }
+        m_queue.clear();
+        if (t_gsPendingBytes >= (1u << 20))
+            gsFlushPending();
+        return;
+    }
+
     if (gsAsyncEnabled())
     {
         GsAsyncState &st = gsAsync();
@@ -217,6 +275,7 @@ void GifArbiter::drain()
             st.started = true;
             st.fn = m_processFn;
             std::thread(gsAsyncWorker).detach();
+            s_gsAsyncStarted.store(true, std::memory_order_release); // PERF-GB
         }
         for (size_t i = 0; i < m_queue.size(); ++i)
         {
