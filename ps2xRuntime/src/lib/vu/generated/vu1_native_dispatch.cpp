@@ -4414,6 +4414,7 @@ bool lbLoop(VU1Interpreter &vu, VuNativeCtx &c)
 // real delay-slot pair, so the last two pairs are executed with the same calls as the tail block.
 constexpr uint64_t kLbEntryHash = 0xed9ddb4fd6ac295full, kLbExitHash = 0x1234ABCDull; // PERF-XG: empty token list (the old value was this state plus the transfer-active token, which the hash no longer carries)
 uint64_t s_lbFullTaken = 0, s_lbFullDeclined = 0, s_lbFullVerts = 0, s_lbFullWhy[10] = {};
+uint64_t s_lb8Groups = 0, s_lb8Fallback = 0; // PERF-SV
 
 struct LbK
 {
@@ -4471,6 +4472,232 @@ inline void lbVertex(LbV &r, int32_t idx, uint32_t s3qw, uint32_t s2qw, const Lb
     r.curR7 = r7.cur;
 }
 
+// PERF-SV: eight vertices per step (struct-of-arrays, AVX2). Produces exactly what lbVertex produces whenever every result lane of every op is either inside the
+// exponent window [2,253] or an exactly-certain zero (a zero operand makes a product zero; a madd zero also needs a zero accumulator). Anything else -> returns false
+// and the caller runs the scalar lbVertex for those vertices, so the output is never approximated.
+struct Lb8V
+{
+    __m256 c[4];
+};
+
+struct Lb8K
+{
+    Lb8V vf1, vf2, vf3, vf4, vf16, accw;
+};
+
+inline __m256 lb8N(__m256 v) // vuhot::N4 on 8 lanes
+{
+    const __m256i bits = _mm256_castps_si256(v);
+    const __m256i expo = _mm256_and_si256(_mm256_srli_epi32(bits, 23), _mm256_set1_epi32(0xFF));
+    const __m256i sign = _mm256_and_si256(bits, _mm256_set1_epi32(static_cast<int>(0x80000000u)));
+    const __m256i isZero = _mm256_cmpeq_epi32(expo, _mm256_setzero_si256());
+    const __m256i isFF = _mm256_cmpeq_epi32(expo, _mm256_set1_epi32(0xFF));
+    __m256i r = _mm256_blendv_epi8(bits, sign, isZero);
+    r = _mm256_blendv_epi8(r, _mm256_or_si256(sign, _mm256_set1_epi32(0x7F7FFFFF)), isFF);
+    return _mm256_castsi256_ps(r);
+}
+
+inline __m256i lb8OutWin(__m256 v)
+{
+    const __m256i ev = _mm256_and_si256(_mm256_srli_epi32(_mm256_castps_si256(v), 23), _mm256_set1_epi32(0xFF));
+    return _mm256_or_si256(_mm256_cmpgt_epi32(_mm256_set1_epi32(2), ev), _mm256_cmpgt_epi32(ev, _mm256_set1_epi32(253)));
+}
+
+inline __m256i lb8IsZ(__m256 v) { return _mm256_castps_si256(_mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_EQ_OQ)); }
+
+inline bool lb8Any(__m256i m) { return !_mm256_testz_si256(m, m); }
+
+struct Lb8Op
+{
+    Lb8V r;
+    __m256i bad, mac, anyZ, anyS, xZ, xS;
+};
+
+template <int DEST, bool MADD>
+inline Lb8Op lb8Op(const Lb8V &a, const Lb8V &b, const Lb8V &ac)
+{
+    Lb8Op o;
+    const __m256i z0 = _mm256_setzero_si256();
+    o.bad = o.mac = o.anyZ = o.anyS = o.xZ = o.xS = z0;
+    for (int c = 0; c < 4; ++c)
+    {
+        if (((DEST >> (3 - c)) & 1) == 0)
+        {
+            o.r.c[c] = _mm256_setzero_ps(); // lanes outside DEST are never read
+            continue;
+        }
+        const __m256 av = a.c[c], bv = b.c[c];
+        const __m256 val = MADD ? _mm256_fmadd_ps(av, bv, ac.c[c]) : _mm256_mul_ps(av, bv);
+        o.r.c[c] = val;
+        const __m256i za = _mm256_or_si256(lb8IsZ(av), lb8IsZ(bv)); // the exact product is zero
+        __m256i zok = _mm256_and_si256(lb8IsZ(val), za);
+        if (MADD)
+            zok = _mm256_and_si256(zok, lb8IsZ(ac.c[c]));
+        o.bad = _mm256_or_si256(o.bad, _mm256_andnot_si256(zok, lb8OutWin(val)));
+        const __m256i sg = _mm256_srai_epi32(_mm256_castps_si256(val), 31);
+        o.mac = _mm256_or_si256(o.mac, _mm256_or_si256(_mm256_and_si256(zok, _mm256_set1_epi32(8 >> c)), _mm256_and_si256(sg, _mm256_set1_epi32(0x80 >> c))));
+        o.anyZ = _mm256_or_si256(o.anyZ, zok);
+        o.anyS = _mm256_or_si256(o.anyS, sg);
+        if (MADD)
+        {
+            const __m256 p = _mm256_mul_ps(av, bv);
+            o.bad = _mm256_or_si256(o.bad, _mm256_andnot_si256(za, lb8OutWin(p)));
+            o.xZ = _mm256_or_si256(o.xZ, za);
+            o.xS = _mm256_or_si256(o.xS, _mm256_srai_epi32(_mm256_castps_si256(p), 31));
+        }
+    }
+    return o;
+}
+
+inline uint32_t lb8Sticky(const Lb8Op &o, bool madd) // OR over lanes of (cur | xf)
+{
+    uint32_t s = (lb8Any(o.anyZ) ? 1u : 0u) | (lb8Any(o.anyS) ? 2u : 0u);
+    if (madd)
+        s |= (lb8Any(o.xZ) ? 1u : 0u) | (lb8Any(o.xS) ? 2u : 0u);
+    return s;
+}
+
+inline Lb8V lb8Const(__m128 v)
+{
+    v = vuhot::N4(v);
+    Lb8V r;
+    r.c[0] = _mm256_broadcastss_ps(v);
+    r.c[1] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0x55));
+    r.c[2] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0xAA));
+    r.c[3] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0xFF));
+    return r;
+}
+
+inline Lb8V lb8Bc(const Lb8V &v, int lane) // one component of every vertex broadcast to all four components
+{
+    Lb8V r;
+    r.c[0] = r.c[1] = r.c[2] = r.c[3] = v.c[lane];
+    return r;
+}
+
+inline Lb8V lb8FromRows(const __m128 rows[8]) // eight xyzw rows -> four component vectors
+{
+    const __m256 r0 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[0]), rows[4], 1);
+    const __m256 r1 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[1]), rows[5], 1);
+    const __m256 r2 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[2]), rows[6], 1);
+    const __m256 r3 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[3]), rows[7], 1);
+    const __m256 t0 = _mm256_unpacklo_ps(r0, r1), t1 = _mm256_unpacklo_ps(r2, r3);
+    const __m256 t2 = _mm256_unpackhi_ps(r0, r1), t3 = _mm256_unpackhi_ps(r2, r3);
+    Lb8V r;
+    r.c[0] = _mm256_shuffle_ps(t0, t1, 0x44);
+    r.c[1] = _mm256_shuffle_ps(t0, t1, 0xEE);
+    r.c[2] = _mm256_shuffle_ps(t2, t3, 0x44);
+    r.c[3] = _mm256_shuffle_ps(t2, t3, 0xEE);
+    return r;
+}
+
+inline void lb8ToRows(const Lb8V &v, __m128 rows[8])
+{
+    const __m256 t0 = _mm256_unpacklo_ps(v.c[0], v.c[1]), t1 = _mm256_unpacklo_ps(v.c[2], v.c[3]);
+    const __m256 t2 = _mm256_unpackhi_ps(v.c[0], v.c[1]), t3 = _mm256_unpackhi_ps(v.c[2], v.c[3]);
+    const __m256 r0 = _mm256_shuffle_ps(t0, t1, 0x44), r1 = _mm256_shuffle_ps(t0, t1, 0xEE);
+    const __m256 r2 = _mm256_shuffle_ps(t2, t3, 0x44), r3 = _mm256_shuffle_ps(t2, t3, 0xEE);
+    rows[0] = _mm256_castps256_ps128(r0);
+    rows[4] = _mm256_extractf128_ps(r0, 1);
+    rows[1] = _mm256_castps256_ps128(r1);
+    rows[5] = _mm256_extractf128_ps(r1, 1);
+    rows[2] = _mm256_castps256_ps128(r2);
+    rows[6] = _mm256_extractf128_ps(r2, 1);
+    rows[3] = _mm256_castps256_ps128(r3);
+    rows[7] = _mm256_extractf128_ps(r3, 1);
+}
+
+// idx / s3q / s2q hold 8 entries (the caller pads a short last group with copies of its last vertex, which cannot change the OR-aggregated flags).
+// Fills out[0..n); the stage sticky bits of the whole group are OR-ed into out[0].sticky (lbFull only ever ORs them over all vertices).
+inline bool lbVertex8(LbV *out, int n, const int32_t *idx, const uint32_t *s3q, const uint32_t *s2q, const Lb8K &k8, const uint8_t *mem, uint32_t dsz)
+{
+    const auto ldq = [&](uint32_t qw) { return _mm_loadu_ps(reinterpret_cast<const float *>(mem + ((qw * 16u) & (dsz - 1u)))); };
+    __m128 rA[8], rB[8], rS3[8], rS2[8];
+    for (int j = 0; j < 8; ++j)
+    {
+        rA[j] = ldq(static_cast<uint32_t>(636 + idx[j]));
+        rB[j] = ldq(static_cast<uint32_t>(716 + idx[j]));
+        rS3[j] = ldq(s3q[j]);
+        rS2[j] = ldq(s2q[j]);
+    }
+    Lb8V A = lb8FromRows(rA), B = lb8FromRows(rB), S3 = lb8FromRows(rS3), S2 = lb8FromRows(rS2);
+    for (int c = 0; c < 4; ++c)
+    {
+        A.c[c] = lb8N(A.c[c]);
+        B.c[c] = lb8N(B.c[c]);
+        S3.c[c] = lb8N(S3.c[c]);
+        S2.c[c] = lb8N(S2.c[c]);
+    }
+    Lb8V zero;
+    zero.c[0] = zero.c[1] = zero.c[2] = zero.c[3] = _mm256_setzero_ps();
+
+    const Lb8Op mula = lb8Op<15, false>(k8.vf3, A, zero);
+    const Lb8Op t5 = lb8Op<15, true>(k8.vf4, lb8Bc(A, 3), mula.r);
+    const __m256 den = lb8N(t5.r.c[3]);
+    if (lb8Any(lb8IsZ(den)))
+        return false; // the scalar path reports the divide-by-zero
+    const __m256 qv = lb8N(lb8N(_mm256_div_ps(_mm256_set1_ps(1.0f), den)));
+    Lb8V Q;
+    Q.c[0] = Q.c[1] = Q.c[2] = Q.c[3] = qv;
+    const Lb8Op r7 = lb8Op<14, false>(t5.r, Q, zero);
+    const Lb8Op os2q = lb8Op<14, false>(S2, Q, zero);
+    const Lb8Op w = lb8Op<1, true>(k8.vf1, Q, k8.accw);
+    const Lb8Op bv = lb8Op<15, false>(B, k8.vf16, zero);
+    const Lb8Op in = lb8Op<15, true>(k8.vf2, k8.vf16, bv.r);
+    const Lb8Op pr = lb8Op<15, false>(S3, in.r, zero);
+    const __m256i bad = _mm256_or_si256(_mm256_or_si256(_mm256_or_si256(mula.bad, t5.bad), _mm256_or_si256(r7.bad, os2q.bad)),
+                                        _mm256_or_si256(_mm256_or_si256(w.bad, bv.bad), _mm256_or_si256(in.bad, pr.bad)));
+    if (lb8Any(bad))
+        return false;
+
+    __m128 rT5[8], rR7[8], rS2Q[8], rIn[8], rBV[8], rPr[8];
+    lb8ToRows(t5.r, rT5);
+    lb8ToRows(r7.r, rR7);
+    lb8ToRows(os2q.r, rS2Q);
+    lb8ToRows(in.r, rIn);
+    lb8ToRows(bv.r, rBV);
+    lb8ToRows(pr.r, rPr);
+    alignas(32) float qf[8], wf[8];
+    alignas(32) uint32_t macIn[8], macR7[8];
+    _mm256_store_ps(qf, qv);
+    _mm256_store_ps(wf, w.r.c[3]);
+    _mm256_store_si256(reinterpret_cast<__m256i *>(macIn), in.mac);
+    _mm256_store_si256(reinterpret_cast<__m256i *>(macR7), r7.mac);
+    for (int j = 0; j < n; ++j)
+    {
+        LbV &r = out[j];
+        r.idx = idx[j];
+        r.A = rA[j];
+        r.B = rB[j];
+        r.S3 = rS3[j];
+        r.S2 = rS2[j];
+        r.T5 = rT5[j];
+        r.R7 = rR7[j];
+        r.S2Q = rS2Q[j];
+        r.inner = rIn[j];
+        r.BV = rBV[j];
+        r.prod = rPr[j];
+        r.Q = qf[j];
+        r.Wraw = wf[j];
+        r.di = 0u;
+        for (int s = 0; s < 8; ++s)
+            r.sticky[s] = 0u;
+        r.macIn = macIn[j];
+        r.curIn = ((macIn[j] & 0xFu) ? 1u : 0u) | ((macIn[j] & 0xF0u) ? 2u : 0u);
+        r.macR7 = macR7[j];
+        r.curR7 = ((macR7[j] & 0xFu) ? 1u : 0u) | ((macR7[j] & 0xF0u) ? 2u : 0u);
+    }
+    out[0].sticky[0] = lb8Sticky(mula, false);
+    out[0].sticky[1] = lb8Sticky(t5, true);
+    out[0].sticky[2] = lb8Sticky(r7, false);
+    out[0].sticky[3] = lb8Sticky(os2q, false);
+    out[0].sticky[4] = lb8Sticky(w, true);
+    out[0].sticky[5] = lb8Sticky(bv, false);
+    out[0].sticky[6] = lb8Sticky(in, true);
+    out[0].sticky[7] = lb8Sticky(pr, false);
+    return true;
+}
+
 bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
 {
     VU1State &st = vu.m_state;
@@ -4506,12 +4733,47 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
     k.vf16 = _mm_loadu_ps(st.vf[16]);
     k.accw = lbFmac<4, 1>(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), lbBc(k.vf1, 2), _mm_setzero_ps());
     LbV V[kMaxV];
+    int32_t idxA[kMaxV];
     for (int32_t t = 0; t < N; ++t)
+        idxA[t] = t == 0 ? vi7 : lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(vi4 + t)), 0)));
+    static const bool s_lb8On = []() { const char *e = std::getenv("PS2X_VU1_LB8"); return !(e && e[0] == '0'); }(); // PERF-SV: =0 forces the scalar vertex loop
+    Lb8K k8;
+    k8.vf1 = lb8Const(k.vf1);
+    k8.vf2 = lb8Const(k.vf2);
+    k8.vf3 = lb8Const(k.vf3);
+    k8.vf4 = lb8Const(k.vf4);
+    k8.vf16 = lb8Const(k.vf16);
+    k8.accw = lb8Const(k.accw.res);
+    for (int32_t t0 = 0; t0 < N; t0 += 8)
     {
-        const int32_t idx = t == 0 ? vi7 : lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(vi4 + t)), 0)));
-        lbVertex(V[t], idx, static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t)), static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t)), k, mem, dsz);
-        if (V[t].di != 0u)
-            return decline(5);
+        const int n = std::min<int32_t>(8, N - t0);
+        bool done = false;
+        if (s_lb8On)
+        {
+            int32_t idx8[8];
+            uint32_t s3q[8], s2q[8];
+            for (int j = 0; j < 8; ++j)
+            {
+                const int jj = j < n ? j : n - 1; // short last group: pad with copies of its last vertex
+                idx8[j] = idxA[t0 + jj];
+                s3q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t0 + jj));
+                s2q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t0 + jj));
+            }
+            done = lbVertex8(&V[t0], n, idx8, s3q, s2q, k8, mem, dsz);
+        }
+        ++s_lb8Groups;
+        if (!done)
+        {
+            ++s_lb8Fallback;
+            for (int j = 0; j < n; ++j)
+            {
+                const int32_t t = t0 + j;
+                lbVertex(V[t], idxA[t], static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t)), static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t)), k, mem, dsz);
+            }
+        }
+        for (int j = 0; j < n; ++j)
+            if (V[t0 + j].di != 0u)
+                return decline(5);
     }
     // everything below only commits (reads of the old memory are done first)
     const int32_t newVi1 = lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(vi13)), 0)));
@@ -4824,6 +5086,8 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
         std::printf("[probe] lb full kernel taken=%llu vertices=%llu declined=%llu (why0-5: %llu %llu %llu %llu %llu %llu)\n", (unsigned long long)s_lbFullTaken, (unsigned long long)s_lbFullVerts,
                     (unsigned long long)s_lbFullDeclined, (unsigned long long)s_lbFullWhy[0], (unsigned long long)s_lbFullWhy[1], (unsigned long long)s_lbFullWhy[2], (unsigned long long)s_lbFullWhy[3],
                     (unsigned long long)s_lbFullWhy[4], (unsigned long long)s_lbFullWhy[5]);
+    if ((s_lbFullTaken & 0xFFFFull) == 0u)
+        std::printf("[probe] lb8 groups=%llu scalar_fallback=%llu\n", (unsigned long long)s_lb8Groups, (unsigned long long)s_lb8Fallback); // PERF-SV
     return true;
 }
 
