@@ -4905,6 +4905,9 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
     return frame;
 }
 
+// PERF-AP: the Vulkan backend converts its own VRAM snapshot through this (an access-specifier hack there would change the mangled name)
+PresentationFrame ps2x_cpu_present_from_local(GSCpuBackend &b, const GSPresentationRequest &request) { return b.PresentFromLocalMemory(request); }
+
 PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationRequest &request)
 {
     PresentationFrame result{};

@@ -33,6 +33,7 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #undef private
 
+PresentationFrame ps2x_cpu_present_from_local(GSCpuBackend &b, const GSPresentationRequest &request); // gs_cpu_backend.cpp
 namespace GSMem
 {
     const uint16_t *ExportPageTable(int idx, size_t *entries);
@@ -885,7 +886,7 @@ namespace
                         if (!presCpu_)
                             presCpu_ = std::make_unique<GSCpuBackend>();
                         presCpu_->Initialize(presVram_.data(), static_cast<uint32_t>(presVram_.size()));
-                        return presCpu_->PresentFromLocalMemory(doneReq);
+                        return ps2x_cpu_present_from_local(*presCpu_, doneReq);
                     }
                     return cpu_->Present(request);
                 }
