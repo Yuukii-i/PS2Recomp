@@ -3718,18 +3718,16 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                 h = (h ^ file[off + i]) * 1099511628211ull;
             return h;
         };
-        if (const char *ri = std::getenv("PS2X_VU1_REPLAY_IMAGE")) // PERF-VAR: replay another microcode image of the corpus (the live code is overwritten, the process exits afterwards)
-        {
-            const uint64_t want = std::strtoull(ri, nullptr, 16);
+        const char *const rpImageEnv = std::getenv("PS2X_VU1_REPLAY_IMAGE"); // PERF-VAR: replay another microcode image of the corpus: it is re-installed in the live code before every run
+        const uint64_t rpWant = rpImageEnv ? std::strtoull(rpImageEnv, nullptr, 16) : 0ull;
+        std::unordered_map<uint64_t, uint64_t> rpGenHash;
+        if (rpImageEnv)
             for (const auto &kv : codeOff)
-                if (rpImageHash(kv.second) == want)
-                {
-                    std::memcpy(const_cast<uint8_t *>(vuCode), file.data() + kv.second, codeSize);
-                    rebuildDecodedCodeCache(vuCode, codeSize, memory, kv.first);
-                    break;
-                }
-        }
+                rpGenHash[kv.first] = rpImageHash(kv.second);
         bool imageLoaded = false;
+        for (const auto &kv : rpGenHash)
+            if (kv.second == rpWant)
+                imageLoaded = true; // PERF-VAR: the wanted image is installed before every run
         for (const auto &kv : codeOff)
             if (std::memcmp(file.data() + kv.second, vuCode, codeSize) == 0)
                 imageLoaded = true;
@@ -3762,6 +3760,11 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                     std::memcpy(&sA, p, sizeof(VU1State)); p += sizeof(VU1State);
                     const uint8_t *mem0 = p; p += dsz;
                     const auto it = codeOff.find(gen);
+                    if (rpImageEnv && it != codeOff.end() && rpGenHash[gen] == rpWant)
+                    {
+                        std::memcpy(const_cast<uint8_t *>(vuCode), file.data() + it->second, codeSize);
+                        rebuildDecodedCodeCache(vuCode, codeSize, memory, memory->getVU1CodeGeneration());
+                    }
                     if (it == codeOff.end() || dsz != dataSize || std::memcmp(file.data() + it->second, vuCode, codeSize) != 0)
                     {
                         ++skipped;

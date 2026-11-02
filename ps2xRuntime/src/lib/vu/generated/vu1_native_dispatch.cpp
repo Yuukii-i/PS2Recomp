@@ -5435,10 +5435,16 @@ uint32_t vu1CoverageCount() { return s_svCov; } // PROBE-CAPTURE
 // PERF-VAR: other microcode images (same program family, a few dozen pairs differ) reuse the main image's executors, hot blocks and kernels wherever
 // their pair + usage record is identical (tools/vu1gen/variant_masks.py); every other pc falls back to the exact interpreter (return 2).
 #include "vu1_variants.inc"
+extern int (*const kVu1Step_t4020[2048])(VU1Interpreter &, VuNativeCtx &); // generated/vu1_native_exec_t4020.cpp: executors for the pairs where image 4020... differs from main
+extern const bool kVu1HotStart_t4020[2048];                                  // generated/vu1_hot_blocks_t4020.cpp
+VuHotFn vu1HotLookup_t4020(uint32_t pc, uint64_t entryHash);
+VuHotFn vu1HotLookupXg_t4020(uint32_t pc, uint64_t entryHash);
 namespace
 {
 const uint8_t *s_same = nullptr;     // null = main image (everything allowed)
 bool s_hotOk[2048];                  // hot block starting at this pair is usable (all pairs of its span are identical)
+bool s_isT4020 = false;                                       // the image with its own executors / hot blocks for the differing pairs
+HotSlot s_hotSlotT[2048] = {}, s_hotSlotTX[2048] = {};
 bool s_kOk[3] = {true, true, true};  // kernels: vertex (2440..25B8), copy (0C80..0CB8), full/loop (1FE0..243F)
 bool varRange(uint32_t lo, uint32_t hiIncl)
 {
@@ -5451,6 +5457,7 @@ bool varRange(uint32_t lo, uint32_t hiIncl)
 void vu1NativeSelectImage(uint64_t hash)
 {
     s_same = nullptr;
+    s_isT4020 = (hash == 0x4020410124328442ull);
     for (uint32_t i = 0; i < kVu1VariantCount; ++i)
         if (kVu1Variants[i].hash == hash)
             s_same = kVu1Variants[i].same;
@@ -5498,7 +5505,8 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
         if (s_svOn && pc < 0x4000u) svg.at(pc); // PROBE-SURVEY
         if (s_rgOn) rgStep(vu, c, pc); // PROBE-REGION
         // PERF-IE: hot blocks with static timing (generated/vu1_hot_blocks.cpp); any unknown state falls back to the pair executors
-        if (kVu1HotStart[pc >> 3] && (!s_same || s_hotOk[pc >> 3]) && (s_xgHot || !vu.m_xgkick.active) && !vu.m_state.branchPending && !vu.m_state.ebit &&
+        const bool useT = s_isT4020 && !s_same[pc >> 3] && kVu1HotStart_t4020[pc >> 3]; // PERF-VAR: pc where this image differs from main
+        if ((useT || (kVu1HotStart[pc >> 3] && (!s_same || s_hotOk[pc >> 3]))) && (s_xgHot || !vu.m_xgkick.active) && !vu.m_state.branchPending && !vu.m_state.ebit &&
             !vu.m_state.haltAfterDelaySlot && c.budgetEnd - vu.m_cycle > 160u)
         {
             if (!c.hashValid)
@@ -5554,13 +5562,14 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
             if (s_svOn) svNovelPair(pc, c.nextHash); // PROBE-CAPTURE
             if (s_tscOn && (pc == 0x2440u || pc == 0x1FE0u || pc == 0x0C80u || pc == 0x20F8u)) noteEntryHash(pc, c.nextHash, vu.m_xgkick.active);
             const bool xa = vu.m_xgkick.active; // the optimised family declines while a transfer runs; the transfer-aware family steps it every cycle
-            HotSlot &hs = (xa ? s_hotSlotX : s_hotSlot)[pc >> 3];
+            HotSlot &hs = (useT ? (xa ? s_hotSlotTX : s_hotSlotT) : (xa ? s_hotSlotX : s_hotSlot))[pc >> 3];
             VuHotFn hf;
             if (hs.ok && hs.h == c.nextHash)
                 hf = hs.fn;
             else
             {
-                hf = xa ? vu1HotLookupXg(pc, c.nextHash) : vu1HotLookup(pc, c.nextHash);
+                hf = useT ? (xa ? vu1HotLookupXg_t4020(pc, c.nextHash) : vu1HotLookup_t4020(pc, c.nextHash))
+                          : (xa ? vu1HotLookupXg(pc, c.nextHash) : vu1HotLookup(pc, c.nextHash));
                 hs.h = c.nextHash;
                 hs.fn = hf;
                 hs.ok = true;
@@ -5635,8 +5644,10 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
         else
             ++s_cause[2];
         c.hashValid = false;
-        const StepFn fn = kStep[pc >> 3];
-        if (!fn || (s_same && !s_same[pc >> 3]))
+        StepFn fn = kStep[pc >> 3];
+        if (s_same && !s_same[pc >> 3])
+            fn = s_isT4020 ? kVu1Step_t4020[pc >> 3] : nullptr; // PERF-VAR
+        if (!fn)
             return 2;
         ++s_slowPairs;
         if (vu.m_xgkick.active)
