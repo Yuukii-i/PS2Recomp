@@ -791,7 +791,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     // PERF-CU: the MSCAL scan, the clock reads and the movie bookkeeping only feed probes / the movie HLE
     const bool cuProbe = probe_ae::isEnabled();
     static const bool s_cuMovie = probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify();
-    uint32_t mscal0x48Count = (cuProbe || s_cuMovie) ? count0x48MscalsInKick(data, sizeBytes) : 0u;
+    // PERF-XS: the scan was 2.7% of the VU1 worker outside movies (HLE is on by default): its result is only read by the movie HLE, which acts only while a movie is active
+    uint32_t mscal0x48Count = (cuProbe || (s_cuMovie && probe_ae::isMovieActivePublic())) ? count0x48MscalsInKick(data, sizeBytes) : 0u;
     probe_ae::onMovieKickMscalCount(mscal0x48Count);
     uint32_t kickUnpacksSkipped = 0;
     uint32_t kickBytesSkipped = 0;
