@@ -3099,6 +3099,8 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::decodeInstructionPair(con
     return decoded;
 }
 
+void vu1NativeSelectImage(uint64_t hash); // PERF-VAR: generated/vu1_native_dispatch.cpp
+bool vu1NativeSupportsImage(uint64_t hash);
 static uint64_t s_hcCurHash = 0; // PROBE-HC: hash of the VU1 microcode image currently loaded
 static uint64_t s_hcUnitHash[2] = {0, 0}; // PROBE-BLK: image hash per unit (VU0 and VU1 both rebuild through the same code)
 void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
@@ -3120,7 +3122,10 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
         for (uint32_t i = 0; i < codeSize; ++i)
             h = (h ^ vuCode[i]) * 1099511628211ull;
         if (m_unit == Unit::VU1)
+        {
             s_hcCurHash = h;
+            vu1NativeSelectImage(h); // PERF-VAR
+        }
             s_hcUnitHash[m_unit == Unit::VU1 ? 1 : 0] = h;
         bool hcNew = false;
         {
@@ -3264,7 +3269,10 @@ uint32_t vu1CoverageCount(); // PROBE-CAPTURE (generated/vu1_native_dispatch.cpp
 
 // PROBE-CAPTURE: VU1 run corpus for the native-VU1 work (PS2X_VU1_CAPTURE=1 -> logs/vu1corpus.bin). Chunks: u32 tag, u32 bytes, payload.
 // 'HDR ' {u32 sizeof(VU1State)}, 'CODE' {u64 generation, code bytes}, 'RUN ' {see svCaptureRecord}. Kept: runs that reach a new dispatch pc, plus 1 in 400.
+static const char *corpusPath() { const char *e = std::getenv("PS2X_VU1_CORPUS"); return (e && e[0]) ? e : "logs/vu1corpus.bin"; } // PERF-VAR
 static bool capOn() { static const bool on = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE"); return e && e[0] == '1'; }(); return on; }
+static uint32_t capEvery() { static const uint32_t n = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE_EVERY"); const unsigned long v = e ? std::strtoul(e, nullptr, 10) : 200ul; return static_cast<uint32_t>(v ? v : 200ul); }(); return n; } // PERF-VAR
+static bool capImageOk() { static const char *e = std::getenv("PS2X_VU1_CAPTURE_IMAGE"); if (!e) return true; return std::strstr(e, [] { static char b[17]; std::snprintf(b, sizeof(b), "%016llx", (unsigned long long)s_hcCurHash); return b; }()) != nullptr; } // PERF-VAR: comma-separated list of 16-digit hashes
 static uint32_t capMaxRecords() { static const uint32_t m = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE_MAX"); const unsigned long n = e ? std::strtoul(e, nullptr, 10) : 0ul; return static_cast<uint32_t>(n ? n : 30000ul); }(); return m; }
 static FILE *s_capF = nullptr;
 static uint32_t s_capKept = 0, s_capSeen = 0, s_capCov = 0;
@@ -3292,7 +3300,7 @@ static void svCaptureRecord(const VU1State &s0, uint32_t wc0, uint64_t cyc0, con
 {
     if (!s_capF)
     {
-        s_capF = std::fopen("logs/vu1corpus.bin", "wb");
+        s_capF = std::fopen(corpusPath(), "wb");
         if (!s_capF) { s_capKept = 0xFFFFFFFFu; return; }
         std::vector<uint8_t> h;
         capPut(h, static_cast<uint32_t>(sizeof(VU1State)));
@@ -3673,7 +3681,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         if (!loaded)
         {
             loaded = true;
-            if (FILE *cf = std::fopen("logs/vu1corpus.bin", "rb"))
+            if (FILE *cf = std::fopen(corpusPath(), "rb"))
             {
                 std::fseek(cf, 0, SEEK_END);
                 const long sz = std::ftell(cf);
@@ -3703,6 +3711,24 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                 o += 8u + n;
             }
         }
+        const auto rpImageHash = [&](size_t off)
+        {
+            uint64_t h = 1469598103934665603ull;
+            for (uint32_t i = 0; i < codeSize; ++i)
+                h = (h ^ file[off + i]) * 1099511628211ull;
+            return h;
+        };
+        if (const char *ri = std::getenv("PS2X_VU1_REPLAY_IMAGE")) // PERF-VAR: replay another microcode image of the corpus (the live code is overwritten, the process exits afterwards)
+        {
+            const uint64_t want = std::strtoull(ri, nullptr, 16);
+            for (const auto &kv : codeOff)
+                if (rpImageHash(kv.second) == want)
+                {
+                    std::memcpy(const_cast<uint8_t *>(vuCode), file.data() + kv.second, codeSize);
+                    rebuildDecodedCodeCache(vuCode, codeSize, memory, kv.first);
+                    break;
+                }
+        }
         bool imageLoaded = false;
         for (const auto &kv : codeOff)
             if (std::memcmp(file.data() + kv.second, vuCode, codeSize) == 0)
@@ -3714,6 +3740,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             const uint32_t rpReps = []() { const char *e = std::getenv("PS2X_VU1_REPLAY_REPS"); const unsigned long n = e ? std::strtoul(e, nullptr, 10) : 1ul; return static_cast<uint32_t>(n ? n : 1ul); }();
             uint32_t total = 0, skipped = 0, bad = 0, cVf = 0, cVi = 0, cAcc = 0, cQpi = 0, cFlags = 0, cPc = 0, cCyc = 0, cWc = 0, cMem = 0, cGif = 0, cMisc = 0;
             std::fprintf(out, "records=%zu codeImages=%zu stateSize file=%u now=%zu\n", runsIdx.size(), codeOff.size(), stSize, sizeof(VU1State));
+            for (const auto &kv : codeOff)
+                std::fprintf(out, "image gen=%llu hash=%016llx\n", (unsigned long long)kv.first, (unsigned long long)rpImageHash(kv.second));
             if (stSize == sizeof(VU1State))
             {
                 for (size_t ri = 0; ri < runsIdx.size(); ++ri)
@@ -3862,7 +3890,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             std::_Exit(0);
         }
     }
-    if (m_unit == Unit::VU1 && capOn() && memory != nullptr && s_capKept < capMaxRecords() && vuCode == memory->getVU1Code()) // PROBE-CAPTURE
+    if (m_unit == Unit::VU1 && capOn() && memory != nullptr && s_capKept < capMaxRecords() && vuCode == memory->getVU1Code() && capImageOk()) // PROBE-CAPTURE
     {
         const VU1State s0 = m_state;
         const uint32_t wc0 = m_workingClip;
@@ -3874,7 +3902,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         s_vfyCapture = nullptr;
         const uint32_t cov = vu1CoverageCount();
         ++s_capRuns;
-        if ((cov != s_capCov || (++s_capSeen % 200u) == 0u)) // new edge / pc / (pc, hash) pair, or 1 run in 200; PS2X_VU1_CAPTURE_MAX caps the records
+        if ((cov != s_capCov || (++s_capSeen % capEvery()) == 0u)) // new edge / pc / (pc, hash) pair, or 1 run in 200; PS2X_VU1_CAPTURE_MAX caps the records
         {
             s_capCov = cov;
             svCaptureRecord(s0, wc0, cyc0, mem0, m_state, m_workingClip, m_cycle, vuData, dataSize, capA, startPC, top, itop, maxCycles,
@@ -4541,7 +4569,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     const bool useFastUpper = !s_vfyRef && !vu1FastMode(); // PERF-HM: interpreter loop (VU0 + non-native VU1) uses fastUpper too
     static const bool vuNativeAllowed = []() { const char *e = std::getenv("PS2X_VU1_NATIVE"); return !(e && e[0] == '0'); }();
     static const bool vu0NativeAllowed = []() { const char *e = std::getenv("PS2X_VU0_NATIVE"); return !(e && e[0] == '0'); }(); // PERF-IM
-    const bool vuNativeImage = m_unit == Unit::VU1 ? (s_hcCurHash == kVu1NativeMainHash && codeSize == 0x4000u)
+    const bool vuNativeImage = m_unit == Unit::VU1 ? (vu1NativeSupportsImage(s_hcCurHash) && codeSize == 0x4000u)
                                                    : (vu0NativeAllowed && s_hcUnitHash[0] == kVu0NativeMainHash && codeSize == 0x1000u);
     const bool vuNativeOn = vuNativeAllowed && vuNativeImage && !s_vfyRef && decodeCacheOk && !vu1FastMode() &&
                             s_vuImmWrites && s_vuImmFlags && // PERF-IC: native pairs apply vf/vi/acc/flag writes directly

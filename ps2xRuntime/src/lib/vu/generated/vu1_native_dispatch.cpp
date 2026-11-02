@@ -5432,6 +5432,59 @@ static inline bool lbTimed(uint32_t k, F &&f)
 }
 uint32_t vu1CoverageCount() { return s_svCov; } // PROBE-CAPTURE
 
+// PERF-VAR: other microcode images (same program family, a few dozen pairs differ) reuse the main image's executors, hot blocks and kernels wherever
+// their pair + usage record is identical (tools/vu1gen/variant_masks.py); every other pc falls back to the exact interpreter (return 2).
+#include "vu1_variants.inc"
+namespace
+{
+const uint8_t *s_same = nullptr;     // null = main image (everything allowed)
+bool s_hotOk[2048];                  // hot block starting at this pair is usable (all pairs of its span are identical)
+bool s_kOk[3] = {true, true, true};  // kernels: vertex (2440..25B8), copy (0C80..0CB8), full/loop (1FE0..243F)
+bool varRange(uint32_t lo, uint32_t hiIncl)
+{
+    for (uint32_t pc = lo; pc <= hiIncl; pc += 8u)
+        if (!s_same[pc >> 3])
+            return false;
+    return true;
+}
+} // namespace
+void vu1NativeSelectImage(uint64_t hash)
+{
+    s_same = nullptr;
+    for (uint32_t i = 0; i < kVu1VariantCount; ++i)
+        if (kVu1Variants[i].hash == hash)
+            s_same = kVu1Variants[i].same;
+    s_kOk[0] = s_kOk[1] = s_kOk[2] = true;
+    if (!s_same)
+        return;
+    for (uint32_t i = 0; i < 2048u; ++i)
+    {
+        bool ok = true;
+        if (kVu1HotStart[i])
+        {
+            const uint32_t n = (kVu1HotSpan[i] ? kVu1HotSpan[i] : 1u) + 1u; // +1 pair of margin
+            for (uint32_t k = 0; k < n && ok; ++k)
+                ok = (i + k) < 2048u && s_same[i + k];
+        }
+        s_hotOk[i] = ok;
+    }
+    s_kOk[0] = varRange(0x2440u, 0x25B8u);
+    s_kOk[1] = varRange(0x0C80u, 0x0CB8u);
+    s_kOk[2] = varRange(0x1FE0u, 0x2438u);
+    std::printf("[probe] vu1 variant image %016llx: same pairs %u, hot starts usable %u, kernels vertex=%d copy=%d full=%d\n",
+                (unsigned long long)hash, (unsigned)std::count(s_same, s_same + 2048, uint8_t(1)),
+                (unsigned)std::count(s_hotOk, s_hotOk + 2048, true), (int)s_kOk[0], (int)s_kOk[1], (int)s_kOk[2]);
+}
+bool vu1NativeSupportsImage(uint64_t hash)
+{
+    if (hash == kVu1NativeMainHash)
+        return true;
+    for (uint32_t i = 0; i < kVu1VariantCount; ++i)
+        if (kVu1Variants[i].hash == hash)
+            return true;
+    return false;
+}
+
 int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
 {
     c.hashValid = false; // the interpreter may have executed pairs since the last hot block
@@ -5445,7 +5498,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
         if (s_svOn && pc < 0x4000u) svg.at(pc); // PROBE-SURVEY
         if (s_rgOn) rgStep(vu, c, pc); // PROBE-REGION
         // PERF-IE: hot blocks with static timing (generated/vu1_hot_blocks.cpp); any unknown state falls back to the pair executors
-        if (kVu1HotStart[pc >> 3] && (s_xgHot || !vu.m_xgkick.active) && !vu.m_state.branchPending && !vu.m_state.ebit &&
+        if (kVu1HotStart[pc >> 3] && (!s_same || s_hotOk[pc >> 3]) && (s_xgHot || !vu.m_xgkick.active) && !vu.m_state.branchPending && !vu.m_state.ebit &&
             !vu.m_state.haltAfterDelaySlot && c.budgetEnd - vu.m_cycle > 160u)
         {
             if (!c.hashValid)
@@ -5454,7 +5507,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 c.hashValid = true;
             }
             // PERF-HC: direct-mapped (pc -> {entry hash, block}) cache in front of the switch lookup; misses (no block) are cached too
-            if (s_lbOn && pc == 0x2440u && c.nextHash == kHashVertEntry && lbTimed(0, [&] { return lbVert(vu, c); })) // PERF-LB: per-vertex routine
+            if (s_lbOn && s_kOk[0] && pc == 0x2440u && c.nextHash == kHashVertEntry && lbTimed(0, [&] { return lbVert(vu, c); })) // PERF-LB: per-vertex routine
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
                 {
@@ -5465,7 +5518,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 }
                 continue;
             }
-            if (s_lbOn && pc == 0x0C80u && c.nextHash == kHashCopyEntry && lbTimed(1, [&] { return lbCopy(vu, c); })) // PERF-LB: stream copy command
+            if (s_lbOn && s_kOk[1] && pc == 0x0C80u && c.nextHash == kHashCopyEntry && lbTimed(1, [&] { return lbCopy(vu, c); })) // PERF-LB: stream copy command
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
                 {
@@ -5476,7 +5529,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 }
                 continue;
             }
-            if (s_lbOn && pc == 0x1FE0u && c.nextHash == kLbEntryHash && lbTimed(2, [&] { return lbFull(vu, c); })) // PERF-LB: the whole routine 1FE0 -> JR in closed form
+            if (s_lbOn && s_kOk[2] && pc == 0x1FE0u && c.nextHash == kLbEntryHash && lbTimed(2, [&] { return lbFull(vu, c); })) // PERF-LB: the whole routine 1FE0 -> JR in closed form
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
                 {
@@ -5487,7 +5540,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
                 }
                 continue;
             }
-            if (s_lbOn && pc == 0x20F8u && c.nextHash == kLbLoopHash && lbTimed(3, [&] { return lbLoop(vu, c); })) // PERF-LB: whole loop block in closed form
+            if (s_lbOn && s_kOk[2] && pc == 0x20F8u && c.nextHash == kLbLoopHash && lbTimed(3, [&] { return lbLoop(vu, c); })) // PERF-LB: whole loop block in closed form
             {
                 if (c.check && c.ops->blkHash(vu) != c.nextHash)
                 {
@@ -5583,7 +5636,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
             ++s_cause[2];
         c.hashValid = false;
         const StepFn fn = kStep[pc >> 3];
-        if (!fn)
+        if (!fn || (s_same && !s_same[pc >> 3]))
             return 2;
         ++s_slowPairs;
         if (vu.m_xgkick.active)
