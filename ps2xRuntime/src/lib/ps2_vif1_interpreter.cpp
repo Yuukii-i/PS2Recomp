@@ -1,11 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
 extern "C" bool ps2_vif1_on_worker(); // PERF-HN (ps2_memory.cpp)
-extern thread_local uint32_t g_vif1JobFbrst;                // ps2_runtime.cpp
-extern "C" void ps2_gs_async_batch(bool on);                 // gs/ps2_gif_arbiter.cpp
-uint64_t ps2_vif1_pipe_submit(std::function<void()> fn);     // PERF-VP2 (ps2_memory.cpp)
-void ps2_vif1_pipe_wait(uint64_t seq);
-uint64_t ps2_vif1_pipe_done();
 extern "C" bool ps2_fk_lookup(uint32_t chainSize, uint32_t pos, uint32_t *outSrc, uint32_t *outBytes, uint32_t *outBufOff);
 extern "C" void ps2_scanCameraRegion(const char *caller, uint64_t callIndex, uint32_t ra);
 extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint16_t dest, uint16_t num,
@@ -803,90 +798,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     uint32_t kickBytesSkipped = 0;
     const auto tVif1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
-    // PERF-VP2 (PS2X_VIF_PIPE=1): on the VIF1 worker, MSCAL/MSCNT go to the VU1 execution thread (ps2_memory.cpp) while this thread keeps parsing.
-    // A running program may read its buffer half [TOP, TOP+OFFSET) and the static area, so: UNPACK with TOP-relative addressing that does not intersect a
-    // queued/running program's half proceeds; absolute UNPACKs and every command that touches VU1 code, the GIF paths or the MARK/FLUSH ordering wait for
-    // the stage to go idle; the job never returns before the stage is idle (so fences and EE-side reads keep their meaning).
-    static const bool s_pipeEnv = []() { const char *e = std::getenv("PS2X_VIF_PIPE"); return e && e[0] == '1'; }();
-    static std::atomic<uint64_t> s_pipeStat[8]; // 0 queued, 1 abs-unpack waits, 2 overlap waits, 3 barrier-op waits, 4 ring-full waits, 5 waited ticks
-    struct PipeCtx
-    {
-        struct Fp
-        {
-            uint64_t seq;
-            uint32_t lo, hi;
-        };
-        bool on = false;
-        uint64_t last = 0;
-        Fp fp[8];
-        int n = 0;
-        ~PipeCtx()
-        {
-            if (last)
-                ps2_vif1_pipe_wait(last);
-        }
-    } pipe;
-    pipe.on = s_pipeEnv && !cuProbe && g_vif1JobFbrst != ~0u && !(s_cuMovie && probe_ae::isMovieActivePublic());
-    const auto pipeWait = [&](uint64_t seq, int cause)
-    {
-        if (seq <= ps2_vif1_pipe_done())
-            return;
-        const uint64_t t0 = __rdtsc();
-        ps2_vif1_pipe_wait(seq);
-        s_pipeStat[cause].fetch_add(1, std::memory_order_relaxed);
-        s_pipeStat[5].fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
-    };
-    const auto pipeAll = [&](int cause)
-    {
-        if (pipe.last)
-            pipeWait(pipe.last, cause);
-        pipe.n = 0;
-    };
-    const auto pipeRange = [&](uint32_t lo, uint32_t hi, bool all, int cause)
-    {
-        const uint64_t done = ps2_vif1_pipe_done();
-        uint64_t need = 0;
-        int w = 0;
-        for (int i = 0; i < pipe.n; ++i)
-        {
-            const PipeCtx::Fp f = pipe.fp[i];
-            if (f.seq <= done)
-                continue;
-            pipe.fp[w++] = f;
-            if (all || (lo < f.hi && f.lo < hi))
-                need = f.seq;
-        }
-        pipe.n = w;
-        if (need)
-            pipeWait(need, cause);
-    };
-    const auto pipeEnqueue = [&](std::function<void()> fn, uint32_t top)
-    {
-        if (pipe.n == 8)
-        {
-            pipeWait(pipe.fp[0].seq, 4);
-            for (int i = 1; i < 8; ++i)
-                pipe.fp[i - 1] = pipe.fp[i];
-            --pipe.n;
-        }
-        ps2_gs_async_batch(false); // this thread's earlier GIF packets must reach the GS queue before the stage's
-        ps2_gs_async_batch(true);
-        const uint64_t seq = ps2_vif1_pipe_submit(std::move(fn));
-        uint32_t lo = top & 0x3FFu, hi = lo + (vif1_regs.ofst & 0x3FFu);
-        if ((vif1_regs.ofst & 0x3FFu) == 0u || hi > 0x400u)
-        {
-            lo = 0u;
-            hi = 0x400u;
-        }
-        pipe.fp[pipe.n++] = PipeCtx::Fp{seq, lo, hi};
-        pipe.last = seq;
-        const uint64_t q = s_pipeStat[0].fetch_add(1, std::memory_order_relaxed) + 1u;
-        if ((q & 0x1FFFu) == 0u)
-            std::printf("[pipe] queued=%llu waits: absUnpack=%llu overlapUnpack=%llu barrierOp=%llu ringFull=%llu waitedMticks=%.1f\n", (unsigned long long)q,
-                        (unsigned long long)s_pipeStat[1].load(), (unsigned long long)s_pipeStat[2].load(), (unsigned long long)s_pipeStat[3].load(),
-                        (unsigned long long)s_pipeStat[4].load(), static_cast<double>(s_pipeStat[5].load()) / 1e6);
-    };
-
 #if defined(PS2X_PROBE_AE) || 1
     if (probe_ae::isEnabled()) {
         probe_ae::onVif1DmaStart(sizeBytes);
@@ -987,15 +898,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 std::fprintf(stderr, "[vif1:irq] cmd=0x%08x opcode=0x%02x imm=0x%04x\n", cmd, opcode, imm);
                 std::fflush(stderr);
             }
-        }
-
-        if (pipe.last) // PERF-VP2: only these commands leave the VU1 stage's state, code, GIF ordering and flags alone
-        {
-            const bool pipeSafe = opcode == VIF_NOP || opcode == VIF_STCYCL || opcode == VIF_OFFSET || opcode == VIF_BASE || opcode == VIF_ITOP ||
-                                  opcode == VIF_STMOD || opcode == VIF_MARK || opcode == VIF_MSCAL || opcode == VIF_MSCALF || opcode == VIF_MSCNT ||
-                                  opcode == VIF_STMASK || opcode == VIF_STROW || opcode == VIF_STCOL || (opcode & 0x60u) == 0x60u;
-            if (!pipeSafe)
-                pipeAll(3);
         }
 
         if (opcode == VIF_NOP)
@@ -1101,10 +1003,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 #endif
 
             const bool skipMscal = probe_ae::isMovieSkipUnpackEnabled() && probe_ae::isMovieKickNative();
-            if (!skipMscal && m_vu1MscalCallback && pipe.on) {
-                const uint32_t fbrstJob = g_vif1JobFbrst;
-                pipeEnqueue([this, startPC, runTop, runItop, fbrstJob]() { g_vif1JobFbrst = fbrstJob; m_vu1MscalCallback(startPC, runTop, runItop); }, runTop);
-            } else if (!skipMscal && m_vu1MscalCallback) {
+            if (!skipMscal && m_vu1MscalCallback) {
                 const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 m_vu1MscalCallback(startPC, runTop, runItop);
 #if defined(PS2X_PROBE_AE) || 1
@@ -1134,10 +1033,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                           runTop, runItop, vif1_regs.tops & 0x3FFu);
 
             probe_ae::flushMovieBatch(nullptr, this);
-            if (m_vu1MscntCallback && pipe.on) {
-                const uint32_t fbrstJob = g_vif1JobFbrst;
-                pipeEnqueue([this, runTop, runItop, fbrstJob]() { g_vif1JobFbrst = fbrstJob; m_vu1MscntCallback(runTop, runItop); }, runTop);
-            } else if (m_vu1MscntCallback) {
+            if (m_vu1MscntCallback) {
                 const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 m_vu1MscntCallback(runTop, runItop);
 #if defined(PS2X_PROBE_AE) || 1
@@ -1312,13 +1208,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             uint32_t vuAddr = (uint32_t)imm & 0x3FFu;
             if ((imm & 0x8000u) != 0u)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
-            if (pipe.last) // PERF-VP2: a queued/running program owns its buffer half and the static area
-            {
-                const bool flgTop = (imm & 0x8000u) != 0u;
-                const uint32_t spanQ = (cl >= wl) ? ((writeVectorCount - 1u) / wl) * cl + ((writeVectorCount - 1u) % wl) : (writeVectorCount - 1u);
-                const uint32_t hiQ = vuAddr + spanQ + 1u;
-                pipeRange(vuAddr, hiQ, !flgTop || hiQ > 0x400u, flgTop ? 2 : 1);
-            }
 
             const uint8_t *srcBaseAt974 = (pos <= sizeBytes) ? (data + pos) : nullptr;
             uint32_t srcRdram = 0xFFFFFFFFu;
