@@ -122,6 +122,9 @@ void gsFlushPending()
 
 void gsAsyncWorker()
 {
+    // PROBE-GP: PS2X_PROF_GSWORKER=1 (with PS2X_PROF_SAMPLE=1) points the sampler's line/owner/budget output at this thread
+    if (const char *pe = std::getenv("PS2X_PROF_GSWORKER"); pe && pe[0] == '1')
+        probe_ae::recordMainGuestThread();
     GsAsyncState &st = gsAsync();
     std::unique_lock<std::mutex> lock(st.m);
     for (;;)
