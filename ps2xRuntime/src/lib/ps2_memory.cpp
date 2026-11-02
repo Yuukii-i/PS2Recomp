@@ -444,6 +444,8 @@ namespace
         bool busy = false;
         bool started = false;
         std::atomic<bool> pending{false}; // queue non-empty or worker busy
+        uint64_t enqueuedJobs = 0, doneJobs = 0; // PERF-SL: job sequence numbers (guarded by m)
+        uint32_t lagWaiters = 0;                 // PERF-SL: EE threads waiting in ps2_vif1_sync_lag
     };
     Vif1AsyncState &vifAsync()
     {
@@ -528,11 +530,14 @@ static void vif1Worker()
         {
             std::lock_guard<std::mutex> lock(st.m);
             st.busy = false;
+            ++st.doneJobs; // PERF-SL
             if (st.q.empty())
             {
                 st.pending.store(false, std::memory_order_release);
                 st.cvIdle.notify_all();
             }
+            else if (st.lagWaiters != 0u)
+                st.cvIdle.notify_all();
         }
     }
 }
@@ -556,6 +561,7 @@ static void vif1EnqueueJob(std::vector<uint8_t> &&data)
     st.queuedBytes += data.size();
     job.data = std::move(data);
     st.q.push_back(std::move(job));
+    ++st.enqueuedJobs; // PERF-SL
     st.pending.store(true, std::memory_order_release);
     st.cvWork.notify_one();
 }
@@ -566,6 +572,35 @@ static void vif1EnqueueCopy(const uint8_t *p, uint32_t n)
     vif1EnqueueJob(std::move(v));
 }
 extern "C" bool ps2_vif1_on_worker() { return t_onVif1Worker; }
+// PERF-SL: called by the per-frame sceGsSyncPath: remember how many jobs exist now and wait until the worker has finished the jobs that existed `lag` calls ago.
+// lag=1: at most one frame of VU1/GIF work is in flight while the EE builds the next one (steady cadence, bounded input latency).
+extern "C" void ps2_vif1_sync_lag(uint32_t lag)
+{
+    if (!vif1AsyncEnabled() || t_onVif1Worker)
+        return;
+    Vif1AsyncState &st = vifAsync();
+    static std::deque<uint64_t> s_tickets; // EE thread only
+    std::unique_lock<std::mutex> lock(st.m);
+    s_tickets.push_back(st.enqueuedJobs);
+    if (s_tickets.size() > lag)
+    {
+        const uint64_t want = s_tickets.front();
+        s_tickets.pop_front();
+        if (st.doneJobs < want)
+        {
+            const uint64_t fT0 = __rdtsc();
+            ++st.lagWaiters;
+            st.cvIdle.wait(lock, [&] { return st.doneJobs >= want; });
+            --st.lagWaiters;
+            g_waitTicks[0].fetch_add(__rdtsc() - fT0, std::memory_order_relaxed);
+            g_waitTicks[5].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+extern "C" uint32_t probe_getNewestDistinctFn(); // PROBE-FS
+extern thread_local uint32_t g_currentExecutingFunction;
+struct FenceSite { uint32_t fn, cur; uintptr_t ra; uint64_t ticks, n; };
+static FenceSite s_fenceSites[24]; // PROBE-FS: EE thread only (the worker returns before the wait)
 extern "C" void ps2_vif1_fence()
 {
     if (!vif1AsyncEnabled() || t_onVif1Worker)
@@ -578,6 +613,17 @@ extern "C" void ps2_vif1_fence()
         st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
         g_waitTicks[0].fetch_add(__rdtsc() - fT0, std::memory_order_relaxed);
         g_waitTicks[5].fetch_add(1, std::memory_order_relaxed);
+        { // PROBE-FS
+            const uint32_t fn = probe_getNewestDistinctFn(), cur = g_currentExecutingFunction;
+            const uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress());
+            FenceSite *slot = nullptr;
+            for (FenceSite &s : s_fenceSites)
+                if (s.n && s.fn == fn && s.cur == cur && s.ra == ra) { slot = &s; break; }
+            if (!slot)
+                for (FenceSite &s : s_fenceSites)
+                    if (!s.n) { slot = &s; s.fn = fn; s.cur = cur; s.ra = ra; break; }
+            if (slot) { slot->ticks += __rdtsc() - fT0; ++slot->n; }
+        }
     }
     if (g_vif1ApplyVpuStat)
         g_vif1ApplyVpuStat();
@@ -604,6 +650,19 @@ extern "C" void ps2_vif1_fence()
             // global ps2xSafeLog
             ps2xSafeLog("[wait] window_ms=%.0f EE ms: vif1_fence=%.0f (n=%.0f) vif1_enqueue=%.0f gs_fence=%.0f gs_backpressure=%.0f | vif1_worker_busy=%.0f vif1_worker_idle=%.0f\n", ms, v[0], v[5],
                         v[1], v[2], v[3], v[4], v[6]);
+            { // PROBE-FS: the heaviest waiting call sites of this window
+                for (int pass = 0; pass < 4; ++pass)
+                {
+                    FenceSite *best = nullptr;
+                    for (FenceSite &s : s_fenceSites)
+                        if (s.n && (!best || s.ticks > best->ticks)) best = &s;
+                    if (!best) break;
+                    ps2xSafeLog("[fsite] newestFn=%08X curFn=%08X ra=%p waits=%llu ms=%.1f\n", best->fn, best->cur, reinterpret_cast<void *>(best->ra),
+                                (unsigned long long)best->n, static_cast<double>(best->ticks) / tpm);
+                    best->n = 0; best->ticks = 0;
+                }
+                for (FenceSite &s : s_fenceSites) { s.n = 0; s.ticks = 0; }
+            }
             s_t0 = now;
             s_tsc0 = tsc;
         }

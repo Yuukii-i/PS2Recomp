@@ -242,21 +242,25 @@ inline std::filesystem::path g_host_cwd;
 inline std::filesystem::path g_cdrom_cwd;
 inline std::string g_ps2_cwd_device = "host0";
 
+// C333: these pools used to live at 0x01F00000..0x01F30FFF, which is inside the game's own file-staging memory
+// (stage archives are staged up to 0x01F9FFFF). Writing an RPC server descriptor at 0x01F10200 corrupted 32 bytes of the
+// staged bg.pck.sz, the zlib inflate came out 355 bytes short and the stage textures/heap broke. The EE kernel area
+// 0x000A0000..0x000FFFFF is never touched by the game (all zeros on hardware), so the runtime pools live there.
 static constexpr uint32_t kRpcPacketSize = 64;
-static constexpr uint32_t kRpcPacketPoolBase = 0x01F00000;
-static constexpr uint32_t kRpcPacketPoolBytes = 0x00010000;
+static constexpr uint32_t kRpcPacketPoolBase = 0x000A0000;
+static constexpr uint32_t kRpcPacketPoolBytes = 0x00008000;
 static constexpr uint32_t kRpcPacketPoolCount = kRpcPacketPoolBytes / kRpcPacketSize;
-static constexpr uint32_t kRpcServerPoolBase = 0x01F10000;
-static constexpr uint32_t kRpcServerPoolBytes = 0x00010000;
+static constexpr uint32_t kRpcServerPoolBase = 0x000A8000;
+static constexpr uint32_t kRpcServerPoolBytes = 0x00008000;
 static constexpr uint32_t kRpcServerStride = 0x80;
 static constexpr uint32_t kRpcServerPoolCount = kRpcServerPoolBytes / kRpcServerStride;
 
-static constexpr uint32_t kTlsPoolBase = 0x01F20000;
+static constexpr uint32_t kTlsPoolBase = 0x000B0000;
 static constexpr uint32_t kTlsPoolBytes = 0x00010000;
 static constexpr uint32_t kTlsBlockSize = 0x100;
 static constexpr uint32_t kTlsPoolCount = kTlsPoolBytes / kTlsBlockSize;
 
-static constexpr uint32_t kBootModePoolBase = 0x01F30000;
+static constexpr uint32_t kBootModePoolBase = 0x000C0000;
 static constexpr uint32_t kBootModePoolBytes = 0x00001000;
 
 static constexpr uint32_t kSifRpcModeNowait = 0x01;

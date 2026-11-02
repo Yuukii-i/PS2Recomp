@@ -1214,6 +1214,8 @@ namespace ps2_stubs
         setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));
     }
 
+    extern "C" void ps2_vif1_sync_lag(uint32_t lag); // PERF-SL: ps2_memory.cpp
+
     void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (probe_ae::isDcProbeEnabled()) probe_ae::onDcSyncPath();
@@ -1242,6 +1244,21 @@ namespace ps2_stubs
                 if (++count > kTimeout)
                 {
                     setReturnS32(ctx, -1);
+                    return;
+                }
+            }
+
+            // PERF-SA (PS2X_SYNCPATH_ASYNC=1): the packets of this frame are already copied into the VIF1 worker's queue, so the guest's buffers are free;
+            // the VIF1_STAT / GIF_STAT polls below would block the EE until the worker (VU1 + GIF) has finished the frame. Skipped: EE and worker overlap.
+            static const bool s_syncPathAsync = []() { const char *e = std::getenv("PS2X_SYNCPATH_ASYNC"); return e && e[0] == '1'; }();
+            if (s_syncPathAsync)
+            {
+                // PERF-SL: only the per-frame sync (called from the frame-swap routine, return address 0x0051E290) is overlapped, with a bounded lag; every other caller waits fully
+                static const uint32_t s_lag = []() { const char *e = std::getenv("PS2X_SYNCPATH_LAG"); const unsigned long n = e ? std::strtoul(e, nullptr, 10) : 1ul; return static_cast<uint32_t>(n ? n : 1ul); }();
+                if (getRegU32(ctx, 31) == 0x0051E290u)
+                {
+                    ps2_vif1_sync_lag(s_lag);
+                    setReturnS32(ctx, 0);
                     return;
                 }
             }

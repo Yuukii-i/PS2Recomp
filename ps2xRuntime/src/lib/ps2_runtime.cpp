@@ -63,6 +63,7 @@ namespace {
 #include <unordered_map>
 #include <sstream>
 #include <mutex>
+#include <set>
 #include <map>
 #include <cstdarg>
 #include <cmath>
@@ -1373,8 +1374,10 @@ PS2Runtime::PS2Runtime()
     // The main thread stack occupies [0x01FA0000, 0x02000000] (SetupThread: stack base=0x01FA0000, size=0x60000).
     // Async callback stacks MUST NOT collide with the main thread's live stack frames.
     // They are placed below the main stack in [0x01F00000, 0x01FA0000].
-    constexpr uint32_t kDefaultAsyncCallbackStackTop = 0x01FA0000u;
-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    // C333: async callback stacks used to be carved below 0x01FA0000, on top of the game's staged files (character.pck.sz
+    // tail, monkeydb). They now live in the otherwise unused EE kernel area [0x000C8000, 0x000F8000) (12 x 16 KB).
+    constexpr uint32_t kDefaultAsyncCallbackStackTop = 0x000F8000u;
+    m_asyncCallbackStackFloor = 0x000C8000u;
     m_asyncCallbackStackTop = kDefaultAsyncCallbackStackTop;
 }
 
@@ -2111,9 +2114,8 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     }
     {
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-        const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
-        m_asyncCallbackStackTop = 0x01FA0000u;
+        m_asyncCallbackStackFloor = 0x000C8000u; // C333 (see constructor)
+        m_asyncCallbackStackTop = 0x000F8000u;
     }
 
     LoadedModule module;
@@ -2668,6 +2670,32 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             }
             if (s_orig15a488) s_orig15a488(rdram, ctx, runtime);
         });
+    }
+
+    // C332: IPU job queue (0x100E64 starts a toIPU/fromIPU DMA + IDEC job; the DMA-end interrupt 0x100F7C retires it).
+    // There is no IPU emulation, so the interrupt never fired and the main thread waited on the job forever
+    // (white screen after picking a level). Retire the job at once; the decoded picture is not produced.
+    // Hack Ledger: PS2X_IPU_HLE=0 disables.
+    if (0x00100E64u >= g_ps2RecompiledFunctionTableBase && 0x00100E64u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const char *ipuHle = std::getenv("PS2X_IPU_HLE");
+        if (!(ipuHle && ipuHle[0] == '0'))
+        {
+            replaceFunction(0x00100E64u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+                static int s_n = 0;
+                if (s_n < 8)
+                {
+                    ++s_n;
+                    const uint32_t job = getRegU32(ctx, 4);
+                    ps2xSafeLog("[ipu] job=0x%08x cmdb=0x%02x ctlb=0x%02x inQw=0x%x outQw=0x%x src=0x%08x dst=0x%08x (retired without decode)%s",
+                                job, rdram[job + 2], rdram[job + 3], *reinterpret_cast<const uint16_t *>(rdram + job + 4),
+                                *reinterpret_cast<const uint16_t *>(rdram + job + 6), *reinterpret_cast<const uint32_t *>(rdram + job + 8),
+                                *reinterpret_cast<const uint32_t *>(rdram + job + 12), "\n");
+                }
+                const uint32_t ra = getRegU32(ctx, 31);
+                (void)runtime->dispatchGuestBranch(rdram, ctx, 0x100F7Cu, 0x100E64u, ra, PS2Runtime::GuestBranchKind::DirectCall, "JAL");
+            });
+        }
     }
 
     // Logging for sub_0015993C:
@@ -3639,7 +3667,15 @@ static bool executeUnrecompiledCode(uint8_t *rdram,
     const uint32_t initialRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
 
     static uint32_t s_interpCount = 0;
-    if (++s_interpCount <= 20 || (s_interpCount % 1000) == 0)
+    // C334: log every distinct fallback target once (these are real functions the recompiler hid; the fallback interpreter has no MMI/lq)
+    static std::mutex s_interpSeenMutex;
+    static std::set<uint32_t> s_interpSeen;
+    bool newTarget = false;
+    {
+        std::lock_guard<std::mutex> lock(s_interpSeenMutex);
+        newTarget = s_interpSeen.insert(targetPc).second;
+    }
+    if (newTarget || ++s_interpCount <= 20 || (s_interpCount % 1000) == 0)
     {
         ps2xSafeLog("[guest-fallback-interp] entry #%u targetPc=0x%08x from sourcePc=0x%08x kind=%s ra=0x%08x\n",
                     s_interpCount, targetPc, sourcePc, describeGuestBranchKind(kind), initialRa);
@@ -5253,6 +5289,87 @@ extern "C" void ps2x_vu0_flags(R5900Context *ctx, __m128 res, int laneMask)
     ctx->vu0_status = static_cast<uint16_t>((ctx->vu0_status & ~0xFu) | now | (now << 6) | (ctx->vu0_status & 0xFC0u));
 }
 
+// C317: VU0 macro-mode Q operations with hardware semantics (PCSX2 _vuDIV/_vuSQRT/_vuRSQRT):
+// x/0 -> +-FLT_MAX (sign = sign(fs) ^ sign(ft)), sqrt(negative) uses |x|. PS2X_VU0_HWQ=0 restores the old behaviour (0 / clamped).
+static bool ps2xVu0HwQ()
+{
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_VU0_HWQ"); return !(e && e[0] == '0'); }();
+    return s_on;
+}
+static float ps2xVu0Max(uint32_t signBits)
+{
+    const uint32_t b = (signBits & 0x80000000u) | 0x7F7FFFFFu;
+    float f;
+    std::memcpy(&f, &b, sizeof(f));
+    return f;
+}
+extern "C" float ps2x_vu0_div(float fs, float ft)
+{
+    if (!ps2xVu0HwQ())
+        return (ft != 0.0f) ? (fs / ft) : 0.0f;
+    uint32_t sb, tb;
+    std::memcpy(&sb, &fs, sizeof(sb));
+    std::memcpy(&tb, &ft, sizeof(tb));
+    if (ft == 0.0f)
+        return ps2xVu0Max(sb ^ tb);
+    const float q = fs / ft;
+    return std::isfinite(q) ? q : ps2xVu0Max(sb ^ tb);
+}
+extern "C" float ps2x_vu0_sqrt(float ft)
+{
+    if (!ps2xVu0HwQ())
+        return std::sqrt(std::max(0.0f, ft));
+    return std::sqrt(std::fabs(ft));
+}
+extern "C" float ps2x_vu0_rsqrt(float fs, float ft)
+{
+    if (!ps2xVu0HwQ())
+        return (ft > 0.0f) ? (fs / std::sqrt(ft)) : 0.0f;
+    uint32_t sb, tb;
+    std::memcpy(&sb, &fs, sizeof(sb));
+    std::memcpy(&tb, &ft, sizeof(tb));
+    if (ft == 0.0f)
+        return ps2xVu0Max(sb ^ tb);
+    const float q = fs / std::sqrt(std::fabs(ft));
+    return std::isfinite(q) ? q : ps2xVu0Max(sb);
+}
+
+// C320: VU R register = 23-bit LFSR kept as a float in [1,2) (0x3F800000 | 23 bits), stored in lane 0 of ctx->vu0_r.
+// The old vrinit/vrnext/vrxor/vrget were invented (vrnext never wrote its vf dest), so every game random was garbage.
+static inline uint32_t ps2xVu0RBits(const R5900Context *ctx)
+{
+    return static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_castps_si128(ctx->vu0_r)));
+}
+static inline void ps2xVu0RSet(R5900Context *ctx, uint32_t bits)
+{
+    ctx->vu0_r = _mm_castsi128_ps(_mm_cvtsi32_si128(static_cast<int>((bits & 0x7FFFFFu) | 0x3F800000u)));
+}
+extern "C" void ps2x_vu0_rinit(R5900Context *ctx, float fs)
+{
+    uint32_t b;
+    std::memcpy(&b, &fs, sizeof(b));
+    ps2xVu0RSet(ctx, b);
+}
+extern "C" void ps2x_vu0_rxor(R5900Context *ctx, float fs)
+{
+    uint32_t b;
+    std::memcpy(&b, &fs, sizeof(b));
+    ps2xVu0RSet(ctx, ps2xVu0RBits(ctx) ^ b);
+}
+extern "C" float ps2x_vu0_rget(R5900Context *ctx)
+{
+    const uint32_t b = ps2xVu0RBits(ctx);
+    float f;
+    std::memcpy(&f, &b, sizeof(f));
+    return f;
+}
+extern "C" float ps2x_vu0_rnext(R5900Context *ctx)
+{
+    const uint32_t r = ps2xVu0RBits(ctx);
+    ps2xVu0RSet(ctx, (r << 1) ^ (((r >> 4) ^ (r >> 22)) & 1u));
+    return ps2x_vu0_rget(ctx);
+}
+
 void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
@@ -5307,6 +5424,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     }
     catch (const std::exception &)
     {
+        { static int s_bad = 0; if (s_bad < 6) { ++s_bad; ps2xSafeLog("[store32-fail] vaddr=0x%08x value=0x%08x pc=0x%08x ra=0x%08x sp=0x%08x a0=0x%08x s0=0x%08x\n", vaddr, value, ctx->pc, getRegU32(ctx, 31), getRegU32(ctx, 29), getRegU32(ctx, 4), getRegU32(ctx, 16)); } } // PROBE-KY
         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
     }
 }
@@ -5588,10 +5706,10 @@ void PS2Runtime::run()
         ThreadNaming::SetCurrentThreadName("GameThread");
         // C310: the EE FPU always rounds toward zero; FPU_CVT_W_S/ROUND_W_S use nearbyintf, which follows MXCSR.RC
         {
+            // default ON (C316: fixes animation tilt, eye lids); PS2X_EE_RTZ=0 restores round-to-nearest
             const char *rtz = getenv("PS2X_EE_RTZ");
-            if (rtz && rtz[0] == '1')
-                _mm_setcsr(_mm_getcsr() | 0x6000u);
-        }
+            if (!(rtz && rtz[0] == '0'))
+                _mm_setcsr(_mm_getcsr() | 0x6000u);        }
         try
         {
             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
@@ -5887,9 +6005,29 @@ void PS2Runtime::run()
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
             const float screenWidth = static_cast<float>(GetScreenWidth());
             const float screenHeight = static_cast<float>(GetScreenHeight());
-            const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
-            const float dstWidth = srcWidth * scale;
-            const float dstHeight = srcHeight * scale;
+            // PS2X_ASPECT=16:9 | 4:3 | fill: shape of the displayed box (default: keep the frame's own 640x448 shape)
+            static const float s_aspect = []() {
+                const char *a = getenv("PS2X_ASPECT");
+                if (!a || !*a) return 0.0f;
+                if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f;
+                if (!std::strcmp(a, "16:10")) return 1.6f;
+                if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f;
+                if (!std::strcmp(a, "fill")) return -1.0f;
+                return 0.0f;
+            }();
+            float dstWidth, dstHeight;
+            if (s_aspect > 0.0f || s_aspect < 0.0f)
+            {
+                const float boxAspect = (s_aspect > 0.0f) ? s_aspect : (screenWidth / screenHeight);
+                dstWidth = std::min(screenWidth, screenHeight * boxAspect);
+                dstHeight = dstWidth / boxAspect;
+            }
+            else
+            {
+                const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+                dstWidth = srcWidth * scale;
+                dstHeight = srcHeight * scale;
+            }
             const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
             const Rectangle dstRect{
                 (screenWidth - dstWidth) * 0.5f,

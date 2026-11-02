@@ -828,6 +828,16 @@ inline __m128i ps2_pmfhl_sh(uint64_t hi, uint64_t lo, uint64_t hi1, uint64_t lo1
 #define PS2_PMFHL_LH(hi, lo, hi1, lo1) ps2_pmfhl_lh((hi), (lo), (hi1), (lo1))
 #define PS2_PMFHL_SH(hi, lo, hi1, lo1) ps2_pmfhl_sh((hi), (lo), (hi1), (lo1))
 
+// C316: EE FPU float->int always truncates toward zero and saturates (PCSX2 CVT_W): independent of MXCSR rounding mode
+inline int32_t ps2_f2i_trunc(float f)
+{
+    uint32_t b;
+    std::memcpy(&b, &f, sizeof(b));
+    if ((b & 0x7F800000u) <= 0x4E800000u)
+        return static_cast<int32_t>(f);
+    return (b & 0x80000000u) ? static_cast<int32_t>(0x80000000u) : 0x7FFFFFFF;
+}
+
 // FPU (COP1) operations
 #define FPU_SET_ACC(ctx, res) (ctx->f_acc = res)
 #define FPU_ADD_S(a, b) ps2_fadd((float)(a), (float)(b))
@@ -843,13 +853,13 @@ inline __m128i ps2_pmfhl_sh(uint64_t hi, uint64_t lo, uint64_t hi1, uint64_t lo1
 #define FPU_TRUNC_L_S(a) ((int64_t)(float)(a))
 #define FPU_CEIL_L_S(a) ((int64_t)ceilf((float)(a)))
 #define FPU_FLOOR_L_S(a) ((int64_t)floorf((float)(a)))
-#define FPU_ROUND_W_S(a) ((int32_t)nearbyintf((float)(a)))
-#define FPU_TRUNC_W_S(a) ((int32_t)(float)(a))
+#define FPU_ROUND_W_S(a) ps2_f2i_trunc((float)(a))
+#define FPU_TRUNC_W_S(a) ps2_f2i_trunc((float)(a))
 #define FPU_CEIL_W_S(a) ((int32_t)ceilf((float)(a)))
 #define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))
 #define FPU_CVT_S_W(a) ((float)(int32_t)(a))
 #define FPU_CVT_S_L(a) ((float)(int64_t)(a))
-#define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
+#define FPU_CVT_W_S(a) ps2_f2i_trunc((float)(a))
 #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
 #define FPU_C_F_S(a, b) (0)
 #define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
@@ -953,7 +963,7 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
 #define PS2_PCPYLD(rs, rt) _mm_unpacklo_epi64(rt, rs)
 #define PS2_PEXEH(rs) _mm_shufflelo_epi16(_mm_shufflehi_epi16(rs, _MM_SHUFFLE(2, 3, 0, 1)), _MM_SHUFFLE(2, 3, 0, 1))
 #define PS2_PEXEW(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(2, 3, 0, 1))
-#define PS2_PROT3W(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(0, 3, 2, 1))
+#define PS2_PROT3W(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(3, 0, 2, 1)) // C162/C316: rotates only the low 3 words
 
 // Additional VU0 operations
 #define PS2_VSQRT(x) sqrtf(x)

@@ -5456,6 +5456,10 @@ bool varRange(uint32_t lo, uint32_t hiIncl)
 } // namespace
 void vu1NativeSelectImage(uint64_t hash)
 {
+    static uint64_t s_lastHash = 0; // PERF-VAR: the decode cache is rebuilt on every microcode upload; only redo the masks (and log) when the image changes
+    if (hash == s_lastHash)
+        return;
+    s_lastHash = hash;
     s_same = nullptr;
     s_isT4020 = (hash == 0x4020410124328442ull);
     for (uint32_t i = 0; i < kVu1VariantCount; ++i)

@@ -28,6 +28,12 @@ extern std::atomic<uint32_t> g_trackedCurScene;
 #include <cstdlib>
 #include <cstring>
 #include "probe_ae.h"
+// PROBE-KY: ring of recent CID1 writes into EE RAM (for heap-corruption forensics)
+struct Cid1WrNote { uint32_t dst, len, op; long long ms; };
+static Cid1WrNote g_cid1WrRing[24]; static unsigned g_cid1WrIdx = 0;
+void ps2xProbeCid1Note(uint32_t dst, uint32_t len, uint32_t op) { Cid1WrNote &n = g_cid1WrRing[g_cid1WrIdx++ % 24]; n.dst = dst; n.len = len; n.op = op; n.ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+void ps2xProbeCid1Dump(uint32_t addr) { const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); for (unsigned i = 0; i < 24; ++i) { const Cid1WrNote &n = g_cid1WrRing[(g_cid1WrIdx + i) % 24]; if (n.len) std::printf("[heapbad] cid1 op=%u dst=%08x len=%x age_ms=%lld%s\n", n.op, n.dst, n.len, now - n.ms, (addr >= n.dst && addr < n.dst + n.len) ? " OVERLAPS-BAD-ADDR" : ""); } std::fflush(stdout); }
+
 
 
 namespace probe_ae {
@@ -2047,7 +2053,7 @@ uint64_t vblDiff = 0;
                     {
                         if (toRead > 0)
                         {
-                            ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + eeDst);
+                            ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + eeDst); ps2xProbeCid1Note(eeDst, (uint32_t)toRead, opcode);
                         }
                         slot.offset += toRead;
                         g_diagCid1BytesServed.fetch_add(toRead, std::memory_order_relaxed);
@@ -2173,7 +2179,7 @@ uint64_t vblDiff = 0;
                     uint64_t startFileOff = slot.offset;
                     if (toRead > 0 && dstAddr != 0u && dstAddr < 0x02000000u && (dstAddr + toRead) <= 0x02000000u)
                     {
-                        ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + dstAddr);
+                        ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + dstAddr); ps2xProbeCid1Note(dstAddr, (uint32_t)toRead, opcode);
                     }
                     slot.offset += toRead;
                     if (probe_ae::isEnabled()) {
@@ -2369,13 +2375,18 @@ uint64_t vblDiff = 0;
                 uint32_t strPoolEe = ptrArrayEe + totalEntries * 4u;
                 uint32_t totalBytes = totalEntries * 64u + totalEntries * 4u + totalStrBytes;
 
-                if (totalBytes > bufSize || (dstEeAddr != 0u && dstEeAddr + totalBytes > PS2_RAM_SIZE))
+                // C330: the real file3.irx does not clamp to the caller's bufSize (the game always passes 1024 but the hub folder
+                // debug/us/stage/travel_a needs 1148 bytes and works on hardware); only refuse a write that would leave RAM.
+                if (dstEeAddr != 0u && dstEeAddr + totalBytes > PS2_RAM_SIZE)
                 {
-                    ps2xSafeLog("[CID1:EnumDir-0x0A] ERROR: totalBytes %u exceeds bufSize %u or RAM for '%s'\n", totalBytes, bufSize, path.c_str());
+                    ps2xSafeLog("[CID1:EnumDir-0x0A] ERROR: totalBytes %u exceeds RAM for '%s'\n", totalBytes, path.c_str());
                     reply.result = static_cast<uint32_t>(-12);
                     break;
                 }
+                if (totalBytes > bufSize)
+                    ps2xSafeLog("[CID1:EnumDir-0x0A] note: totalBytes %u > bufSize %u for '%s' (written in full, like file3.irx)\n", totalBytes, bufSize, path.c_str());
 
+                ps2xProbeCid1Note(dstEeAddr, totalBytes, 0x0Au); // PROBE-KY
                 if (dstEeAddr != 0u && dstEeAddr + totalBytes <= PS2_RAM_SIZE)
                 {
                     std::memset(rdram + statArrayEe, 0, totalEntries * 64u);
@@ -2433,7 +2444,7 @@ uint64_t vblDiff = 0;
                     {
                         if (toRead > 0)
                         {
-                            ps2x::vfi::VfiArchive::instance().readFileData(*entry, fileOffset, toRead, rdram + eeDst);
+                            ps2x::vfi::VfiArchive::instance().readFileData(*entry, fileOffset, toRead, rdram + eeDst); ps2xProbeCid1Note(eeDst, (uint32_t)toRead, opcode);
                         }
                         g_diagCid1BytesServed.fetch_add(toRead, std::memory_order_relaxed);
                         diagSetLastCid1Path(path);
@@ -2462,6 +2473,7 @@ uint64_t vblDiff = 0;
             default:
             {
                 uint32_t flags = (cmdSize >= 0x18) ? *reinterpret_cast<const uint32_t *>(src + 0x14) : 0u;
+                { char hx_[200] = {0}; const uint32_t dl_ = cmdSize < 48u ? cmdSize : 48u; for (uint32_t i = 0; i < dl_; ++i) std::snprintf(hx_ + i * 3, 4, "%02x ", src[i]); ps2xSafeLog("[cid1] unimpl detail cmdSize=%u slot=0x%08x seq=%u srcExtra=0x%08x destExtra=0x%08x off=%u bytes: %s\n", cmdSize, slotPtr, seq, srcExtra, destExtra, off, hx_); } // PROBE-KY
                 ps2xSafeLog( "[cid1] UNIMPLEMENTED cmd=0x%02x flags=0x%x\n", opcode, flags);
                 reply.result = static_cast<uint32_t>(-1);
                 break;
