@@ -780,8 +780,116 @@ namespace
                 addFrame(rq.preferredSource.fbp, rq.preferredSource.fbw, rq.preferredSource.psm, 0u);
         }
 
+        // PERF-AP: wait for the in-flight present copy and move its pages into the private VRAM image
+        bool completeAsync()
+        {
+            if (!asyncPending_)
+                return false;
+            VkResult r = vkWaitForFences(g_vk.dev, 1, &alt_.fence, VK_TRUE, ~0ull);
+            vkResetFences(g_vk.dev, 1, &alt_.fence);
+            asyncPending_ = false;
+            if (r != VK_SUCCESS)
+            {
+                vkReady_ = false;
+                vkFailed_ = true;
+                return false;
+            }
+            std::vector<std::pair<uint32_t, uint32_t>> runs;
+            pageRuns(asyncPages_, runs);
+            for (const auto &run : runs)
+            {
+                const size_t off = static_cast<size_t>(run.first) * 8192u, len = static_cast<size_t>(run.second) * 8192u;
+                std::memcpy(presVram_.data() + off, snap_.map + off, len);
+                downloadBytes_ += len;
+            }
+            return true;
+        }
+
+        // PERF-AP: queue the copy of the display pages (vram_ is authoritative after ensureUpload) without waiting for the GPU
+        void startAsync(const GSPresentationRequest &request)
+        {
+            if (!ensureUpload())
+                return;
+            PageSet need;
+            addPresentPages(need, request);
+            std::vector<std::pair<uint32_t, uint32_t>> runs;
+            pageRuns(need, runs);
+            beginRecording();
+            endPass();
+            std::vector<VkBufferCopy> regions;
+            for (const auto &run : runs)
+                regions.push_back(VkBufferCopy{static_cast<VkDeviceSize>(run.first) * 8192u, static_cast<VkDeviceSize>(run.first) * 8192u,
+                                               static_cast<VkDeviceSize>(run.second) * 8192u});
+            bufBarrier(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            if (!regions.empty())
+                vkCmdCopyBuffer(cb_, vram_.b, snap_.b, static_cast<uint32_t>(regions.size()), regions.data());
+            VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            hb.buffer = snap_.b;
+            hb.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cb_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
+            vkEndCommandBuffer(cb_);
+            recording_ = false;
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &cb_;
+            if (vkQueueSubmit(g_vk.queue, 1, &si, fence_) == VK_SUCCESS)
+            {
+                asyncPending_ = true;
+                asyncPages_ = need;
+                asyncReq_ = request;
+                orderAfterAsync_ = true;
+                ++submits_;
+                resetRings();
+                clutChanged_ = true;
+                swapSlot();
+            }
+            else
+            {
+                vkResetFences(g_vk.dev, 1, &fence_);
+                vkReady_ = false;
+                vkFailed_ = true;
+                resetRings();
+            }
+        }
+
         PresentationFrame Present(const GSPresentationRequest &request) override
         {
+            if (asyncOk_ && asyncPresentWanted() && !compare_ && !ref_)
+            {
+                std::unique_lock<std::mutex> lk(m_);
+                if (vkReady_)
+                {
+                    const uint64_t gqP0 = __rdtsc(), pj0 = gqP0;
+                    const bool haveSnap = completeAsync();
+                    const GSPresentationRequest doneReq = asyncReq_;
+                    if (vkReady_ && !haveSnap)
+                    {
+                        PageSet first; // first present: the synchronous path supplies this frame
+                        addPresentPages(first, request);
+                        syncPages(first, 0);
+                    }
+                    if (vkReady_)
+                        startAsync(request);
+                    g_presTicks[3].fetch_add(__rdtsc() - pj0, std::memory_order_relaxed);
+                    ++presents_;
+                    maybePrintStats();
+                    primsThisFrame_ = 0;
+                    g_gqPresentHold.fetch_add(__rdtsc() - gqP0, std::memory_order_relaxed);
+                    g_gqPresents.fetch_add(1, std::memory_order_relaxed);
+                    lk.unlock();
+                    if (haveSnap)
+                    {
+                        if (!presCpu_)
+                            presCpu_ = std::make_unique<GSCpuBackend>();
+                        presCpu_->Initialize(presVram_.data(), static_cast<uint32_t>(presVram_.size()));
+                        return presCpu_->PresentFromLocalMemory(doneReq);
+                    }
+                    return cpu_->Present(request);
+                }
+            }
             std::unique_lock<std::mutex> lk(m_);
             const uint64_t gqP0 = __rdtsc(); // PROBE-GQ2: time the lock is held
             if (vkReady_)
@@ -895,9 +1003,9 @@ namespace
             if (!makeBuf(clutBuf_, static_cast<VkDeviceSize>(kMaxClutSlots) * 1024u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
                 return false;
 
-            VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
+            VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
             VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-            dpi.maxSets = 1;
+            dpi.maxSets = 2;
             dpi.poolSizeCount = 1;
             dpi.pPoolSizes = &ps;
             if (vkCreateDescriptorPool(g_vk.dev, &dpi, nullptr, &descPool_) != VK_SUCCESS)
@@ -931,7 +1039,69 @@ namespace
             if (vkCreateFence(g_vk.dev, &fci, nullptr, &fence_) != VK_SUCCESS)
                 return false;
             primMap_ = reinterpret_cast<uint32_t *>(prims_.map);
+            if (asyncPresentWanted())
+                asyncOk_ = createAltSlot(hv);
             return true;
+        }
+
+        // PERF-AP: PS2X_PRESENT_ASYNC=1 -- present submits the display-page copy without waiting; the converted frame is returned one present later.
+        // The ring buffers, descriptor set, command buffer and fence exist twice; the slot that is in flight is always alt_.
+        static bool asyncPresentWanted()
+        {
+            static const bool on = []() { const char *e = std::getenv("PS2X_PRESENT_ASYNC"); return e && e[0] == '1'; }();
+            return on;
+        }
+
+        bool createAltSlot(VkMemoryPropertyFlags hv)
+        {
+            if (!makeBuf(alt_.staging, kStagingSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hv, true))
+                return false;
+            if (!makeBuf(alt_.prims, static_cast<VkDeviceSize>(kMaxPrims) * kPrimStride * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
+                return false;
+            if (!makeBuf(alt_.clut, static_cast<VkDeviceSize>(kMaxClutSlots) * 1024u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
+                return false;
+            if (!makeBuf(snap_, kVramSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, hv, true, VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
+                return false;
+            VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            dai.descriptorPool = descPool_;
+            dai.descriptorSetCount = 1;
+            dai.pSetLayouts = &g_vk.setLayout;
+            if (vkAllocateDescriptorSets(g_vk.dev, &dai, &alt_.desc) != VK_SUCCESS)
+                return false;
+            VkDescriptorBufferInfo bi[4] = {{vram_.b, 0, VK_WHOLE_SIZE}, {g_vk.tables, 0, VK_WHOLE_SIZE}, {alt_.clut.b, 0, VK_WHOLE_SIZE}, {alt_.prims.b, 0, VK_WHOLE_SIZE}};
+            VkWriteDescriptorSet w[4]{};
+            for (uint32_t i = 0; i < 4; ++i)
+            {
+                w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[i].dstSet = alt_.desc;
+                w[i].dstBinding = i;
+                w[i].descriptorCount = 1;
+                w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                w[i].pBufferInfo = &bi[i];
+            }
+            vkUpdateDescriptorSets(g_vk.dev, 4, w, 0, nullptr);
+            VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            cai.commandPool = g_vk.pool;
+            cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cai.commandBufferCount = 1;
+            if (vkAllocateCommandBuffers(g_vk.dev, &cai, &alt_.cb) != VK_SUCCESS)
+                return false;
+            VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            if (vkCreateFence(g_vk.dev, &fci, nullptr, &alt_.fence) != VK_SUCCESS)
+                return false;
+            presVram_.assign(kVramSize, 0u);
+            return true;
+        }
+
+        void swapSlot()
+        {
+            std::swap(staging_, alt_.staging);
+            std::swap(prims_, alt_.prims);
+            std::swap(clutBuf_, alt_.clut);
+            std::swap(desc_, alt_.desc);
+            std::swap(cb_, alt_.cb);
+            std::swap(fence_, alt_.fence);
+            primMap_ = reinterpret_cast<uint32_t *>(prims_.map);
         }
 
         // ------------------------------------------------------------ command recording
@@ -947,6 +1117,13 @@ namespace
             vkCmdBindDescriptorSets(cb_, VK_PIPELINE_BIND_POINT_GRAPHICS, g_vk.pipeLayout, 0, 1, &desc_, 0, nullptr);
             recording_ = true;
             inPass_ = false;
+            if (orderAfterAsync_)
+            {
+                // a submission that was not waited for (async present) may still be using vram_: order this one after it
+                bufBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+                orderAfterAsync_ = false;
+            }
         }
 
         void beginPass()
@@ -1555,6 +1732,19 @@ namespace
         bool vkReady_ = false;
         bool vkFailed_ = false;
         Buf vram_, staging_, down_, prims_, clutBuf_;
+        struct AltSlot
+        {
+            Buf staging, prims, clut;
+            VkDescriptorSet desc = VK_NULL_HANDLE;
+            VkCommandBuffer cb = VK_NULL_HANDLE;
+            VkFence fence = VK_NULL_HANDLE;
+        } alt_; // PERF-AP: the slot that is (or was last) in flight
+        Buf snap_;                      // PERF-AP: display pages copied off vram_ by the async present
+        std::vector<uint8_t> presVram_; // PERF-AP: private VRAM image the display conversion reads
+        std::unique_ptr<GSCpuBackend> presCpu_;
+        PageSet asyncPages_;
+        GSPresentationRequest asyncReq_{};
+        bool asyncOk_ = false, asyncPending_ = false, orderAfterAsync_ = false;
         VkDescriptorPool descPool_ = VK_NULL_HANDLE;
         VkDescriptorSet desc_ = VK_NULL_HANDLE;
         VkCommandBuffer cb_ = VK_NULL_HANDLE;
