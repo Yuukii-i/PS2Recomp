@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include "ThreadNaming.h" // PERF-MB
 #include <intrin.h>
 extern std::atomic<uint64_t> g_waitTicks[8]; // PROBE-KF, defined in ps2_memory.cpp
 
@@ -158,6 +159,7 @@ void gsFlushPending()
 
 void gsAsyncWorker()
 {
+    ThreadNaming::SetCurrentThreadName("GsWorker");
     // PROBE-GP: PS2X_PROF_GSWORKER=1 (with PS2X_PROF_SAMPLE=1) points the sampler's line/owner/budget output at this thread
     if (const char *pe = std::getenv("PS2X_PROF_GSWORKER"); pe && pe[0] == '1')
         probe_ae::recordMainGuestThread();

@@ -520,6 +520,19 @@ namespace probe_ae {
 
                             bhLog("[prof2] t=%u thread=%u samples=%llu top: %s\n",
                                   tSec, (unsigned)tid, (unsigned long long)tagg.totalSamples, topStr.c_str());
+                            if (sortedLeaf.size() > 30) // PERF-MB: the first line stops at 30 entries; the rest of the table goes on a second line
+                            {
+                                std::string moreStr;
+                                const size_t limit2 = (std::min)(size_t(75), sortedLeaf.size());
+                                for (size_t i = 30; i < limit2; ++i)
+                                {
+                                    double symPct = (static_cast<double>(sortedLeaf[i].second) * 100.0) / static_cast<double>(tagg.totalSamples);
+                                    char sbuf[128];
+                                    snprintf(sbuf, sizeof(sbuf), "%s=%.1f%% ", sortedLeaf[i].first.c_str(), symPct);
+                                    moreStr += sbuf;
+                                }
+                                bhLog("[prof2] t=%u thread=%u more: %s\n", tSec, (unsigned)tid, moreStr.c_str());
+                            }
                         }
                     }
 

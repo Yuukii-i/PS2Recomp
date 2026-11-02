@@ -5699,6 +5699,7 @@ void PS2Runtime::run()
     Texture2D frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
 
+    ThreadNaming::SetCurrentThreadName("MainLoop"); // PERF-MB
     std::atomic<bool> gameThreadFinished{false};
 
     std::thread gameThread([&]()
@@ -5985,6 +5986,34 @@ void PS2Runtime::run()
 
         if (shouldPresent)
         {
+            // PERF-MB: delivered-frame cadence ([ft] line every 5 s). A locked 60 means p99 well under 16.7 ms and no interval over 20 ms.
+            if (currentPresentSeq != s_lastPresentedSeq)
+            {
+                static std::vector<float> s_ft;
+                static auto s_ftPrev = now;
+                static auto s_ftLog = now;
+                static uint32_t s_ftOver17 = 0, s_ftOver20 = 0, s_ftOver34 = 0;
+                const float ms = std::chrono::duration<float, std::milli>(now - s_ftPrev).count();
+                s_ftPrev = now;
+                if (ms < 1000.0f)
+                {
+                    s_ft.push_back(ms);
+                    s_ftOver17 += ms > 16.7f;
+                    s_ftOver20 += ms > 20.0f;
+                    s_ftOver34 += ms > 33.4f;
+                }
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_ftLog).count() >= 5000 && !s_ft.empty())
+                {
+                    std::vector<float> v(s_ft);
+                    std::sort(v.begin(), v.end());
+                    const auto at = [&](double q) { return v[std::min<size_t>(v.size() - 1, static_cast<size_t>(q * static_cast<double>(v.size())))]; };
+                    ps2xSafeLog("[ft] n=%zu p50=%.1f p95=%.1f p99=%.1f max=%.1f ms | over16.7=%u over20=%u over33.4=%u\n", v.size(), at(0.50), at(0.95), at(0.99), v.back(),
+                                s_ftOver17, s_ftOver20, s_ftOver34);
+                    s_ft.clear();
+                    s_ftOver17 = s_ftOver20 = s_ftOver34 = 0;
+                    s_ftLog = now;
+                }
+            }
             s_lastPresentedGsKicks = currentGsKicks;
             s_lastPresentedSeq = currentPresentSeq;
             s_lastPresentTime = now;
@@ -6047,7 +6076,15 @@ void PS2Runtime::run()
         }
         else
         {
-            PollInputEvents();
+            // PERF-MB: the idle loop polled the window system ~1000 times/s; each poll costs ~0.35 ms of CPU (about 8 ms per frame at 43 fps in
+            // tools/cpu_per_frame.ps1), PCSX2 has no such cost. Poll at most every PS2X_IDLE_POLL_MS (default 4; 1 = old behaviour). EndDrawing polls once per presented frame anyway.
+            static const int64_t s_idlePollUs = []() { const char *e = std::getenv("PS2X_IDLE_POLL_MS"); const long v = e ? std::atol(e) : 4; return static_cast<int64_t>(v < 1 ? 1 : v) * 1000; }();
+            static auto s_lastPoll = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+            if (std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - s_lastPoll).count() >= s_idlePollUs - 100)
+            {
+                PollInputEvents();
+                s_lastPoll = std::chrono::steady_clock::now();
+            }
             auto tYield0 = std::chrono::steady_clock::now();
             // PERF-KN: this loop used to spin PollInputEvents()+yield() at full speed whenever there was no new frame to present, burning a whole
             // logical core (uProf: ~35% of the process's cycles; it competes with the EE thread for SMT/power budget). Sleep ~1 ms instead

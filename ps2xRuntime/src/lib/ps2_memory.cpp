@@ -425,6 +425,7 @@ extern "C" void ps2_gs_async_fence(); // PERF-GK (gs/ps2_gif_arbiter.cpp)
 #include <deque>
 #include <functional>
 #include <thread>
+#include "ThreadNaming.h" // PERF-MB: thread names for tools/cpu_per_frame.ps1
 extern std::function<uint32_t()> g_vif1FbrstProvider;   // ps2_runtime.cpp: EE-thread FBRST (VU0 control reg) snapshot
 extern std::function<void()> g_vif1ApplyVpuStat;        // ps2_runtime.cpp: merge worker-produced VPU_STAT bits into the EE context
 extern thread_local uint32_t g_vif1JobFbrst;            // ps2_runtime.cpp: FBRST for the job being run by the worker (~0u = none)
@@ -499,6 +500,7 @@ extern "C" void ps2_gs_async_batch(bool on); // PERF-GB: gs/ps2_gif_arbiter.cpp
 static void vif1Worker()
 {
     t_onVif1Worker = true;
+    ThreadNaming::SetCurrentThreadName("Vif1Worker");
     // PROBE-KJ: PS2X_PROF_VU1WORKER=1 (with PS2X_PROF_SAMPLE=1) points the sampler's stack/owner/budget2 output at this worker instead of the EE thread
     if (const char *pe = std::getenv("PS2X_PROF_VU1WORKER"); pe && pe[0] == '1')
         probe_ae::recordMainGuestThread();

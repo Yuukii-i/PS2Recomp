@@ -31,6 +31,7 @@ namespace ps2_syscalls {
 #include <intrin.h>
 #include <cassert>
 #include <mutex>
+#include "ThreadNaming.h" // PERF-MB
 #include <thread>
 #include <condition_variable>
 #include <cstring>
@@ -2293,6 +2294,7 @@ bool postPresentLatch(GS &gs)
         {
             w->started = true;
             std::thread([w = w]() {
+                ThreadNaming::SetCurrentThreadName("PresentLatch"); // PERF-MB
                 std::unique_lock<std::mutex> lk2(w->m);
                 for (;;)
                 {
