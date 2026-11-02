@@ -754,12 +754,8 @@ namespace
 
         PresentationFrame Present(const GSPresentationRequest &request) override
         {
-            std::lock_guard<std::mutex> lk(m_);
-            struct GqHold // PROBE-GQ2: time the lock is held
-            {
-                uint64_t t0 = __rdtsc();
-                ~GqHold() { g_gqPresentHold.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); g_gqPresents.fetch_add(1, std::memory_order_relaxed); }
-            } gqHold;
+            std::unique_lock<std::mutex> lk(m_);
+            const uint64_t gqP0 = __rdtsc(); // PROBE-GQ2: time the lock is held
             if (vkReady_)
             {
                 // the CPU presenter only reads colour surfaces; Z pages stay GPU-newer unless the compare mode needs everything
@@ -781,6 +777,8 @@ namespace
             ++presents_;
             maybePrintStats();
             primsThisFrame_ = 0;
+            g_gqPresentHold.fetch_add(__rdtsc() - gqP0, std::memory_order_relaxed); g_gqPresents.fetch_add(1, std::memory_order_relaxed); // PROBE-GQ2
+            lk.unlock(); // PERF-PU: the VRAM snapshot + display conversion run under the CPU backend's own mutex; the draw thread no longer waits for them
             return cpu_->Present(request);
         }
 
