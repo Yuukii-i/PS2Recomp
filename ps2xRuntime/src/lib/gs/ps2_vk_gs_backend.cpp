@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -800,7 +801,18 @@ namespace
         {
             if (!asyncPending_)
                 return false;
-            VkResult r = vkWaitForFences(g_vk.dev, 1, &alt_.fence, VK_TRUE, ~0ull);
+            // PERF-PG: PS2X_FENCE_POLL=1 sleeps between status checks instead of blocking in vkWaitForFences (drivers may spin there and bill the CPU)
+            static const bool s_poll = []() { const char *e = std::getenv("PS2X_FENCE_POLL"); return e && e[0] == '1'; }();
+            const uint64_t fw0 = __rdtsc();
+            VkResult r;
+            if (s_poll)
+            {
+                while ((r = vkGetFenceStatus(g_vk.dev, alt_.fence)) == VK_NOT_READY)
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            else
+                r = vkWaitForFences(g_vk.dev, 1, &alt_.fence, VK_TRUE, ~0ull);
+            g_presTicks[4].fetch_add(__rdtsc() - fw0, std::memory_order_relaxed); // shown as "snapshot" in the [present] line: fence wait
             vkResetFences(g_vk.dev, 1, &alt_.fence);
             asyncPending_ = false;
             if (r != VK_SUCCESS)
@@ -890,7 +902,9 @@ namespace
         {
             if (asyncOk_ && asyncPresentWanted() && !compare_ && !ref_)
             {
+                const uint64_t lk0 = __rdtsc();
                 std::unique_lock<std::mutex> lk(m_);
+                g_presTicks[5].fetch_add(__rdtsc() - lk0, std::memory_order_relaxed); // shown as "deswizzle": wait for the backend mutex
                 if (vkReady_)
                 {
                     const uint64_t gqP0 = __rdtsc(), pj0 = gqP0;
