@@ -3097,6 +3097,10 @@ namespace probe_ae {
     }
 
     static void checkDaProbeSecDump() {
+        // PERF-VS: this runs on every VU1 run (flushMovieBatch) and read the clock each time (~30 ns x 300k runs/s); it only prints once-a-second statistics
+        static thread_local uint32_t s_cdpTick = 0;
+        if ((++s_cdpTick & 127u) != 0u)
+            return;
         auto now = std::chrono::steady_clock::now();
         double secDiff = std::chrono::duration<double>(now - s_bsProbeLastSec).count();
         if (secDiff >= 1.0) {
@@ -3184,7 +3188,8 @@ namespace probe_ae {
 
         uint64_t hash;
         bool match;
-        if ((s_mscalHashCounter.fetch_add(1u, std::memory_order_relaxed) & 1023u) == 0u || s_cachedMscalHash == 0) {
+        static thread_local uint32_t s_mscalTick = 0; // PERF-VS: was an atomic RMW per VU1 run; the counter only paces the signature re-hash
+        if ((++s_mscalTick & 1023u) == 1u || s_cachedMscalHash == 0) {
             hash = 0xCBF29CE484222325ULL;
             for (uint32_t i = 0; i < 0xE00u; ++i) {
                 hash ^= vuCode[i];
