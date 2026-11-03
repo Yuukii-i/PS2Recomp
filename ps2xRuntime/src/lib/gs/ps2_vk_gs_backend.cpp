@@ -543,6 +543,9 @@ namespace
     {
         bool ok = false, usedPreferred = false, fieldMode = false, oddField = false;
         uint32_t base = 0, fbw = 0, psm = 0, x0 = 0, y0 = 0, w = 0, h = 0, displayFbp = 0, sourceFbp = 0;
+        // both display circuits blended (PMODE): circuit 2's frame and the blend controls; outW/outH = size of the blended picture
+        bool dual = false;
+        uint32_t flags = 0, base2 = 0, fbw2 = 0, psm2 = 0, x2 = 0, y2 = 0, w2 = 0, h2 = 0, bg = 0, outW = 0, outH = 0;
     };
 
     // ---------------------------------------------------------------- the backend
@@ -1219,7 +1222,7 @@ namespace
             dsl.pBindings = bnd;
             if (vkCreateDescriptorSetLayout(g_vk.dev, &dsl, nullptr, &cSetLayout_) != VK_SUCCESS)
                 return false;
-            VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+            VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 80};
             VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
             plci.setLayoutCount = 1;
             plci.pSetLayouts = &cSetLayout_;
@@ -1301,10 +1304,46 @@ namespace
             };
             const bool valid1 = (rq.pmode & 1ull) != 0ull && setup(rq.display1, rq.dispfb1);
             const bool valid2 = (rq.pmode & 2ull) != 0ull && setup(rq.display2, rq.dispfb2);
-            if (valid1 == valid2)
+            if (!valid1 && !valid2)
             {
-                why = valid1 ? 1u : 0u; // 0 none enabled, 1 both circuits blended
+                why = 0u; // none enabled
                 return false;
+            }
+            if (valid1 && valid2)
+            {
+                // both circuits blended, the same arithmetic as PresentFromLocalMemory (no preferred source, no per-circuit fallback)
+                const auto circuit = [](uint64_t fb, uint32_t &psm, uint32_t &base, uint32_t &fbw, uint32_t &x, uint32_t &y)
+                {
+                    psm = static_cast<uint32_t>((fb >> 15) & 0x1Fu);
+                    base = static_cast<uint32_t>(fb & 0x1FFu) << 5u;
+                    fbw = static_cast<uint32_t>((fb >> 9) & 0x3Fu);
+                    if (fbw == 0u)
+                        fbw = 10u;
+                    x = static_cast<uint32_t>((fb >> 32) & 0x7FFu);
+                    y = static_cast<uint32_t>((fb >> 43) & 0x7FFu);
+                };
+                circuit(rq.dispfb1, p.psm, p.base, p.fbw, p.x0, p.y0);
+                circuit(rq.dispfb2, p.psm2, p.base2, p.fbw2, p.x2, p.y2);
+                const auto fmtOk = [](uint32_t f) { return f == 0u || f == 1u || f == 2u || f == 10u; };
+                if (!fmtOk(p.psm) || !fmtOk(p.psm2))
+                {
+                    why = 2u;
+                    return false;
+                }
+                sizeOf(rq.display1, p.w, p.h);
+                sizeOf(rq.display2, p.w2, p.h2);
+                p.outW = std::max(p.w, p.w2);
+                p.outH = std::max(p.h, p.h2);
+                p.flags = 1u | ((rq.pmode & 0x80ull) ? 2u : 0u) | ((rq.pmode & 0x20ull) ? 4u : 0u) | (static_cast<uint32_t>((rq.pmode >> 8) & 0xFFu) << 8u);
+                p.bg = static_cast<uint32_t>(rq.bgcolor & 0xFFFFFFull);
+                p.dual = true;
+                p.usedPreferred = false;
+                p.displayFbp = static_cast<uint32_t>(rq.dispfb1 & 0x1FFu);
+                p.sourceFbp = p.displayFbp;
+                p.fieldMode = (rq.smode2 & 1ull) != 0ull && ((rq.smode2 >> 1) & 1ull) == 0ull;
+                p.oddField = (rq.vsyncTick & 1ull) != 0ull;
+                p.ok = true;
+                return true;
             }
             const uint64_t fb = valid1 ? rq.dispfb1 : rq.dispfb2;
             const uint64_t disp = valid1 ? rq.display1 : rq.display2;
@@ -1348,9 +1387,11 @@ namespace
                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
             vkCmdBindPipeline(cb_, VK_PIPELINE_BIND_POINT_COMPUTE, cPipeline_);
             vkCmdBindDescriptorSets(cb_, VK_PIPELINE_BIND_POINT_COMPUTE, cPipeLayout_, 0, 1, &cDesc_, 0, nullptr);
-            const uint32_t pc[8] = {gp.base, gp.fbw, gp.psm, gp.x0, gp.y0, gp.w, gp.h, 0u};
+            const uint32_t ow = gp.dual ? gp.outW : gp.w, oh = gp.dual ? gp.outH : gp.h;
+            const uint32_t pc[20] = {gp.base, gp.fbw, gp.psm, gp.x0, gp.y0, gp.w, gp.h, gp.flags, gp.base2, gp.fbw2,
+                                     gp.psm2, gp.x2, gp.y2, gp.w2, gp.h2, gp.bg, ow, oh, 0u, 0u};
             vkCmdPushConstants(cb_, cPipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
-            vkCmdDispatch(cb_, (gp.w + 15u) / 16u, (gp.h + 15u) / 16u, 1);
+            vkCmdDispatch(cb_, (ow + 15u) / 16u, (oh + 15u) / 16u, 1);
             VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
             hb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -1364,30 +1405,32 @@ namespace
         void readGpuFrame(const GpuPlan &gp, PresentationFrame &out, bool &needCpu)
         {
             needCpu = false;
-            uint32_t cnt = 0, zero = 0;
-            std::memcpy(&cnt, presOut_.map, 4);
-            std::memcpy(presOut_.map, &zero, 4);
+            uint32_t cnt[2] = {0, 0};
+            const uint32_t zero[2] = {0, 0};
+            std::memcpy(cnt, presOut_.map, 8);
+            std::memcpy(presOut_.map, zero, 8);
             static const bool s_fallbackOn = []() { const char *e = std::getenv("PS2X_GS_PRESENT_FALLBACK"); return !(e && (std::strcmp(e, "0") == 0 || std::strcmp(e, "false") == 0)); }();
-            if (s_fallbackOn && !gp.usedPreferred && cnt <= 256u)
+            if (s_fallbackOn && !gp.usedPreferred && (cnt[0] <= 256u || (gp.dual && cnt[1] <= 256u)))
             {
                 needCpu = true;
                 return;
             }
+            const uint32_t ow = gp.dual ? gp.outW : gp.w, oh = gp.dual ? gp.outH : gp.h;
             out.pixels.assign(640u * 512u * 4u, 0u);
             const uint8_t *src = presOut_.map + 16;
-            for (uint32_t y = 0; y < gp.h; ++y)
+            for (uint32_t y = 0; y < oh; ++y)
             {
                 uint32_t sy = y;
-                if (gp.fieldMode && gp.h >= 2u)
+                if (gp.fieldMode && oh >= 2u)
                 {
                     sy = ((y >> 1u) << 1u) + (gp.oddField ? 1u : 0u);
-                    if (sy >= gp.h)
-                        sy = gp.h - 1u;
+                    if (sy >= oh)
+                        sy = oh - 1u;
                 }
-                std::memcpy(out.pixels.data() + static_cast<size_t>(y) * 640u * 4u, src + static_cast<size_t>(sy) * 640u * 4u, static_cast<size_t>(gp.w) * 4u);
+                std::memcpy(out.pixels.data() + static_cast<size_t>(y) * 640u * 4u, src + static_cast<size_t>(sy) * 640u * 4u, static_cast<size_t>(ow) * 4u);
             }
-            out.width = gp.w;
-            out.height = gp.h;
+            out.width = ow;
+            out.height = oh;
             out.displayFbp = gp.displayFbp;
             out.sourceFbp = gp.sourceFbp;
             out.usedPreferred = gp.usedPreferred;
