@@ -787,6 +787,31 @@ namespace
         uint64_t t0 = 0;
         std::chrono::steady_clock::time_point wall{};
     } g_vs;
+    // UNPACK shape histogram: key = opcode | cl << 7 | wl << 15 | maskEnable << 23 | mode << 24 | usn << 26 | flg << 27
+    struct VsShape
+    {
+        uint32_t key = 0;
+        bool used = false;
+        uint64_t n = 0, vecs = 0, ticks = 0;
+    };
+    VsShape g_vsShapes[256];
+    VsShape *vsShapeSlot(uint32_t key)
+    {
+        uint32_t h = (key * 2654435761u) >> 24;
+        for (uint32_t i = 0; i < 256u; ++i)
+        {
+            VsShape &e = g_vsShapes[(h + i) & 255u];
+            if (!e.used)
+            {
+                e.used = true;
+                e.key = key;
+                return &e;
+            }
+            if (e.key == key)
+                return &e;
+        }
+        return nullptr;
+    }
     bool vifStatOn()
     {
         static const bool on = []() { const char *e = std::getenv("PS2X_VIFSTAT"); return e && e[0] == '1'; }();
@@ -801,6 +826,28 @@ namespace
         {
             if (acc)
                 *acc += __rdtsc() - t0;
+        }
+    };
+    struct VsShapeTimer
+    {
+        VsShape *slot = nullptr;
+        uint64_t t0 = 0;
+        void set(uint32_t key, uint32_t vecs)
+        {
+            if (!vifStatOn())
+                return;
+            slot = vsShapeSlot(key);
+            t0 = __rdtsc();
+            if (slot)
+            {
+                ++slot->n;
+                slot->vecs += vecs;
+            }
+        }
+        ~VsShapeTimer()
+        {
+            if (slot)
+                slot->ticks += __rdtsc() - t0;
         }
     };
     void vifStatReport()
@@ -823,6 +870,26 @@ namespace
                     g_vs.mscal ? vu * 1000.0 / (g_vs.mscal * 1000.0 / ms) : 0.0, g_vs.unpacks * 1000.0 / ms,
                     g_vs.unpacks ? up * 1000.0 / (g_vs.unpacks * 1000.0 / ms) : 0.0, g_vs.directs * 1000.0 / ms,
                     g_vs.directs ? di * 1000.0 / (g_vs.directs * 1000.0 / ms) : 0.0, g_vs.directs ? g_vs.directBytes / 1024.0 / g_vs.directs : 0.0);
+        {
+            // top UNPACK shapes by time: "op/cl/wl/mask/mode/usn/flg n/s vec/call ns/call ms/s"
+            int order[256], cnt = 0;
+            for (int i = 0; i < 256; ++i)
+                if (g_vsShapes[i].used)
+                    order[cnt++] = i;
+            std::sort(order, order + cnt, [](int a, int b) { return g_vsShapes[a].ticks > g_vsShapes[b].ticks; });
+            std::printf("[vifstat] unpack shapes (op/cl/wl/mask/mode/usn/flg: calls/s, vec/call, ns/call, ms/s):");
+            for (int k = 0; k < cnt && k < 8; ++k)
+            {
+                const VsShape &e = g_vsShapes[order[k]];
+                const double callsPerS = e.n * 1000.0 / ms;
+                std::printf(" %02X/%u/%u/%u/%u/%u/%u: %.0f, %.1f, %.0f, %.1f |", e.key & 0x7Fu, (e.key >> 7) & 0xFFu, (e.key >> 15) & 0xFFu, (e.key >> 23) & 1u,
+                            (e.key >> 24) & 3u, (e.key >> 26) & 1u, (e.key >> 27) & 1u, callsPerS, e.n ? static_cast<double>(e.vecs) / e.n : 0.0,
+                            e.n ? static_cast<double>(e.ticks) / tpms / e.n * 1e6 : 0.0, per(e.ticks));
+            }
+            std::printf("\n");
+            for (VsShape &e : g_vsShapes)
+                e = VsShape{};
+        }
         std::fflush(stdout);
         g_vs = VifStat{};
         g_vs.wall = now;
@@ -1230,6 +1297,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         else if ((opcode & 0x60) == 0x60)
         {
             VsTimer vsUnpack(&g_vs.unpack);
+            VsShapeTimer vsShape;
             if (vifStatOn())
                 ++g_vs.unpacks;
             uint8_t vn = (opcode >> 2) & 0x3;
@@ -1272,6 +1340,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 wl = 1u;
             }
 
+            vsShape.set((opcode & 0x7Fu) | (cl << 7) | (wl << 15) | ((maskEnable ? 1u : 0u) << 23) | ((vif1_regs.mode & 3u) << 24) | (((imm >> 14) & 1u) << 26) | (((imm >> 15) & 1u) << 27), writeVectorCount);
             uint32_t sourceVectorCount = writeVectorCount;
             if (cl < wl)
             {
