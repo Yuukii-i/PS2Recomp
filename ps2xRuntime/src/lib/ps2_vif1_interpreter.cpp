@@ -1425,6 +1425,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 }
                 const uint8_t *srcBase = data + pos;
 
+                // PERF-VS: the fast/generic counters only feed the probe log lines; two atomic RMWs per UNPACK (1.4M/s) are skipped when no probe is on
+                static const bool s_unpackCountsOn = probe_ae::isEnabled() || probe_ae::isDcProbeEnabled() || isVu3dProbeEnabled();
                 static std::atomic<uint64_t> s_ciFastCount{0};
                 static std::atomic<uint64_t> s_ciGenericCount{0};
                 static std::atomic<uint64_t> s_ciMismCount{0};
@@ -1779,8 +1781,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         executeGeneric = true;
                     } else {
                         runFastPath(m_vu1Data);
-                        s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
-                        s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
+                        if (s_unpackCountsOn)
+                        {
+                            s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
+                            s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
+                        }
                         executeGeneric = false;
                         if (probe_ae::isDcProbeEnabled() || isVu3dProbeEnabled()) {
                             uint32_t srcOff = (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE) ? static_cast<uint32_t>(srcBase - m_rdram) : 0u;
@@ -1792,8 +1797,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         }
                     }
                 } else {
-                    s_ciGenericCount.fetch_add(1, std::memory_order_relaxed);
-                    s_dbGenericVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
+                    if (s_unpackCountsOn)
+                    {
+                        s_ciGenericCount.fetch_add(1, std::memory_order_relaxed);
+                        s_dbGenericVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
+                    }
                     if (probe_ae::isEnabled()) {
                         DbShapeKey key{static_cast<uint8_t>(vn), static_cast<uint8_t>(vl),
                                        static_cast<uint8_t>(cl), static_cast<uint8_t>(wl),
