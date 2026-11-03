@@ -777,10 +777,69 @@ void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
     processVIF1Data(m_rdram + srcPhys, sizeBytes);
 }
 
+// PERF-VS: PS2X_VIFSTAT=1 prints where the VIF1 worker's time goes (cycles inside this function, split into VU1 program runs, UNPACK and DIRECT)
+namespace
+{
+    struct VifStat
+    {
+        uint64_t fn = 0, vu = 0, unpack = 0, direct = 0;
+        uint64_t calls = 0, codes = 0, mscal = 0, unpacks = 0, directs = 0, directBytes = 0;
+        uint64_t t0 = 0;
+        std::chrono::steady_clock::time_point wall{};
+    } g_vs;
+    bool vifStatOn()
+    {
+        static const bool on = []() { const char *e = std::getenv("PS2X_VIFSTAT"); return e && e[0] == '1'; }();
+        return on;
+    }
+    struct VsTimer
+    {
+        uint64_t *acc;
+        uint64_t t0;
+        explicit VsTimer(uint64_t *a) : acc(vifStatOn() ? a : nullptr), t0(acc ? __rdtsc() : 0) {}
+        ~VsTimer()
+        {
+            if (acc)
+                *acc += __rdtsc() - t0;
+        }
+    };
+    void vifStatReport()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (g_vs.wall.time_since_epoch().count() == 0)
+        {
+            g_vs.wall = now;
+            g_vs.t0 = __rdtsc();
+            return;
+        }
+        const double ms = std::chrono::duration<double, std::milli>(now - g_vs.wall).count();
+        if (ms < 5000.0)
+            return;
+        const double tpms = static_cast<double>(__rdtsc() - g_vs.t0) / ms;
+        const auto per = [&](uint64_t t) { return static_cast<double>(t) / tpms / ms * 1000.0; }; // ms per second
+        const double fn = per(g_vs.fn), vu = per(g_vs.vu), up = per(g_vs.unpack), di = per(g_vs.direct);
+        std::printf("[vifstat] per s: fn=%.0f ms (vu1 runs %.0f, unpack %.0f, direct %.0f, other parse %.0f) | calls=%.0f codes=%.0f mscal=%.0f (%.1f us each) unpack=%.0f (%.2f us each) direct=%.0f (%.1f us, %.1f KB each)\n",
+                    fn, vu, up, di, fn - vu - up - di, g_vs.calls * 1000.0 / ms, g_vs.codes * 1000.0 / ms, g_vs.mscal * 1000.0 / ms,
+                    g_vs.mscal ? vu * 1000.0 / (g_vs.mscal * 1000.0 / ms) : 0.0, g_vs.unpacks * 1000.0 / ms,
+                    g_vs.unpacks ? up * 1000.0 / (g_vs.unpacks * 1000.0 / ms) : 0.0, g_vs.directs * 1000.0 / ms,
+                    g_vs.directs ? di * 1000.0 / (g_vs.directs * 1000.0 / ms) : 0.0, g_vs.directs ? g_vs.directBytes / 1024.0 / g_vs.directs : 0.0);
+        std::fflush(stdout);
+        g_vs = VifStat{};
+        g_vs.wall = now;
+        g_vs.t0 = __rdtsc();
+    }
+} // namespace
+
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
         return;
+    VsTimer vsFn(&g_vs.fn);
+    if (vifStatOn())
+    {
+        ++g_vs.calls;
+        vifStatReport();
+    }
 
     s_erCurrentChunk = data;
     s_erCurrentChunkSize = sizeBytes;
@@ -810,6 +869,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     while (pos + 4 <= sizeBytes)
     {
 
+        if (vifStatOn())
+            ++g_vs.codes;
         uint32_t pos_cmd = pos;
         uint32_t cmd;
         memcpy(&cmd, data + pos, 4);
@@ -1005,7 +1066,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             const bool skipMscal = probe_ae::isMovieSkipUnpackEnabled() && probe_ae::isMovieKickNative();
             if (!skipMscal && m_vu1MscalCallback) {
                 const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-                m_vu1MscalCallback(startPC, runTop, runItop);
+                {
+                    VsTimer vsVu(&g_vs.vu);
+                    if (vifStatOn())
+                        ++g_vs.mscal;
+                    m_vu1MscalCallback(startPC, runTop, runItop);
+                }
 #if defined(PS2X_PROBE_AE) || 1
                 if (probe_ae::isEnabled()) {
                     auto tVu1End = std::chrono::steady_clock::now();
@@ -1035,7 +1101,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             probe_ae::flushMovieBatch(nullptr, this);
             if (m_vu1MscntCallback) {
                 const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-                m_vu1MscntCallback(runTop, runItop);
+                {
+                    VsTimer vsVu(&g_vs.vu);
+                    if (vifStatOn())
+                        ++g_vs.mscal;
+                    m_vu1MscntCallback(runTop, runItop);
+                }
 #if defined(PS2X_PROBE_AE) || 1
                 if (probe_ae::isEnabled()) {
                     auto tVu1End = std::chrono::steady_clock::now();
@@ -1100,11 +1171,17 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
         {
+            VsTimer vsDirect(&g_vs.direct);
             probe_ae::flushMovieBatch(nullptr, this);
             uint32_t qwCount = imm;
             if (qwCount == 0)
                 qwCount = 65536;
             const uint32_t availableQw = (sizeBytes - pos) / 16u;
+            if (vifStatOn())
+            {
+                ++g_vs.directs;
+                g_vs.directBytes += static_cast<uint64_t>(std::min(qwCount, availableQw)) * 16u;
+            }
             const bool truncated = qwCount > availableQw;
             if (qwCount > availableQw)
                 qwCount = availableQw;
@@ -1152,6 +1229,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if ((opcode & 0x60) == 0x60)
         {
+            VsTimer vsUnpack(&g_vs.unpack);
+            if (vifStatOn())
+                ++g_vs.unpacks;
             uint8_t vn = (opcode >> 2) & 0x3;
             uint8_t vl = opcode & 0x3;
             const bool maskEnable = (opcode & 0x10u) != 0u;
