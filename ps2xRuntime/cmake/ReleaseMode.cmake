@@ -37,9 +37,18 @@ function(EnableFastReleaseMode TargetName)
                     /OPT:REF # remove unreferenced
                     /OPT:ICF # fold identical COMDATs
                     $<$<STREQUAL:${PS2X_PGO},GEN>:/FASTGENPROFILE> # PERF-PGO: /GENPROFILE (full probes) was too slow to play to the hub
-                    $<$<STREQUAL:${PS2X_PGO},USE>:/USEPROFILE> # PERF-PGO
+                    $<$<STREQUAL:${PS2X_PGO},USE>:/USEPROFILE:PGD=$<TARGET_FILE_DIR:${TargetName}>/ps2EntryRunner_pgogen.pgd> # PERF-PGO
                 >
             )
+            # PERF-PGO safeguard: the instrumented and the optimised exe get their own file names, so a PGO step can never overwrite the normal
+            # ps2EntryRunner.exe (and ninja links the new name without having to delete anything)
+            if(TargetName STREQUAL "ps2EntryRunner")
+                if(PS2X_PGO STREQUAL "GEN")
+                    set_target_properties(${TargetName} PROPERTIES OUTPUT_NAME "ps2EntryRunner_pgogen")
+                elseif(PS2X_PGO STREQUAL "USE")
+                    set_target_properties(${TargetName} PROPERTIES OUTPUT_NAME "ps2EntryRunner_pgo")
+                endif()
+            endif()
         endif()
     endif()
 
