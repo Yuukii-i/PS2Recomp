@@ -36,7 +36,7 @@ function(EnableFastReleaseMode TargetName)
                     /LTCG # link-time code generation
                     /OPT:REF # remove unreferenced
                     /OPT:ICF # fold identical COMDATs
-                    $<$<STREQUAL:${PS2X_PGO},GEN>:/GENPROFILE> # PERF-PGO
+                    $<$<STREQUAL:${PS2X_PGO},GEN>:/FASTGENPROFILE> # PERF-PGO: /GENPROFILE (full probes) was too slow to play to the hub
                     $<$<STREQUAL:${PS2X_PGO},USE>:/USEPROFILE> # PERF-PGO
                 >
             )
