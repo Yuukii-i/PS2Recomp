@@ -1300,6 +1300,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             VsShapeTimer vsShape;
             if (vifStatOn())
                 ++g_vs.unpacks;
+            // PERF-VS: one cached flag instead of five probe-state calls per UNPACK (1.4M/s); every probe below is env-driven and fixed for the whole run
+            static const bool s_unpackQuiet = !(probe_ae::isEnabled() || probe_ae::isDcProbeEnabled() || probe_ae::isMovieHleFrameMode() || probe_ae::isMovieHleVerify() ||
+                                                isVu3dProbeEnabled());
+            static const bool s_skipUnpackEnabled = probe_ae::isMovieSkipUnpackEnabled();
             uint8_t vn = (opcode >> 2) & 0x3;
             uint8_t vl = opcode & 0x3;
             const bool maskEnable = (opcode & 0x10u) != 0u;
@@ -1385,7 +1389,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                           vif1_regs.col[0], vif1_regs.col[1], vif1_regs.col[2], vif1_regs.col[3]);
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
-            if (cl == 0u && probe_ae::isDcProbeEnabled())
+            if (!s_unpackQuiet && cl == 0u && probe_ae::isDcProbeEnabled())
             {
                 static std::atomic<uint32_t> s_dc16Cl0Count{0};
                 uint32_t cnt = s_dc16Cl0Count.fetch_add(1, std::memory_order_relaxed);
@@ -1397,7 +1401,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 }
             }
 #if defined(PS2X_PROBE_AE) || 1
-            if (probe_ae::isEnabled() || probe_ae::isMovieHleFrameMode() || probe_ae::isMovieHleVerify()) {
+            if (!s_unpackQuiet && (probe_ae::isEnabled() || probe_ae::isMovieHleFrameMode() || probe_ae::isMovieHleVerify())) {
                 uint8_t fmt = opcode & 0x0Fu;
                 uint32_t usn = (imm & 0x4000u) != 0u ? 1u : 0u;
                 uint32_t flg = (imm & 0x8000u) != 0u ? 1u : 0u;
@@ -1411,7 +1415,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
 #endif
 
-            const bool skipUnpack = probe_ae::isMovieSkipUnpackEnabled() && probe_ae::isMovieKickNative();
+            const bool skipUnpack = s_skipUnpackEnabled && probe_ae::isMovieKickNative();
             if (skipUnpack)
             {
                 kickUnpacksSkipped++;
