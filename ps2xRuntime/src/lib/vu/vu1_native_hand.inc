@@ -811,6 +811,150 @@ inline bool lbVertex8(LbV *out, int n, const int32_t *idx, const uint32_t *s3q, 
     return true;
 }
 
+// PERF-LBR (PS2X_VU1_LBR=1; =2 runs it next to the scalar reference, counts mismatches and keeps using the exact result): relaxed variant of lbVertex8.
+// What it relies on: the VU1 microcode never reads the STATUS flags (probe C210b: 0 readers in 134M pairs, none in the image), and reads MAC only for the `in` and
+// `r7` results (their words are pushed to the MAC ring), so the other six ops need their VALUES to be exact but not their flags. Values are the same fmadd/mul as
+// lb8Op; the exactness test is the same window [2,253] but done as one min/max accumulation per op (zero results are accepted: a cancelling or underflowing result
+// is +-0 in the scalar path too, only its flags differ). Also stored: only the rows lbFull reads (S2Q, prod, R7, Wraw, MAC words for every vertex; the other seven
+// rows only for the last vertex of the routine).
+template <int DEST, bool MADD>
+inline Lb8V lb8OpR(const Lb8V &a, const Lb8V &b, const Lb8V &ac, __m256i &minT, __m256i &maxU)
+{
+    Lb8V r;
+    const __m256i absMask = _mm256_set1_epi32(0x7FFFFFFF), one = _mm256_set1_epi32(1);
+    for (int c = 0; c < 4; ++c)
+    {
+        if (((DEST >> (3 - c)) & 1) == 0)
+        {
+            r.c[c] = _mm256_setzero_ps(); // lanes outside DEST are never read
+            continue;
+        }
+        const __m256 val = MADD ? _mm256_fmadd_ps(a.c[c], b.c[c], ac.c[c]) : _mm256_mul_ps(a.c[c], b.c[c]);
+        r.c[c] = val;
+        const __m256i u = _mm256_and_si256(_mm256_castps_si256(val), absMask);
+        minT = _mm256_min_epu32(minT, _mm256_sub_epi32(u, one)); // u == 0 wraps to 0xFFFFFFFF and never counts as small
+        maxU = _mm256_max_epu32(maxU, u);
+    }
+    return r;
+}
+
+uint64_t s_lbrGroups = 0, s_lbrRelaxed = 0, s_lbrDeclined = 0, s_lbrMismatch = 0; // PERF-LBR
+
+inline bool lbVertex8R(LbV *out, int n, const int32_t *idx, const uint32_t *s3q, const uint32_t *s2q, const Lb8K &k8, const uint8_t *mem, uint32_t dsz, uint32_t fullMask)
+{
+    const auto ldq = [&](uint32_t qw) { return _mm_loadu_ps(reinterpret_cast<const float *>(mem + ((qw * 16u) & (dsz - 1u)))); };
+    __m128 rA[8], rB[8], rS3[8], rS2[8];
+    for (int j = 0; j < 8; ++j)
+    {
+        rA[j] = ldq(static_cast<uint32_t>(636 + idx[j]));
+        rB[j] = ldq(static_cast<uint32_t>(716 + idx[j]));
+        rS3[j] = ldq(s3q[j]);
+        rS2[j] = ldq(s2q[j]);
+    }
+    Lb8V A = lb8FromRows(rA), B = lb8FromRows(rB), S3 = lb8FromRows(rS3), S2 = lb8FromRows(rS2);
+    for (int c = 0; c < 4; ++c)
+    {
+        A.c[c] = lb8N(A.c[c]);
+        B.c[c] = lb8N(B.c[c]);
+        S3.c[c] = lb8N(S3.c[c]);
+        S2.c[c] = lb8N(S2.c[c]);
+    }
+    Lb8V zero;
+    zero.c[0] = zero.c[1] = zero.c[2] = zero.c[3] = _mm256_setzero_ps();
+    __m256i minT = _mm256_set1_epi32(-1), maxU = _mm256_setzero_si256();
+
+    const Lb8V mula = lb8OpR<15, false>(k8.vf3, A, zero, minT, maxU);
+    const Lb8V t5 = lb8OpR<15, true>(k8.vf4, lb8Bc(A, 3), mula, minT, maxU);
+    const __m256 den = lb8N(t5.c[3]);
+    if (lb8Any(lb8IsZ(den)))
+        return false; // the scalar path reports the divide-by-zero
+    const __m256 qv = lb8N(lb8N(_mm256_div_ps(_mm256_set1_ps(1.0f), den)));
+    Lb8V Q;
+    Q.c[0] = Q.c[1] = Q.c[2] = Q.c[3] = qv;
+    const Lb8Op r7 = lb8Op<14, false>(t5, Q, zero); // exact: its MAC word is read
+    const Lb8V os2q = lb8OpR<14, false>(S2, Q, zero, minT, maxU);
+    const Lb8V w = lb8OpR<1, true>(k8.vf1, Q, k8.accw, minT, maxU);
+    const Lb8V bv = lb8OpR<15, false>(B, k8.vf16, zero, minT, maxU);
+    const Lb8Op in = lb8Op<15, true>(k8.vf2, k8.vf16, bv); // exact: its MAC word is read
+    const Lb8V pr = lb8OpR<15, false>(S3, in.r, zero, minT, maxU);
+    const __m256i badLo = _mm256_cmpeq_epi32(_mm256_min_epu32(minT, _mm256_set1_epi32(0x00FFFFFE)), minT); // some result in [1, 0x00FFFFFF]: exponent < 2
+    const __m256i badHi = _mm256_cmpgt_epi32(maxU, _mm256_set1_epi32(0x7EFFFFFF));                         // some result with exponent > 253
+    if (lb8Any(_mm256_or_si256(_mm256_or_si256(badLo, badHi), _mm256_or_si256(r7.bad, in.bad))))
+        return false;
+
+    __m128 rR7[8], rS2Q[8], rPr[8], rT5[8], rIn[8], rBV[8];
+    lb8ToRows(r7.r, rR7);
+    lb8ToRows(os2q, rS2Q);
+    lb8ToRows(pr, rPr);
+    if (fullMask != 0u)
+    {
+        lb8ToRows(t5, rT5);
+        lb8ToRows(in.r, rIn);
+        lb8ToRows(bv, rBV);
+    }
+    alignas(32) float qf[8], wf[8];
+    alignas(32) uint32_t macIn[8], macR7[8];
+    _mm256_store_ps(qf, qv);
+    _mm256_store_ps(wf, w.c[3]);
+    _mm256_store_si256(reinterpret_cast<__m256i *>(macIn), in.mac);
+    _mm256_store_si256(reinterpret_cast<__m256i *>(macR7), r7.mac);
+    for (int j = 0; j < n; ++j)
+    {
+        LbV &r = out[j];
+        r.idx = idx[j];
+        r.R7 = rR7[j];
+        r.S2Q = rS2Q[j];
+        r.prod = rPr[j];
+        r.Wraw = wf[j];
+        r.di = 0u;
+        r.macIn = macIn[j];
+        r.macR7 = macR7[j];
+        r.curR7 = ((macR7[j] & 0xFu) ? 1u : 0u) | ((macR7[j] & 0xF0u) ? 2u : 0u);
+        if ((fullMask >> j) & 1u)
+        {
+            r.A = rA[j];
+            r.B = rB[j];
+            r.S3 = rS3[j];
+            r.S2 = rS2[j];
+            r.T5 = rT5[j];
+            r.inner = rIn[j];
+            r.BV = rBV[j];
+            r.Q = qf[j];
+            r.curIn = ((macIn[j] & 0xFu) ? 1u : 0u) | ((macIn[j] & 0xF0u) ? 2u : 0u);
+        }
+    }
+    for (int s = 0; s < 8; ++s)
+        out[0].sticky[s] = 0u; // STATUS sticky bits are only tracked for the two exact ops; nothing reads STATUS
+    out[0].sticky[2] = lb8Sticky(r7, false);
+    out[0].sticky[6] = lb8Sticky(in, true);
+    return true;
+}
+
+inline bool lbSameRow(__m128 a, __m128 b) { return _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_castps_si128(a), _mm_castps_si128(b))) == 0xFFFF; }
+
+// PS2X_VU1_LBR=2: compare what lbVertex8R stored with the scalar reference (the fields lbFull reads); returns the number of differing vertices
+inline int lbCompareRelaxed(const LbV *rel, const LbV *ref, int n, uint32_t fullMask, int32_t t0)
+{
+    int bad = 0;
+    for (int j = 0; j < n; ++j)
+    {
+        const LbV &a = rel[j], &b = ref[j];
+        bool same = a.idx == b.idx && std::bit_cast<uint32_t>(a.Wraw) == std::bit_cast<uint32_t>(b.Wraw) && lbSameRow(a.S2Q, b.S2Q) && lbSameRow(a.prod, b.prod) &&
+                    lbSameRow(a.R7, b.R7) && a.macIn == b.macIn && a.macR7 == b.macR7 && a.curR7 == b.curR7;
+        if (same && ((fullMask >> j) & 1u))
+            same = lbSameRow(a.A, b.A) && lbSameRow(a.B, b.B) && lbSameRow(a.S3, b.S3) && lbSameRow(a.S2, b.S2) && lbSameRow(a.T5, b.T5) && lbSameRow(a.inner, b.inner) &&
+                   lbSameRow(a.BV, b.BV) && std::bit_cast<uint32_t>(a.Q) == std::bit_cast<uint32_t>(b.Q) && a.curIn == b.curIn;
+        if (!same)
+        {
+            if (s_lbrMismatch + bad < 8u)
+                std::printf("[probe] lbr MISMATCH vertex %d idx=%d macIn %08X/%08X macR7 %08X/%08X wraw %08X/%08X\n", t0 + j, a.idx, a.macIn, b.macIn, a.macR7, b.macR7,
+                            std::bit_cast<uint32_t>(a.Wraw), std::bit_cast<uint32_t>(b.Wraw));
+            ++bad;
+        }
+    }
+    return bad;
+}
+
 bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
 {
     VU1State &st = vu.m_state;
@@ -850,6 +994,8 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
     for (int32_t t = 0; t < N; ++t)
         idxA[t] = t == 0 ? vi7 : lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(vi4 + t)), 0)));
     static const bool s_lb8On = []() { const char *e = std::getenv("PS2X_VU1_LB8"); return !(e && e[0] == '0'); }(); // PERF-SV: =0 forces the scalar vertex loop
+    static const int s_lbrMode = []() { const char *e = std::getenv("PS2X_VU1_LBR"); return e && e[0] == '1' ? 1 : (e && e[0] == '2' ? 2 : 0); }(); // PERF-LBR
+    uint32_t stickyAcc = k.accw.cur | k.accw.xf;
     Lb8K k8;
     k8.vf1 = lb8Const(k.vf1);
     k8.vf2 = lb8Const(k.vf2);
@@ -860,7 +1006,7 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
     for (int32_t t0 = 0; t0 < N; t0 += 8)
     {
         const int n = std::min<int32_t>(8, N - t0);
-        bool done = false;
+        bool done = false, relaxed = false;
         if (s_lb8On)
         {
             int32_t idx8[8];
@@ -872,10 +1018,35 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
                 s3q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t0 + jj));
                 s2q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t0 + jj));
             }
-            done = lbVertex8(&V[t0], n, idx8, s3q, s2q, k8, mem, dsz);
+            if (s_lbrMode != 0)
+            {
+                ++s_lbrGroups;
+                const uint32_t fullMask = (t0 + n == N) ? (1u << (n - 1)) : 0u; // only the last vertex of the routine needs every intermediate row
+                relaxed = lbVertex8R(&V[t0], n, idx8, s3q, s2q, k8, mem, dsz, fullMask);
+                if (!relaxed)
+                    ++s_lbrDeclined;
+                else if (s_lbrMode == 2)
+                {
+                    LbV ref[8];
+                    for (int j = 0; j < n; ++j)
+                    {
+                        const int32_t t = t0 + j;
+                        lbVertex(ref[j], idxA[t], static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t)), static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t)), k, mem, dsz);
+                    }
+                    s_lbrMismatch += static_cast<uint64_t>(lbCompareRelaxed(&V[t0], ref, n, fullMask, t0));
+                    for (int j = 0; j < n; ++j)
+                        V[t0 + j] = ref[j]; // verify mode keeps using the exact result
+                    relaxed = false;
+                    done = true;
+                }
+                else
+                    ++s_lbrRelaxed;
+            }
+            if (!relaxed && !done)
+                done = lbVertex8(&V[t0], n, idx8, s3q, s2q, k8, mem, dsz);
         }
         ++s_lb8Groups;
-        if (!done)
+        if (!done && !relaxed)
         {
             ++s_lb8Fallback;
             for (int j = 0; j < n; ++j)
@@ -884,9 +1055,21 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
                 lbVertex(V[t], idxA[t], static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t)), static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t)), k, mem, dsz);
             }
         }
-        for (int j = 0; j < n; ++j)
-            if (V[t0 + j].di != 0u)
-                return decline(5);
+        if (relaxed)
+        {
+            for (int s = 0; s < 8; ++s) // lbVertex8R puts the group's sticky bits in its first vertex only; the other vertices hold no STATUS data
+                stickyAcc |= V[t0].sticky[s];
+        }
+        else
+        {
+            for (int j = 0; j < n; ++j)
+            {
+                if (V[t0 + j].di != 0u)
+                    return decline(5);
+                for (int s = 0; s < 8; ++s)
+                    stickyAcc |= V[t0 + j].sticky[s];
+            }
+        }
     }
     // everything below only commits (reads of the old memory are done first)
     const int32_t newVi1 = lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(vi13)), 0)));
@@ -918,10 +1101,7 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
     putw(1023, 3, ubase);
 
     // status: sticky OR over every stage op of every vertex, low 4 = R7 of the last vertex (last FMAC of the tail), bits 4-5 cleared by the last landing
-    uint32_t sticky = k.accw.cur | k.accw.xf;
-    for (int32_t t = 0; t < N; ++t)
-        for (int s = 0; s < 8; ++s)
-            sticky |= V[t].sticky[s];
+    const uint32_t sticky = stickyAcc;
     const uint32_t en = st.status;
     st.status = (en & 0xC00u) | ((en & 0x3C0u) | ((sticky & 0xFu) << 6)) | V[N - 1].curR7;
     // MAC ring pushes at the KEEPMAC pairs: prologue 20D8 (inner of vertex 2), one per loop pass (inner of k+2), tail 21C0 (R7 of the last vertex)
@@ -1201,6 +1381,9 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
                     (unsigned long long)s_lbFullWhy[4], (unsigned long long)s_lbFullWhy[5]);
     if ((s_lbFullTaken & 0xFFFFull) == 0u)
         std::printf("[probe] lb8 groups=%llu scalar_fallback=%llu\n", (unsigned long long)s_lb8Groups, (unsigned long long)s_lb8Fallback); // PERF-SV
+    if (s_lbrMode != 0)
+        std::printf("[probe] lbr mode=%d groups=%llu relaxed=%llu declined=%llu mismatched=%llu\n", s_lbrMode, (unsigned long long)s_lbrGroups, (unsigned long long)s_lbrRelaxed,
+                    (unsigned long long)s_lbrDeclined, (unsigned long long)s_lbrMismatch); // PERF-LBR
     return true;
 }
 
