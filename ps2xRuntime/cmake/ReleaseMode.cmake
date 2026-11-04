@@ -1,5 +1,9 @@
 include(CheckIPOSupported)
 
+# PERF-PGO: MSVC profile-guided link of the runtime + entry runner (objects are already /GL). OFF = normal build, GEN = instrumented link (run it, then
+# pgosweep ps2EntryRunner.exe), USE = optimised link with the collected ps2EntryRunner.pgd. Only the link changes, nothing is recompiled.
+set(PS2X_PGO "OFF" CACHE STRING "MSVC PGO mode: OFF, GEN or USE")
+
 check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
 
 function(EnableFastReleaseMode TargetName)
@@ -32,6 +36,8 @@ function(EnableFastReleaseMode TargetName)
                     /LTCG # link-time code generation
                     /OPT:REF # remove unreferenced
                     /OPT:ICF # fold identical COMDATs
+                    $<$<STREQUAL:${PS2X_PGO},GEN>:/GENPROFILE> # PERF-PGO
+                    $<$<STREQUAL:${PS2X_PGO},USE>:/USEPROFILE> # PERF-PGO
                 >
             )
         endif()
