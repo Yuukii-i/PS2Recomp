@@ -931,6 +931,7 @@ inline bool lbVertex8R(LbV *out, int n, const int32_t *idx, const uint32_t *s3q,
 }
 
 inline bool lbSameRow(__m128 a, __m128 b) { return _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_castps_si128(a), _mm_castps_si128(b))) == 0xFFFF; }
+inline bool lbSameRow3(__m128 a, __m128 b) { return (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_castps_si128(a), _mm_castps_si128(b))) & 0x0FFF) == 0x0FFF; } // xyz only (DEST=14 results)
 
 // PS2X_VU1_LBR=2: compare what lbVertex8R stored with the scalar reference (the fields lbFull reads); returns the number of differing vertices
 inline int lbCompareRelaxed(const LbV *rel, const LbV *ref, int n, uint32_t fullMask, int32_t t0)
@@ -939,16 +940,32 @@ inline int lbCompareRelaxed(const LbV *rel, const LbV *ref, int n, uint32_t full
     for (int j = 0; j < n; ++j)
     {
         const LbV &a = rel[j], &b = ref[j];
-        bool same = a.idx == b.idx && std::bit_cast<uint32_t>(a.Wraw) == std::bit_cast<uint32_t>(b.Wraw) && lbSameRow(a.S2Q, b.S2Q) && lbSameRow(a.prod, b.prod) &&
-                    lbSameRow(a.R7, b.R7) && a.macIn == b.macIn && a.macR7 == b.macR7 && a.curR7 == b.curR7;
-        if (same && ((fullMask >> j) & 1u))
-            same = lbSameRow(a.A, b.A) && lbSameRow(a.B, b.B) && lbSameRow(a.S3, b.S3) && lbSameRow(a.S2, b.S2) && lbSameRow(a.T5, b.T5) && lbSameRow(a.inner, b.inner) &&
-                   lbSameRow(a.BV, b.BV) && std::bit_cast<uint32_t>(a.Q) == std::bit_cast<uint32_t>(b.Q) && a.curIn == b.curIn;
-        if (!same)
+        // one bit per compared field: 0 idx, 1 Wraw, 2 S2Q(xyz), 3 prod, 4 R7(xyz), 5 macIn, 6 macR7, 7 curR7; last vertex only: 8 A, 9 B, 10 S3, 11 S2, 12 T5, 13 inner, 14 BV, 15 Q, 16 curIn
+        uint32_t diff = 0;
+        diff |= (a.idx != b.idx) << 0;
+        diff |= (std::bit_cast<uint32_t>(a.Wraw) != std::bit_cast<uint32_t>(b.Wraw)) << 1;
+        diff |= (!lbSameRow3(a.S2Q, b.S2Q)) << 2;
+        diff |= (!lbSameRow(a.prod, b.prod)) << 3;
+        diff |= (!lbSameRow3(a.R7, b.R7)) << 4;
+        diff |= (a.macIn != b.macIn) << 5;
+        diff |= (a.macR7 != b.macR7) << 6;
+        diff |= (a.curR7 != b.curR7) << 7;
+        if ((fullMask >> j) & 1u)
+        {
+            diff |= (!lbSameRow(a.A, b.A)) << 8;
+            diff |= (!lbSameRow(a.B, b.B)) << 9;
+            diff |= (!lbSameRow(a.S3, b.S3)) << 10;
+            diff |= (!lbSameRow(a.S2, b.S2)) << 11;
+            diff |= (!lbSameRow(a.T5, b.T5)) << 12;
+            diff |= (!lbSameRow(a.inner, b.inner)) << 13;
+            diff |= (!lbSameRow(a.BV, b.BV)) << 14;
+            diff |= (std::bit_cast<uint32_t>(a.Q) != std::bit_cast<uint32_t>(b.Q)) << 15;
+            diff |= (a.curIn != b.curIn) << 16;
+        }
+        if (diff != 0u)
         {
             if (s_lbrMismatch + bad < 8u)
-                std::printf("[probe] lbr MISMATCH vertex %d idx=%d macIn %08X/%08X macR7 %08X/%08X wraw %08X/%08X\n", t0 + j, a.idx, a.macIn, b.macIn, a.macR7, b.macR7,
-                            std::bit_cast<uint32_t>(a.Wraw), std::bit_cast<uint32_t>(b.Wraw));
+                std::printf("[probe] lbr MISMATCH vertex %d idx=%d fields=0x%05X (bit0 idx 1 Wraw 2 S2Q 3 prod 4 R7 5 macIn 6 macR7 7 curR7 | 8 A 9 B 10 S3 11 S2 12 T5 13 inner 14 BV 15 Q 16 curIn)\n", t0 + j, a.idx, diff);
             ++bad;
         }
     }
@@ -1380,10 +1397,12 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
                     (unsigned long long)s_lbFullDeclined, (unsigned long long)s_lbFullWhy[0], (unsigned long long)s_lbFullWhy[1], (unsigned long long)s_lbFullWhy[2], (unsigned long long)s_lbFullWhy[3],
                     (unsigned long long)s_lbFullWhy[4], (unsigned long long)s_lbFullWhy[5]);
     if ((s_lbFullTaken & 0xFFFFull) == 0u)
+    {
         std::printf("[probe] lb8 groups=%llu scalar_fallback=%llu\n", (unsigned long long)s_lb8Groups, (unsigned long long)s_lb8Fallback); // PERF-SV
-    if (s_lbrMode != 0)
-        std::printf("[probe] lbr mode=%d groups=%llu relaxed=%llu declined=%llu mismatched=%llu\n", s_lbrMode, (unsigned long long)s_lbrGroups, (unsigned long long)s_lbrRelaxed,
-                    (unsigned long long)s_lbrDeclined, (unsigned long long)s_lbrMismatch); // PERF-LBR
+        if (s_lbrMode != 0)
+            std::printf("[probe] lbr mode=%d groups=%llu relaxed=%llu declined=%llu mismatched=%llu\n", s_lbrMode, (unsigned long long)s_lbrGroups, (unsigned long long)s_lbrRelaxed,
+                        (unsigned long long)s_lbrDeclined, (unsigned long long)s_lbrMismatch); // PERF-LBR
+    }
     return true;
 }
 
