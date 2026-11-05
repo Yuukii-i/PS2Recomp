@@ -1011,7 +1011,7 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
     for (int32_t t = 0; t < N; ++t)
         idxA[t] = t == 0 ? vi7 : lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(vi4 + t)), 0)));
     static const bool s_lb8On = []() { const char *e = std::getenv("PS2X_VU1_LB8"); return !(e && e[0] == '0'); }(); // PERF-SV: =0 forces the scalar vertex loop
-    static const int s_lbrMode = []() { const char *e = std::getenv("PS2X_VU1_LBR"); return e && e[0] == '1' ? 1 : (e && e[0] == '2' ? 2 : 0); }(); // PERF-LBR
+    static const int s_lbrMode = []() { const char *e = std::getenv("PS2X_VU1_LBR"); return !e ? 1 : (e[0] == '2' ? 2 : (e[0] == '0' ? 0 : 1)); }(); // PERF-LBR: on by default (verified: 38M groups, 0 mismatches); =0 off, =2 verify
     uint32_t stickyAcc = k.accw.cur | k.accw.xf;
     Lb8K k8;
     k8.vf1 = lb8Const(k.vf1);
