@@ -11,8 +11,10 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include <cstdio>
 #include "ThreadNaming.h" // PERF-MB
 #include <intrin.h>
+extern void ps2xSafeLog(const char *fmt, ...);
 extern std::atomic<uint64_t> g_waitTicks[8]; // PROBE-KF, defined in ps2_memory.cpp
 
 // PERF-GK: optional asynchronous GS (PS2X_GS_ASYNC=1). drain() hands the sorted packets to a worker thread that runs the
@@ -124,6 +126,46 @@ bool gsAsyncEnabled()
     return on;
 }
 
+bool gsBatchPopEnabled()
+{
+    static const bool on = []() {
+        const char *v = std::getenv("PS2X_GS_BATCHPOP");
+        const bool enabled = v && (v[0] == '1' || (v[0] != '0' && std::strcmp(v, "off") != 0 && std::strcmp(v, "false") != 0 && v[0] != '\0'));
+        if (enabled)
+        {
+            ::ps2xSafeLog("[gsbatch] ON max=64\n");
+            std::fflush(stderr);
+        }
+        return enabled;
+    }();
+    return on;
+}
+
+thread_local std::vector<std::vector<uint8_t>> t_gsRecycleStash;
+
+void flushRecycleStash()
+{
+    if (t_gsRecycleStash.empty())
+        return;
+    PacketPool &pool = packetPool();
+    std::lock_guard<std::mutex> lock(pool.m);
+    for (auto &v : t_gsRecycleStash)
+    {
+        const size_t cap = v.capacity();
+        if (cap < 256u || cap > (1u << 20))
+            continue;
+        int b = 8;
+        while ((static_cast<size_t>(2) << b) <= cap)
+            ++b; // floor(log2(cap)): a buffer in bucket b holds at least 2^b bytes
+        if (pool.bytes + cap <= (64u << 20))
+        {
+            pool.bytes += cap;
+            pool.b[b].push_back(std::move(v));
+        }
+    }
+    t_gsRecycleStash.clear();
+}
+
 // PERF-GB: while the calling thread is in batch mode (the VIF1 worker, around one job) async GIF packets are collected thread-locally and handed to the queue
 // under ONE lock at the end of the job (was a lock + possible notify + pool lock per XGKICK). Order is unchanged: single producer, FIFO queue.
 thread_local bool t_gsBatch = false;
@@ -165,32 +207,106 @@ void gsAsyncWorker()
         probe_ae::recordMainGuestThread();
     GsAsyncState &st = gsAsync();
     std::unique_lock<std::mutex> lock(st.m);
+
+    if (!gsBatchPopEnabled())
+    {
+        for (;;)
+        {
+            st.workerWaiting = true;
+            const uint64_t gqI0 = __rdtsc(); // PROBE-GQ
+            st.cvWork.wait(lock, [&] { return !st.q.empty(); });
+            g_gsqIdle.fetch_add(__rdtsc() - gqI0, std::memory_order_relaxed);
+            st.workerWaiting = false;
+            std::vector<uint8_t> pkt = std::move(st.q.front());
+            st.q.pop_front();
+            st.busy = true;
+            lock.unlock();
+            const size_t pktSize = pkt.size();
+            const uint64_t gqB0 = __rdtsc(); // PROBE-GQ
+            st.fn(pkt.data(), static_cast<uint32_t>(pktSize));
+            g_gsqBusy.fetch_add(__rdtsc() - gqB0, std::memory_order_relaxed);
+            g_gsqPkts.fetch_add(1, std::memory_order_relaxed);
+            recyclePacketBuf(std::move(pkt));
+            lock.lock();
+            st.queuedBytes -= pktSize;
+            ++st.processedPkts;
+            st.busy = false;
+            // PERF-GH: a producer blocked on the byte limit only needs to hear about it once a good part of the queue is drained (it used to be woken after every
+            // packet, pushed one packet and blocked again: a context switch per packet while the GS thread was the bottleneck). Fence and ticket waiters keep their wake-ups.
+            if (st.idleWaiters != 0u && (st.ticketWaiters != 0u || st.q.empty() || st.queuedBytes <= kGsAsyncMaxBytes / 4u * 3u))
+                st.cvIdle.notify_all();
+        }
+    }
+
+    struct WorkerExitGuard
+    {
+        ~WorkerExitGuard()
+        {
+            flushRecycleStash();
+        }
+    } exitGuard;
+
+    std::vector<std::vector<uint8_t>> batch;
+    batch.reserve(64);
+
     for (;;)
     {
         st.workerWaiting = true;
         const uint64_t gqI0 = __rdtsc(); // PROBE-GQ
+        if (st.q.empty() && !t_gsRecycleStash.empty())
+        {
+            flushRecycleStash();
+        }
         st.cvWork.wait(lock, [&] { return !st.q.empty(); });
-        g_gsqIdle.fetch_add(__rdtsc() - gqI0, std::memory_order_relaxed);
+        const uint64_t idleTicks = __rdtsc() - gqI0;
         st.workerWaiting = false;
-        std::vector<uint8_t> pkt = std::move(st.q.front());
-        st.q.pop_front();
+
+        batch.clear();
+        size_t batchBytes = 0;
+        while (!st.q.empty() && batch.size() < 64)
+        {
+            batchBytes += st.q.front().size();
+            batch.push_back(std::move(st.q.front()));
+            st.q.pop_front();
+        }
+        if (st.q.empty() && !t_gsRecycleStash.empty())
+        {
+            flushRecycleStash();
+        }
+        const uint64_t batchCount = static_cast<uint64_t>(batch.size());
         st.busy = true;
         lock.unlock();
-        const size_t pktSize = pkt.size();
+
         const uint64_t gqB0 = __rdtsc(); // PROBE-GQ
-        st.fn(pkt.data(), static_cast<uint32_t>(pktSize));
-        g_gsqBusy.fetch_add(__rdtsc() - gqB0, std::memory_order_relaxed);
-        g_gsqPkts.fetch_add(1, std::memory_order_relaxed);
-        recyclePacketBuf(std::move(pkt));
+        for (size_t i = 0; i < batch.size(); ++i)
+        {
+            st.fn(batch[i].data(), static_cast<uint32_t>(batch[i].size()));
+        }
+        const uint64_t busyTicks = __rdtsc() - gqB0;
+
+        for (size_t i = 0; i < batch.size(); ++i)
+        {
+            t_gsRecycleStash.push_back(std::move(batch[i]));
+        }
+        batch.clear();
+
+        if (t_gsRecycleStash.size() >= 32)
+        {
+            flushRecycleStash();
+        }
+
+        g_gsqIdle.fetch_add(idleTicks, std::memory_order_relaxed);
+        g_gsqBusy.fetch_add(busyTicks, std::memory_order_relaxed);
+        g_gsqPkts.fetch_add(batchCount, std::memory_order_relaxed);
+
         lock.lock();
-        st.queuedBytes -= pktSize;
-        ++st.processedPkts;
+        st.queuedBytes -= batchBytes;
+        st.processedPkts += batchCount;
         st.busy = false;
-        // PERF-GH: a producer blocked on the byte limit only needs to hear about it once a good part of the queue is drained (it used to be woken after every
-        // packet, pushed one packet and blocked again: a context switch per packet while the GS thread was the bottleneck). Fence and ticket waiters keep their wake-ups.
         if (st.idleWaiters != 0u && (st.ticketWaiters != 0u || st.q.empty() || st.queuedBytes <= kGsAsyncMaxBytes / 4u * 3u))
             st.cvIdle.notify_all();
     }
+    flushRecycleStash();
 }
 } // namespace
 
