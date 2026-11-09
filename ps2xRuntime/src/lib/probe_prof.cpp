@@ -645,3 +645,32 @@ namespace probe_ae {
     void cgStartSamplerIfEnabled() {}
 #endif
 }
+
+// PERF-LU (PS2X_SCHED=1): scheduling hints, called from ps2_runtime.cpp / ps2_memory.cpp / gs/ps2_gif_arbiter.cpp.
+// Lives here because this TU already includes <windows.h> (the other TUs avoid it: min/max and stub-name clashes).
+// flags & 1: process priority class ABOVE_NORMAL + opt out of process power throttling (EcoQoS).
+// flags & 2: current thread priority ABOVE_NORMAL + opt out of thread power throttling. No affinity changes, no REALTIME/HIGHEST.
+extern "C" void ps2x_sched_apply(int flags) // flags: 1 = process level, 2 = current thread
+{
+#ifdef _WIN32
+    if (flags & 1)
+    {
+        SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+        PROCESS_POWER_THROTTLING_STATE ps{};
+        ps.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        ps.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        ps.StateMask = 0;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &ps, sizeof(ps));
+    }
+    if (!(flags & 2))
+        return;
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    THREAD_POWER_THROTTLING_STATE ts{};
+    ts.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+    ts.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+    ts.StateMask = 0;
+    SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &ts, sizeof(ts));
+#else
+    (void)flags;
+#endif
+}

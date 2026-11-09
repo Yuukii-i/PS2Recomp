@@ -417,6 +417,7 @@ bool PS2Memory::initialize(size_t ramSize)
 // PROBE-KF: wait/busy ticks: 0 vif1 fence wait, 1 vif1 enqueue wait, 2 gs fence wait, 3 gs backpressure wait, 4 vif1 worker busy, 5 fence waits (count)
 std::atomic<uint64_t> g_waitTicks[8]{};
 extern "C" uint64_t ps2x_ft2_waitTicks(int idx) { return (idx >= 0 && idx < 8) ? g_waitTicks[idx].load(std::memory_order_relaxed) : 0u; } // PERF-LN
+extern "C" void ps2x_sched_apply(int flags); // PERF-LU: probe_prof.cpp
 extern "C" void ps2_gs_async_fence(); // PERF-GK (gs/ps2_gif_arbiter.cpp)
 
 // PERF-HN: async VIF1/VU1 worker (opt-in PS2X_VIF1_ASYNC=1). The EE thread copies VIF1 packet data into jobs; one worker
@@ -502,6 +503,15 @@ static void vif1Worker()
 {
     t_onVif1Worker = true;
     ThreadNaming::SetCurrentThreadName("Vif1Worker");
+    { // PERF-LU
+        static const bool s_sched = []() { const char *e = std::getenv("PS2X_SCHED"); return e && e[0] == '1'; }();
+        if (s_sched)
+        {
+            ps2x_sched_apply(2);
+            ps2xSafeLog("[sched] ON Vif1Worker\n");
+            std::fflush(stderr);
+        }
+    }
     // PROBE-KJ: PS2X_PROF_VU1WORKER=1 (with PS2X_PROF_SAMPLE=1) points the sampler's stack/owner/budget2 output at this worker instead of the EE thread
     if (const char *pe = std::getenv("PS2X_PROF_VU1WORKER"); pe && pe[0] == '1')
         probe_ae::recordMainGuestThread();

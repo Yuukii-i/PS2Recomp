@@ -425,6 +425,7 @@ void ps2xSafeLog(const char *fmt, ...)
 extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *hModule, char *lpFilename, unsigned long nSize);
 extern "C" __declspec(dllimport) unsigned int __stdcall timeBeginPeriod(unsigned int uPeriod); // PERF-KN (winmm, already linked by raylib)
 #endif
+extern "C" void ps2x_sched_apply(int flags); // PERF-LU: probe_prof.cpp (flags: 1 process, 2 current thread)
 
 namespace ps2_stubs
 {
@@ -5845,11 +5846,34 @@ void PS2Runtime::run()
     UnloadImage(blank);
 
     ThreadNaming::SetCurrentThreadName("MainLoop"); // PERF-MB
+#ifdef _WIN32
+    // PERF-LU (PS2X_SCHED=1): process priority + power-throttling opt-out + 1 ms timer resolution, once at start
+    static const bool s_schedOn = []() {
+        const char *e = std::getenv("PS2X_SCHED");
+        const bool on = e && e[0] == '1';
+        if (on)
+        {
+            ps2x_sched_apply(1);
+            timeBeginPeriod(1);
+            ps2xSafeLog("[sched] ON process\n");
+            std::fflush(stderr);
+        }
+        return on;
+    }();
+#else
+    static const bool s_schedOn = false;
+#endif
     std::atomic<bool> gameThreadFinished{false};
 
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
+        if (s_schedOn)
+        {
+            ps2x_sched_apply(2);
+            ps2xSafeLog("[sched] ON GameThread\n");
+            std::fflush(stderr);
+        }
         // C310: the EE FPU always rounds toward zero; FPU_CVT_W_S/ROUND_W_S use nearbyintf, which follows MXCSR.RC
         {
             // default ON (C316: fixes animation tilt, eye lids); PS2X_EE_RTZ=0 restores round-to-nearest

@@ -15,6 +15,7 @@
 #include "ThreadNaming.h" // PERF-MB
 #include <intrin.h>
 extern void ps2xSafeLog(const char *fmt, ...);
+extern "C" void ps2x_sched_apply(int flags); // PERF-LU: probe_prof.cpp
 extern std::atomic<uint64_t> g_waitTicks[8]; // PROBE-KF, defined in ps2_memory.cpp
 
 // PERF-GK: optional asynchronous GS (PS2X_GS_ASYNC=1). drain() hands the sorted packets to a worker thread that runs the
@@ -203,6 +204,15 @@ void gsFlushPending()
 void gsAsyncWorker()
 {
     ThreadNaming::SetCurrentThreadName("GsWorker");
+    { // PERF-LU
+        static const bool s_sched = []() { const char *e = std::getenv("PS2X_SCHED"); return e && e[0] == '1'; }();
+        if (s_sched)
+        {
+            ps2x_sched_apply(2);
+            ::ps2xSafeLog("[sched] ON GsWorker\n");
+            std::fflush(stderr);
+        }
+    }
     // PROBE-GP: PS2X_PROF_GSWORKER=1 (with PS2X_PROF_SAMPLE=1) points the sampler's line/owner/budget output at this thread
     if (const char *pe = std::getenv("PS2X_PROF_GSWORKER"); pe && pe[0] == '1')
         probe_ae::recordMainGuestThread();
