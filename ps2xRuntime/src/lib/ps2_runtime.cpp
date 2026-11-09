@@ -3942,20 +3942,57 @@ struct EeProfilerScope {
     }
 };
 
-bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
-                                     R5900Context *ctx,
-                                     uint32_t targetPc,
-                                     uint32_t sourcePc,
-                                     uint32_t fallthroughPc,
-                                     GuestBranchKind kind,
-                                     const char *debugName)
+// PERF-LM (PS2X_ACCT_BATCH=1): guest-call dispatch cycles are accumulated and applied via EeScheduler::accountCycles in steps of >= 256.
+// EeScheduler::accountCycles merges g_acctPending into every other caller's count (so checkpoint/preemption, syscalls always see exact time);
+// the slow Load/Store paths flush before any IO-region access (timers, INTC, DMAC...).
+thread_local uint32_t g_acctPending = 0;
+static EeScheduler *g_acctSched = nullptr;
+static inline bool acctBatchEnabled()
 {
-    EeProfilerScope eeScope;
-    if (g_profCounts) // PROBE-IJ
-        ++g_pcDispatch[static_cast<int>(kind) % 5];
-    ctx->pc = targetPc;
-    const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_ACCT_BATCH");
+        const bool on = e && e[0] == '1';
+        if (on) { ::ps2xSafeLog("[acctbatch] ON\n"); fflush(stderr); }
+        return on;
+    }();
+    return s_on;
+}
+static inline void acctDispatch(EeScheduler *s)
+{
+    if (acctBatchEnabled())
+    {
+        g_acctSched = s;
+        g_acctPending += EeScheduler::kGuestDispatchCycles;
+        if (g_acctPending >= 256u)
+        {
+            const uint32_t p = g_acctPending;
+            g_acctPending = 0;
+            s->accountCycles(p);
+        }
+    }
+    else
+    {
+        s->accountCycles(EeScheduler::kGuestDispatchCycles);
+    }
+}
+static inline void acctFlushForIo(uint32_t vaddr)
+{
+    if (g_acctPending != 0u && (vaddr & 0x1FFFFFFFu) >= 0x10000000u && g_acctSched)
+    {
+        const uint32_t p = g_acctPending;
+        g_acctPending = 0;
+        g_acctSched->accountCycles(p);
+    }
+}
 
+// PERF-LL: cold probe blocks of dispatchGuestBranch, moved verbatim (same order, run only when a probe is enabled)
+static bool dispatchAnyProbeEnabled()
+{
+    static const bool s_any = isVu3dProbeEnabled() || (std::getenv("PS2X_DISPATCH_PROBES") != nullptr);
+    return s_any;
+}
+__declspec(noinline) static void dispatchGuestBranchProbes(uint8_t *rdram, R5900Context *ctx, uint32_t targetPc, uint32_t sourcePc, bool isCall)
+{
     if (isVu3dProbeEnabled())
     {
         if (targetPc == 0x002540E4u || targetPc == 0x00359EFCu || targetPc == 0x00254280u)
@@ -4131,6 +4168,24 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             }
         }
     }
+}
+
+bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+                                     R5900Context *ctx,
+                                     uint32_t targetPc,
+                                     uint32_t sourcePc,
+                                     uint32_t fallthroughPc,
+                                     GuestBranchKind kind,
+                                     const char *debugName)
+{
+    EeProfilerScope eeScope;
+    if (g_profCounts) // PROBE-IJ
+        ++g_pcDispatch[static_cast<int>(kind) % 5];
+    ctx->pc = targetPc;
+    const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+
+    if (dispatchAnyProbeEnabled())
+        dispatchGuestBranchProbes(rdram, ctx, targetPc, sourcePc, isCall);
     // vf0 is hardwired {0,0,0,1}; contexts built via R5900Context() start with it zeroed. (Hack Ledger: HW-faithful backstop)
     if (ctx)
         ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
@@ -4165,7 +4220,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // Never return false here for calls/transfers, as that unwinds host C++ frames and breaks main loop.
     if (m_eeScheduler)
     {
-        m_eeScheduler->accountCycles(EeScheduler::kGuestDispatchCycles);
+        acctDispatch(m_eeScheduler.get());
     }
 
     if (!isCall)
@@ -4189,6 +4244,86 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
         ctx->pc = targetPc;
         return false;
+    }
+
+    // PERF-LL (PS2X_DISPATCH_LEAN=1): single slot lookup for the call path; same side effects and order as the generic code below.
+    static const bool s_dispatchLean = []() {
+        const char *e = std::getenv("PS2X_DISPATCH_LEAN");
+        const bool on = !(e && e[0] == '0'); // PERF-LM: default ON
+        if (on) { ::ps2xSafeLog("[dispatchlean] ON\n"); fflush(stderr); }
+        return on;
+    }();
+    if (s_dispatchLean)
+    {
+        uint32_t leanSlot = 0u;
+        RecompiledFunction leanFn = nullptr;
+        if (generatedFunctionTableSlot(targetPc, leanSlot))
+            leanFn = g_ps2RecompiledFunctionTable[leanSlot];
+        if (leanFn != nullptr)
+        {
+            extern thread_local uint32_t g_currentExecutingFunction;
+            const uint32_t prevExecutingFn = g_currentExecutingFunction;
+            g_currentExecutingFunction = targetPc;
+
+            if (targetPc == 0x0031A1B4u || targetPc == 0x0031A240u ||
+                (targetPc >= 0x00408000u && targetPc <= 0x00413000u))
+            {
+                g_mpegFunctionCalled.store(true, std::memory_order_relaxed);
+            }
+            if (targetPc != g_lastDistinctFns[0])
+            {
+                g_lastDistinctFns[4] = g_lastDistinctFns[3];
+                g_lastDistinctFns[3] = g_lastDistinctFns[2];
+                g_lastDistinctFns[2] = g_lastDistinctFns[1];
+                g_lastDistinctFns[1] = g_lastDistinctFns[0];
+                g_lastDistinctFns[0] = targetPc;
+            }
+
+            pushDispatchPc(targetPc);
+            const uint32_t entryPc = ctx->pc;
+            leanFn(rdram, ctx, this);
+            g_currentExecutingFunction = prevExecutingFn;
+
+            if (targetPc == 0x001037E8u)
+            {
+                while (!isStopRequested() && ctx->pc != 0u)
+                {
+                    const uint32_t currentPc = ctx->pc;
+                    uint32_t s = 0u;
+                    if (!generatedFunctionTableSlot(currentPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
+                        break;
+                    pushDispatchPc(currentPc);
+                    g_ps2RecompiledFunctionTable[s](rdram, ctx, this);
+                    if (ctx->pc == currentPc)
+                        break;
+                }
+                return true;
+            }
+
+            if (ctx->pc == entryPc)
+                ctx->pc = fallthroughPc;
+
+            uint32_t leanChainSteps = 0;
+            while (ctx->pc != fallthroughPc && !isStopRequested() && ctx->pc != 0u)
+            {
+                const uint32_t nextPc = ctx->pc;
+                uint32_t s = 0u;
+                if (!generatedFunctionTableSlot(nextPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
+                    break;
+                if (++leanChainSteps > 1000)
+                    break;
+                if (m_eeScheduler)
+                    acctDispatch(m_eeScheduler.get());
+                pushDispatchPc(nextPc);
+                g_ps2RecompiledFunctionTable[s](rdram, ctx, this);
+                if (ctx->pc == nextPc)
+                    break;
+            }
+
+            if (isStopRequested() || ctx->pc == 0u)
+                return false;
+            return ctx->pc == fallthroughPc;
+        }
     }
 
     if (!hasFunction(targetPc))
@@ -4264,7 +4399,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         }
         if (m_eeScheduler)
         {
-            m_eeScheduler->accountCycles(EeScheduler::kGuestDispatchCycles);
+            acctDispatch(m_eeScheduler.get());
         }
         const uint32_t nextPc = ctx->pc;
         RecompiledFunction nextFn = lookupFunction(nextPc);
@@ -5162,6 +5297,7 @@ static inline bool sprFastAddr(uint32_t vaddr)
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint8_t>(vaddr))
     {
         uint8_t v;
@@ -5182,6 +5318,7 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint16_t>(vaddr))
     {
         uint16_t v;
@@ -5202,6 +5339,7 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint32_t>(vaddr))
     {
         uint32_t v;
@@ -5222,6 +5360,7 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint64_t>(vaddr))
     {
         uint64_t v;
@@ -5242,6 +5381,7 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (vaddr & 15u) // PROBE-IZ: R5900 lq ignores the low 4 address bits
     {
         static std::atomic<int> s_n{0};
@@ -5373,6 +5513,7 @@ extern "C" float ps2x_vu0_rnext(R5900Context *ctx)
 void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint8_t>(vaddr))
     {
         std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));
@@ -5392,6 +5533,7 @@ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8
 void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint16_t>(vaddr))
     {
         std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));
@@ -5411,6 +5553,7 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint32_t>(vaddr))
     {
         std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));
@@ -5432,6 +5575,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
 {
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint64_t>(vaddr))
     {
         std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));
@@ -5452,6 +5596,7 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
 {
     vaddr &= ~15u; // PROBE-IZ: R5900 sq ignores the low 4 address bits
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
+    acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<__m128i>(vaddr))
     {
         std::memcpy(m_memory.getScratchpad() + (vaddr & 0x3FFFu), &value, sizeof(value));

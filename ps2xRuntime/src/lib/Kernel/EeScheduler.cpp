@@ -621,8 +621,15 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 extern const bool g_profCounts;                                     // PROBE-IJ (ps2_runtime.cpp)
 extern uint64_t g_pcAcctCalls, g_pcAcctTicks, g_pcIopTicks;          // PROBE-IJ
 
+extern thread_local uint32_t g_acctPending; // PERF-LM: dispatch cycles batched by ps2_runtime.cpp (PS2X_ACCT_BATCH)
+
 void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
+    if (g_acctPending != 0u) // PERF-LM: merge pending batched cycles so every caller sees exact EE time
+    {
+        cycles += g_acctPending;
+        g_acctPending = 0u;
+    }
     const uint64_t t0 = g_profCounts ? __rdtsc() : 0u;
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
     m_eeCycle += elapsed;
