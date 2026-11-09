@@ -46,6 +46,7 @@ namespace GSMem
 #include <atomic>
 #include <intrin.h>
 static std::atomic<uint64_t> g_gqLockWait{0}, g_gqLockWaits{0}, g_gqPresentHold{0}, g_gqPresents{0}; // PROBE-GQ2
+extern "C" uint64_t ps2x_ft2_presentHold() { return g_gqPresentHold.load(std::memory_order_relaxed); } // PERF-LN
 extern "C" void ps2_gs_vk_stats(uint64_t *out) { out[0] = g_gqLockWait.exchange(0); out[1] = g_gqLockWaits.exchange(0); out[2] = g_gqPresentHold.exchange(0); out[3] = g_gqPresents.exchange(0); }
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
 
@@ -1822,10 +1823,20 @@ namespace
                 const float fx0 = v0.x - static_cast<float>(ofx), fy0 = v0.y - static_cast<float>(ofy);
                 const float fx1 = v1.x - static_cast<float>(ofx), fy1 = v1.y - static_cast<float>(ofy);
                 const float fx2 = v2.x - static_cast<float>(ofx), fy2 = v2.y - static_cast<float>(ofy);
-                int minX = static_cast<int>(std::floor(std::min({fx0, fx1, fx2})));
-                int maxX = static_cast<int>(std::ceil(std::max({fx0, fx1, fx2})));
-                int minY = static_cast<int>(std::floor(std::min({fy0, fy1, fy2})));
-                int maxY = static_cast<int>(std::ceil(std::max({fy0, fy1, fy2})));
+                // PERF-LO: sequential compare, exactly what std::min/max(initializer_list) does (same result incl. NaN), without the list call
+                float mnX = fx0, mxX = fx0, mnY = fy0, mxY = fy0;
+                if (fx1 < mnX) mnX = fx1;
+                if (fx2 < mnX) mnX = fx2;
+                if (mxX < fx1) mxX = fx1;
+                if (mxX < fx2) mxX = fx2;
+                if (fy1 < mnY) mnY = fy1;
+                if (fy2 < mnY) mnY = fy2;
+                if (mxY < fy1) mxY = fy1;
+                if (mxY < fy2) mxY = fy2;
+                int minX = static_cast<int>(std::floor(mnX));
+                int maxX = static_cast<int>(std::ceil(mxX));
+                int minY = static_cast<int>(std::floor(mnY));
+                int maxY = static_cast<int>(std::ceil(mxY));
                 minX = clampInt(minX, ctx.scissor.x0, ctx.scissor.x1);
                 maxX = clampInt(maxX, ctx.scissor.x0, ctx.scissor.x1);
                 minY = clampInt(minY, ctx.scissor.y0, ctx.scissor.y1);

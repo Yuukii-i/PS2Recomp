@@ -1,6 +1,16 @@
 #include <array>
+#include <atomic>
+#include <vector>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <algorithm>
+#include <intrin.h>
 
 #include "runtime/gs/ps2_gs_memory.h"
+
+void ps2xSafeLog(const char *fmt, ...); // PERF-LO (global, defined elsewhere)
 
 namespace GSMem
 {
@@ -501,7 +511,7 @@ namespace GSMem
         }
     }
 
-    bool UploadStream(int kind, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+    static bool UploadStreamOld(int kind, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
     {
         switch (kind)
         {
@@ -520,6 +530,384 @@ namespace GSMem
         case 12: StreamBytesFast<Z16S, 2>(PageTableZ16S, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
         default: return false;
         }
+    }
+
+    // PERF-LO (PS2X_UPLOAD_FAST=1): row-hoisted variants for the kinds that still used the per-pixel Traits::Write (1 CT24, 5 T8H, 10 Z24, 6/7/8 T4*).
+    // Same arithmetic as PixelStorageTraits<>::Address/Write, with the page row and table row hoisted out of the pixel loop.
+    // MODE 0: 3 source bytes, read-modify-write of a u32 (keeps the top byte); 1: one source byte stored as-is (T8H); 2: 4-bit pixel, RMW of a byte.
+    namespace
+    {
+        template <PixelStorageMode PSM, int MODE, typename TableT>
+        void StreamFast2(const TableT &table, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+        {
+            using Traits = PixelStorageTraits<PSM>;
+            constexpr u32 PW = Traits::PageExtent().x;
+            constexpr u32 PH = Traits::PageExtent().y;
+            constexpr usz PPP = Traits::PixelsPerPage();
+            constexpr usz BPP = Traits::BlocksPerPage();
+            constexpr u32 kMask = static_cast<u32>(MEMORY_SIZE - (MODE == 0 ? 4u : 1u));
+            const u32 blockIdx = static_cast<u32>(bp % BPP);
+            const u32 basePage = static_cast<u32>(bp / BPP);
+            const u32 pagesPerRow = (bw * 64u) / PW;
+            u32 done = 0;
+            while (done < count)
+            {
+                const u32 n = std::min<u32>(count - done, xEnd - x);
+                const auto &trow = table[blockIdx][y % PH];
+                const usz rowPage = static_cast<usz>(basePage) + static_cast<usz>((y / PH) * pagesPerRow);
+                for (u32 k = 0; k < n; ++k)
+                {
+                    const u32 xx = x + k;
+                    const usz page = rowPage + xx / PW;
+                    const u32 pixelAddr = static_cast<u32>(page * PPP + trow[xx % PW]);
+                    const u32 bits = static_cast<u32>(static_cast<usz>(pixelAddr) * UnpackedBitWidth(PSM) + Traits::BitOffset());
+                    const u32 byteAddr = (bits / 8u) & kMask;
+                    u8 *ptr = data + byteAddr;
+                    const u32 i = done + k;
+                    if constexpr (MODE == 0)
+                    {
+                        const u32 v = static_cast<u32>(src[i * 3u]) | (static_cast<u32>(src[i * 3u + 1u]) << 8u) | (static_cast<u32>(src[i * 3u + 2u]) << 16u);
+                        u32 old;
+                        std::memcpy(&old, ptr, 4);
+                        const u32 nv = (old & 0xFF000000u) | (v & 0x00FFFFFFu);
+                        std::memcpy(ptr, &nv, 4);
+                    }
+                    else if constexpr (MODE == 1)
+                    {
+                        *ptr = src[i];
+                    }
+                    else
+                    {
+                        const u32 v = (src[i >> 1] >> ((i & 1u) * 4u)) & 0x0Fu;
+                        const u32 shift = bits % 8u;
+                        const u32 old = *ptr;
+                        *ptr = static_cast<u8>((old & ~(0x0Fu << shift)) | ((v & 0x0Fu) << shift));
+                    }
+                }
+                done += n;
+                x += n;
+                if (x == xEnd)
+                {
+                    x = xBegin;
+                    ++y;
+                }
+            }
+        }
+    }
+
+    // PERF-LP: kind 4 (PSMT8) whole-block path. The in-block byte layout is taken from the existing PageTableP8 and CHECKED once against every block of
+    // every table row (a block is 16x16, its 256 pixels occupy one aligned 256-pixel span: table value = blockOrigin + inBlock[by*16+bx], with inBlock the same
+    // everywhere). If the check fails the fast path is disabled and the old code runs. Aligned 16-row groups only; everything else uses StreamBytesFast.
+    static std::atomic<uint64_t> g_t8FastCalls{0};
+    static std::atomic<uint64_t> g_t8FastGroups{0};
+
+    namespace
+    {
+        struct T8BlockTable
+        {
+            bool ok = false;
+            u8 inBlock[256]; // destination byte offset (inside the block's 256-byte span) of source pixel by*16+bx
+            T8BlockTable()
+            {
+                using Traits = PixelStorageTraits<P8>;
+                constexpr u32 PW = Traits::PageExtent().x;
+                constexpr u32 PH = Traits::PageExtent().y;
+                constexpr usz BPP = Traits::BlocksPerPage();
+                static_assert(PW % 16u == 0u && PH % 16u == 0u, "T8 page must be a multiple of the 16x16 block");
+                static_assert(UnpackedBitWidth(P8) == 8 && Traits::BitOffset() == 0, "T8 is byte addressed");
+                const u32 base = PageTableP8[0][0][0];
+                if ((base & 0xFFu) != 0u)
+                    return;
+                for (u32 by = 0; by < 16u; ++by)
+                    for (u32 bx = 0; bx < 16u; ++bx)
+                    {
+                        const u32 off = static_cast<u32>(PageTableP8[0][by][bx]) - base;
+                        if (off >= 256u)
+                            return;
+                        inBlock[by * 16u + bx] = static_cast<u8>(off);
+                    }
+                for (u32 bi = 0; bi < BPP; ++bi)
+                    for (u32 yb = 0; yb < PH; yb += 16u)
+                        for (u32 xb = 0; xb < PW; xb += 16u)
+                        {
+                            const u32 org = PageTableP8[bi][yb][xb];
+                            if ((org & 0xFFu) != 0u)
+                                return;
+                            for (u32 by = 0; by < 16u; ++by)
+                                for (u32 bx = 0; bx < 16u; ++bx)
+                                    if (static_cast<u32>(PageTableP8[bi][yb + by][xb + bx]) != org + inBlock[by * 16u + bx])
+                                        return;
+                        }
+                ok = true;
+            }
+        };
+
+        // Writes full aligned 16-row groups; returns the number of pixels consumed (a multiple of 16 * width). Position x/y are advanced.
+        // Preconditions (checked by the caller): width % 16 == 0, xBegin % 16 == 0, x == xBegin, y % 16 == 0.
+        u32 StreamT8Groups(const T8BlockTable &tbl, u8 *data, u32 bp, u32 bw, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+        {
+            using Traits = PixelStorageTraits<P8>;
+            constexpr u32 PW = Traits::PageExtent().x;
+            constexpr u32 PH = Traits::PageExtent().y;
+            constexpr usz PPP = Traits::PixelsPerPage();
+            constexpr usz BPP = Traits::BlocksPerPage();
+            constexpr u32 kMask = static_cast<u32>(MEMORY_SIZE - 1u);
+            const u32 width = xEnd - xBegin;
+            const u32 groupPixels = 16u * width;
+            const u32 blockIdx = static_cast<u32>(bp % BPP);
+            const u32 basePage = static_cast<u32>(bp / BPP);
+            const u32 pagesPerRow = (bw * 64u) / PW;
+            u32 consumed = 0;
+            while (count - consumed >= groupPixels)
+            {
+                const auto &trow = PageTableP8[blockIdx][y % PH];
+                const usz rowPage = static_cast<usz>(basePage) + static_cast<usz>((y / PH) * pagesPerRow);
+                for (u32 xb = xBegin; xb < xEnd; xb += 16u)
+                {
+                    const usz page = rowPage + xb / PW;
+                    const u32 pixelAddr = static_cast<u32>(page * PPP + trow[xb % PW]);
+                    u8 *dst = data + (pixelAddr & kMask); // pixelAddr is 256-aligned, the block never wraps
+                    const u8 *s = src + consumed + (xb - xBegin);
+                    for (u32 by = 0; by < 16u; ++by, s += width)
+                        for (u32 bx = 0; bx < 16u; ++bx)
+                            dst[tbl.inBlock[by * 16u + bx]] = s[bx];
+                }
+                consumed += groupPixels;
+                y += 16u;
+            }
+            return consumed;
+        }
+
+        void StreamT8(u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+        {
+            static const T8BlockTable s_tbl; // thread-safe init
+            const u32 width = xEnd - xBegin;
+            if (!s_tbl.ok || width == 0u || (width & 15u) != 0u || (xBegin & 15u) != 0u)
+            {
+                StreamBytesFast<P8, 1>(PageTableP8, data, bp, bw, x, y, xBegin, xEnd, count, src);
+                return;
+            }
+            // 1. leading part until the position is (xBegin, y % 16 == 0)
+            while (count > 0 && !(x == xBegin && (y & 15u) == 0u))
+            {
+                const u32 n = (x != xBegin) ? std::min<u32>(count, xEnd - x) : std::min<u32>(count, width * (16u - (y & 15u)));
+                StreamBytesFast<P8, 1>(PageTableP8, data, bp, bw, x, y, xBegin, xEnd, n, src);
+                src += n;
+                count -= n;
+            }
+            // 2. whole 16-row groups
+            if (count >= 16u * width)
+            {
+                const u32 used = StreamT8Groups(s_tbl, data, bp, bw, y, xBegin, xEnd, count, src);
+                if (used != 0u)
+                {
+                    g_t8FastGroups.fetch_add(used / (16u * width), std::memory_order_relaxed);
+                    g_t8FastCalls.fetch_add(1, std::memory_order_relaxed);
+                }
+                src += used;
+                count -= used;
+            }
+            // 3. tail
+            if (count > 0)
+                StreamBytesFast<P8, 1>(PageTableP8, data, bp, bw, x, y, xBegin, xEnd, count, src);
+        }
+    }
+
+    static bool UploadStreamFast(int kind, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+    {
+        switch (kind)
+        {
+        case 4:  StreamT8(data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 1:  StreamFast2<C24, 0>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 5:  StreamFast2<P8H, 1>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 6:  StreamFast2<P4, 2>(PageTableP4, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 7:  StreamFast2<P4HL, 2>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 8:  StreamFast2<P4HH, 2>(PageTableC32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        case 10: StreamFast2<Z24, 0>(PageTableZ32, data, bp, bw, x, y, xBegin, xEnd, count, src); return true;
+        default: return UploadStreamOld(kind, data, bp, bw, x, y, xBegin, xEnd, count, src); // other kinds already use the hoisted StreamBytesFast
+        }
+    }
+
+    // PERF-LO: UploadStream wrapper: PS2X_UPLOAD_STAT (counters), PS2X_UPLOAD_FAST (new variants), PS2X_UPLOAD_VERIFY (compare new vs old). All default off.
+    static bool uploadEnvOn(const char *name)
+    {
+        const char *e = std::getenv(name);
+        return e && e[0] == '1';
+    }
+
+    bool UploadStream(int kind, u8 *data, u32 bp, u32 bw, u32 &x, u32 &y, u32 xBegin, u32 xEnd, u32 count, const u8 *src)
+    {
+        static const bool s_stat = uploadEnvOn("PS2X_UPLOAD_STAT");
+        static const bool s_fast = []() { const char *e = std::getenv("PS2X_UPLOAD_FAST"); const bool on = !(e && e[0] == '0'); /* PERF-LS: default ON */ if (on) { ::ps2xSafeLog("[uploadfast] ON\n"); std::fflush(stderr); } return on; }();
+        static const bool s_verify = s_fast && uploadEnvOn("PS2X_UPLOAD_VERIFY");
+
+        uint64_t t0 = 0;
+        if (s_stat)
+            t0 = __rdtsc();
+
+        bool ok;
+        if (!s_fast)
+        {
+            ok = UploadStreamOld(kind, data, bp, bw, x, y, xBegin, xEnd, count, src);
+        }
+        else if (!s_verify || ([]() {
+                     static const uint64_t s_every = []() { const char *e = std::getenv("PS2X_UPLOAD_VERIFY_EVERY"); const unsigned long long n = e ? std::strtoull(e, nullptr, 10) : 64ull; return n ? static_cast<uint64_t>(n) : 1ull; }();
+                     static uint64_t s_ctr = 0;
+                     return (++s_ctr % s_every) != 0u;
+                 }()))
+        {
+            ok = UploadStreamFast(kind, data, bp, bw, x, y, xBegin, xEnd, count, src);
+        }
+        else
+        {
+            // Verify: snapshot only the pages the call can touch (over-covering), run OLD, keep its result, restore, run NEW, compare.
+            // The OLD result is always the one left in VRAM.
+            static std::vector<u8> s_snap, s_oldRes;
+            static std::vector<u32> s_spans; // byte offsets (8 KB aligned) of the covered pages
+            static uint64_t s_verified = 0, s_mismatch = 0, s_fallback4mb = 0;
+            constexpr u32 kPageBytes = 8192u;
+            constexpr u32 kMemMask = static_cast<u32>(MEMORY_SIZE - 1u);
+            s_spans.clear();
+            bool whole = false;
+            {
+                u32 PW = 64, PH = 32, BPP = 32;
+                switch (kind)
+                {
+                case 2: case 3: case 11: case 12: PW = 64; PH = 64; break;
+                case 4: PW = 128; PH = 64; break;
+                case 6: PW = 128; PH = 128; break;
+                default: PW = 64; PH = 32; break;
+                }
+                // geometry cross-check against the traits for the formats we special-case, else fall back to the whole VRAM
+                if ((kind == 4 && (PixelStorageTraits<P8>::PageExtent().x != PW || PixelStorageTraits<P8>::PageExtent().y != PH)) ||
+                    (kind == 6 && (PixelStorageTraits<P4>::PageExtent().x != PW || PixelStorageTraits<P4>::PageExtent().y != PH)) ||
+                    (kind == 0 && (PixelStorageTraits<C32>::PageExtent().x != PW || PixelStorageTraits<C32>::PageExtent().y != PH)) ||
+                    (kind == 2 && (PixelStorageTraits<C16>::PageExtent().x != PW || PixelStorageTraits<C16>::PageExtent().y != PH)) ||
+                    kind < 0 || kind > 12 || xEnd <= xBegin || bw == 0u || x < xBegin || x >= xEnd || bw > 1024u || count > (1u << 26))
+                    whole = true;
+                if (!whole)
+                {
+                    const u32 width = xEnd - xBegin;
+                    const u32 rowsN = (x - xBegin + count + width - 1u) / width;
+                    const u32 yLast = y + (rowsN ? rowsN - 1u : 0u);
+                    const u32 pagesPerRow = (bw * 64u) / PW;
+                    const u32 basePage = bp / BPP;
+                    const u32 pxLo = xBegin / PW, pxHi = (xEnd - 1u) / PW;
+                    const u64 nPages = static_cast<u64>(yLast / PH - y / PH + 1u) * (pxHi - pxLo + 3u);
+                    if (nPages > 512u)
+                        whole = true;
+                    else
+                    {
+                        for (u32 r = y / PH; r <= yLast / PH; ++r)
+                            for (u32 px = pxLo; px <= pxHi + 1u; ++px)
+                            {
+                                // one page of margin on each side (px - 1 handled by starting one lower)
+                                const u32 pageIdx = basePage + r * pagesPerRow + px;
+                                for (u32 m = 0; m < 2u; ++m)
+                                    s_spans.push_back(((pageIdx - m) * kPageBytes) & kMemMask);
+                            }
+                    }
+                }
+            }
+            if (!whole)
+            {
+                std::sort(s_spans.begin(), s_spans.end()); // each covered page copied once
+                s_spans.erase(std::unique(s_spans.begin(), s_spans.end()), s_spans.end());
+            }
+            if (whole)
+            {
+                ++s_fallback4mb;
+                s_spans.clear();
+                for (u32 off = 0; off < MEMORY_SIZE; off += kPageBytes)
+                    s_spans.push_back(off);
+            }
+            s_snap.resize(s_spans.size() * kPageBytes);
+            s_oldRes.resize(s_spans.size() * kPageBytes);
+            for (size_t i = 0; i < s_spans.size(); ++i)
+                std::memcpy(s_snap.data() + i * kPageBytes, data + s_spans[i], kPageBytes);
+            const u32 x0 = x, y0 = y;
+            u32 xo = x, yo = y;
+            ok = UploadStreamOld(kind, data, bp, bw, xo, yo, xBegin, xEnd, count, src);
+            for (size_t i = 0; i < s_spans.size(); ++i)
+                std::memcpy(s_oldRes.data() + i * kPageBytes, data + s_spans[i], kPageBytes);
+            for (size_t i = 0; i < s_spans.size(); ++i)
+                std::memcpy(data + s_spans[i], s_snap.data() + i * kPageBytes, kPageBytes);
+            u32 xn = x, yn = y;
+            UploadStreamFast(kind, data, bp, bw, xn, yn, xBegin, xEnd, count, src);
+            bool same = (xn == xo && yn == yo);
+            for (size_t i = 0; same && i < s_spans.size(); ++i)
+                same = std::memcmp(data + s_spans[i], s_oldRes.data() + i * kPageBytes, kPageBytes) == 0;
+            ++s_verified;
+            if (!same)
+            {
+                ++s_mismatch;
+                if (s_mismatch <= 20)
+                {
+                    ::ps2xSafeLog("[uploadfast] MISMATCH kind=%d x=%u y=%u w=%u h=%u off=%u\n", kind, x0, y0, xEnd - xBegin, count / ((xEnd - xBegin) ? (xEnd - xBegin) : 1u), x0 - xBegin);
+                    std::fflush(stderr);
+                }
+            }
+            // leave the OLD result in VRAM: restore each covered page from the saved OLD result (NOT a whole-VRAM copy: s_oldRes only holds the covered pages)
+            for (size_t i = 0; i < s_spans.size(); ++i)
+                std::memcpy(data + s_spans[i], s_oldRes.data() + i * kPageBytes, kPageBytes);
+            {
+                static uint32_t s_geomPrints = 0;
+                if (s_geomPrints < 8u)
+                {
+                    ++s_geomPrints;
+                    ::ps2xSafeLog("[uploadfast] verify geometry: kind=%d pages=%zu fallback=%d\n", kind, s_spans.size(), whole ? 1 : 0);
+                    std::fflush(stderr);
+                }
+            }
+            x = xo;
+            y = yo;
+            if ((s_verified & 255u) == 0u)
+            {
+                ::ps2xSafeLog("[uploadfast] verified=%llu mismatches=%llu fallback4MB=%llu\n", static_cast<unsigned long long>(s_verified), static_cast<unsigned long long>(s_mismatch), static_cast<unsigned long long>(s_fallback4mb));
+                std::fflush(stderr);
+            }
+        }
+
+        if (s_stat)
+        {
+            static uint64_t s_calls[13]{}, s_bytes[13]{}, s_ticks[13]{};
+            static uint64_t s_winTsc = __rdtsc();
+            static auto s_winT = std::chrono::steady_clock::now();
+            if (kind >= 0 && kind < 13)
+            {
+                static const u32 kBpp[13] = {4, 3, 2, 2, 1, 1, 0, 0, 0, 4, 3, 2, 2};
+                const uint64_t t1 = __rdtsc();
+                ++s_calls[kind];
+                s_bytes[kind] += (kBpp[kind] != 0u) ? static_cast<uint64_t>(count) * kBpp[kind] : static_cast<uint64_t>(count / 2u);
+                s_ticks[kind] += t1 - t0;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(now - s_winT).count();
+            if (ms >= 5000.0)
+            {
+                const uint64_t tsc = __rdtsc();
+                const double tpm = static_cast<double>(tsc - s_winTsc) / ms;
+                char buf[512];
+                int len = ::snprintf(buf, sizeof(buf), "[uploadstat] window_ms=%.0f", ms);
+                for (int k = 0; k < 13 && len > 0 && len < static_cast<int>(sizeof(buf)) - 64; ++k)
+                {
+                    if (s_calls[k] == 0)
+                        continue;
+                    len += ::snprintf(buf + len, sizeof(buf) - static_cast<size_t>(len), " kind=%d:%llu/%.2f/%.1f", k,
+                                      static_cast<unsigned long long>(s_calls[k]), static_cast<double>(s_bytes[k]) / (1024.0 * 1024.0), static_cast<double>(s_ticks[k]) / tpm);
+                    s_calls[k] = s_bytes[k] = s_ticks[k] = 0;
+                    if (k == 4 && len > 0 && len < static_cast<int>(sizeof(buf)) - 48)
+                        len += ::snprintf(buf + len, sizeof(buf) - static_cast<size_t>(len), " (fast=%llu groups=%llu)",
+                                          static_cast<unsigned long long>(g_t8FastCalls.exchange(0, std::memory_order_relaxed)),
+                                          static_cast<unsigned long long>(g_t8FastGroups.exchange(0, std::memory_order_relaxed)));
+                }
+                ::ps2xSafeLog("%s\n", buf);
+                std::fflush(stderr);
+                s_winT = now;
+                s_winTsc = tsc;
+            }
+        }
+        return ok;
     }
 
     // PERF-GR: read one row of pixels (same PixelStorageTraits<>::Read as ReadCT32/ReadCT24/ReadCT16/ReadCT16S, without the per-pixel indirect call).

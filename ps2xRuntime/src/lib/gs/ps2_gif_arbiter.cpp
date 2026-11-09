@@ -130,7 +130,7 @@ bool gsBatchPopEnabled()
 {
     static const bool on = []() {
         const char *v = std::getenv("PS2X_GS_BATCHPOP");
-        const bool enabled = v && (v[0] == '1' || (v[0] != '0' && std::strcmp(v, "off") != 0 && std::strcmp(v, "false") != 0 && v[0] != '\0'));
+        const bool enabled = !(v && v[0] == '0'); // PERF-LS: default ON
         if (enabled)
         {
             ::ps2xSafeLog("[gsbatch] ON max=64\n");
@@ -173,6 +173,7 @@ thread_local std::vector<std::vector<uint8_t>> t_gsPending;
 thread_local size_t t_gsPendingBytes = 0;
 std::atomic<bool> s_gsAsyncStarted{false};
 std::atomic<uint64_t> g_gsqBusy{0}, g_gsqIdle{0}, g_gsqBlocked{0}, g_gsqPeak{0}, g_gsqPkts{0}; // PROBE-GQ
+extern "C" uint64_t ps2x_ft2_gsBusy() { return g_gsqBusy.load(std::memory_order_relaxed); } // PERF-LN
 
 void gsFlushPending()
 {

@@ -24,6 +24,74 @@ extern "C" void ps2_gs_front_stats(uint64_t *out) { out[0] = g_gqBuild.exchange(
 std::atomic<uint64_t> g_hostPresentSeq{0};
 // PERF-JD: rdtsc ticks per stage of the vblank present latch: 0 total, 1 Flush+Sync, 2 backend Present, 3 Vk syncPages (in Present), 4 VRAM snapshot, 5 CPU de-swizzle, 7 count
 std::atomic<uint64_t> g_presTicks[8]{};
+
+// PERF-LN (PS2X_FT2=1): frame-time metric measured where the frame is produced + hitch dump of what the late frame waited for.
+extern "C" uint64_t ps2x_ft2_waitTicks(int idx); // ps2_memory.cpp (g_waitTicks[idx], non-resetting)
+extern "C" uint64_t ps2x_ft2_gsBusy();           // gs/ps2_gif_arbiter.cpp (g_gsqBusy, non-resetting)
+extern "C" uint64_t ps2x_ft2_presentHold();      // gs/ps2_vk_gs_backend.cpp (g_gqPresentHold, non-resetting)
+void ps2xSafeLog(const char *fmt, ...);
+static void ft2OnPresent()
+{
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_FT2"); return e && e[0] == '1'; }();
+    if (!s_on)
+        return;
+    using clk = std::chrono::steady_clock;
+    static double s_tpm = 0.0;
+    static clk::time_point s_last{};
+    static clk::time_point s_winStart{};
+    static bool s_have = false;
+    static std::vector<double> s_dts;
+    static uint32_t s_over20 = 0, s_over25 = 0, s_hitches = 0;
+    static uint64_t s_prev[5]{}; // fence ticks, vif busy, gs busy, present hold, fence count
+    if (s_tpm == 0.0)
+    {
+        const auto c0 = clk::now();
+        const uint64_t t0 = __rdtsc();
+        while (std::chrono::duration<double, std::milli>(clk::now() - c0).count() < 100.0) {}
+        const uint64_t t1 = __rdtsc();
+        s_tpm = static_cast<double>(t1 - t0) / std::chrono::duration<double, std::milli>(clk::now() - c0).count();
+        if (s_tpm <= 0.0) s_tpm = 1.0;
+    }
+    const auto now = clk::now();
+    const uint64_t cur[5] = {ps2x_ft2_waitTicks(0), ps2x_ft2_waitTicks(4), ps2x_ft2_gsBusy(), ps2x_ft2_presentHold(), ps2x_ft2_waitTicks(5)};
+    double d[5];
+    for (int i = 0; i < 5; ++i)
+    {
+        d[i] = static_cast<double>(cur[i] >= s_prev[i] ? cur[i] - s_prev[i] : cur[i]); // other reporters may reset the shared counters
+        s_prev[i] = cur[i];
+    }
+    if (!s_have)
+    {
+        s_have = true;
+        s_last = now;
+        s_winStart = now;
+        return;
+    }
+    const double dt = std::chrono::duration<double, std::milli>(now - s_last).count();
+    s_last = now;
+    s_dts.push_back(dt);
+    if (dt > 20.0) ++s_over20;
+    if (dt > 25.0) ++s_over25;
+    if (dt > 22.0 && s_hitches < 400u)
+    {
+        ++s_hitches;
+        ::ps2xSafeLog("[hitch] dt=%.1f ee_wait=%.1f vif_busy=%.1f gs_busy=%.1f present_hold=%.1f fence_n=%llu\n",
+                      dt, d[0] / s_tpm, d[1] / s_tpm, d[2] / s_tpm, d[3] / s_tpm, static_cast<unsigned long long>(d[4]));
+        std::fflush(stderr);
+    }
+    if (std::chrono::duration<double, std::milli>(now - s_winStart).count() >= 5000.0 && !s_dts.empty())
+    {
+        std::vector<double> v = s_dts;
+        std::sort(v.begin(), v.end());
+        auto pct = [&](double p) { return v[std::min(v.size() - 1, static_cast<size_t>(p * static_cast<double>(v.size())))]; };
+        ::ps2xSafeLog("[ft2] n=%zu p50=%.2f p95=%.2f p99=%.2f max=%.2f ms | over20=%u over25=%u\n",
+                      v.size(), pct(0.50), pct(0.95), pct(0.99), v.back(), s_over20, s_over25);
+        std::fflush(stderr);
+        s_dts.clear();
+        s_over20 = s_over25 = 0;
+        s_winStart = now;
+    }
+}
 namespace
 {
     static inline bool isVerboseLog()
@@ -685,6 +753,7 @@ void GS::latchHostPresentationFrame()
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
         g_hostPresentSeq.fetch_add(1, std::memory_order_release);
+        ft2OnPresent(); // PERF-LN
     }
 
     // PERF-JD: every 128 latches print the average ms per latch for each stage

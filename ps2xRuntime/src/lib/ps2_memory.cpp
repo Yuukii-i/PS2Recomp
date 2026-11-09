@@ -416,6 +416,7 @@ bool PS2Memory::initialize(size_t ramSize)
 #include <intrin.h>
 // PROBE-KF: wait/busy ticks: 0 vif1 fence wait, 1 vif1 enqueue wait, 2 gs fence wait, 3 gs backpressure wait, 4 vif1 worker busy, 5 fence waits (count)
 std::atomic<uint64_t> g_waitTicks[8]{};
+extern "C" uint64_t ps2x_ft2_waitTicks(int idx) { return (idx >= 0 && idx < 8) ? g_waitTicks[idx].load(std::memory_order_relaxed) : 0u; } // PERF-LN
 extern "C" void ps2_gs_async_fence(); // PERF-GK (gs/ps2_gif_arbiter.cpp)
 
 // PERF-HN: async VIF1/VU1 worker (opt-in PS2X_VIF1_ASYNC=1). The EE thread copies VIF1 packet data into jobs; one worker
