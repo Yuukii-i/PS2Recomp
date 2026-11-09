@@ -5,6 +5,10 @@
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/ee_scheduler.h"
 #include "probe_ae.h"
+#include <cstdio>
+#include <vector>
+
+void ps2xSafeLog(const char *fmt, ...); // PROBE-LH (global, defined elsewhere)
 
 namespace ps2_stubs
 {
@@ -1222,8 +1226,53 @@ namespace ps2_stubs
         int32_t mode = static_cast<int32_t>(getRegU32(ctx, 4));
         auto &mem = runtime->memory();
 
+        // PROBE-LH (PS2X_SYNCPATH_LOG=1): histogram of guest return addresses of sceGsSyncPath
+        static const bool s_spLog = []() { const char *e = std::getenv("PS2X_SYNCPATH_LOG"); return e && e[0] == '1'; }();
+        if (s_spLog && mode != 0)
+        {
+            static uint32_t s_spNonZero = 0;
+            if (s_spNonZero < 8)
+            {
+                ++s_spNonZero;
+                ::ps2xSafeLog("[syncpath] mode=%d ra=0x%08X\n", static_cast<int>(mode), getRegU32(ctx, 31));
+                fflush(stderr);
+            }
+        }
+
         if (mode == 0)
         {
+            if (s_spLog)
+            {
+                static uint32_t s_spCalls = 0;
+                static uint32_t s_spN = 0;
+                static uint32_t s_spRa[16];
+                static uint32_t s_spCnt[16];
+                const uint32_t ra = getRegU32(ctx, 31);
+                ++s_spCalls;
+                uint32_t i = 0;
+                for (; i < s_spN; ++i)
+                    if (s_spRa[i] == ra) break;
+                if (i == s_spN && s_spN < 16)
+                {
+                    s_spRa[s_spN] = ra;
+                    s_spCnt[s_spN] = 0;
+                    ++s_spN;
+                }
+                if (i < s_spN) ++s_spCnt[i];
+                if (s_spCalls % 120 == 0)
+                {
+                    char buf[512];
+                    int len = ::snprintf(buf, sizeof(buf), "[syncpath] calls=%u mode=0", s_spCalls);
+                    for (uint32_t k = 0; k < s_spN && len > 0 && len < static_cast<int>(sizeof(buf)) - 32; ++k)
+                    {
+                        len += ::snprintf(buf + len, sizeof(buf) - len, " ra=0x%08X:%u", s_spRa[k], s_spCnt[k]);
+                        s_spCnt[k] = 0;
+                    }
+                    ::ps2xSafeLog("%s\n", buf);
+                    fflush(stderr);
+                }
+            }
+
             mem.processPendingTransfers();
             runtime->drainCompletedDmacHandlers(rdram);
 
@@ -1255,6 +1304,43 @@ namespace ps2_stubs
             {
                 // PERF-SL: only the per-frame sync (called from the frame-swap routine, return address 0x0051E290) is overlapped, with a bounded lag; every other caller waits fully
                 static const uint32_t s_lag = []() { const char *e = std::getenv("PS2X_SYNCPATH_LAG"); const unsigned long n = e ? std::strtoul(e, nullptr, 10) : 1ul; return static_cast<uint32_t>(n ? n : 1ul); }();
+                // PROBE-LI: PS2X_SYNCPATH_SKIP_RA = comma-separated hex return addresses that skip the wait entirely
+                static const std::vector<uint32_t> s_skipRa = []() {
+                    std::vector<uint32_t> v;
+                    const char *e = std::getenv("PS2X_SYNCPATH_SKIP_RA");
+                    if (!e) return v;
+                    const char *p = e;
+                    while (*p)
+                    {
+                        char *end = nullptr;
+                        const unsigned long n = std::strtoul(p, &end, 16);
+                        if (end == p) { ++p; continue; }
+                        v.push_back(static_cast<uint32_t>(n));
+                        p = end;
+                        while (*p == ',' || *p == ' ') ++p;
+                    }
+                    if (!v.empty())
+                    {
+                        char buf[256];
+                        int len = ::snprintf(buf, sizeof(buf), "[syncpath] skip list:");
+                        for (size_t k = 0; k < v.size() && len > 0 && len < static_cast<int>(sizeof(buf)) - 16; ++k)
+                            len += ::snprintf(buf + len, sizeof(buf) - len, " 0x%08X", v[k]);
+                        ::ps2xSafeLog("%s\n", buf);
+                        fflush(stderr);
+                    }
+                    return v;
+                }();
+                {
+                    const uint32_t raNow = getRegU32(ctx, 31);
+                    for (uint32_t s : s_skipRa)
+                    {
+                        if (s == raNow)
+                        {
+                            setReturnS32(ctx, 0);
+                            return;
+                        }
+                    }
+                }
                 if (getRegU32(ctx, 31) == 0x0051E290u)
                 {
                     ps2_vif1_sync_lag(s_lag);
