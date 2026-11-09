@@ -260,6 +260,261 @@ namespace ps2_stubs
             data[19] = pressureValue(state, portState, kPadBtnR2);
         }
 
+        struct PadRecord
+        {
+            uint16_t buttons = 0xFFFFu;
+            uint8_t lx = 0x80u;
+            uint8_t ly = 0x80u;
+            uint8_t rx = 0x80u;
+            uint8_t ry = 0x80u;
+        };
+
+        std::mutex s_padHookMutex;
+        bool s_padHookInitialized = false;
+
+        bool s_playActive = false;
+        bool s_recActive = false;
+        bool s_playHold = false;
+
+        std::string s_recFilename;
+        std::vector<PadRecord> s_recRecords;
+        size_t s_recPolls = 0;
+
+        std::string s_playFilename;
+        std::vector<PadRecord> s_playRecords;
+        size_t s_playPollIndex = 0;
+        bool s_playEndReported = false;
+
+        void flushRecordFileLocked()
+        {
+            if (s_recFilename.empty())
+            {
+                return;
+            }
+            std::string tmpPath = s_recFilename + ".tmp";
+            std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+            if (!out.is_open())
+            {
+                return;
+            }
+            const char header[] = "PADREC1\n";
+            out.write(header, 8);
+            for (const auto &rec : s_recRecords)
+            {
+                uint8_t buf[6];
+                buf[0] = static_cast<uint8_t>(rec.buttons & 0xFFu);
+                buf[1] = static_cast<uint8_t>((rec.buttons >> 8) & 0xFFu);
+                buf[2] = rec.lx;
+                buf[3] = rec.ly;
+                buf[4] = rec.rx;
+                buf[5] = rec.ry;
+                out.write(reinterpret_cast<const char *>(buf), sizeof(buf));
+            }
+            out.flush();
+            out.close();
+
+            std::remove(s_recFilename.c_str());
+            if (std::rename(tmpPath.c_str(), s_recFilename.c_str()) != 0)
+            {
+                std::ofstream direct(s_recFilename, std::ios::binary | std::ios::trunc);
+                if (direct.is_open())
+                {
+                    direct.write(header, 8);
+                    for (const auto &rec : s_recRecords)
+                    {
+                        uint8_t buf[6];
+                        buf[0] = static_cast<uint8_t>(rec.buttons & 0xFFu);
+                        buf[1] = static_cast<uint8_t>((rec.buttons >> 8) & 0xFFu);
+                        buf[2] = rec.lx;
+                        buf[3] = rec.ly;
+                        buf[4] = rec.rx;
+                        buf[5] = rec.ry;
+                        direct.write(reinterpret_cast<const char *>(buf), sizeof(buf));
+                    }
+                }
+            }
+        }
+
+        void onProcessExitPadRec()
+        {
+            std::lock_guard<std::mutex> lock(s_padHookMutex);
+            if (s_recActive)
+            {
+                flushRecordFileLocked();
+            }
+        }
+
+        void initPadRecordReplayLocked()
+        {
+            if (s_padHookInitialized)
+            {
+                return;
+            }
+            s_padHookInitialized = true;
+
+            const char *playEnv = std::getenv("PS2X_PAD_PLAY");
+            const char *recEnv = std::getenv("PS2X_PAD_REC");
+            const char *holdEnv = std::getenv("PS2X_PAD_PLAY_HOLD");
+
+            if (holdEnv && (std::strcmp(holdEnv, "1") == 0))
+            {
+                s_playHold = true;
+            }
+
+            const bool hasPlay = (playEnv != nullptr && playEnv[0] != '\0');
+            const bool hasRec = (recEnv != nullptr && recEnv[0] != '\0');
+
+            if (hasPlay && hasRec)
+            {
+                ::ps2xSafeLog("[pad] warning: both PS2X_PAD_PLAY and PS2X_PAD_REC set; PLAY wins, REC ignored\n");
+                std::fflush(stderr);
+            }
+
+            if (hasPlay)
+            {
+                s_playActive = true;
+                s_playFilename = playEnv;
+                std::ifstream in(s_playFilename, std::ios::binary | std::ios::ate);
+                if (in.is_open())
+                {
+                    const std::streamsize fileSize = in.tellg();
+                    in.seekg(0, std::ios::beg);
+                    if (fileSize >= 8)
+                    {
+                        std::vector<uint8_t> buffer(static_cast<size_t>(fileSize));
+                        in.read(reinterpret_cast<char *>(buffer.data()), fileSize);
+                        if (std::memcmp(buffer.data(), "PADREC1\n", 8) == 0)
+                        {
+                            const size_t payloadSize = buffer.size() - 8;
+                            size_t recordSize = 6;
+                            if (payloadSize % 7 == 0 && payloadSize % 6 != 0)
+                            {
+                                recordSize = 7;
+                            }
+                            const size_t numRecords = payloadSize / recordSize;
+                            s_playRecords.reserve(numRecords);
+                            for (size_t i = 0; i < numRecords; ++i)
+                            {
+                                const size_t offset = 8 + i * recordSize;
+                                PadRecord rec;
+                                rec.buttons = static_cast<uint16_t>(buffer[offset] | (buffer[offset + 1] << 8));
+                                rec.lx = buffer[offset + 2];
+                                rec.ly = buffer[offset + 3];
+                                rec.rx = buffer[offset + 4];
+                                rec.ry = buffer[offset + 5];
+                                s_playRecords.push_back(rec);
+                            }
+                        }
+                        else
+                        {
+                            ::ps2xSafeLog("[padplay] ERROR: invalid header in %s\n", s_playFilename.c_str());
+                            std::fflush(stderr);
+                        }
+                    }
+                    in.close();
+                }
+                else
+                {
+                    ::ps2xSafeLog("[padplay] ERROR: failed to open %s\n", s_playFilename.c_str());
+                    std::fflush(stderr);
+                }
+
+                ::ps2xSafeLog("[padplay] loaded %zu polls from %s\n", s_playRecords.size(), s_playFilename.c_str());
+                std::fflush(stderr);
+            }
+            else if (hasRec)
+            {
+                s_recActive = true;
+                s_recFilename = recEnv;
+                std::atexit(onProcessExitPadRec);
+                ::ps2xSafeLog("[padrec] recording to %s\n", s_recFilename.c_str());
+                std::fflush(stderr);
+            }
+        }
+
+        bool isPadPathRead()
+        {
+            const char *env = std::getenv("PS2X_PAD_PATH");
+            return (env != nullptr && std::strcmp(env, "read") == 0);
+        }
+
+        void applyPadRecordReplay(PadInputState &state)
+        {
+            std::lock_guard<std::mutex> lock(s_padHookMutex);
+            initPadRecordReplayLocked();
+
+            if (s_playActive)
+            {
+                const size_t N = s_playRecords.size();
+                const size_t n = s_playPollIndex++;
+
+                if (n < N)
+                {
+                    const auto &rec = s_playRecords[n];
+                    state.buttons = rec.buttons;
+                    state.lx = rec.lx;
+                    state.ly = rec.ly;
+                    state.rx = rec.rx;
+                    state.ry = rec.ry;
+                }
+                else
+                {
+                    if (!s_playEndReported)
+                    {
+                        s_playEndReported = true;
+                        ::ps2xSafeLog("[padplay] END at poll %zu\n", N);
+                        std::fflush(stderr);
+                        ::ps2xSafeLog("[bench] START poll=%zu\n", N);
+                        std::fflush(stderr);
+                    }
+                    if (s_playHold && !s_playRecords.empty())
+                    {
+                        const auto &last = s_playRecords.back();
+                        state.buttons = last.buttons;
+                        state.lx = last.lx;
+                        state.ly = last.ly;
+                        state.rx = last.rx;
+                        state.ry = last.ry;
+                    }
+                    else
+                    {
+                        state.buttons = 0xFFFFu;
+                        state.lx = 0x80u;
+                        state.ly = 0x80u;
+                        state.rx = 0x80u;
+                        state.ry = 0x80u;
+                    }
+                }
+
+                if (n > 0 && (n % 3600 == 0))
+                {
+                    ::ps2xSafeLog("[padplay] poll=%zu/%zu\n", n, N);
+                    std::fflush(stderr);
+                }
+            }
+            else if (s_recActive)
+            {
+                PadRecord rec;
+                rec.buttons = state.buttons;
+                rec.lx = state.lx;
+                rec.ly = state.ly;
+                rec.rx = state.rx;
+                rec.ry = state.ry;
+                s_recRecords.push_back(rec);
+                ++s_recPolls;
+
+                if (s_recPolls % 600 == 0)
+                {
+                    flushRecordFileLocked();
+                }
+                if (s_recPolls % 3600 == 0)
+                {
+                    ::ps2xSafeLog("[padrec] polls=%zu\n", s_recPolls);
+                    std::fflush(stderr);
+                }
+            }
+        }
+
         bool readPadPortData(int port, int slot, PS2Runtime *runtime, uint8_t *outData, uint32_t dataAddr)
         {
             if (!outData)
@@ -307,6 +562,11 @@ namespace ps2_stubs
                     applyGamepadState(state);
                     applyKeyboardState(state, portState.analogMode);
                 }
+            }
+
+            if (isPadPathRead() && port == 0 && slot == 0)
+            {
+                applyPadRecordReplay(state);
             }
 
             fillPadStatus(outData, state, portState);
@@ -962,6 +1222,11 @@ namespace ps2_stubs
             {
                 state.buttons &= ~inj.mask;
             }
+        }
+
+        if (port == 0 && !isPadPathRead())
+        {
+            applyPadRecordReplay(state);
         }
 
         return state;
