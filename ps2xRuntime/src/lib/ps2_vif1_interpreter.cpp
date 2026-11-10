@@ -16,6 +16,8 @@ extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint1
 #include <mutex>
 #include <cstdarg>
 
+extern void ps2xSafeLog(const char *fmt, ...);
+
 // =========================================================================
 // Task DZ: VIF1 UNPACK ring buffer & VIF1 register dump
 // =========================================================================
@@ -86,15 +88,14 @@ extern "C" bool ps2_vif1_findLastUnpackForQw(uint32_t qw, uint32_t *outDest, uin
 // =========================================================================
 // Task EH: VU1 unpack ring for qw 440..720 & shape counters
 // =========================================================================
+static const bool g_vu3dProbeEnabled = []() {
+    const char *v = std::getenv("PS2X_PROBE_VU3D");
+    return (v && (v[0] == '1' || v[0] == 't'));
+}();
+
 static inline bool isVu3dProbeEnabled()
 {
-    static int s_vu3d = -1;
-    if (s_vu3d == -1)
-    {
-        const char *v = std::getenv("PS2X_PROBE_VU3D");
-        s_vu3d = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
-    }
-    return s_vu3d == 1;
+    return g_vu3dProbeEnabled;
 }
 
 struct EhUnpackRecord {
@@ -812,16 +813,16 @@ namespace
         }
         return nullptr;
     }
-    bool vifStatOn()
+    static const bool g_vifStatOn = []() { const char *e = std::getenv("PS2X_VIFSTAT"); return e && e[0] == '1'; }();
+    inline __forceinline bool vifStatOn()
     {
-        static const bool on = []() { const char *e = std::getenv("PS2X_VIFSTAT"); return e && e[0] == '1'; }();
-        return on;
+        return g_vifStatOn;
     }
     struct VsTimer
     {
         uint64_t *acc;
         uint64_t t0;
-        explicit VsTimer(uint64_t *a) : acc(vifStatOn() ? a : nullptr), t0(acc ? __rdtsc() : 0) {}
+        explicit VsTimer(uint64_t *a) : acc(g_vifStatOn ? a : nullptr), t0(acc ? __rdtsc() : 0) {}
         ~VsTimer()
         {
             if (acc)
@@ -834,7 +835,7 @@ namespace
         uint64_t t0 = 0;
         void set(uint32_t key, uint32_t vecs)
         {
-            if (!vifStatOn())
+            if (!g_vifStatOn)
                 return;
             slot = vsShapeSlot(key);
             t0 = __rdtsc();
@@ -895,6 +896,36 @@ namespace
         g_vs.wall = now;
         g_vs.t0 = __rdtsc();
     }
+
+    // Hoisted per-UNPACK / per-MSCAL flags and unpack setup cache
+    static const bool s_unpackQuiet = !(probe_ae::isEnabled() || probe_ae::isDcProbeEnabled() || probe_ae::isMovieHleFrameMode() || probe_ae::isMovieHleVerify() ||
+                                        isVu3dProbeEnabled());
+    static const bool s_skipUnpackEnabled = probe_ae::isMovieSkipUnpackEnabled();
+    static const bool s_unpackCountsOn = probe_ae::isEnabled() || probe_ae::isDcProbeEnabled() || isVu3dProbeEnabled();
+
+    static const bool g_unpackFastEnabled = []() -> bool {
+        const char *env = std::getenv("PS2X_UNPACK_FAST");
+        return !(env && (env[0] == '0' || env[0] == 'f' || env[0] == 'F'));
+    }();
+
+    static const bool g_unpackVerifyEnabled = []() -> bool {
+        const char *env = std::getenv("PS2X_UNPACK_VERIFY");
+        return env && (env[0] == '1' || env[0] == 't' || env[0] == 'T');
+    }();
+
+    inline __forceinline bool isUnpackFastEnabled() { return g_unpackFastEnabled; }
+    inline __forceinline bool isUnpackVerifyEnabled() { return g_unpackVerifyEnabled; }
+
+    static const bool s_uvOn = []() {
+        const char *e = std::getenv("PS2X_UNPACK_SIMD");
+        return !(e && e[0] == '0');
+    }(); // PERF-UV
+
+    enum Act : uint8_t {
+        ACT_DECODED = 0,
+        ACT_CONST   = 1,
+        ACT_PROTECT = 2
+    };
 } // namespace
 
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
@@ -1300,10 +1331,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             VsShapeTimer vsShape;
             if (vifStatOn())
                 ++g_vs.unpacks;
-            // PERF-VS: one cached flag instead of five probe-state calls per UNPACK (1.4M/s); every probe below is env-driven and fixed for the whole run
-            static const bool s_unpackQuiet = !(probe_ae::isEnabled() || probe_ae::isDcProbeEnabled() || probe_ae::isMovieHleFrameMode() || probe_ae::isMovieHleVerify() ||
-                                                isVu3dProbeEnabled());
-            static const bool s_skipUnpackEnabled = probe_ae::isMovieSkipUnpackEnabled();
             uint8_t vn = (opcode >> 2) & 0x3;
             uint8_t vl = opcode & 0x3;
             const bool maskEnable = (opcode & 0x10u) != 0u;
@@ -1430,7 +1457,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 const uint8_t *srcBase = data + pos;
 
                 // PERF-VS: the fast/generic counters only feed the probe log lines; two atomic RMWs per UNPACK (1.4M/s) are skipped when no probe is on
-                static const bool s_unpackCountsOn = probe_ae::isEnabled() || probe_ae::isDcProbeEnabled() || isVu3dProbeEnabled();
                 static std::atomic<uint64_t> s_ciFastCount{0};
                 static std::atomic<uint64_t> s_ciGenericCount{0};
                 static std::atomic<uint64_t> s_ciMismCount{0};
@@ -1467,36 +1493,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     std::printf("%s", msg);
                 };
 
-                auto isUnpackFastEnabled = []() -> bool {
-                    static int s_state = -1;
-                    if (s_state == -1) {
-                        const char *env = std::getenv("PS2X_UNPACK_FAST");
-                        s_state = (env && (env[0] == '0' || env[0] == 'f' || env[0] == 'F')) ? 0 : 1;
-                    }
-                    return s_state == 1;
-                };
-
-                auto isUnpackVerifyEnabled = []() -> bool {
-                    static int s_state = -1;
-                    if (s_state == -1) {
-                        const char *env = std::getenv("PS2X_UNPACK_VERIFY");
-                        s_state = (env && (env[0] == '1' || env[0] == 't' || env[0] == 'T')) ? 1 : 0;
-                    }
-                    return s_state == 1;
-                };
-
                 const uint32_t totalSpan = ((writeVectorCount - 1u) / wl) * cl + ((writeVectorCount - 1u) % wl);
                 const uint64_t lastVec = static_cast<uint64_t>(vuAddr) + totalSpan;
                 const bool rangeOk = (lastVec < 0x400u) && ((lastVec + 1u) * 16u <= PS2_VU1_DATA_SIZE);
                 const bool canFastPath = (cl >= wl && sourceVectorCount == writeVectorCount &&
                                           vn <= 3u && vl <= 2u &&
                                           ((vif1_regs.mode & 3u) == 0u) && rangeOk);
-
-                enum Act : uint8_t {
-                    ACT_DECODED = 0,
-                    ACT_CONST   = 1,
-                    ACT_PROTECT = 2
-                };
 
                 Act act[4][4];
                 uint32_t constVal[4][4];
@@ -1624,7 +1626,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         }
                     }
 
-                    static const bool s_uvOn = []() { const char *e = std::getenv("PS2X_UNPACK_SIMD"); return !(e && e[0] == '0'); }(); // PERF-UV
                     if (s_uvOn)
                     {
                         alignas(16) uint32_t dmA[4][4] = {}, pmA[4][4] = {}, cvA[4][4] = {};

@@ -14,6 +14,7 @@ namespace probe_ae {
 #include <iostream>
 #include <sstream>
 #include <vector>
+#include <unordered_map>
 #include <cstdlib>
 #include <chrono>
 #include <intrin.h>
@@ -255,6 +256,239 @@ namespace
     std::atomic<uint32_t> s_debugTexaWriteCount{0};
     std::atomic<uint32_t> s_debugCvFontUploadCount{0};
     std::atomic<uint32_t> s_debugLocalCopyCount{0};
+
+    // Task LW: lean per-triangle path (PS2X_GS_LEAN=1, PS2X_GS_LEAN_VERIFY=1)
+    static inline bool isGsLeanEnabled()
+    {
+        static const bool s_on = []() {
+            const char *e = std::getenv("PS2X_GS_LEAN");
+            const bool on = !(e && e[0] == '0');
+            if (on)
+            {
+                ::ps2xSafeLog("[gslean] ON\n");
+                std::fflush(stderr);
+            }
+            return on;
+        }();
+        return s_on;
+    }
+
+    static inline bool isGsLeanVerifyEnabled()
+    {
+        static const bool s_verify = []() {
+            if (!isGsLeanEnabled())
+                return false;
+            const char *e = std::getenv("PS2X_GS_LEAN_VERIFY");
+            return (e && e[0] == '1');
+        }();
+        return s_verify;
+    }
+
+    struct LeanVerifyKick
+    {
+        bool drawing;
+        GSVertex vtx;
+    };
+    static std::vector<LeanVerifyKick> *s_leanVerifyRecord = nullptr;
+
+    // PROBE-INTERP: per-draw log for the frame-interpolation feasibility study (PS2X_GS_INTERP_PROBE=1, file logs/interp_probe.txt)
+    static FILE *s_ip = nullptr;
+    static const bool s_interpProbeActive = []() -> bool {
+        const char *e = std::getenv("PS2X_GS_INTERP_PROBE");
+        if (e && e[0] == '1')
+        {
+            s_ip = std::fopen("logs/interp_probe.txt", "w");
+            return s_ip != nullptr;
+        }
+        return false;
+    }();
+
+    // Task LV: GIF packet shape statistics (PS2X_GIFSTAT=1)
+    static const bool s_gifStatOn = []() {
+        const char *e = std::getenv("PS2X_GIFSTAT");
+        return e && e[0] == '1';
+    }();
+
+    static uint64_t s_gifStatRegCounts[256]{};
+
+    struct GifShapeKey
+    {
+        uint64_t regs;
+        uint32_t nloop;
+        uint16_t prim;
+        uint8_t flg;
+        uint8_t nreg;
+        uint8_t pre;
+        uint8_t eop;
+
+        bool operator==(const GifShapeKey &o) const
+        {
+            return regs == o.regs &&
+                   nloop == o.nloop &&
+                   prim == o.prim &&
+                   flg == o.flg &&
+                   nreg == o.nreg &&
+                   pre == o.pre &&
+                   eop == o.eop;
+        }
+    };
+
+    struct GifShapeKeyHash
+    {
+        size_t operator()(const GifShapeKey &k) const
+        {
+            uint64_t h = k.regs;
+            h ^= (static_cast<uint64_t>(k.nloop) << 32) |
+                 (static_cast<uint64_t>(k.prim) << 16) |
+                 (static_cast<uint64_t>(k.flg) << 10) |
+                 (static_cast<uint64_t>(k.nreg) << 4) |
+                 (static_cast<uint64_t>(k.pre) << 1) |
+                 (static_cast<uint64_t>(k.eop));
+            h ^= h >> 33;
+            h *= 0xff51afd7ed558ccdull;
+            h ^= h >> 33;
+            h *= 0xc4ceb9fe1a85ec53ull;
+            h ^= h >> 33;
+            return static_cast<size_t>(h);
+        }
+    };
+
+    struct GifShapeVal
+    {
+        uint64_t count = 0;
+        uint64_t qwords = 0;
+        uint64_t ticks = 0;
+    };
+
+    static void recordGifStatTag(uint64_t tagLo, uint64_t tagHi,
+                                 uint32_t nloop, uint8_t flg, uint32_t nreg,
+                                 bool pre, uint32_t qwords, uint64_t ticks,
+                                 uint64_t curTsc)
+    {
+        static std::unordered_map<GifShapeKey, GifShapeVal, GifShapeKeyHash> s_shapes;
+        static uint64_t s_totalTags = 0;
+        static uint64_t s_totalQwords = 0;
+        static uint64_t s_totalTicks = 0;
+        static auto s_winStart = std::chrono::steady_clock::now();
+        static uint64_t s_winStartTsc = curTsc;
+        static uint64_t s_lastCheckTsc = curTsc;
+        static bool s_initialized = false;
+
+        if (!s_initialized)
+        {
+            s_winStart = std::chrono::steady_clock::now();
+            s_winStartTsc = curTsc;
+            s_lastCheckTsc = curTsc;
+            s_initialized = true;
+        }
+
+        const uint8_t eop = static_cast<uint8_t>((tagLo >> 15) & 1);
+        const uint16_t prim = pre ? static_cast<uint16_t>((tagLo >> 47) & 0x7FF) : 0u;
+
+        GifShapeKey key;
+        key.regs = tagHi;
+        key.nloop = nloop;
+        key.prim = prim;
+        key.flg = flg;
+        key.nreg = static_cast<uint8_t>(nreg);
+        key.pre = pre ? 1u : 0u;
+        key.eop = eop;
+
+        auto &val = s_shapes[key];
+        val.count++;
+        val.qwords += qwords;
+        val.ticks += ticks;
+
+        s_totalTags++;
+        s_totalQwords += qwords;
+        s_totalTicks += ticks;
+
+        if (curTsc > s_lastCheckTsc && curTsc - s_lastCheckTsc >= 10000000ull)
+        {
+            s_lastCheckTsc = curTsc;
+            const auto now = std::chrono::steady_clock::now();
+            const double winMs = std::chrono::duration<double, std::milli>(now - s_winStart).count();
+            if (winMs >= 5000.0)
+            {
+                const double sec = winMs / 1000.0;
+                const double ticksPerMs = winMs > 0.0 ? static_cast<double>(curTsc - s_winStartTsc) / winMs : 1.0;
+                const double msInTags = ticksPerMs > 0.0 ? (static_cast<double>(s_totalTicks) / ticksPerMs) / sec : 0.0;
+
+                ::ps2xSafeLog("[gifstat] window_ms=%.0f tags/s=%.0f qwords/s=%.0f ms/s_in_tags=%.1f\n",
+                              winMs,
+                              static_cast<double>(s_totalTags) / sec,
+                              static_cast<double>(s_totalQwords) / sec,
+                              msInTags);
+
+                std::vector<std::pair<GifShapeKey, GifShapeVal>> shapeList;
+                shapeList.reserve(s_shapes.size());
+                for (const auto &kv : s_shapes)
+                {
+                    shapeList.push_back(kv);
+                }
+                std::sort(shapeList.begin(), shapeList.end(), [](const auto &a, const auto &b) {
+                    return a.second.ticks > b.second.ticks;
+                });
+
+                const size_t printShapeCount = std::min<size_t>(10, shapeList.size());
+                for (size_t i = 0; i < printShapeCount; ++i)
+                {
+                    const auto &k = shapeList[i].first;
+                    const auto &v = shapeList[i].second;
+                    const double tagsPerSec = static_cast<double>(v.count) / sec;
+                    const double qwPerTag = v.count > 0 ? static_cast<double>(v.qwords) / static_cast<double>(v.count) : 0.0;
+                    const double nsPerTag = (v.count > 0 && ticksPerMs > 0.0) ? (static_cast<double>(v.ticks) / static_cast<double>(v.count) / ticksPerMs) * 1e6 : 0.0;
+                    const double msPerSec = ticksPerMs > 0.0 ? (static_cast<double>(v.ticks) / ticksPerMs) / sec : 0.0;
+                    ::ps2xSafeLog("[gifstat] flg=%u nloop=%u nreg=%u regs=%016llX pre=%u prim=%X eop=%u | tags/s=%.0f qw/tag=%.1f ns/tag=%.0f ms/s=%.1f\n",
+                                  static_cast<unsigned>(k.flg),
+                                  static_cast<unsigned>(k.nloop),
+                                  static_cast<unsigned>(k.nreg),
+                                  static_cast<unsigned long long>(k.regs),
+                                  static_cast<unsigned>(k.pre),
+                                  static_cast<unsigned>(k.prim),
+                                  static_cast<unsigned>(k.eop),
+                                  tagsPerSec, qwPerTag, nsPerTag, msPerSec);
+                }
+
+                struct RegStat
+                {
+                    uint8_t id;
+                    uint64_t count;
+                };
+                std::vector<RegStat> regList;
+                regList.reserve(256);
+                for (uint32_t r = 0; r < 256; ++r)
+                {
+                    if (s_gifStatRegCounts[r] > 0)
+                    {
+                        regList.push_back({static_cast<uint8_t>(r), s_gifStatRegCounts[r]});
+                    }
+                }
+                std::sort(regList.begin(), regList.end(), [](const RegStat &a, const RegStat &b) {
+                    return a.count > b.count;
+                });
+
+                const size_t printRegCount = std::min<size_t>(10, regList.size());
+                for (size_t i = 0; i < printRegCount; ++i)
+                {
+                    const double nPerSec = static_cast<double>(regList[i].count) / sec;
+                    ::ps2xSafeLog("[gifstat] reg=%02X n/s=%.0f\n",
+                                  static_cast<unsigned>(regList[i].id),
+                                  nPerSec);
+                }
+
+                std::fflush(stderr);
+
+                s_shapes.clear();
+                std::memset(s_gifStatRegCounts, 0, sizeof(s_gifStatRegCounts));
+                s_totalTags = 0;
+                s_totalQwords = 0;
+                s_totalTicks = 0;
+                s_winStart = now;
+                s_winStartTsc = curTsc;
+            }
+        }
+    }
 }
 
 
@@ -974,18 +1208,269 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         for (uint32_t i = 0; i < nreg; ++i)
             regs[i] = static_cast<uint8_t>((tagHi >> (i * 4)) & 0xF);
 
+        const uint32_t gifStatDataOffset = offset;
+        const uint64_t gifStatTsc0 = s_gifStatOn ? __rdtsc() : 0ull;
+
         if (flg == GIF_FMT_PACKED)
         {
-            for (uint32_t loop = 0; loop < nloop; ++loop)
+            const bool isDominantShape = (nreg == 4u) &&
+                (((tagHi & 0xFFFFull) == 0x512Aull) || ((tagHi & 0xFFFFull) == 0x412Aull));
+
+            if (isGsLeanEnabled() && isDominantShape)
             {
-                for (uint32_t r = 0; r < nreg; ++r)
+                static uint64_t s_leanTagIndex = 0;
+                static uint64_t s_leanVerifiedCount = 0;
+                static uint64_t s_leanMismatchCount = 0;
+                const uint64_t tagIdx = s_leanTagIndex++;
+                const bool doVerify = isGsLeanVerifyEnabled() && ((tagIdx & 63u) == 0u);
+
+                if (doVerify)
                 {
-                    if (offset + 16 > sizeBytes)
-                        return;
-                    uint64_t lo = loadLE64(data + offset);
-                    uint64_t hi = loadLE64(data + offset + 8);
-                    offset += 16;
-                    writeRegisterPacked(regs[r], lo, hi);
+                    const uint8_t initR = m_curR;
+                    const uint8_t initG = m_curG;
+                    const uint8_t initB = m_curB;
+                    const uint8_t initA = m_curA;
+                    const float initS = m_curS;
+                    const float initT = m_curT;
+                    const float initQ = m_curQ;
+                    const uint16_t initU = m_curU;
+                    const uint16_t initV = m_curV;
+                    const uint8_t initFog = m_curFog;
+                    const uint32_t tagPayloadOffset = offset;
+
+                    std::vector<LeanVerifyKick> recordedGeneric;
+                    recordedGeneric.reserve(nloop);
+                    s_leanVerifyRecord = &recordedGeneric;
+
+                    for (uint32_t loop = 0; loop < nloop; ++loop)
+                    {
+                        for (uint32_t r = 0; r < nreg; ++r)
+                        {
+                            if (offset + 16 > sizeBytes)
+                            {
+                                s_leanVerifyRecord = nullptr;
+                                return;
+                            }
+                            uint64_t lo = loadLE64(data + offset);
+                            uint64_t hi = loadLE64(data + offset + 8);
+                            offset += 16;
+                            writeRegisterPacked(regs[r], lo, hi);
+                        }
+                    }
+                    s_leanVerifyRecord = nullptr;
+
+                    const uint8_t genR = m_curR;
+                    const uint8_t genG = m_curG;
+                    const uint8_t genB = m_curB;
+                    const uint8_t genA = m_curA;
+                    const float genS = m_curS;
+                    const float genT = m_curT;
+                    const float genQ = m_curQ;
+                    const uint16_t genU = m_curU;
+                    const uint16_t genV = m_curV;
+                    const uint8_t genFog = m_curFog;
+
+                    uint8_t curR = initR;
+                    uint8_t curG = initG;
+                    uint8_t curB = initB;
+                    uint8_t curA = initA;
+                    float curS = initS;
+                    float curT = initT;
+                    float curQ = initQ;
+                    uint16_t curU = initU;
+                    uint16_t curV = initV;
+                    uint8_t curFog = initFog;
+
+                    std::vector<LeanVerifyKick> scratchKicks;
+                    scratchKicks.reserve(nloop);
+
+                    const bool isXYZF2 = ((tagHi >> 12u) & 0xFu) == 0x04u;
+                    uint32_t verifyOff = tagPayloadOffset;
+                    for (uint32_t loop = 0; loop < nloop; ++loop)
+                    {
+                        if (verifyOff + 64u > sizeBytes)
+                            break;
+                        const uint64_t lo0 = loadLE64(data + verifyOff);
+                        const uint64_t hi0 = loadLE64(data + verifyOff + 8u);
+                        const uint64_t lo1 = loadLE64(data + verifyOff + 16u);
+                        const uint64_t hi1 = loadLE64(data + verifyOff + 24u);
+                        const uint64_t lo2 = loadLE64(data + verifyOff + 32u);
+                        const uint64_t hi2 = loadLE64(data + verifyOff + 40u);
+                        const uint64_t lo3 = loadLE64(data + verifyOff + 48u);
+                        const uint64_t hi3 = loadLE64(data + verifyOff + 56u);
+                        verifyOff += 64u;
+
+                        curFog = static_cast<uint8_t>((hi0 >> 36u) & 0xFFu);
+
+                        const uint32_t sBits = static_cast<uint32_t>(lo1 & 0xFFFFFFFFu);
+                        const uint32_t tBits = static_cast<uint32_t>((lo1 >> 32u) & 0xFFFFFFFFu);
+                        const uint32_t qBits = static_cast<uint32_t>(hi1 & 0xFFFFFFFFu);
+                        std::memcpy(&curS, &sBits, 4);
+                        std::memcpy(&curT, &tBits, 4);
+                        std::memcpy(&curQ, &qBits, 4);
+                        if (curQ == 0.0f)
+                            curQ = 1.0f;
+
+                        curR = static_cast<uint8_t>(lo2 & 0xFFu);
+                        curG = static_cast<uint8_t>((lo2 >> 32u) & 0xFFu);
+                        curB = static_cast<uint8_t>(hi2 & 0xFFu);
+                        curA = static_cast<uint8_t>((hi2 >> 32u) & 0xFFu);
+
+                        const uint16_t x = static_cast<uint16_t>(lo3 & 0xFFFFu);
+                        const uint16_t y = static_cast<uint16_t>((lo3 >> 32u) & 0xFFFFu);
+                        const uint32_t z = isXYZF2 ? static_cast<uint32_t>((hi3 >> 4u) & 0xFFFFFFu)
+                                                   : static_cast<uint32_t>(hi3 & 0xFFFFFFFFu);
+                        const uint8_t f = isXYZF2 ? static_cast<uint8_t>((hi3 >> 36u) & 0xFFu)
+                                                  : curFog;
+                        const bool adk = ((hi3 >> 47u) & 1u) != 0u;
+
+                        GSVertex vtx{};
+                        vtx.x = static_cast<float>(x) / 16.0f;
+                        vtx.y = static_cast<float>(y) / 16.0f;
+                        vtx.z = static_cast<float>(z);
+                        vtx.r = curR;
+                        vtx.g = curG;
+                        vtx.b = curB;
+                        vtx.a = curA;
+                        vtx.q = curQ;
+                        vtx.s = curS;
+                        vtx.t = curT;
+                        vtx.u = curU;
+                        vtx.v = curV;
+                        vtx.fog = f;
+
+                        scratchKicks.push_back({!adk, vtx});
+                    }
+
+                    bool mismatch = false;
+                    if (scratchKicks.size() != recordedGeneric.size())
+                    {
+                        mismatch = true;
+                    }
+                    else
+                    {
+                        for (size_t i = 0; i < scratchKicks.size(); ++i)
+                        {
+                            const auto &sk = scratchKicks[i];
+                            const auto &gk = recordedGeneric[i];
+                            if (sk.drawing != gk.drawing ||
+                                sk.vtx.x != gk.vtx.x ||
+                                sk.vtx.y != gk.vtx.y ||
+                                sk.vtx.z != gk.vtx.z ||
+                                sk.vtx.r != gk.vtx.r ||
+                                sk.vtx.g != gk.vtx.g ||
+                                sk.vtx.b != gk.vtx.b ||
+                                sk.vtx.a != gk.vtx.a ||
+                                sk.vtx.q != gk.vtx.q ||
+                                sk.vtx.s != gk.vtx.s ||
+                                sk.vtx.t != gk.vtx.t ||
+                                sk.vtx.u != gk.vtx.u ||
+                                sk.vtx.v != gk.vtx.v ||
+                                sk.vtx.fog != gk.vtx.fog)
+                            {
+                                mismatch = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (curR != genR || curG != genG || curB != genB || curA != genA ||
+                        curS != genS || curT != genT || curQ != genQ ||
+                        curU != genU || curV != genV || curFog != genFog)
+                    {
+                        mismatch = true;
+                    }
+
+                    if (mismatch)
+                    {
+                        s_leanMismatchCount++;
+                        if (s_leanMismatchCount <= 20u)
+                        {
+                            ::ps2xSafeLog("[gslean] MISMATCH tag#%llu ...\n", static_cast<unsigned long long>(tagIdx));
+                            std::fflush(stderr);
+                        }
+                    }
+                    s_leanVerifiedCount++;
+                    if ((s_leanVerifiedCount & 4095u) == 0u)
+                    {
+                        ::ps2xSafeLog("[gslean] verified=%llu mismatches=%llu\n",
+                                      static_cast<unsigned long long>(s_leanVerifiedCount),
+                                      static_cast<unsigned long long>(s_leanMismatchCount));
+                        std::fflush(stderr);
+                    }
+                }
+                else
+                {
+                    const bool isXYZF2 = ((tagHi >> 12u) & 0xFu) == 0x04u;
+                    for (uint32_t loop = 0; loop < nloop; ++loop)
+                    {
+                        if (offset + 64u > sizeBytes)
+                            return;
+                        const uint64_t lo0 = loadLE64(data + offset);
+                        const uint64_t hi0 = loadLE64(data + offset + 8u);
+                        const uint64_t lo1 = loadLE64(data + offset + 16u);
+                        const uint64_t hi1 = loadLE64(data + offset + 24u);
+                        const uint64_t lo2 = loadLE64(data + offset + 32u);
+                        const uint64_t hi2 = loadLE64(data + offset + 40u);
+                        const uint64_t lo3 = loadLE64(data + offset + 48u);
+                        const uint64_t hi3 = loadLE64(data + offset + 56u);
+                        offset += 64u;
+
+                        m_curFog = static_cast<uint8_t>((hi0 >> 36u) & 0xFFu);
+
+                        const uint32_t sBits = static_cast<uint32_t>(lo1 & 0xFFFFFFFFu);
+                        const uint32_t tBits = static_cast<uint32_t>((lo1 >> 32u) & 0xFFFFFFFFu);
+                        const uint32_t qBits = static_cast<uint32_t>(hi1 & 0xFFFFFFFFu);
+                        std::memcpy(&m_curS, &sBits, 4);
+                        std::memcpy(&m_curT, &tBits, 4);
+                        std::memcpy(&m_curQ, &qBits, 4);
+                        if (m_curQ == 0.0f)
+                            m_curQ = 1.0f;
+
+                        m_curR = static_cast<uint8_t>(lo2 & 0xFFu);
+                        m_curG = static_cast<uint8_t>((lo2 >> 32u) & 0xFFu);
+                        m_curB = static_cast<uint8_t>(hi2 & 0xFFu);
+                        m_curA = static_cast<uint8_t>((hi2 >> 32u) & 0xFFu);
+
+                        const uint16_t x = static_cast<uint16_t>(lo3 & 0xFFFFu);
+                        const uint16_t y = static_cast<uint16_t>((lo3 >> 32u) & 0xFFFFu);
+                        const uint32_t z = isXYZF2 ? static_cast<uint32_t>((hi3 >> 4u) & 0xFFFFFFu)
+                                                   : static_cast<uint32_t>(hi3 & 0xFFFFFFFFu);
+                        const uint8_t f = isXYZF2 ? static_cast<uint8_t>((hi3 >> 36u) & 0xFFu)
+                                                  : m_curFog;
+                        const bool adk = ((hi3 >> 47u) & 1u) != 0u;
+
+                        GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
+                        vtx.x = static_cast<float>(x) / 16.0f;
+                        vtx.y = static_cast<float>(y) / 16.0f;
+                        vtx.z = static_cast<float>(z);
+                        vtx.r = m_curR;
+                        vtx.g = m_curG;
+                        vtx.b = m_curB;
+                        vtx.a = m_curA;
+                        vtx.q = m_curQ;
+                        vtx.s = m_curS;
+                        vtx.t = m_curT;
+                        vtx.u = m_curU;
+                        vtx.v = m_curV;
+                        vtx.fog = f;
+                        vertexKick(!adk);
+                    }
+                }
+            }
+            else
+            {
+                for (uint32_t loop = 0; loop < nloop; ++loop)
+                {
+                    for (uint32_t r = 0; r < nreg; ++r)
+                    {
+                        if (offset + 16 > sizeBytes)
+                            return;
+                        uint64_t lo = loadLE64(data + offset);
+                        uint64_t hi = loadLE64(data + offset + 8);
+                        offset += 16;
+                        writeRegisterPacked(regs[r], lo, hi);
+                    }
                 }
             }
         }
@@ -1011,6 +1496,13 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
                 imageBytes = sizeBytes - offset;
             processImageData(data + offset, imageBytes);
             offset += imageBytes;
+        }
+
+        if (s_gifStatOn)
+        {
+            const uint64_t gifStatTsc1 = __rdtsc();
+            const uint32_t gifStatQwords = (offset - gifStatDataOffset) / 16u;
+            recordGifStatTag(tagLo, tagHi, nloop, flg, nreg, pre, gifStatQwords, gifStatTsc1 - gifStatTsc0, gifStatTsc1);
         }
     }
 }
@@ -1156,6 +1648,25 @@ bool GS::tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeByt
 
 void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 {
+    if (s_gifStatOn)
+    {
+        switch (regDesc)
+        {
+        case 0x01:
+        case 0x02:
+        case 0x03:
+        case 0x04:
+        case 0x05:
+        case 0x0A:
+        case 0x0C:
+        case 0x0D:
+            s_gifStatRegCounts[regDesc]++;
+            break;
+        default:
+            break;
+        }
+    }
+
     switch (regDesc)
     {
     case 0x00:
@@ -1219,6 +1730,10 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         vtx.u = m_curU;
         vtx.v = m_curV;
         vtx.fog = f;
+        if (s_leanVerifyRecord)
+        {
+            s_leanVerifyRecord->push_back({!adk, vtx});
+        }
         vertexKick(!adk);
         break;
     }
@@ -1256,6 +1771,10 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         vtx.u = m_curU;
         vtx.v = m_curV;
         vtx.fog = m_curFog;
+        if (s_leanVerifyRecord)
+        {
+            s_leanVerifyRecord->push_back({!adk, vtx});
+        }
         vertexKick(!adk);
         break;
     }
@@ -1347,6 +1866,10 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
 {
+    if (s_gifStatOn)
+    {
+        s_gifStatRegCounts[regAddr]++;
+    }
 #if defined(PS2X_PROBE_AE) || 1
     if (probe_ae::isEnabled()) {
         probe_ae::onGsWriteRegister(regAddr, value);
@@ -1892,11 +2415,17 @@ void GS::vertexKick(bool drawing)
 
     if (drawing && m_backend)
     {
-        const uint64_t gqT0 = __rdtsc(); // PROBE-GQ2
+        const bool lean = isGsLeanEnabled();
+        const uint64_t gqT0 = lean ? 0ull : __rdtsc(); // PROBE-GQ2
         refreshDrawBatch(needed); // PERF-GR
         GSPrimitiveBatch &batch = m_drawBatch;
-        updatePreferredDisplaySourceForDraw(batch);
-        g_gqBuild.fetch_add(__rdtsc() - gqT0, std::memory_order_relaxed);
+        if (!lean || (m_hasPreferredDisplaySource && batch.state.context.frame.fbp == m_preferredDisplayDestFbp) ||
+            (batch.state.prim.type == GS_PRIM_SPRITE && batch.vertexCount >= 2u))
+        {
+            updatePreferredDisplaySourceForDraw(batch);
+        }
+        if (!lean)
+            g_gqBuild.fetch_add(__rdtsc() - gqT0, std::memory_order_relaxed);
 
         bool skipBatch = false;
         if (m_hasPreferredDisplaySource &&
@@ -1934,25 +2463,27 @@ void GS::vertexKick(bool drawing)
             queueDraw(batch); // PERF-GR
         }
 
-        recordDrawDebugEventUnlocked(needed);
+        if (!lean || gsDebugHistoryEnabled())
+        {
+            recordDrawDebugEventUnlocked(needed);
+        }
 
         // PROBE-INTERP: per-draw log for the frame-interpolation feasibility study (PS2X_GS_INTERP_PROBE=1, file logs/interp_probe.txt)
-        static FILE *const s_ip = []() -> FILE * {
-            const char *e = std::getenv("PS2X_GS_INTERP_PROBE");
-            return (e && e[0] == '1') ? std::fopen("logs/interp_probe.txt", "w") : nullptr;
-        }();
-        static uint32_t s_ipLines = 0;
-        if (s_ip && s_ipLines < 1500000u)
+        if (s_interpProbeActive)
         {
-            ++s_ipLines;
-            std::fprintf(s_ip, "D %llu %u %u %u %u %u", static_cast<unsigned long long>(g_hostPresentSeq.load(std::memory_order_relaxed)),
-                         static_cast<unsigned>(m_prim.type), static_cast<unsigned>(batch.state.prim.tme),
-                         static_cast<unsigned>(batch.state.context.tex0.tbp0), static_cast<unsigned>(batch.state.context.frame.fbp), static_cast<unsigned>(needed));
-            for (int vi = 0; vi < needed && vi < 3; ++vi)
-                std::fprintf(s_ip, " %.2f %.2f %.0f", batch.vertices[vi].x, batch.vertices[vi].y, batch.vertices[vi].z);
-            std::fputc('\n', s_ip);
-            if ((s_ipLines & 0x3FFFu) == 0)
-                std::fflush(s_ip);
+            static uint32_t s_ipLines = 0;
+            if (s_ip && s_ipLines < 1500000u)
+            {
+                ++s_ipLines;
+                std::fprintf(s_ip, "D %llu %u %u %u %u %u", static_cast<unsigned long long>(g_hostPresentSeq.load(std::memory_order_relaxed)),
+                             static_cast<unsigned>(m_prim.type), static_cast<unsigned>(batch.state.prim.tme),
+                             static_cast<unsigned>(batch.state.context.tex0.tbp0), static_cast<unsigned>(batch.state.context.frame.fbp), static_cast<unsigned>(needed));
+                for (int vi = 0; vi < needed && vi < 3; ++vi)
+                    std::fprintf(s_ip, " %.2f %.2f %.0f", batch.vertices[vi].x, batch.vertices[vi].y, batch.vertices[vi].z);
+                std::fputc('\n', s_ip);
+                if ((s_ipLines & 0x3FFFu) == 0)
+                    std::fflush(s_ip);
+            }
         }
     }
 
