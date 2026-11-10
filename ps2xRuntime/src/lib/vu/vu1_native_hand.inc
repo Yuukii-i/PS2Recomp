@@ -839,26 +839,135 @@ inline Lb8V lb8OpR(const Lb8V &a, const Lb8V &b, const Lb8V &ac, __m256i &minT, 
 }
 
 uint64_t s_lbrGroups = 0, s_lbrRelaxed = 0, s_lbrDeclined = 0, s_lbrMismatch = 0; // PERF-LBR
+static const int s_lbrMode = []() { const char *e = std::getenv("PS2X_VU1_LBR"); return !e ? 1 : (e[0] == '2' ? 2 : (e[0] == '0' ? 0 : 1)); }(); // PERF-LBR: on by default (verified: 38M groups, 0 mismatches); =0 off, =2 verify
+static const bool s_lb8On = []() { const char *e = std::getenv("PS2X_VU1_LB8"); return !(e && e[0] == '0'); }(); // PERF-SV: =0 forces the scalar vertex loop
 
-inline bool lbVertex8R(LbV *out, int n, const int32_t *idx, const uint32_t *s3q, const uint32_t *s2q, const Lb8K &k8, const uint8_t *mem, uint32_t dsz, uint32_t fullMask)
+static const bool s_lb2On = []() {
+    const char *e = std::getenv("PS2X_VU1_LB2");
+    const bool on = !(e && e[0] == '0');
+    if (on)
+    {
+        std::printf("[lb2] ON\n");
+        std::fflush(stdout);
+    }
+    return on;
+}();
+
+struct LbQuadCommit
+{
+    int32_t w0;
+    __m128 s2q;
+    __m128i p2;
+    __m128i p3;
+};
+
+inline bool lbVertex8R(LbV *out, int n, const int32_t *idx, const uint32_t *s3q, const uint32_t *s2q, const Lb8K &k8, const uint8_t *mem, uint32_t dsz, uint32_t fullMask,
+                       uint32_t s3_base = 0, uint32_t s2_base = 0, LbQuadCommit *commitOut = nullptr, int32_t t0 = 0, int32_t N = 0)
 {
     const auto ldq = [&](uint32_t qw) { return _mm_loadu_ps(reinterpret_cast<const float *>(mem + ((qw * 16u) & (dsz - 1u)))); };
     __m128 rA[8], rB[8], rS3[8], rS2[8];
-    for (int j = 0; j < 8; ++j)
+
+    if (s_lb2On)
     {
-        rA[j] = ldq(static_cast<uint32_t>(636 + idx[j]));
-        rB[j] = ldq(static_cast<uint32_t>(716 + idx[j]));
-        rS3[j] = ldq(s3q[j]);
-        rS2[j] = ldq(s2q[j]);
+        // C. Gather addressing: s3q and s2q addresses are consecutive per group (vi3+t, vi2+vi12+t).
+        // Check if run of n quads crosses end of VU data memory (dsz); if so, fallback to per-load masked path.
+        for (int j = 0; j < 8; ++j)
+        {
+            rA[j] = ldq(static_cast<uint32_t>(636 + idx[j]));
+            rB[j] = ldq(static_cast<uint32_t>(716 + idx[j]));
+        }
+
+        const uint32_t s3_byte = (s3_base * 16u) & (dsz - 1u);
+        if (s3_byte + static_cast<uint32_t>(n) * 16u <= dsz)
+        {
+            const float *pS3 = reinterpret_cast<const float *>(mem + s3_byte);
+            for (int j = 0; j < n; ++j)
+                rS3[j] = _mm_loadu_ps(pS3 + 4 * j);
+            for (int j = n; j < 8; ++j)
+                rS3[j] = rS3[n - 1];
+        }
+        else
+        {
+            for (int j = 0; j < 8; ++j)
+            {
+                const int jj = j < n ? j : n - 1;
+                rS3[j] = ldq(static_cast<uint16_t>(s3_base + jj));
+            }
+        }
+
+        const uint32_t s2_byte = (s2_base * 16u) & (dsz - 1u);
+        if (s2_byte + static_cast<uint32_t>(n) * 16u <= dsz)
+        {
+            const float *pS2 = reinterpret_cast<const float *>(mem + s2_byte);
+            for (int j = 0; j < n; ++j)
+                rS2[j] = _mm_loadu_ps(pS2 + 4 * j);
+            for (int j = n; j < 8; ++j)
+                rS2[j] = rS2[n - 1];
+        }
+        else
+        {
+            for (int j = 0; j < 8; ++j)
+            {
+                const int jj = j < n ? j : n - 1;
+                rS2[j] = ldq(static_cast<uint16_t>(s2_base + jj));
+            }
+        }
     }
+    else
+    {
+        for (int j = 0; j < 8; ++j)
+        {
+            rA[j] = ldq(static_cast<uint32_t>(636 + idx[j]));
+            rB[j] = ldq(static_cast<uint32_t>(716 + idx[j]));
+            rS3[j] = ldq(s3q[j]);
+            rS2[j] = ldq(s2q[j]);
+        }
+    }
+
     Lb8V A = lb8FromRows(rA), B = lb8FromRows(rB), S3 = lb8FromRows(rS3), S2 = lb8FromRows(rS2);
-    for (int c = 0; c < 4; ++c)
+
+    if (s_lb2On)
     {
-        A.c[c] = lb8N(A.c[c]);
-        B.c[c] = lb8N(B.c[c]);
-        S3.c[c] = lb8N(S3.c[c]);
-        S2.c[c] = lb8N(S2.c[c]);
+        // B. Check 16 input vectors: bits u = x & 0x7FFFFFFF is 'bad' if (u-1) < 0x7FFFFF (denormal) or u >= 0x7F800000 (Inf/NaN).
+        // If no lane is bad, N is identity and can be skipped; otherwise run existing lb8N path.
+        const __m256i absMask = _mm256_set1_epi32(0x7FFFFFFF), one = _mm256_set1_epi32(1);
+        __m256i inMinT = _mm256_set1_epi32(-1), inMaxU = _mm256_setzero_si256();
+        const auto chk = [&](__m256 v) {
+            const __m256i u = _mm256_and_si256(_mm256_castps_si256(v), absMask);
+            inMinT = _mm256_min_epu32(inMinT, _mm256_sub_epi32(u, one));
+            inMaxU = _mm256_max_epu32(inMaxU, u);
+        };
+        for (int c = 0; c < 4; ++c)
+        {
+            chk(A.c[c]);
+            chk(B.c[c]);
+            chk(S3.c[c]);
+            chk(S2.c[c]);
+        }
+        const __m256i badLo = _mm256_cmpeq_epi32(_mm256_min_epu32(inMinT, _mm256_set1_epi32(0x007FFFFE)), inMinT);
+        const __m256i badHi = _mm256_cmpgt_epi32(inMaxU, _mm256_set1_epi32(0x7F7FFFFF));
+        if (lb8Any(_mm256_or_si256(badLo, badHi)))
+        {
+            for (int c = 0; c < 4; ++c)
+            {
+                A.c[c] = lb8N(A.c[c]);
+                B.c[c] = lb8N(B.c[c]);
+                S3.c[c] = lb8N(S3.c[c]);
+                S2.c[c] = lb8N(S2.c[c]);
+            }
+        }
     }
+    else
+    {
+        for (int c = 0; c < 4; ++c)
+        {
+            A.c[c] = lb8N(A.c[c]);
+            B.c[c] = lb8N(B.c[c]);
+            S3.c[c] = lb8N(S3.c[c]);
+            S2.c[c] = lb8N(S2.c[c]);
+        }
+    }
+
     Lb8V zero;
     zero.c[0] = zero.c[1] = zero.c[2] = zero.c[3] = _mm256_setzero_ps();
     __m256i minT = _mm256_set1_epi32(-1), maxU = _mm256_setzero_si256();
@@ -881,6 +990,139 @@ inline bool lbVertex8R(LbV *out, int n, const int32_t *idx, const uint32_t *s3q,
     const __m256i badHi = _mm256_cmpgt_epi32(maxU, _mm256_set1_epi32(0x7EFFFFFF));                         // some result with exponent > 253
     if (lb8Any(_mm256_or_si256(_mm256_or_si256(badLo, badHi), _mm256_or_si256(r7.bad, in.bad))))
         return false;
+
+    // PROOF OF IDENTITY FOR OPTIMISATION A:
+    // 1. The relaxed gate (badLo, badHi, r7.bad, in.bad) confirms that for every operation,
+    //    all lanes are either exact zero or have IEEE exponent in [2, 253].
+    // 2. vuhot::N(x) alters bits only when exponent is 0 (denormals -> signed zero) or 255
+    //    (Inf/NaN -> max float). For exponent in [2, 253], N(x) == x. For +-0.0f, N(x) == +-0.0f,
+    //    which under clamp([0, 255]) maps to +0.0f. Hence, N4 is an exact identity for
+    //    Wraw, prod, and R7 on this path.
+    // 3. In lbFtoi<1>(lbClamp(prod, 255)): prod is clamped to [0.0f, 255.0f], scale is 1.0f,
+    //    so scaled value sc <= 255.0f. Since 255.0f < 2147483648.0f (2^31), the comparison
+    //    sc >= 2^31 is strictly false on all lanes. The blendv overflow check in lbFtoi<1>
+    //    never triggers INT_MAX and is an identity.
+    // 4. In lbFtoi<16>(lbClamp(Wraw, 255)): clamped Wraw in [0.0f, 255.0f], scaled by 16.0f,
+    //    gives sc <= 4080.0f < 2^31. Its overflow blend can never trigger either.
+
+    if (s_lb2On && commitOut != nullptr && s_lbrMode != 2)
+    {
+        const __m256 iReg8 = _mm256_set1_ps(255.0f);
+
+        // 1. Wraw (p0 lane 3):
+        const __m256 cw = _mm256_min_ps(_mm256_max_ps(w.c[3], _mm256_setzero_ps()), iReg8);
+        const __m256 scw = _mm256_mul_ps(cw, _mm256_set1_ps(16.0f));
+        const __m256i iw = _mm256_cvttps_epi32(scw);
+        alignas(32) int32_t w0_group[8];
+        _mm256_store_si256(reinterpret_cast<__m256i *>(w0_group), iw);
+
+        // 2. prod (p2 full quad):
+        Lb8V pr_i;
+        for (int c = 0; c < 4; ++c)
+        {
+            const __m256 cp = _mm256_min_ps(_mm256_max_ps(pr.c[c], _mm256_setzero_ps()), iReg8);
+            pr_i.c[c] = _mm256_castsi256_ps(_mm256_cvttps_epi32(cp));
+        }
+        __m128 rP2[8];
+        lb8ToRows(pr_i, rP2);
+
+        // 3. R7 (p3: lanes 0..2 ftoi16 R7, lane 3 idx & 0xFFFF):
+        Lb8V r7_i;
+        for (int c = 0; c < 3; ++c)
+        {
+            const __m256 sc = _mm256_mul_ps(r7.r.c[c], _mm256_set1_ps(16.0f));
+            const __m256i t = _mm256_cvttps_epi32(sc);
+            const __m256 ge = _mm256_cmp_ps(sc, _mm256_set1_ps(2147483648.0f), _CMP_GE_OQ);
+            r7_i.c[c] = _mm256_blendv_ps(_mm256_castsi256_ps(t), _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF)), ge);
+        }
+        const __m256i idxVec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(idx));
+        r7_i.c[3] = _mm256_castsi256_ps(_mm256_and_si256(idxVec, _mm256_set1_epi32(0xFFFF)));
+        __m128 rP3[8];
+        lb8ToRows(r7_i, rP3);
+
+        // 4. S2Q (p1 lanes 0..2):
+        __m128 rS2Q[8];
+        lb8ToRows(os2q, rS2Q);
+
+        for (int j = 0; j < n; ++j)
+        {
+            commitOut[j].w0 = w0_group[j];
+            commitOut[j].s2q = rS2Q[j];
+            commitOut[j].p2 = _mm_castps_si128(rP2[j]);
+            commitOut[j].p3 = _mm_castps_si128(rP3[j]);
+        }
+
+        // Only keep float rows in V[] where later register writes need them:
+        // - Last 3 vertices (N-3, N-2, N-1) for vf R7, Wraw, prod, S2Q
+        // - V[2..N-1].macIn for MAC ring push
+        // - V[N-1].macR7 / curR7 for tail MAC push and st.status
+        // - V[N-1] full rows (T5, inner, BV, Q, curIn, S2, S3) if fullMask != 0
+        const bool hasLast3 = (t0 + n > N - 3);
+        __m128 rR7[8], rPr[8];
+        alignas(32) float wf[8];
+        if (hasLast3)
+        {
+            lb8ToRows(r7.r, rR7);
+            lb8ToRows(pr, rPr);
+            _mm256_store_ps(wf, w.c[3]);
+        }
+
+        __m128 rT5[8], rIn[8], rBV[8];
+        alignas(32) float qf[8];
+        if (fullMask != 0u)
+        {
+            lb8ToRows(t5, rT5);
+            lb8ToRows(in.r, rIn);
+            lb8ToRows(bv, rBV);
+            _mm256_store_ps(qf, qv);
+        }
+
+        alignas(32) uint32_t macIn[8];
+        _mm256_store_si256(reinterpret_cast<__m256i *>(macIn), in.mac);
+
+        alignas(32) uint32_t macR7[8];
+        if (t0 + n == N)
+            _mm256_store_si256(reinterpret_cast<__m256i *>(macR7), r7.mac);
+
+        for (int j = 0; j < n; ++j)
+        {
+            const int32_t t = t0 + j;
+            LbV &r = out[j];
+            r.idx = idx[j];
+            r.di = 0u;
+            if (t >= 2 && t < N)
+                r.macIn = macIn[j];
+            if (t >= N - 3)
+            {
+                r.R7 = rR7[j];
+                r.S2Q = rS2Q[j];
+                r.prod = rPr[j];
+                r.Wraw = wf[j];
+            }
+            if (t == N - 1)
+            {
+                r.macR7 = macR7[j];
+                r.curR7 = ((macR7[j] & 0xFu) ? 1u : 0u) | ((macR7[j] & 0xF0u) ? 2u : 0u);
+            }
+            if ((fullMask >> j) & 1u)
+            {
+                r.A = rA[j];
+                r.B = rB[j];
+                r.S3 = rS3[j];
+                r.S2 = rS2[j];
+                r.T5 = rT5[j];
+                r.inner = rIn[j];
+                r.BV = rBV[j];
+                r.Q = qf[j];
+                r.curIn = ((macIn[j] & 0xFu) ? 1u : 0u) | ((macIn[j] & 0xF0u) ? 2u : 0u);
+            }
+        }
+        for (int s = 0; s < 8; ++s)
+            out[0].sticky[s] = 0u;
+        out[0].sticky[2] = lb8Sticky(r7, false);
+        out[0].sticky[6] = lb8Sticky(in, true);
+        return true;
+    }
 
     __m128 rR7[8], rS2Q[8], rPr[8], rT5[8], rIn[8], rBV[8];
     lb8ToRows(r7.r, rR7);
@@ -1007,11 +1249,14 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
     k.vf16 = _mm_loadu_ps(st.vf[16]);
     k.accw = lbFmac<4, 1>(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), lbBc(k.vf1, 2), _mm_setzero_ps());
     LbV V[kMaxV];
-    int32_t idxA[kMaxV];
+    int32_t idxA[kMaxV + 8];
     for (int32_t t = 0; t < N; ++t)
         idxA[t] = t == 0 ? vi7 : lbS16(static_cast<int32_t>(ld32(static_cast<uint32_t>(static_cast<uint16_t>(vi4 + t)), 0)));
-    static const bool s_lb8On = []() { const char *e = std::getenv("PS2X_VU1_LB8"); return !(e && e[0] == '0'); }(); // PERF-SV: =0 forces the scalar vertex loop
-    static const int s_lbrMode = []() { const char *e = std::getenv("PS2X_VU1_LBR"); return !e ? 1 : (e[0] == '2' ? 2 : (e[0] == '0' ? 0 : 1)); }(); // PERF-LBR: on by default (verified: 38M groups, 0 mismatches); =0 off, =2 verify
+    if (s_lb2On)
+    {
+        for (int32_t p = 0; p < 8; ++p)
+            idxA[N + p] = idxA[N - 1];
+    }
     uint32_t stickyAcc = k.accw.cur | k.accw.xf;
     Lb8K k8;
     k8.vf1 = lb8Const(k.vf1);
@@ -1020,47 +1265,95 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
     k8.vf4 = lb8Const(k.vf4);
     k8.vf16 = lb8Const(k.vf16);
     k8.accw = lb8Const(k.accw.res);
+    LbQuadCommit commit[kMaxV];
+    uint64_t relaxedMask = 0;
     for (int32_t t0 = 0; t0 < N; t0 += 8)
     {
         const int n = std::min<int32_t>(8, N - t0);
         bool done = false, relaxed = false;
         if (s_lb8On)
         {
-            int32_t idx8[8];
-            uint32_t s3q[8], s2q[8];
-            for (int j = 0; j < 8; ++j)
+            if (s_lb2On)
             {
-                const int jj = j < n ? j : n - 1; // short last group: pad with copies of its last vertex
-                idx8[j] = idxA[t0 + jj];
-                s3q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t0 + jj));
-                s2q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t0 + jj));
-            }
-            if (s_lbrMode != 0)
-            {
-                ++s_lbrGroups;
-                const uint32_t fullMask = (t0 + n == N) ? (1u << (n - 1)) : 0u; // only the last vertex of the routine needs every intermediate row
-                relaxed = lbVertex8R(&V[t0], n, idx8, s3q, s2q, k8, mem, dsz, fullMask);
-                if (!relaxed)
-                    ++s_lbrDeclined;
-                else if (s_lbrMode == 2)
+                const uint32_t s3_base = static_cast<uint16_t>(vi3 + t0);
+                const uint32_t s2_base = static_cast<uint16_t>(vi2 + vi12 + t0);
+                const int32_t *idxPtr = &idxA[t0];
+                if (s_lbrMode != 0)
                 {
-                    LbV ref[8];
-                    for (int j = 0; j < n; ++j)
+                    ++s_lbrGroups;
+                    const uint32_t fullMask = (t0 + n == N) ? (1u << (n - 1)) : 0u; // only the last vertex of the routine needs every intermediate row
+                    relaxed = lbVertex8R(&V[t0], n, idxPtr, nullptr, nullptr, k8, mem, dsz, fullMask, s3_base, s2_base, &commit[t0], t0, N);
+                    if (!relaxed)
+                        ++s_lbrDeclined;
+                    else if (s_lbrMode == 2)
                     {
-                        const int32_t t = t0 + j;
-                        lbVertex(ref[j], idxA[t], static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t)), static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t)), k, mem, dsz);
+                        LbV ref[8];
+                        for (int j = 0; j < n; ++j)
+                        {
+                            const int32_t t = t0 + j;
+                            lbVertex(ref[j], idxA[t], static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t)), static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t)), k, mem, dsz);
+                        }
+                        s_lbrMismatch += static_cast<uint64_t>(lbCompareRelaxed(&V[t0], ref, n, fullMask, t0));
+                        for (int j = 0; j < n; ++j)
+                            V[t0 + j] = ref[j]; // verify mode keeps using the exact result
+                        relaxed = false;
+                        done = true;
                     }
-                    s_lbrMismatch += static_cast<uint64_t>(lbCompareRelaxed(&V[t0], ref, n, fullMask, t0));
-                    for (int j = 0; j < n; ++j)
-                        V[t0 + j] = ref[j]; // verify mode keeps using the exact result
-                    relaxed = false;
-                    done = true;
+                    else
+                        ++s_lbrRelaxed;
                 }
-                else
-                    ++s_lbrRelaxed;
+                if (!relaxed && !done)
+                {
+                    int32_t idx8[8];
+                    uint32_t s3q[8], s2q[8];
+                    for (int j = 0; j < 8; ++j)
+                    {
+                        const int jj = j < n ? j : n - 1;
+                        idx8[j] = idxA[t0 + jj];
+                        s3q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t0 + jj));
+                        s2q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t0 + jj));
+                    }
+                    done = lbVertex8(&V[t0], n, idx8, s3q, s2q, k8, mem, dsz);
+                }
             }
-            if (!relaxed && !done)
-                done = lbVertex8(&V[t0], n, idx8, s3q, s2q, k8, mem, dsz);
+            else
+            {
+                int32_t idx8[8];
+                uint32_t s3q[8], s2q[8];
+                for (int j = 0; j < 8; ++j)
+                {
+                    const int jj = j < n ? j : n - 1; // short last group: pad with copies of its last vertex
+                    idx8[j] = idxA[t0 + jj];
+                    s3q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t0 + jj));
+                    s2q[j] = static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t0 + jj));
+                }
+                if (s_lbrMode != 0)
+                {
+                    ++s_lbrGroups;
+                    const uint32_t fullMask = (t0 + n == N) ? (1u << (n - 1)) : 0u; // only the last vertex of the routine needs every intermediate row
+                    relaxed = lbVertex8R(&V[t0], n, idx8, s3q, s2q, k8, mem, dsz, fullMask);
+                    if (!relaxed)
+                        ++s_lbrDeclined;
+                    else if (s_lbrMode == 2)
+                    {
+                        LbV ref[8];
+                        for (int j = 0; j < n; ++j)
+                        {
+                            const int32_t t = t0 + j;
+                            lbVertex(ref[j], idxA[t], static_cast<uint32_t>(static_cast<uint16_t>(vi3 + t)), static_cast<uint32_t>(static_cast<uint16_t>(vi2 + vi12 + t)), k, mem, dsz);
+                        }
+                        s_lbrMismatch += static_cast<uint64_t>(lbCompareRelaxed(&V[t0], ref, n, fullMask, t0));
+                        for (int j = 0; j < n; ++j)
+                            V[t0 + j] = ref[j]; // verify mode keeps using the exact result
+                        relaxed = false;
+                        done = true;
+                    }
+                    else
+                        ++s_lbrRelaxed;
+                }
+                if (!relaxed && !done)
+                    done = lbVertex8(&V[t0], n, idx8, s3q, s2q, k8, mem, dsz);
+            }
         }
         ++s_lb8Groups;
         if (!done && !relaxed)
@@ -1074,6 +1367,7 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
         }
         if (relaxed)
         {
+            relaxedMask |= (((1ull << n) - 1ull) << t0);
             for (int s = 0; s < 8; ++s) // lbVertex8R puts the group's sticky bits in its first vertex only; the other vertices hold no STATUS data
                 stickyAcc |= V[t0].sticky[s];
         }
@@ -1108,11 +1402,21 @@ bool lbFull(VU1Interpreter &vu, VuNativeCtx &c)
         __m128i *p1 = reinterpret_cast<__m128i *>(c.vuData + (((q0 + 1u) * 16u) & (dsz - 1u)));
         __m128i *p2 = reinterpret_cast<__m128i *>(c.vuData + (((q0 + 2u) * 16u) & (dsz - 1u)));
         __m128i *p3 = reinterpret_cast<__m128i *>(c.vuData + (((q0 + 3u) * 16u) & (dsz - 1u)));
-        const int32_t w0 = _mm_cvtsi128_si32(lbFtoi<16>(lbClamp(_mm_set1_ps(V[v].Wraw), iReg)));
-        _mm_storeu_si128(p0, _mm_insert_epi32(_mm_loadu_si128(p0), w0, 3));
-        _mm_storeu_si128(p1, _mm_castps_si128(_mm_blend_ps(_mm_castsi128_ps(_mm_loadu_si128(p1)), V[v].S2Q, 0x7)));
-        _mm_storeu_si128(p2, lbFtoi<1>(lbClamp(V[v].prod, iReg)));
-        _mm_storeu_si128(p3, _mm_insert_epi32(lbFtoi<16>(V[v].R7), static_cast<int32_t>(static_cast<uint32_t>(V[v].idx) & 0xFFFFu), 3));
+        if (s_lb2On && ((relaxedMask >> v) & 1u))
+        {
+            _mm_storeu_si128(p0, _mm_insert_epi32(_mm_loadu_si128(p0), commit[v].w0, 3));
+            _mm_storeu_si128(p1, _mm_castps_si128(_mm_blend_ps(_mm_castsi128_ps(_mm_loadu_si128(p1)), commit[v].s2q, 0x7)));
+            _mm_storeu_si128(p2, commit[v].p2);
+            _mm_storeu_si128(p3, commit[v].p3);
+        }
+        else
+        {
+            const int32_t w0 = _mm_cvtsi128_si32(lbFtoi<16>(lbClamp(_mm_set1_ps(V[v].Wraw), iReg)));
+            _mm_storeu_si128(p0, _mm_insert_epi32(_mm_loadu_si128(p0), w0, 3));
+            _mm_storeu_si128(p1, _mm_castps_si128(_mm_blend_ps(_mm_castsi128_ps(_mm_loadu_si128(p1)), V[v].S2Q, 0x7)));
+            _mm_storeu_si128(p2, lbFtoi<1>(lbClamp(V[v].prod, iReg)));
+            _mm_storeu_si128(p3, _mm_insert_epi32(lbFtoi<16>(V[v].R7), static_cast<int32_t>(static_cast<uint32_t>(V[v].idx) & 0xFFFFu), 3));
+        }
     }
     putw(1023, 2, ctlOld);
     putw(1023, 3, ubase);
