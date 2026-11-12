@@ -992,11 +992,20 @@ extern std::function<void(uint32_t startPC, uint32_t top, uint32_t itop, uint8_t
 namespace
 {
 
+    static inline bool vpVerifyOn()
+    {
+        static const bool on = []() {
+            const char *e = std::getenv("PS2X_VU1_DUAL_VERIFY");
+            return e && e[0] == '1';
+        }();
+        return on;
+    }
+
     static inline bool vpDualOn()
     {
         static const bool on = []() {
             const char *e = std::getenv("PS2X_VU1_DUAL");
-            return e && e[0] == '1';
+            return (e && e[0] == '1') || vpVerifyOn();
         }();
         return on;
     }
@@ -1016,8 +1025,12 @@ namespace
         uint8_t w[161][16];
         bool swapped{false};
         bool wroteTable{false};
+        std::vector<uint8_t> gif;
+        std::vector<uint8_t> entryMem;
+        std::atomic<bool> entryReady{false};
     };
     static VpSlot s_vpSlots[256];
+    static std::atomic<uint32_t> vpVerifyDone{0};
 
     struct PredEntry {
         uint8_t key[16];
@@ -1324,6 +1337,287 @@ namespace
         s_vpTurnDone.store(ev.t + 1u, std::memory_order_release);
     }
 
+    // Task DC: VU1 dual executor VERIFY mode
+    static std::atomic<uint64_t> s_vvCompared{0};
+    static std::atomic<uint64_t> s_vvGifMismatch{0};
+    static std::atomic<uint64_t> s_vvWMismatch{0};
+    static std::atomic<uint64_t> s_vvEntryDiffPrograms{0};
+    static std::atomic<uint64_t> s_vvEntryDiffQwords{0};
+    static std::atomic<uint32_t> s_vvMismatchPrints{0};
+    static std::atomic<uint32_t> s_vvEntryPrints{0};
+    static uint32_t s_vvHist[1024]{};
+
+    static inline void vpVerifySummaryPrint()
+    {
+        static std::atomic<bool> s_printing{false};
+        static auto s_lastSummary = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastSummary).count() >= 1)
+        {
+            bool expected = false;
+            if (s_printing.compare_exchange_strong(expected, true))
+            {
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastSummary).count() >= 1)
+                {
+                    s_lastSummary = now;
+                    ::ps2xSafeLog("[vverify] compared=%llu gifMismatch=%llu wMismatch=%llu entryDiffPrograms=%llu entryDiffQwords=%llu\n",
+                                  (unsigned long long)s_vvCompared.exchange(0),
+                                  (unsigned long long)s_vvGifMismatch.exchange(0),
+                                  (unsigned long long)s_vvWMismatch.exchange(0),
+                                  (unsigned long long)s_vvEntryDiffPrograms.exchange(0),
+                                  (unsigned long long)s_vvEntryDiffQwords.exchange(0));
+
+                    struct HistEntry {
+                        uint32_t idx;
+                        uint32_t count;
+                    };
+                    HistEntry sortedHist[1024];
+                    for (uint32_t i = 0; i < 1024; ++i)
+                    {
+                        sortedHist[i].idx = i;
+                        sortedHist[i].count = s_vvHist[i];
+                    }
+                    std::partial_sort(sortedHist, sortedHist + 24, sortedHist + 1024,
+                                      [](const HistEntry &a, const HistEntry &b) {
+                                          if (a.count != b.count)
+                                              return a.count > b.count;
+                                          return a.idx < b.idx;
+                                      });
+
+                    char hotBuf[512];
+                    int pos = std::snprintf(hotBuf, sizeof(hotBuf), "[vverify] hot q:");
+                    for (int i = 0; i < 24; ++i)
+                    {
+                        if (sortedHist[i].count == 0)
+                            break;
+                        pos += std::snprintf(hotBuf + pos, sizeof(hotBuf) - pos, " %u:%u", sortedHist[i].idx, sortedHist[i].count);
+                    }
+                    std::snprintf(hotBuf + pos, sizeof(hotBuf) - pos, "\n");
+                    ::ps2xSafeLog("%s", hotBuf);
+                }
+                s_printing.store(false, std::memory_order_relaxed);
+            }
+        }
+    }
+
+    static void vpRunVerifyX0(const VpEvent &ev)
+    {
+        const uint32_t k = ev.n;
+        uint8_t *copy = s_vpVu1Data;
+        if (!copy)
+            return;
+
+        uint8_t entryW[161][16];
+        loadW(entryW, copy);
+        std::memcpy(s_threadKeys[k & 255u], copy + (static_cast<size_t>(ev.b & 0x3FFu) * 16u), 16);
+
+        if ((k & 1u) != 0u)
+        {
+            auto &slot = s_vpSlots[k & 255u];
+            if (slot.entryMem.size() != PS2_VU1_DATA_SIZE)
+                slot.entryMem.resize(PS2_VU1_DATA_SIZE);
+            std::memcpy(slot.entryMem.data(), copy, PS2_VU1_DATA_SIZE);
+            slot.entryReady.store(true, std::memory_order_release);
+        }
+
+        static thread_local std::vector<uint8_t> s_cap0;
+        s_cap0.clear();
+        ps2_vu1_set_capture(&s_cap0);
+        if (vpMscalCb)
+            vpMscalCb(ev.a, ev.b, ev.c);
+        ps2_vu1_set_capture(nullptr);
+
+        if (!s_cap0.empty() && vpGif1Cb)
+            vpGif1Cb(s_cap0.data(), static_cast<uint32_t>(s_cap0.size()));
+
+        vpWaitCond([&]() {
+            return k < vpVerifyDone.load(std::memory_order_acquire) + 200u;
+        });
+
+        loadW(s_vpSlots[k & 255u].w, copy);
+        s_vpSlots[k & 255u].gif = s_cap0;
+        s_vpSlots[k & 255u].done.store(k + 1u, std::memory_order_release);
+    }
+
+    static void vpRunVerifyX1(const VpEvent &ev)
+    {
+        const uint32_t k = ev.n;
+        uint8_t *copy = s_vpShadow;
+        if (!copy)
+            return;
+
+        if ((k & 1u) == 0u)
+        {
+            std::memcpy(s_threadKeys[k & 255u], copy + (static_cast<size_t>(ev.b & 0x3FFu) * 16u), 16);
+            return;
+        }
+
+        s_vpStX1Runs.fetch_add(1, std::memory_order_relaxed);
+        std::memcpy(s_threadKeys[k & 255u], copy + (static_cast<size_t>(ev.b & 0x3FFu) * 16u), 16);
+
+        if (k != 0u)
+        {
+            vpWaitCond([&]() {
+                return s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k;
+            });
+            storeW(copy, s_vpSlots[(k - 1u) & 255u].w);
+        }
+
+        vpWaitCond([&]() {
+            return s_vpSlots[k & 255u].done.load(std::memory_order_acquire) == k + 1u;
+        });
+
+        const auto &entryMem = s_vpSlots[k & 255u].entryMem;
+        uint32_t diffQwords = 0u;
+        struct QRange {
+            uint32_t start;
+            uint32_t end;
+        };
+        QRange ranges[8];
+        uint32_t rangeCount = 0u;
+        bool inRange = false;
+        bool activeRangeSaved = false;
+
+        if (entryMem.size() == PS2_VU1_DATA_SIZE)
+        {
+            for (uint32_t q = 0u; q < 1024u; ++q)
+            {
+                if (std::memcmp(copy + (q * 16u), entryMem.data() + (q * 16u), 16) != 0)
+                {
+                    diffQwords++;
+                    s_vvHist[q]++;
+                    if (!inRange)
+                    {
+                        inRange = true;
+                        if (rangeCount < 8u)
+                        {
+                            ranges[rangeCount].start = q;
+                            ranges[rangeCount].end = q;
+                            rangeCount++;
+                            activeRangeSaved = true;
+                        }
+                        else
+                        {
+                            activeRangeSaved = false;
+                        }
+                    }
+                    else if (activeRangeSaved)
+                    {
+                        ranges[rangeCount - 1u].end = q;
+                    }
+                }
+                else
+                {
+                    inRange = false;
+                    activeRangeSaved = false;
+                }
+            }
+        }
+
+        { // PROBE-DC3: PS2X_VU1_DUAL_VERIFY_SYNC=1 runs X1 on X0's exact entry memory (checks the second VU1 instance itself)
+            static const bool s_dc3 = []() { const char *e = std::getenv("PS2X_VU1_DUAL_VERIFY_SYNC"); return e && e[0] == '1'; }();
+            if (s_dc3 && entryMem.size() == PS2_VU1_DATA_SIZE)
+                std::memcpy(copy, entryMem.data(), PS2_VU1_DATA_SIZE);
+        }
+        static thread_local std::vector<uint8_t> s_cap1;
+        s_cap1.clear();
+        ps2_vu1_set_capture(&s_cap1);
+        if (g_vu1MscalCallbackB)
+            g_vu1MscalCallbackB(ev.a, ev.b, ev.c, s_vpShadow);
+        ps2_vu1_set_capture(nullptr);
+
+        const auto &x0Gif = s_vpSlots[k & 255u].gif;
+        const auto &x1Gif = s_cap1;
+        int firstDiff = -1;
+        const size_t minSz = std::min(x0Gif.size(), x1Gif.size());
+        for (size_t i = 0; i < minSz; ++i)
+        {
+            if (x0Gif[i] != x1Gif[i])
+            {
+                firstDiff = static_cast<int>(i);
+                break;
+            }
+        }
+        if (firstDiff == -1 && x0Gif.size() != x1Gif.size())
+        {
+            firstDiff = static_cast<int>(minSz);
+        }
+        const bool gifMismatch = (firstDiff != -1);
+
+        uint8_t shadowW[161][16];
+        loadW(shadowW, copy);
+        char wBuf[32];
+        int diffQword = -1;
+        if (std::memcmp(shadowW[0], s_vpSlots[k & 255u].w[0], 16) != 0)
+        {
+            diffQword = 1023;
+        }
+        else
+        {
+            for (uint32_t i = 1u; i < 161u; ++i)
+            {
+                if (std::memcmp(shadowW[i], s_vpSlots[k & 255u].w[i], 16) != 0)
+                {
+                    diffQword = static_cast<int>(635u + i);
+                    break;
+                }
+            }
+        }
+        const bool wMismatch = (diffQword != -1);
+        if (wMismatch)
+        {
+            std::snprintf(wBuf, sizeof(wBuf), "diff q=%d", diffQword);
+        }
+        else
+        {
+            std::snprintf(wBuf, sizeof(wBuf), "same");
+        }
+
+        s_vvCompared.fetch_add(1, std::memory_order_relaxed);
+        if (gifMismatch)
+            s_vvGifMismatch.fetch_add(1, std::memory_order_relaxed);
+        if (wMismatch)
+            s_vvWMismatch.fetch_add(1, std::memory_order_relaxed);
+        if (diffQwords > 0u)
+            s_vvEntryDiffPrograms.fetch_add(1, std::memory_order_relaxed);
+        s_vvEntryDiffQwords.fetch_add(diffQwords, std::memory_order_relaxed);
+
+        if (diffQwords > 0u)
+        {
+            const uint32_t entryPrintIdx = s_vvEntryPrints.fetch_add(1, std::memory_order_relaxed);
+            if (entryPrintIdx < 10u)
+            {
+                char rangesBuf[128];
+                int rpos = 0;
+                rangesBuf[0] = '\0';
+                for (uint32_t r = 0u; r < rangeCount; ++r)
+                {
+                    rpos += std::snprintf(rangesBuf + rpos, sizeof(rangesBuf) - rpos,
+                                          (r == 0u) ? "%u-%u" : ",%u-%u",
+                                          ranges[r].start, ranges[r].end);
+                }
+                ::ps2xSafeLog("[vverify] entry k=%u pc=%04x top=%u n=%u ranges=%s gif=%s\n",
+                              k, ev.a, ev.b, diffQwords, rangesBuf, gifMismatch ? "diff" : "same");
+            }
+        }
+
+        if (gifMismatch || wMismatch)
+        {
+            const uint32_t printIdx = s_vvMismatchPrints.fetch_add(1, std::memory_order_relaxed);
+            if (printIdx < 20u)
+            {
+                ::ps2xSafeLog("[vverify] k=%u pc=%04x top=%u itop=%u gif x0=%u x1=%u firstDiff=%d w=%s\n",
+                              k, ev.a, ev.b, ev.c,
+                              static_cast<uint32_t>(x0Gif.size()), static_cast<uint32_t>(x1Gif.size()),
+                              firstDiff, wBuf);
+            }
+        }
+
+        vpVerifySummaryPrint();
+
+        vpVerifyDone.store(k + 1u, std::memory_order_release);
+    }
+
     static void vpPushEvent(const VpEvent &ev)
     {
         const bool dual = vpDualOn();
@@ -1460,7 +1754,7 @@ namespace
         }
         if (dual)
         {
-            if (s_vpMscalK > 0u && ((s_vpMscalK - 1u) & 1u) == 1u && s_vpVu1Data)
+            if (!vpVerifyOn() && s_vpMscalK > 0u && ((s_vpMscalK - 1u) & 1u) == 1u && s_vpVu1Data)
             {
                 storeW(s_vpVu1Data, s_vpSlots[(s_vpMscalK - 1u) & 255u].w);
             }
@@ -1472,7 +1766,14 @@ namespace
             s_vpTurnT = 0u;
             s_vpTurnDone.store(0u, std::memory_order_release);
             for (int i = 0; i < 256; ++i)
+            {
                 s_vpSlots[i].done.store(0u, std::memory_order_relaxed);
+                s_vpSlots[i].entryReady.store(false, std::memory_order_relaxed);
+                s_vpSlots[i].gif.clear();
+            }
+            vpVerifyDone.store(0u, std::memory_order_release);
+            if (vpVerifyOn())
+                vpVerifySummaryPrint();
         }
         if (dwT0) // PROBE-MG
         {
@@ -1552,7 +1853,10 @@ namespace
             case VP_MSCAL:
                 if (vpDualOn())
                 {
-                    vpRunMscal(ev, 0);
+                    if (vpVerifyOn())
+                        vpRunVerifyX0(ev);
+                    else
+                        vpRunMscal(ev, 0);
                 }
                 else
                 {
@@ -1567,14 +1871,22 @@ namespace
             case VP_GIF2:
                 if (vpDualOn())
                 {
-                    vpWaitCond([&]() {
-                        return s_vpTurnDone.load(std::memory_order_acquire) == ev.t;
-                    });
-                    if (vpGif2Cb)
-                        vpGif2Cb(ev.p, ev.n, ev.hl != 0);
-                    ps2_gs_async_batch(false);
-                    ps2_gs_async_batch(true);
-                    s_vpTurnDone.store(ev.t + 1u, std::memory_order_release);
+                    if (vpVerifyOn())
+                    {
+                        if (vpGif2Cb)
+                            vpGif2Cb(ev.p, ev.n, ev.hl != 0);
+                    }
+                    else
+                    {
+                        vpWaitCond([&]() {
+                            return s_vpTurnDone.load(std::memory_order_acquire) == ev.t;
+                        });
+                        if (vpGif2Cb)
+                            vpGif2Cb(ev.p, ev.n, ev.hl != 0);
+                        ps2_gs_async_batch(false);
+                        ps2_gs_async_batch(true);
+                        s_vpTurnDone.store(ev.t + 1u, std::memory_order_release);
+                    }
                 }
                 else
                 {
@@ -1679,7 +1991,10 @@ namespace
             case VP_MSCAL:
             {
                 const uint64_t t0 = vpStatOn() ? __rdtsc() : 0ull;
-                vpRunMscal(ev, 1);
+                if (vpVerifyOn())
+                    vpRunVerifyX1(ev);
+                else
+                    vpRunMscal(ev, 1);
                 if (t0)
                     s_vpStBusy1.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
                 break;
