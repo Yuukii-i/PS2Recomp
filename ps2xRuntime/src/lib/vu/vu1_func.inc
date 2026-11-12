@@ -127,6 +127,21 @@ inline void stq(uint8_t *vu, uint32_t q, __m128 v)
     undoLog().push_back(e);
     _mm_storeu_ps(reinterpret_cast<float *>(vu + (qi << 4)), v);
 }
+// PERF: bulk-log `count` qwords starting at q (one resize + memcpys instead of a push_back per store); the stores into that range may then use stqRaw.
+inline void logRange(const uint8_t *vu, uint32_t q, uint32_t count)
+{
+    std::vector<UndoEnt> &log = undoLog();
+    const size_t base = log.size();
+    log.resize(base + count);
+    UndoEnt *e = log.data() + base;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const uint32_t qi = (q + i) & 0x3FFu;
+        e[i].qword = static_cast<uint16_t>(qi);
+        std::memcpy(e[i].old, vu + (qi << 4), 16);
+    }
+}
+inline void stqRaw(uint8_t *vu, uint32_t q, __m128 v) { _mm_storeu_ps(reinterpret_cast<float *>(vu + ((q & 0x3FFu) << 4)), v); } // range already logged
 inline uint16_t ilw(const uint8_t *vu, uint32_t q, uint32_t f) // ILW.f: low 16 bits of word f
 {
     uint32_t w;
@@ -657,15 +672,17 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, std:
     }
     const uint32_t m1012z = ldw(vu, 1012, 2), m1012w = ldw(vu, 1012, 3);
     const uint32_t ctlOld = ldw(vu, 1023, 3) & 0xFFFFu;
-    stqi(vu, ubase, _mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x)));
+    // The whole output span [ubase, ubase + 4N] is logged once (the rest of the program may still fall back, so the log cannot be dropped), then written raw.
+    logRange(vu, ubase, 4u * static_cast<uint32_t>(N) + 1u);
+    stqRaw(vu, ubase, _mm_castsi128_ps(_mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))));
     for (int32_t v = 0; v < N; ++v)
     {
         const uint32_t q0 = ubase + 1u + 4u * static_cast<uint32_t>(v);
         const int32_t w0 = _mm_cvtsi128_si32(ftoiS<16>(clampI(_mm_set1_ps(V[v].Wraw))));
-        stqi(vu, q0, _mm_insert_epi32(ldqi(vu, q0), w0, 3));
-        stq(vu, q0 + 1u, _mm_blend_ps(ldq(vu, q0 + 1u), V[v].S2Q, 0x7));
-        stqi(vu, q0 + 2u, ftoiS<1>(clampI(V[v].prod)));
-        stqi(vu, q0 + 3u, _mm_insert_epi32(ftoiS<16>(V[v].R7), static_cast<int32_t>(static_cast<uint32_t>(V[v].idx) & 0xFFFFu), 3));
+        stqRaw(vu, q0, _mm_castsi128_ps(_mm_insert_epi32(ldqi(vu, q0), w0, 3)));
+        stqRaw(vu, q0 + 1u, _mm_blend_ps(ldq(vu, q0 + 1u), V[v].S2Q, 0x7));
+        stqRaw(vu, q0 + 2u, _mm_castsi128_ps(ftoiS<1>(clampI(V[v].prod))));
+        stqRaw(vu, q0 + 3u, _mm_castsi128_ps(_mm_insert_epi32(ftoiS<16>(V[v].R7), static_cast<int32_t>(static_cast<uint32_t>(V[v].idx) & 0xFFFFu), 3)));
     }
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3)); // ISW.z / ISW.w toggle
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
@@ -860,6 +877,35 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
     }
     if (!ok)
         return false;
+    {
+        // PERF: kicks are normally appended back to back in `gif`; then submit the whole stream once (one arbiter pass instead of one per kick).
+        uint32_t expect = 0u;
+        bool contiguous = true;
+        for (const auto &k : kicks)
+        {
+            if (k.second == 0u)
+                continue;
+            if (k.first != expect)
+            {
+                contiguous = false;
+                break;
+            }
+            expect += k.second;
+        }
+        if (contiguous && expect == gif.size())
+        {
+            if (expect != 0u)
+            {
+                if (capture)
+                    capture->insert(capture->end(), gif.data(), gif.data() + expect);
+                else if (memory)
+                    memory->submitGifPacket(GifPathId::Path1, gif.data(), expect);
+                else
+                    gs.processGIFPacket(gif.data(), expect);
+            }
+            return true;
+        }
+    }
     for (const auto &k : kicks)
     {
         if (k.second == 0u)

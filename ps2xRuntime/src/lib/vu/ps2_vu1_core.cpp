@@ -3659,6 +3659,37 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     probe_ae::onBxOrigRunStart(startPC, top, vuData, dataSize);
     probe_ae::onBzOrigRunBlock();
 
+    // Task F1 / PERF: functional engine (PS2X_VU1_FUNC=1), image 86503d39 only. Hooked BEFORE resetScheduler/state init: a taken run needs none of them
+    // (next real run re-inits everything from m_state); diagnostic modes (verify/replay/capture/probes) keep the old order by being excluded here.
+    if (m_unit == Unit::VU1 && vu1func::funcOn() && !s_vuAnyProbe && !s_vfyRef && !s_kickRec && memory != nullptr && codeSize == 16384u && dataSize == 16384u &&
+        vuCode == memory->getVU1Code() && (startPC & 0xFFFFu) == 8u && !probe_ae::isEnabled() && !probe_ae::isMovieHleVerify() &&
+        (vu1VerifyMode() & 1) == 0 && !rpOn() && !capOn())
+    {
+        (void)getDecodedInstructionPairForPc(vuCode, codeSize, memory, 0u); // validate / rebuild the cache first so s_hcCurHash names the code image about to run
+        if (s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, nullptr, true))
+        {
+            m_activeVuData = vuData;
+            m_activeVuDataSize = dataSize;
+            m_activeGs = &gs;
+            m_activeMemory = memory;
+            m_state.pc = 0x10u; // as after the E-bit stop at 0000 (+ its delay slot at 0008)
+            m_state.ebit = true;
+            m_state.haltAfterDelaySlot = false;
+            m_state.stoppedByD = false;
+            m_state.stoppedByT = false;
+            m_state.branchPending = false;
+            m_state.branchTarget = 0;
+            m_state.branchDelay = 0;
+            m_state.top = top;
+            m_state.itop = itop;
+            m_state.vf[0][0] = 0.0f; m_state.vf[0][1] = 0.0f; m_state.vf[0][2] = 0.0f; m_state.vf[0][3] = 1.0f;
+            m_workingClip = m_state.clip; // the only resetScheduler outputs that are visible between runs
+            m_xgkick.active = false;
+            m_stopRequested = false;
+            return;
+        }
+    }
+
     if (m_unit == Unit::VU0)
     {
         const uint64_t jmNow = __rdtsc(); // PROBE-JM
@@ -4426,25 +4457,6 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         if (!capA.empty())
             memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));
         return;
-    }
-    if (m_unit == Unit::VU1 && vu1func::funcOn() && !s_vuAnyProbe && !s_vfyRef && !s_kickRec && memory != nullptr && codeSize == 16384u && dataSize == 16384u &&
-        vuCode == memory->getVU1Code() && (startPC & 0xFFFFu) == 8u) // Task F1: functional engine (PS2X_VU1_FUNC=1), image 86503d39 only
-    {
-        (void)getDecodedInstructionPairForPc(vuCode, codeSize, memory, 0u); // validate / rebuild the cache first so s_hcCurHash names the code image about to run
-        if (s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, s_vfyCapture, true))
-        {
-            m_activeVuData = vuData;
-            m_activeVuDataSize = dataSize;
-            m_activeGs = &gs;
-            m_activeMemory = memory;
-            m_state.pc = 0x10u; // as after the E-bit stop at 0000 (+ its delay slot at 0008)
-            m_state.ebit = true;
-            m_state.haltAfterDelaySlot = false;
-            m_state.stoppedByD = false;
-            m_state.stoppedByT = false;
-            m_state.branchPending = false;
-            return;
-        }
     }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
     if (m_unit == Unit::VU0)
