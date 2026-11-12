@@ -2344,7 +2344,7 @@ namespace
 const uint8_t *s_same = nullptr;     // null = main image (everything allowed)
 bool s_hotOk[2048];                  // hot block starting at this pair is usable (all pairs of its span are identical)
 bool s_isT4020 = false;                                       // the image with its own executors / hot blocks for the differing pairs
-HotSlot s_hotSlotT[2048] = {}, s_hotSlotTX[2048] = {};
+thread_local HotSlot s_hotSlotT[2048] = {}, s_hotSlotTX[2048] = {};
 bool s_kOk[3] = {true, true, true};  // kernels: vertex (2440..25B8), copy (0C80..0CB8), full/loop (1FE0..243F)
 bool varRange(uint32_t lo, uint32_t hiIncl)
 {

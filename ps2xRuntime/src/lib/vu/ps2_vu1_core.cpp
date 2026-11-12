@@ -874,7 +874,7 @@ struct PipeMasks
 {
     uint32_t flag = 0, store = 0, vf = 0, vi = 0, acc = 0;
 };
-static PipeMasks s_pipeMasks[2];
+static thread_local PipeMasks s_pipeMasks[2];
 static inline uint32_t pmCtz(uint32_t v)
 {
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -892,7 +892,7 @@ static inline uint32_t pmCtz(uint32_t v)
 static const bool s_vfyOn = []() { const char *v = std::getenv("PS2X_VU1_VERIFY"); return v && std::atoi(v) != 0; }();
 static thread_local bool s_vfyRefTl = false;
 #define s_vfyRef (s_vfyOn && s_vfyRefTl)
-static uint64_t s_nextReady[2] = {0u, 0u};
+static thread_local uint64_t s_nextReady[2] = {0u, 0u};
 #define NR() (s_nextReady[m_unit == Unit::VU1 ? 1 : 0])
 
 // PERF-HV: flag writes are applied at issue. PROBE-FLG (logs/probe_ij.log): status is never read by VU code, FC*/FM* readers see
@@ -4241,6 +4241,13 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                         }
                         m_workingClip = wc0;
                         m_cycle = cyc0;
+                        if (rpScramble & 8u) // PROBE-MI2: MAC / STATUS / CLIP flags (incl. the clip history) inherited from the previous program
+                        {
+                            m_state.mac = 0xA5A5u;
+                            m_state.status = 0x0FC0u;
+                            m_state.clip = 0x00A5A5A5u;
+                            m_workingClip = 0x00A5A5A5u;
+                        }
                         std::memcpy(vuData, mem0, dsz);
                         resetScheduler();
                         cap.clear();

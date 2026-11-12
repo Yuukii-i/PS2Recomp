@@ -23,8 +23,8 @@ namespace vuflags
         bool valid;
     };
 
-    inline FlgRing s_flgMac[2], s_flgClip[2];
-    inline FlgStatusUndo s_flgStatusUndo[2];
+    inline thread_local FlgRing s_flgMac[2], s_flgClip[2];
+    inline thread_local FlgStatusUndo s_flgStatusUndo[2];
 
     inline void flgPush(FlgRing &ring, uint64_t cycle, uint32_t v)
     {
