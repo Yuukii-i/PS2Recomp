@@ -363,15 +363,197 @@ inline __m128 miniV(__m128 a, __m128 b) // mirrors VU1Interpreter::execUpper MIN
     const __m128 a4 = norm4(a), b4 = norm4(b);
     return _mm_blendv_ps(b4, a4, _mm_cmplt_ps(a4, b4));
 }
+inline __m128 absV(__m128 v) // mirrors VU1Interpreter::execUpper case 0x1D (ABS)
+{
+    return _mm_and_ps(norm4(v), _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF)));
+}
+inline __m128 mr32(__m128 v) // mirrors VU1Interpreter::execLower case 0x31 (MR32: xyzw -> yzwx)
+{
+    return _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 3, 2, 1));
+}
+
+// Task F4: Sutherland-Hodgman 6-plane frustum clipper (2900..2F68), called from rigid2440 when no trivial-reject FCOR mask matches.
+// Reproduces every context/spill/buffer/GIF store to VU memory (1020..1022, 918..959, 876..) and kicks 1023 + 876; returns to 24F8/2720 via JR vi12.
+static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, int32_t vi7, int32_t vi8, int32_t vi9, int32_t vi10, bool copyS,
+                        __m128 c1v, __m128 c2v, __m128 c5v, __m128 vf28, __m128 vf29, __m128 vf10, __m128 vf30, __m128 vf31, __m128 vf7,
+                        __m128 vf11, __m128 vf12, __m128 vf13, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
+{
+    const __m128 zero = _mm_setzero_ps(), vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    const uint16_t retVi12 = static_cast<uint16_t>((copyS ? 0x2720u : 0x24F8u) >> 3);
+
+    // 2900..2960: save integer context to 1020..1022
+    stqi(vu, 1022u, _mm_set_epi32(vi8 & 0xFFFF, vi7 & 0xFFFF, vi6 & 0xFFFF, vi5 & 0xFFFF));
+    stqi(vu, 1021u, _mm_set_epi32(retVi12, 0x7FFF, vi10 & 0xFFFF, vi9 & 0xFFFF));
+    stqi(vu, 1020u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1020u), vi13, 0), 5, 1));
+    const uint32_t clipMode = ldw(vu, 1012u, 1u) & 1u;
+
+    // 2968..29E8: spill triangle vertices + wrap-around vertex 0 into 918..929
+    vf13 = maxV(vf13, zero); // 2978 MAXx.xyzw vf13, vf13, vf0
+    stq(vu, 918u, vf28);
+    stq(vu, 921u, vf29);
+    stq(vu, 924u, vf10);
+    stq(vu, 927u, vf28);
+    stq(vu, 920u, vf30);
+    stq(vu, 923u, vf31);
+    stq(vu, 926u, vf7);
+    stq(vu, 925u, vf13);
+    stq(vu, 929u, vf30); // 29B0 delay slot of IBEQ
+    if (clipMode != 0u)
+    {
+        stq(vu, 919u, vf13);
+        stq(vu, 922u, vf13);
+        stq(vu, 928u, vf13);
+    }
+    else
+    {
+        stq(vu, 919u, vf11);
+        stq(vu, 922u, vf12);
+        stq(vu, 928u, vf11);
+    }
+
+    // 29F0..2C70: 6 frustum planes (-Z, +Z, -X, +X, -Y, +Y), ping-ponging 918 <-> 948
+    struct PlaneSpec
+    {
+        float sgn;
+        uint32_t mask0, mask1;
+        int axis;
+        uint32_t inBase, outBase;
+    };
+    static constexpr PlaneSpec kPlanes[6] = {
+        {-1.0f, 2048u >> 6, 32u, 2, 918u, 948u},
+        {1.0f, 1024u >> 6, 16u, 2, 948u, 918u},
+        {-1.0f, 128u >> 6, 2u, 0, 918u, 948u},
+        {1.0f, 64u >> 6, 1u, 0, 948u, 918u},
+        {-1.0f, 512u >> 6, 8u, 1, 918u, 948u},
+        {1.0f, 256u >> 6, 4u, 1, 948u, 918u},
+    };
+
+    int32_t polyCount = 3;
+    __m128 vf19_last = zero;
+    for (int p = 0; p < 6; ++p)
+    {
+        const PlaneSpec &pl = kPlanes[p];
+        const __m128 sgnV = _mm_set1_ps(pl.sgn);
+        __m128 vf17 = ldq(vu, pl.inBase + 0u);
+        __m128 vf18 = ldq(vu, pl.inBase + 1u);
+        __m128 vf23 = ldq(vu, pl.inBase + 2u);
+        __m128 vf21 = ldq(vu, pl.inBase + 3u);
+        uint32_t inPtr = pl.inBase + 4u;
+        __m128 vf22 = ldq(vu, inPtr++);
+        uint32_t outPtr = pl.outBase;
+        int32_t outCount = 0;
+
+        for (int32_t e = 0; e < polyCount; ++e)
+        {
+            const __m128 vf19 = fmacV<0>(vf23, zero, zero);
+            const bool out0 = (clipBitsV(vf17) & pl.mask0) != 0u;
+            const bool out1 = (clipBitsV(vf21) & pl.mask1) != 0u;
+            const __m128 vf25w = fmacV<4>(vf17, sgnV, zero);
+            const __m128 vf26w = fmacV<4>(vf21, sgnV, zero);
+            vf23 = ldq(vu, inPtr++);
+
+            if (!out0)
+            {
+                stq(vu, outPtr++, vf17);
+                stq(vu, outPtr++, vf18);
+                stq(vu, outPtr++, vf19);
+                ++outCount;
+            }
+            if (out0 != out1)
+            {
+                // 2EC8..2F68: edge intersection interpolator
+                __m128 d0v = fmacV<1>(vf17, bc<3>(vf25w), zero);
+                __m128 d1v = fmacV<1>(vf21, bc<3>(vf26w), zero);
+                for (int r = 0; r < pl.axis; ++r)
+                {
+                    d0v = mr32(d0v);
+                    d1v = mr32(d1v);
+                }
+                const __m128 d1n = fmacV<0>(zero, d1v, zero); // 2F00 ADDx.y vf24, vf0, vf26
+                const float den = _mm_cvtss_f32(fmacV<1>(d1v, d0v, zero));
+                const float q = divQ2(1.0f, den);
+                const float absD0 = _mm_cvtss_f32(absV(d0v));
+                const float absD1 = _mm_cvtss_f32(absV(d1n));
+                const float absQ = _mm_cvtss_f32(absV(_mm_set1_ps(normRes(q))));
+                const __m128 bD0 = _mm_set1_ps(absD0), bD1 = _mm_set1_ps(absD1), bQ = _mm_set1_ps(absQ);
+
+                const __m128 pos = fmacV<4>(fmacV<2>(vf21, bD0, fmacV<4>(vf17, bD1, zero)), bQ, zero);
+                const __m128 col = fmacV<0>(fmacV<4>(fmacV<2>(vf22, bD0, fmacV<4>(vf18, bD1, zero)), bQ, zero), _mm_set1_ps(0.001f), zero);
+                const __m128 st = fmacV<4>(fmacV<2>(vf23, bD0, fmacV<4>(vf19, bD1, zero)), bQ, zero);
+                const __m128 m1012 = ldq(vu, 1012u); // 2F18 + 2F40: SQ.yzw m1012, 876(vi0)
+                stq(vu, 876u, _mm_blend_ps(ldq(vu, 876u), m1012, 0xE));
+
+                stq(vu, outPtr++, pos);
+                stq(vu, outPtr++, col);
+                stq(vu, outPtr++, st);
+                ++outCount;
+            }
+            vf17 = fmacV<0>(vf21, zero, zero);
+            vf18 = fmacV<0>(vf22, zero, zero);
+            vf21 = ldq(vu, inPtr++);
+            if (e + 1 < polyCount)
+                vf22 = ldq(vu, inPtr++);
+        }
+
+        if (outCount == 0)
+            return true; // 2E88 -> 2D50..2DA8: completely clipped out
+
+        // 2E90..2EC0: wrap-around copy of vertex 0 + screen-space transform of v0 on last plane
+        const __m128 w0 = ldq(vu, pl.outBase + 0u);
+        const __m128 w1 = ldq(vu, pl.outBase + 1u);
+        const __m128 w2 = ldq(vu, pl.outBase + 2u);
+        stq(vu, outPtr++, w0);
+        stq(vu, outPtr++, w1);
+        stq(vu, outPtr++, w2);
+        if (p == 5)
+            vf19_last = fmacV<2>(c2v, bc<3>(w0), fmacV<4>(c1v, w0, zero));
+        polyCount = outCount;
+    }
+
+    // 2C78..2D48: emit clipped polygon GIF packet at 876..
+    const uint32_t tagX = (static_cast<uint32_t>(polyCount) + 32768u) & 0xFFFFu;
+    stqi(vu, 876u, _mm_insert_epi32(ldqi(vu, 876u), static_cast<int32_t>(tagX), 0));
+    if (!kick(vu, 1023u, kicks, gif))
+        return false;
+
+    float q = divQ2(1.0f, _mm_cvtss_f32(bc<3>(vf19_last)));
+    uint32_t ptr = 918u;
+    uint32_t outQ = 877u;
+    __m128 vf25 = ldq(vu, ptr + 3u);
+    for (int32_t k = 0; k < polyCount; ++k)
+    {
+        const __m128 qb = _mm_set1_ps(q);
+        const __m128 f2 = fmacV<4>(vf0, bc<2>(c5v), zero);
+        __m128 vf8 = fmacV<2>(bc<3>(c5v), qb, f2);
+        const __m128 vf26 = ldq(vu, ptr + 1u);
+        const __m128 vf21 = fmacV<4>(vf19_last, qb, zero);
+        __m128 vf27 = ldq(vu, ptr + 2u);
+        vf19_last = fmacV<2>(c2v, bc<3>(vf25), fmacV<4>(c1v, vf25, zero));
+        vf8 = maxV(vf8, zero);
+        vf27 = _mm_blend_ps(vf27, fmacV<4>(vf27, qb, zero), 0x7);
+        vf8 = miniV(vf8, _mm_set1_ps(255.0f));
+        const __m128i rg = ftoiS<1>(vf26);
+        const __m128i xy = ftoiS<16>(vf21);
+        q = divQ2(1.0f, _mm_cvtss_f32(bc<3>(vf19_last)));
+        ptr += 3u;
+        vf25 = ldq(vu, ptr + 3u);
+        const __m128i fw = ftoiS<16>(vf8);
+        stq(vu, outQ + 1u, vf27);
+        stqi(vu, outQ + 2u, rg);
+        stqi(vu, outQ + 3u, xy);
+        stqi(vu, outQ + 0u, _mm_insert_epi32(ldqi(vu, outQ + 0u), _mm_extract_epi32(fw, 3), 3));
+        outQ += 4u;
+    }
+    return kick(vu, 876u, kicks, gif);
+}
 
 // Rigid path 2440 (per-vertex transform / trivial-reject / assemble, loop 24C8..25B0): 1:1 value + memory port of lbVert (vu1_native_hand.inc), which is exact on every
 // record without real clipping. Differences: runs in place on VU memory through stq (same program order of loads/stores as lbVert's private copy, so the data
 // seen by later loads is identical); flags / STATUS / cycles / exit registers dropped; the epilogue 25B8..2200 (1023 swap, XGKICK vi7, XTOP) added.
-// Real clipping (no mask of the 6 trivial-reject tests matches, routine 2900+) -> false (whole program falls back).
+// Real clipping (no mask of the 6 trivial-reject tests matches, routine 2900+) is handled by clipPolygon(...).
 static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t N, uint32_t i4base, uint32_t s2base, uint32_t s3base, uint32_t ubase, uint32_t vf27x, uint32_t vf27y,
                       bool copyS, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
 {
-    (void)vi13;
     constexpr int kMaxN = 300;
     const __m128 zero = _mm_setzero_ps(), vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), v2048 = _mm_set1_ps(2048.0f);
     const __m128 c1v = ldq(vu, 1002), c2v = ldq(vu, 1003), c5v = ldq(vu, 1016), c14v = ldq(vu, 1014), vf16 = ldq(vu, 1013);
@@ -430,8 +612,13 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
                     break;
                 }
             if (hit < 0)
-                return false; // real clipping (2900+)
-            if (hit == 5) // ISW.x vi5, 1022 (delay slot of the IBNE at 28F8)
+            {
+                if (!clipPolygon(vu, vi13, vi5, vi6, Wd[j], vi8, vi9, vi10, copyS, c1v, c2v, c5v,
+                                 Ps[j - 2], Ps[j - 1], Ps[j], fmacV<0>(V7(Ss[j - 2]), zero, zero), V7(Ss[j - 1]), V7(Ss[j]),
+                                 clampI(Lit[j - 2]), clampI(Lit[j - 1]), Lit[j], kicks, gif))
+                    return false;
+            }
+            else if (hit == 5) // ISW.x vi5, 1022 (delay slot of the IBNE at 28F8)
                 stqi(vu, 1022u, _mm_insert_epi32(ldqi(vu, 1022u), vi5, 0));
         }
         const __m128 qb = _mm_set1_ps(Qf[j]);

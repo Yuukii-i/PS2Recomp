@@ -261,6 +261,25 @@ inline float normalizeOperand(float value)
     return value;
 }
 
+inline __m128 normalizeOperand4(__m128 value)
+{
+    const __m128i vi = _mm_castps_si128(value);
+    const __m128i signMask = _mm_set1_epi32(static_cast<int32_t>(0x80000000u));
+    const __m128i expMask = _mm_set1_epi32(0x7F800000);
+    const __m128i maxMag = _mm_set1_epi32(0x7F7FFFFF);
+
+    const __m128i expBits = _mm_and_si128(vi, expMask);
+    const __m128i signBits = _mm_and_si128(vi, signMask);
+    const __m128i isExpZero = _mm_cmpeq_epi32(expBits, _mm_setzero_si128());
+    const __m128i isExpMax = _mm_cmpeq_epi32(expBits, expMask);
+
+    // Flush exponent==0 to signed zero, clamp exponent==0xFF to signed FLT_MAX.
+    __m128i res = _mm_or_si128(_mm_andnot_si128(isExpZero, vi), signBits);
+    const __m128i clamped = _mm_or_si128(signBits, maxMag);
+    res = _mm_or_si128(_mm_andnot_si128(isExpMax, res), _mm_and_si128(isExpMax, clamped));
+    return _mm_castsi128_ps(res);
+}
+
 // Mirrors VU1Interpreter::normalizeFmacExactResult
 inline uint8_t normalizeFmacExactResult(float &value, long double exactResult)
 {
@@ -291,12 +310,34 @@ inline uint8_t normalizeFmacExactResult(float &value, long double exactResult)
 
 inline void executeFast(const FastProg &prog, R5900Context *ctx)
 {
-    ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    static constexpr uint8_t kBitRev4[16] = {
+        0u, 8u, 4u, 12u, 2u, 10u, 6u, 14u,
+        1u, 9u, 5u, 13u, 3u, 11u, 7u, 15u
+    };
+    alignas(16) static constexpr int32_t kSseLaneMasks[16][4] = {
+        { 0,  0,  0,  0}, {-1,  0,  0,  0}, { 0, -1,  0,  0}, {-1, -1,  0,  0},
+        { 0,  0, -1,  0}, {-1,  0, -1,  0}, { 0, -1, -1,  0}, {-1, -1, -1,  0},
+        { 0,  0,  0, -1}, {-1,  0,  0, -1}, { 0, -1,  0, -1}, {-1, -1,  0, -1},
+        { 0,  0, -1, -1}, {-1,  0, -1, -1}, { 0, -1, -1, -1}, {-1, -1, -1, -1}
+    };
+
+    __m128 vf[32];
+    vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    for (uint32_t i = 1; i < 32u; ++i)
+        vf[i] = ctx->vu0_vf[i];
+    __m128 vacc = ctx->vu0_acc;
+    uint32_t dirtyVfMask = 0u;
+    bool dirtyAcc = false;
+
     ctx->vi[0] = 0;
 
-    float *const acc = reinterpret_cast<float *>(&ctx->vu0_acc);
     uint32_t mac = ctx->vu0_mac_flags;
     uint32_t status = ctx->vu0_status;
+
+    const __m128 vzero = _mm_setzero_ps();
+    const __m128i expMask = _mm_set1_epi32(0x7F800000);
+    const __m128i minExp2 = _mm_set1_epi32(0x00800000);   // exp > 1  => exp >= 2
+    const __m128i maxExp254 = _mm_set1_epi32(0x7F000000); // exp < 254 => exp <= 253
 
     for (uint32_t i = 0; i < prog.numOps; ++i)
     {
@@ -304,8 +345,109 @@ inline void executeFast(const FastProg &prog, R5900Context *ctx)
         if (op.kind == OP_NOP || op.dest == 0u)
             continue;
 
-        const float *const vs = reinterpret_cast<const float *>(&ctx->vu0_vf[op.fs]);
-        const float *const vt = reinterpret_cast<const float *>(&ctx->vu0_vf[op.ft]);
+        const uint32_t sseDestMask = kBitRev4[op.dest];
+        const bool madd = (op.kind == OP_MADD);
+
+        const __m128 va = normalizeOperand4(vf[op.fs]);
+        __m128 vb = vzero;
+        if (op.src == SRC_VT_BC)
+        {
+            const __m128 vt = vf[op.ft];
+            __m128 bcast = vt;
+            switch (op.bc)
+            {
+            case 0u: bcast = _mm_shuffle_ps(vt, vt, _MM_SHUFFLE(0, 0, 0, 0)); break;
+            case 1u: bcast = _mm_shuffle_ps(vt, vt, _MM_SHUFFLE(1, 1, 1, 1)); break;
+            case 2u: bcast = _mm_shuffle_ps(vt, vt, _MM_SHUFFLE(2, 2, 2, 2)); break;
+            default: bcast = _mm_shuffle_ps(vt, vt, _MM_SHUFFLE(3, 3, 3, 3)); break;
+            }
+            vb = normalizeOperand4(bcast);
+        }
+        else if (op.src == SRC_Q)
+        {
+            vb = _mm_set1_ps(normalizeOperand(ctx->vu0_q));
+        }
+        else if (op.src == SRC_I)
+        {
+            vb = _mm_set1_ps(normalizeOperand(ctx->vu0_i));
+        }
+        else
+        {
+            vb = normalizeOperand4(vf[op.ft]);
+        }
+
+        const __m128 vac = madd ? normalizeOperand4(vacc) : vzero;
+        const __m128 vprod = _mm_mul_ps(va, vb);
+        const __m128 vres = madd ? _mm_fmadd_ps(va, vb, vac) : vprod;
+
+        const __m128i resExp = _mm_and_si128(_mm_castps_si128(vres), expMask);
+        const __m128i resInWin = _mm_and_si128(
+            _mm_cmpgt_epi32(resExp, minExp2),
+            _mm_cmpgt_epi32(maxExp254, resExp));
+        const __m128 abZero = _mm_or_ps(_mm_cmpeq_ps(va, vzero), _mm_cmpeq_ps(vb, vzero));
+
+        __m128 resZeroSafe = abZero;
+        uint32_t safeBits = 0u;
+        if (madd)
+        {
+            const __m128 acZero = _mm_cmpeq_ps(vac, vzero);
+            resZeroSafe = _mm_and_ps(abZero, acZero);
+            const __m128i resSafe = _mm_or_si128(resInWin, _mm_castps_si128(resZeroSafe));
+            const __m128i prodExp = _mm_and_si128(_mm_castps_si128(vprod), expMask);
+            const __m128i prodInWin = _mm_and_si128(
+                _mm_cmpgt_epi32(prodExp, minExp2),
+                _mm_cmpgt_epi32(maxExp254, prodExp));
+            const __m128i prodSafe = _mm_or_si128(prodInWin, _mm_castps_si128(abZero));
+            safeBits = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_and_si128(resSafe, prodSafe))));
+        }
+        else
+        {
+            safeBits = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(resInWin, _mm_castps_si128(abZero)))));
+        }
+
+        if ((safeBits & sseDestMask) == sseDestMask)
+        {
+            const uint32_t zeroSse = static_cast<uint32_t>(_mm_movemask_ps(resZeroSafe)) & sseDestMask;
+            const uint32_t signSse = static_cast<uint32_t>(_mm_movemask_ps(vres)) & sseDestMask;
+            mac = kBitRev4[zeroSse] | (static_cast<uint32_t>(kBitRev4[signSse]) << 4);
+            const uint32_t current = ((zeroSse != 0u) ? 1u : 0u) | ((signSse != 0u) ? 2u : 0u);
+            uint32_t extraSticky = 0u;
+            if (madd)
+            {
+                const uint32_t prodZeroSse = static_cast<uint32_t>(_mm_movemask_ps(abZero)) & sseDestMask;
+                const uint32_t prodSignSse = static_cast<uint32_t>(_mm_movemask_ps(vprod)) & sseDestMask;
+                extraSticky = ((prodZeroSse != 0u) ? 1u : 0u) | ((prodSignSse != 0u) ? 2u : 0u);
+            }
+            status = (status & 0xFF0u) | current | ((current | extraSticky) << 6);
+
+            if (op.toAcc)
+            {
+                if (sseDestMask == 0xFu)
+                    vacc = vres;
+                else
+                    vacc = _mm_blendv_ps(vacc, vres, _mm_castsi128_ps(_mm_load_si128(reinterpret_cast<const __m128i *>(kSseLaneMasks[sseDestMask]))));
+                dirtyAcc = true;
+            }
+            else if (op.fd != 0u)
+            {
+                if (sseDestMask == 0xFu)
+                    vf[op.fd] = vres;
+                else
+                    vf[op.fd] = _mm_blendv_ps(vf[op.fd], vres, _mm_castsi128_ps(_mm_load_si128(reinterpret_cast<const __m128i *>(kSseLaneMasks[sseDestMask]))));
+                dirtyVfMask |= (1u << op.fd);
+            }
+            continue;
+        }
+
+        // Exact scalar fallback when any enabled lane falls outside the safe window
+        alignas(16) float vs[4];
+        alignas(16) float vt[4];
+        alignas(16) float acArr[4];
+        _mm_store_ps(vs, vf[op.fs]);
+        _mm_store_ps(vt, vf[op.ft]);
+        if (madd)
+            _mm_store_ps(acArr, vacc);
+
         float bval = 0.0f;
         if (op.src == SRC_VT_BC)
             bval = normalizeOperand(vt[op.bc]);
@@ -314,7 +456,6 @@ inline void executeFast(const FastProg &prog, R5900Context *ctx)
         else if (op.src == SRC_I)
             bval = normalizeOperand(ctx->vu0_i);
 
-        const bool madd = (op.kind == OP_MADD);
         float result[4]{};
         uint8_t laneFlags[4]{};
         uint32_t extraSticky = 0u;
@@ -326,7 +467,7 @@ inline void executeFast(const FastProg &prog, R5900Context *ctx)
                 continue;
             const float a = normalizeOperand(vs[c]);
             const float b = (op.src == SRC_VT_VEC) ? normalizeOperand(vt[c]) : bval;
-            const float ac = madd ? normalizeOperand(acc[c]) : 0.0f;
+            const float ac = madd ? normalizeOperand(acArr[c]) : 0.0f;
             float val;
             long double ex;
             if (madd)
@@ -369,18 +510,34 @@ inline void executeFast(const FastProg &prog, R5900Context *ctx)
 
         if (op.toAcc)
         {
+            if (!madd)
+                _mm_store_ps(acArr, vacc);
             for (uint32_t c = 0; c < 4u; ++c)
                 if ((op.dest & (1u << (3u - c))) != 0u)
-                    acc[c] = result[c];
+                    acArr[c] = result[c];
+            vacc = _mm_load_ps(acArr);
+            dirtyAcc = true;
         }
         else if (op.fd != 0u)
         {
-            float *const dst = reinterpret_cast<float *>(&ctx->vu0_vf[op.fd]);
+            alignas(16) float dst[4];
+            _mm_store_ps(dst, vf[op.fd]);
             for (uint32_t c = 0; c < 4u; ++c)
                 if ((op.dest & (1u << (3u - c))) != 0u)
                     dst[c] = result[c];
+            vf[op.fd] = _mm_load_ps(dst);
+            dirtyVfMask |= (1u << op.fd);
         }
     }
+
+    ctx->vu0_vf[0] = vf[0];
+    for (uint32_t m = dirtyVfMask >> 1, idx = 1u; m != 0u; m >>= 1, ++idx)
+    {
+        if ((m & 1u) != 0u)
+            ctx->vu0_vf[idx] = vf[idx];
+    }
+    if (dirtyAcc)
+        ctx->vu0_acc = vacc;
 
     const uint32_t r0 = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_castps_si128(ctx->vu0_r)));
     ctx->vu0_r = _mm_castsi128_ps(_mm_set1_epi32(static_cast<int32_t>(0x3F800000u | (r0 & 0x007FFFFFu))));
