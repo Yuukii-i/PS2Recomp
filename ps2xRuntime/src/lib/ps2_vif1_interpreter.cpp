@@ -949,6 +949,7 @@ namespace
         uint32_t a, b, c;
         const uint8_t *p;
         uint32_t n;
+        uint32_t t;
     };
 
     struct VpRec {
@@ -1008,6 +1009,115 @@ namespace
     static std::atomic<uint32_t> vpRecHead1{0};
 
     alignas(64) static uint8_t s_vpShadow[PS2_VU1_DATA_SIZE];
+
+    // Task DB2: Dual VU1 executor state
+    struct VpSlot {
+        std::atomic<uint32_t> done{0}; // k+1 when published, 0 after reset
+        uint8_t w[161][16];
+        bool swapped{false};
+        bool wroteTable{false};
+    };
+    static VpSlot s_vpSlots[256];
+
+    struct PredEntry {
+        uint8_t key[16];
+        uint8_t state; // 0 empty, 1 known, 2 conflict
+        uint8_t swaps;
+        uint8_t writes;
+    };
+    static PredEntry s_predTable[1024];
+    static std::mutex s_predMutex;
+
+    static uint32_t s_vpMscalK = 0u; // Parser only: MSCAL event index within job
+    static uint32_t s_vpTurnT = 0u;   // Parser only: turn index over MSCAL and GIF2
+    static std::atomic<uint32_t> s_vpTurnDone{0}; // Shared: completed turn counter
+
+    static std::atomic<uint64_t> s_vpStX1Runs{0};
+    static std::atomic<uint64_t> s_vpStSpec{0};
+    static std::atomic<uint64_t> s_vpStReruns{0};
+    static std::atomic<uint64_t> s_vpStWaitsExact{0};
+    alignas(16) static thread_local uint8_t s_threadKeys[256][16];
+
+    static inline uint32_t hashKey16(const uint8_t *k)
+    {
+        uint64_t a, b;
+        std::memcpy(&a, k, 8);
+        std::memcpy(&b, k + 8, 8);
+        uint64_t h = a ^ (b * 0x517cc1b727220a95ULL);
+        h ^= (h >> 32);
+        return static_cast<uint32_t>(h);
+    }
+
+    static PredEntry predLookup(const uint8_t *key)
+    {
+        std::lock_guard<std::mutex> lock(s_predMutex);
+        const uint32_t idx = hashKey16(key) & 1023u;
+        for (uint32_t step = 0u; step < 1024u; ++step)
+        {
+            const uint32_t cur = (idx + step) & 1023u;
+            if (s_predTable[cur].state == 0u)
+                break;
+            if (std::memcmp(s_predTable[cur].key, key, 16) == 0)
+                return s_predTable[cur];
+        }
+        PredEntry empty{};
+        empty.state = 0u;
+        return empty;
+    }
+
+    static void predUpdate(const uint8_t *key, bool swapped, bool wroteTable)
+    {
+        std::lock_guard<std::mutex> lock(s_predMutex);
+        const uint32_t idx = hashKey16(key) & 1023u;
+        uint32_t emptyIdx = 1024u;
+        for (uint32_t step = 0u; step < 1024u; ++step)
+        {
+            const uint32_t cur = (idx + step) & 1023u;
+            if (s_predTable[cur].state == 0u)
+            {
+                if (emptyIdx == 1024u)
+                    emptyIdx = cur;
+                break;
+            }
+            if (std::memcmp(s_predTable[cur].key, key, 16) == 0)
+            {
+                if (s_predTable[cur].state == 1u)
+                {
+                    if (s_predTable[cur].swaps != (swapped ? 1u : 0u) ||
+                        s_predTable[cur].writes != (wroteTable ? 1u : 0u))
+                    {
+                        s_predTable[cur].state = 2u; // conflict: never predicted again
+                    }
+                }
+                return;
+            }
+        }
+        if (emptyIdx < 1024u)
+        {
+            std::memcpy(s_predTable[emptyIdx].key, key, 16);
+            s_predTable[emptyIdx].state = 1u;
+            s_predTable[emptyIdx].swaps = swapped ? 1u : 0u;
+            s_predTable[emptyIdx].writes = wroteTable ? 1u : 0u;
+        }
+    }
+
+    static inline void loadW(uint8_t dst[161][16], const uint8_t *vuData)
+    {
+        std::memcpy(dst[0], vuData + (1023u * 16u), 16);
+        std::memcpy(&dst[1][0], vuData + (636u * 16u), 160u * 16u);
+    }
+
+    static inline void storeW(uint8_t *vuData, const uint8_t src[161][16])
+    {
+        std::memcpy(vuData + (1023u * 16u), src[0], 16);
+        std::memcpy(vuData + (636u * 16u), &src[1][0], 160u * 16u);
+    }
+
+    static inline void swapToggle1023(uint8_t *vuData)
+    {
+        uint32_t *qw = reinterpret_cast<uint32_t *>(vuData + (1023u * 16u));
+        std::swap(qw[2], qw[3]);
+    }
 
     static std::atomic<uint32_t> vpFlushSeqGen{0};
     static std::atomic<uint32_t> vpIdleSeq{0};
@@ -1069,6 +1179,149 @@ namespace
     {
         static const int n = []() { const char *e = std::getenv("PS2X_VPIPE_SPIN"); return e ? static_cast<int>(std::strtol(e, nullptr, 10)) : 4000; }();
         return n;
+    }
+
+    template <typename Pred>
+    static inline void vpWaitCond(Pred &&pred)
+    {
+        if (pred())
+            return;
+        const int spinLimit = vpSpinLimit();
+        for (int spin = 0; spin < spinLimit; ++spin)
+        {
+            if (pred())
+                return;
+            _mm_pause();
+        }
+        while (!pred())
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    static void vpRunMscal(const VpEvent &ev, int myThread)
+    {
+        const uint32_t k = ev.n;
+        uint8_t *copy = (myThread == 0) ? s_vpVu1Data : s_vpShadow;
+        if (!copy)
+            return;
+
+        if ((k & 1u) != static_cast<uint32_t>(myThread))
+        {
+            // If k is NOT this thread's: read key(k) = 16 bytes at own copy + top*16 and keep it; continue.
+            std::memcpy(s_threadKeys[k & 255u], copy + (static_cast<size_t>(ev.b & 0x3FFu) * 16u), 16);
+            return;
+        }
+
+        // If it is this thread's:
+        if (myThread == 1)
+            s_vpStX1Runs.fetch_add(1, std::memory_order_relaxed);
+
+        // Read and save key(k) before running (microcode could overwrite TOP)
+        std::memcpy(s_threadKeys[k & 255u], copy + (static_cast<size_t>(ev.b & 0x3FFu) * 16u), 16);
+
+        // 1. Entry W:
+        uint8_t entryW[161][16];
+        uint8_t assumedW[161][16];
+        bool speculated = false;
+
+        if (k == 0u)
+        {
+            loadW(entryW, copy);
+        }
+        else if (s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k)
+        {
+            storeW(copy, s_vpSlots[(k - 1u) & 255u].w);
+            std::memcpy(entryW, s_vpSlots[(k - 1u) & 255u].w, sizeof(entryW));
+        }
+        else
+        {
+            const PredEntry pred = predLookup(s_threadKeys[(k - 1u) & 255u]);
+            if (pred.state == 1u && pred.writes == 0u)
+            {
+                speculated = true;
+                s_vpStSpec.fetch_add(1, std::memory_order_relaxed);
+                if (pred.swaps != 0u)
+                {
+                    swapToggle1023(copy);
+                }
+                loadW(assumedW, copy);
+                std::memcpy(entryW, assumedW, sizeof(entryW));
+            }
+            else
+            {
+                s_vpStWaitsExact.fetch_add(1, std::memory_order_relaxed);
+                vpWaitCond([&]() {
+                    return s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k;
+                });
+                storeW(copy, s_vpSlots[(k - 1u) & 255u].w);
+                std::memcpy(entryW, s_vpSlots[(k - 1u) & 255u].w, sizeof(entryW));
+            }
+        }
+
+        // 2. Run the program with capture on (thread_local vector).
+        static thread_local std::vector<uint8_t> s_cap;
+        s_cap.clear();
+        ps2_vu1_set_capture(&s_cap);
+        if (myThread == 0)
+        {
+            if (vpMscalCb)
+                vpMscalCb(ev.a, ev.b, ev.c);
+        }
+        else
+        {
+            if (g_vu1MscalCallbackB)
+                g_vu1MscalCallbackB(ev.a, ev.b, ev.c, s_vpShadow);
+        }
+        ps2_vu1_set_capture(nullptr);
+
+        // 3. If speculated: wait until slot(k-1).done == k; if slot(k-1).w != assumed: copy slot(k-1).w into own W and RE-RUN the program (clear capture first). Count re-runs.
+        if (speculated)
+        {
+            vpWaitCond([&]() {
+                return s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k;
+            });
+            if (std::memcmp(s_vpSlots[(k - 1u) & 255u].w, assumedW, sizeof(assumedW)) != 0)
+            {
+                s_vpStReruns.fetch_add(1, std::memory_order_relaxed);
+                storeW(copy, s_vpSlots[(k - 1u) & 255u].w);
+                std::memcpy(entryW, s_vpSlots[(k - 1u) & 255u].w, sizeof(entryW));
+                s_cap.clear();
+                ps2_vu1_set_capture(&s_cap);
+                if (myThread == 0)
+                {
+                    if (vpMscalCb)
+                        vpMscalCb(ev.a, ev.b, ev.c);
+                }
+                else
+                {
+                    if (g_vu1MscalCallbackB)
+                        g_vu1MscalCallbackB(ev.a, ev.b, ev.c, s_vpShadow);
+                }
+                ps2_vu1_set_capture(nullptr);
+            }
+        }
+
+        // 4. Outcome: swapped = own 1023 differs from entry W 1023; wroteTable = own 636..795 differs from entry W. Update the table for key(k). Publish slot(k): copy own W into slot(k).w, then done.store(k+1, release).
+        const bool swapped = (std::memcmp(copy + (1023u * 16u), entryW[0], 16) != 0);
+        const bool wroteTable = (std::memcmp(copy + (636u * 16u), &entryW[1][0], 160u * 16u) != 0);
+
+        predUpdate(s_threadKeys[k & 255u], swapped, wroteTable);
+
+        s_vpSlots[k & 255u].swapped = swapped;
+        s_vpSlots[k & 255u].wroteTable = wroteTable;
+        loadW(s_vpSlots[k & 255u].w, copy);
+        s_vpSlots[k & 255u].done.store(k + 1u, std::memory_order_release);
+
+        // 5. Wait for the GIF turn t (atomic turnDone == t), submit the capture with submitGifPacket(Path1, ...) (X1 uses the same callback object; submitGifPacket is called by whichever thread holds the turn), then ps2_gs_async_batch(false); ps2_gs_async_batch(true) (flush so cross-thread order holds), then turnDone.store(t+1).
+        vpWaitCond([&]() {
+            return s_vpTurnDone.load(std::memory_order_acquire) == ev.t;
+        });
+        if (!s_cap.empty() && vpGif1Cb)
+            vpGif1Cb(s_cap.data(), static_cast<uint32_t>(s_cap.size()));
+        ps2_gs_async_batch(false);
+        ps2_gs_async_batch(true);
+        s_vpTurnDone.store(ev.t + 1u, std::memory_order_release);
     }
 
     static void vpPushEvent(const VpEvent &ev)
@@ -1205,9 +1458,21 @@ namespace
             return idle0 && idle1;
         });
         }
-        if (dual && s_vpVu1Data)
+        if (dual)
         {
-            std::memcpy(s_vpShadow, s_vpVu1Data, PS2_VU1_DATA_SIZE);
+            if (s_vpMscalK > 0u && ((s_vpMscalK - 1u) & 1u) == 1u && s_vpVu1Data)
+            {
+                storeW(s_vpVu1Data, s_vpSlots[(s_vpMscalK - 1u) & 255u].w);
+            }
+            if (s_vpVu1Data)
+            {
+                std::memcpy(s_vpShadow, s_vpVu1Data, PS2_VU1_DATA_SIZE);
+            }
+            s_vpMscalK = 0u;
+            s_vpTurnT = 0u;
+            s_vpTurnDone.store(0u, std::memory_order_release);
+            for (int i = 0; i < 256; ++i)
+                s_vpSlots[i].done.store(0u, std::memory_order_relaxed);
         }
         if (dwT0) // PROBE-MG
         {
@@ -1219,12 +1484,14 @@ namespace
             {
                 s_last = now;
                 const double ms = 1.0 / 3.0e6; // ~3 GHz TSC: ticks -> ms (approximate)
-                ::ps2xSafeLog("[vpipe] drains=%llu drainwait_ms=%.0f exec_busy_ms=%.0f x1_busy_ms=%.0f exec_spin_ms=%.0f sleeps=%llu full=%llu ev[w/mscal/mscnt/gif/flush]=%llu/%llu/%llu/%llu/%llu\n",
+                ::ps2xSafeLog("[vpipe] drains=%llu drainwait_ms=%.0f exec_busy_ms=%.0f x1_busy_ms=%.0f exec_spin_ms=%.0f sleeps=%llu full=%llu ev[w/mscal/mscnt/gif/flush]=%llu/%llu/%llu/%llu/%llu x1_runs=%llu spec=%llu reruns=%llu waits_exact=%llu\n",
                               (unsigned long long)s_vpStDrains.exchange(0), s_vpStDrainWait.exchange(0) * ms, s_vpStBusy.exchange(0) * ms,
                               s_vpStBusy1.exchange(0) * ms,
                               s_vpStSpin.exchange(0) * ms, (unsigned long long)s_vpStSleeps.exchange(0), (unsigned long long)s_vpStFull.exchange(0),
                               (unsigned long long)s_vpStEv[1].exchange(0), (unsigned long long)s_vpStEv[2].exchange(0), (unsigned long long)s_vpStEv[3].exchange(0),
-                              (unsigned long long)s_vpStEv[4].exchange(0), (unsigned long long)s_vpStEv[5].exchange(0));
+                              (unsigned long long)s_vpStEv[4].exchange(0), (unsigned long long)s_vpStEv[5].exchange(0),
+                              (unsigned long long)s_vpStX1Runs.exchange(0), (unsigned long long)s_vpStSpec.exchange(0),
+                              (unsigned long long)s_vpStReruns.exchange(0), (unsigned long long)s_vpStWaitsExact.exchange(0));
                 ::ps2xSafeLog("[vpipe] drains by site end/mskpath3/mpg/directimage/syncunpack=%llu/%llu/%llu/%llu/%llu\n",
                               (unsigned long long)s_vpStWhy[0].exchange(0), (unsigned long long)s_vpStWhy[1].exchange(0), (unsigned long long)s_vpStWhy[2].exchange(0),
                               (unsigned long long)s_vpStWhy[3].exchange(0), (unsigned long long)s_vpStWhy[4].exchange(0));
@@ -1285,14 +1552,7 @@ namespace
             case VP_MSCAL:
                 if (vpDualOn())
                 {
-                    static thread_local std::vector<uint8_t> cap;
-                    cap.clear();
-                    ps2_vu1_set_capture(&cap);
-                    if (vpMscalCb)
-                        vpMscalCb(ev.a, ev.b, ev.c);
-                    ps2_vu1_set_capture(nullptr);
-                    if (!cap.empty() && vpGif1Cb)
-                        vpGif1Cb(cap.data(), static_cast<uint32_t>(cap.size()));
+                    vpRunMscal(ev, 0);
                 }
                 else
                 {
@@ -1305,8 +1565,22 @@ namespace
                     vpMscntCb(ev.b, ev.c);
                 break;
             case VP_GIF2:
-                if (vpGif2Cb)
-                    vpGif2Cb(ev.p, ev.n, ev.hl != 0);
+                if (vpDualOn())
+                {
+                    vpWaitCond([&]() {
+                        return s_vpTurnDone.load(std::memory_order_acquire) == ev.t;
+                    });
+                    if (vpGif2Cb)
+                        vpGif2Cb(ev.p, ev.n, ev.hl != 0);
+                    ps2_gs_async_batch(false);
+                    ps2_gs_async_batch(true);
+                    s_vpTurnDone.store(ev.t + 1u, std::memory_order_release);
+                }
+                else
+                {
+                    if (vpGif2Cb)
+                        vpGif2Cb(ev.p, ev.n, ev.hl != 0);
+                }
                 break;
             case VP_WRITES:
                 if (s_vpVu1Data)
@@ -1403,6 +1677,13 @@ namespace
                 }
                 break;
             case VP_MSCAL:
+            {
+                const uint64_t t0 = vpStatOn() ? __rdtsc() : 0ull;
+                vpRunMscal(ev, 1);
+                if (t0)
+                    s_vpStBusy1.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
+                break;
+            }
             case VP_MSCNT:
             case VP_GIF2:
             default:
@@ -1709,6 +1990,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     ev.a = startPC;
                     ev.b = runTop;
                     ev.c = runItop;
+                    if (vpDualOn())
+                    {
+                        ev.n = s_vpMscalK++;
+                        ev.t = s_vpTurnT++;
+                    }
                     vpPushEvent(ev);
                 }
             }
@@ -1751,6 +2037,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             {
                 if (m_vu1MscntCallback)
                 {
+                    if (vpDualOn())
+                        vpDrain(0);
                     VpEvent ev{};
                     ev.kind = VP_MSCNT;
                     ev.b = runTop;
@@ -1874,6 +2162,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         ev.hl = directHl ? 1 : 0;
                         ev.p = s_vpKeep.back().data();
                         ev.n = static_cast<uint32_t>(s_vpKeep.back().size());
+                        if (vpDualOn())
+                            ev.t = s_vpTurnT++;
                         vpPushEvent(ev);
                     }
                     else
@@ -1893,6 +2183,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         ev.hl = directHl ? 1 : 0;
                         ev.p = data + pos;
                         ev.n = qwCount * 16;
+                        if (vpDualOn())
+                            ev.t = s_vpTurnT++;
                         vpPushEvent(ev);
                     }
                     else
