@@ -947,6 +947,75 @@ static void jmReport()
     s_prevT = nowT;
 }
 
+// PROBE-V0A: VU0 microprogram inventory probe (PS2X_VU0_PCPROF=1, default off)
+static bool v0ProfOn()
+{
+    static const bool on = []() {
+        const char *e = std::getenv("PS2X_VU0_PCPROF");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+struct V0ProfEntry
+{
+    uint64_t calls = 0;
+    uint64_t ticks = 0;
+    uint64_t instrs = 0;
+};
+static V0ProfEntry s_v0pEntries[512];
+static uint64_t s_v0pTotalCalls = 0;
+static uint64_t s_v0pTotalTicks = 0;
+static uint32_t s_v0pLastInstrs = 0;
+static void v0ProfRecord(uint32_t startPC, uint64_t ticks, uint32_t instrs, uint64_t imageHash)
+{
+    static uint64_t s_prevTsc = __rdtsc();
+    static auto s_prevT = std::chrono::steady_clock::now();
+    const uint32_t idx = (startPC & 0xFFFu) >> 3;
+    V0ProfEntry &e = s_v0pEntries[idx];
+    ++e.calls;
+    e.ticks += ticks;
+    e.instrs += instrs;
+    ++s_v0pTotalCalls;
+    s_v0pTotalTicks += ticks;
+    if ((s_v0pTotalCalls & 4095u) != 0u)
+        return;
+    const auto nowT = std::chrono::steady_clock::now();
+    const double winS = std::chrono::duration<double>(nowT - s_prevT).count();
+    if (winS < 5.0)
+        return;
+    const uint64_t nowTsc = __rdtsc();
+    const double tpns = (winS > 0.0 && nowTsc > s_prevTsc) ? static_cast<double>(nowTsc - s_prevTsc) / (winS * 1e9) : 1.0;
+    const double tpms = tpns * 1e6;
+    uint32_t order[512];
+    for (uint32_t i = 0; i < 512u; ++i)
+        order[i] = i;
+    std::partial_sort(order, order + 24, order + 512, [](uint32_t a, uint32_t b) {
+        return s_v0pEntries[a].ticks > s_v0pEntries[b].ticks;
+    });
+    char buf[2048];
+    int pos = std::snprintf(buf, sizeof(buf), "[v0prof] window_s=%.1f calls=%llu total_ms=%.1f image=%016llx top:",
+                            winS, static_cast<unsigned long long>(s_v0pTotalCalls),
+                            static_cast<double>(s_v0pTotalTicks) / tpms,
+                            static_cast<unsigned long long>(imageHash));
+    for (uint32_t i = 0; i < 24u && pos > 0 && pos < static_cast<int>(sizeof(buf)); ++i)
+    {
+        const V0ProfEntry &pe = s_v0pEntries[order[i]];
+        if (pe.calls == 0u)
+            break;
+        const double entryMs = static_cast<double>(pe.ticks) / tpms;
+        const double nsPerCall = (static_cast<double>(pe.ticks) / tpns) / static_cast<double>(pe.calls);
+        pos += std::snprintf(buf + pos, sizeof(buf) - static_cast<size_t>(pos), " %03x:%.1fms/%llu(%.0fns)",
+                             order[i] << 3, entryMs, static_cast<unsigned long long>(pe.calls), nsPerCall);
+    }
+    extern void ps2xSafeLog(const char *fmt, ...);
+    ps2xSafeLog("%s\n", buf);
+    std::memset(s_v0pEntries, 0, sizeof(s_v0pEntries));
+    s_v0pTotalCalls = 0;
+    s_v0pTotalTicks = 0;
+    s_prevTsc = nowTsc;
+    s_prevT = nowT;
+}
+
 void VU1Interpreter::resetScheduler()
 {
     // PERF-HM: entries are zeroed when committed, so with nothing pending the arrays are already clear
@@ -3479,6 +3548,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     }
     if (m_unit == Unit::VU0)
         s_jmExec0 = s_jmMark = __rdtsc(); // PROBE-JM
+    const bool v0pOn = (m_unit == Unit::VU0) && v0ProfOn(); // PROBE-V0A
+    const uint64_t v0pT0 = v0pOn ? __rdtsc() : 0ull; // PROBE-V0A
     g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
     struct SvGuard // PROBE-SURVEY: per-entry-pc run/cycle/kick tally, VU1 only (PS2X_VU1_SURVEY=1)
     {
@@ -4468,7 +4539,30 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));
         return;
     }
+    if (v0pOn) // PROBE-V0D: dump VU0 code+data (pre-run) once per new image hash (max 4)
+    {
+        static uint64_t s_v0dHashes[4];
+        static uint32_t s_v0dCount = 0;
+        const uint64_t h0d = s_hcUnitHash[0];
+        bool seen0d = false;
+        for (uint32_t i = 0; i < s_v0dCount; ++i)
+            seen0d |= (s_v0dHashes[i] == h0d);
+        if (!seen0d && s_v0dCount < 4u)
+        {
+            s_v0dHashes[s_v0dCount++] = h0d;
+            char p0d[128];
+            std::snprintf(p0d, sizeof(p0d), "logs/vu0_image_%016llx.bin", static_cast<unsigned long long>(h0d));
+            if (FILE *f0d = std::fopen(p0d, "wb"))
+            {
+                std::fwrite(vuCode, 1, codeSize, f0d);
+                std::fwrite(vuData, 1, dataSize, f0d);
+                std::fclose(f0d);
+            }
+        }
+    }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+    if (v0pOn) // PROBE-V0A
+        v0ProfRecord(startPC, __rdtsc() - v0pT0, s_v0pLastInstrs, s_hcUnitHash[0]);
     if (m_unit == Unit::VU0)
     {
         const uint64_t jmNow = __rdtsc(); // PROBE-JM
@@ -6362,6 +6456,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     }
     if (m_unit == Unit::VU0)
     {
+        if (v0ProfOn()) // PROBE-V0A
+            s_v0pLastInstrs = instrsThisRun;
         const uint64_t jmNow = __rdtsc(); // PROBE-JM
         s_jmT[3] += jmNow - s_jmMark;
         s_jmMark = jmNow;
