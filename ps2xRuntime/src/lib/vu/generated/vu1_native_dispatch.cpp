@@ -3905,6 +3905,120 @@ const bool s_pcpOn = []() { const char *e = std::getenv("PS2X_VU1_PCPROF"); retu
 std::atomic<uint64_t> s_pcpT[2][0x800], s_pcpN[2][0x800]; // PROBE-PC: [0] unit (hot block / kernel), [1] slow pair
 uint64_t s_pcpCalls = 0, s_pcpTsc0 = 0;
 std::chrono::steady_clock::time_point s_pcpWin0;
+// PROBE-HI: handler-level profile. A new program = a unit starting at pc 0x0008. A handler entry = the unit start following a 0x0028 unit (or, before the first
+// handler of a program, the first unit that is not 0x08/0x20/0x28). A handler is active until the next 0x0028 unit. Plain statics (VU1 runs on one thread).
+uint64_t s_hiT[0x800], s_hiN[0x800]; // PROBE-HI: per handler entry pc>>3: inclusive ticks, calls
+struct HiSig { uint64_t hash, count; uint16_t pcs[8]; uint8_t npc; };
+HiSig s_hiSig[512]; // PROBE-HI
+uint64_t s_hiPrograms = 0; // PROBE-HI
+uint16_t s_hiSet[16]; uint32_t s_hiSetN = 0; // PROBE-HI: sorted distinct handler entry pcs of the current program
+uint32_t s_hiPrev = 0xFFFFu, s_hiCur = 0xFFFFu; // PROBE-HI: previous unit start pc, active handler idx (0xFFFF = none)
+bool s_hiProgLive = false, s_hiGotHandler = false;
+void hiProgramEnd()
+{
+    if (!s_hiProgLive)
+        return;
+    s_hiProgLive = false;
+    ++s_hiPrograms;
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t i = 0; i < s_hiSetN; ++i)
+        h = (h ^ s_hiSet[i]) * 1099511628211ull;
+    if (h == 0u)
+        h = 1u;
+    uint32_t slot = uint32_t(h >> 7) & 511u;
+    for (int probe = 0; probe < 512; ++probe, slot = (slot + 1u) & 511u)
+    {
+        HiSig &s = s_hiSig[slot];
+        if (s.hash == 0u)
+        {
+            s.hash = h;
+            s.npc = uint8_t(s_hiSetN < 8u ? s_hiSetN : 8u);
+            for (uint32_t i = 0; i < s.npc; ++i)
+                s.pcs[i] = s_hiSet[i];
+        }
+        if (s.hash == h)
+        {
+            ++s.count;
+            return;
+        }
+    }
+}
+inline void hiAt(uint32_t pc) // called after the previous slice was flushed
+{
+    if (pc == 0x0008u)
+    {
+        hiProgramEnd();
+        s_hiProgLive = true;
+        s_hiSetN = 0;
+        s_hiGotHandler = false;
+        s_hiCur = 0xFFFFu;
+        s_hiPrev = pc;
+        return;
+    }
+    s_hiProgLive = true;
+    bool entry = s_hiPrev == 0x0028u && pc != 0x0028u;
+    if (!entry && !s_hiGotHandler && (s_hiPrev == 0x0008u || s_hiPrev == 0x0020u) && pc != 0x0020u && pc != 0x0028u)
+        entry = true;
+    if (pc == 0x0028u)
+        s_hiCur = 0xFFFFu;
+    else if (entry)
+    {
+        s_hiGotHandler = true;
+        s_hiCur = (pc >> 3) & 0x7FFu;
+        ++s_hiN[s_hiCur];
+        uint16_t v = uint16_t(pc);
+        uint32_t i = 0;
+        while (i < s_hiSetN && s_hiSet[i] < v)
+            ++i;
+        if (i >= s_hiSetN || s_hiSet[i] != v)
+        {
+            if (s_hiSetN < 16u)
+            {
+                for (uint32_t j = s_hiSetN; j > i; --j)
+                    s_hiSet[j] = s_hiSet[j - 1];
+                s_hiSet[i] = v;
+                ++s_hiSetN;
+            }
+        }
+    }
+    s_hiPrev = pc;
+}
+void hiReport(double msPerTick)
+{
+    std::vector<std::pair<uint64_t, uint32_t>> v;
+    for (uint32_t i = 0; i < 0x800u; ++i)
+    {
+        if (s_hiT[i])
+            v.emplace_back(s_hiT[i], i);
+    }
+    std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    char buf[4096];
+    int n = std::snprintf(buf, sizeof(buf), "[pcprof] handlers:");
+    for (size_t j = 0; j < v.size() && j < 40u && n < 3900; ++j)
+        n += std::snprintf(buf + n, sizeof(buf) - n, " %04x:%.1fms/%llu", v[j].second * 8u, v[j].first * msPerTick, (unsigned long long)s_hiN[v[j].second]);
+    ps2xSafeLog("%s\n", buf);
+    std::vector<std::pair<uint64_t, uint32_t>> sv;
+    for (uint32_t i = 0; i < 512u; ++i)
+    {
+        if (s_hiSig[i].hash)
+            sv.emplace_back(s_hiSig[i].count, i);
+    }
+    std::sort(sv.begin(), sv.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    n = std::snprintf(buf, sizeof(buf), "[pcprof] programs=%llu signatures:", (unsigned long long)s_hiPrograms);
+    for (size_t j = 0; j < sv.size() && j < 12u && n < 3800; ++j)
+    {
+        const HiSig &s = s_hiSig[sv[j].second];
+        n += std::snprintf(buf + n, sizeof(buf) - n, " {");
+        for (uint32_t i = 0; i < s.npc; ++i)
+            n += std::snprintf(buf + n, sizeof(buf) - n, "%s%x", i ? "," : "", (unsigned)s.pcs[i]);
+        n += std::snprintf(buf + n, sizeof(buf) - n, "}x%llu", (unsigned long long)s.count);
+    }
+    ps2xSafeLog("%s\n", buf);
+    std::memset(s_hiT, 0, sizeof(s_hiT));
+    std::memset(s_hiN, 0, sizeof(s_hiN));
+    std::memset(s_hiSig, 0, sizeof(s_hiSig));
+    s_hiPrograms = 0;
+}
 void pcpReport()
 {
     using namespace std::chrono;
@@ -3943,6 +4057,7 @@ void pcpReport()
         for (uint32_t i = 0; i < 0x800u; ++i)
             s_pcpN[k][i].store(0, std::memory_order_relaxed);
     }
+    hiReport(msPerTick); // PROBE-HI
     s_pcpWin0 = now;
     s_pcpTsc0 = tsc;
 }
@@ -3963,6 +4078,7 @@ struct PcpGuard
         const uint64_t d = __rdtsc() - t0;
         s_pcpT[slow][idx].fetch_add(d, std::memory_order_relaxed);
         s_pcpN[slow][idx].fetch_add(1, std::memory_order_relaxed);
+        if (s_hiCur != 0xFFFFu) s_hiT[s_hiCur] += d; // PROBE-HI
         live = false;
     }
     inline void at(uint32_t pc)
@@ -3971,6 +4087,7 @@ struct PcpGuard
         idx = (pc >> 3) & 0x7FFu;
         slow = false;
         live = true;
+        hiAt(pc); // PROBE-HI
         t0 = __rdtsc();
     }
     ~PcpGuard() { flush(); }
