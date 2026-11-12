@@ -4455,6 +4455,8 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
                        exception == EXCEPTION_TLB_REFILL);
 }
 
+#include "vu/vu0_fast.inc"
+
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
     (void)rdram;
@@ -4538,13 +4540,48 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     }
     else
     {
-        m_vu0.reset();
-        copyVu0ContextToState(ctx, m_vu0.state());
-        m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
-                      vu0Data, PS2_VU0_DATA_SIZE,
-                      m_gs, &m_memory,
-                      startPC, 0u, ctx->vu0_itop, 4096);
-        copyVu0StateToContext(m_vu0.state(), ctx);
+        const bool fastAllow = ctx && !probeOn && !vu0fast::isAnyVerifyOrProfEnabled();
+        const bool checkOn = fastAllow && vu0fast::isCheckEnabled();
+        const bool fastOn = fastAllow && vu0fast::isFastEnabled();
+        const vu0fast::FastProg *fastProg =
+            (fastOn || checkOn)
+                ? vu0fast::lookupOrClassify(vu0Code, m_memory.getVU0CodeGeneration(), startPC)
+                : nullptr;
+
+        if (checkOn && fastProg)
+        {
+            R5900Context fastCtx = *ctx;
+            vu0fast::executeFast(*fastProg, &fastCtx);
+
+            m_vu0.reset();
+            copyVu0ContextToState(ctx, m_vu0.state());
+            m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
+                          vu0Data, PS2_VU0_DATA_SIZE,
+                          m_gs, &m_memory,
+                          startPC, 0u, ctx->vu0_itop, 4096);
+            copyVu0StateToContext(m_vu0.state(), ctx);
+
+            vu0fast::compareAndRecord(startPC, fastCtx, *ctx);
+            vu0fast::maybePrintCheckStats(false);
+        }
+        else if (fastOn && fastProg)
+        {
+            vu0fast::executeFast(*fastProg, ctx);
+        }
+        else
+        {
+            m_vu0.reset();
+            copyVu0ContextToState(ctx, m_vu0.state());
+            m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
+                          vu0Data, PS2_VU0_DATA_SIZE,
+                          m_gs, &m_memory,
+                          startPC, 0u, ctx->vu0_itop, 4096);
+            copyVu0StateToContext(m_vu0.state(), ctx);
+            if (checkOn)
+            {
+                vu0fast::maybePrintCheckStats(true);
+            }
+        }
     }
 
     if (probeOn && startPC == 0u)
