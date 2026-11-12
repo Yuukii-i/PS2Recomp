@@ -433,6 +433,97 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
     return true;
 }
 
+// PERF-SVF: 8-wide struct-of-arrays AVX2 vertex chain, copied from lbVertex8 / lb8Op / lb8FromRows / lb8ToRows (vu1_native_hand.inc lines ~601-812; flags/sticky/mac
+// bookkeeping dropped, only the value + exactness guard kept). Exact whenever no result lane of any op leaves the exponent window [2,253] (except certain zeros);
+// otherwise the caller runs the scalar fmacV chain for that group.
+struct Fv8V
+{
+    __m256 c[4];
+};
+inline __m256 fv8N(__m256 v) // == lb8N == vuhot::N4 on 8 lanes
+{
+    const __m256i bits = _mm256_castps_si256(v);
+    const __m256i expo = _mm256_and_si256(_mm256_srli_epi32(bits, 23), _mm256_set1_epi32(0xFF));
+    const __m256i sign = _mm256_and_si256(bits, _mm256_set1_epi32(static_cast<int>(0x80000000u)));
+    const __m256i isZero = _mm256_cmpeq_epi32(expo, _mm256_setzero_si256());
+    const __m256i isFF = _mm256_cmpeq_epi32(expo, _mm256_set1_epi32(0xFF));
+    __m256i r = _mm256_blendv_epi8(bits, sign, isZero);
+    r = _mm256_blendv_epi8(r, _mm256_or_si256(sign, _mm256_set1_epi32(0x7F7FFFFF)), isFF);
+    return _mm256_castsi256_ps(r);
+}
+inline __m256i fv8OutWin(__m256 v)
+{
+    const __m256i ev = _mm256_and_si256(_mm256_srli_epi32(_mm256_castps_si256(v), 23), _mm256_set1_epi32(0xFF));
+    return _mm256_or_si256(_mm256_cmpgt_epi32(_mm256_set1_epi32(2), ev), _mm256_cmpgt_epi32(ev, _mm256_set1_epi32(253)));
+}
+inline __m256i fv8IsZ(__m256 v) { return _mm256_castps_si256(_mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_EQ_OQ)); }
+inline bool fv8Any(__m256i m) { return !_mm256_testz_si256(m, m); }
+
+template <int DEST, bool MADD>
+inline Fv8V fv8Op(const Fv8V &a, const Fv8V &b, const Fv8V &ac, __m256i &bad)
+{
+    Fv8V r;
+    for (int c = 0; c < 4; ++c)
+    {
+        if (((DEST >> (3 - c)) & 1) == 0)
+        {
+            r.c[c] = _mm256_setzero_ps();
+            continue;
+        }
+        const __m256 av = a.c[c], bv = b.c[c];
+        const __m256 val = MADD ? _mm256_fmadd_ps(av, bv, ac.c[c]) : _mm256_mul_ps(av, bv);
+        r.c[c] = val;
+        const __m256i za = _mm256_or_si256(fv8IsZ(av), fv8IsZ(bv));
+        __m256i zok = _mm256_and_si256(fv8IsZ(val), za);
+        if (MADD)
+            zok = _mm256_and_si256(zok, fv8IsZ(ac.c[c]));
+        bad = _mm256_or_si256(bad, _mm256_andnot_si256(zok, fv8OutWin(val)));
+        if (MADD)
+            bad = _mm256_or_si256(bad, _mm256_andnot_si256(za, fv8OutWin(_mm256_mul_ps(av, bv))));
+    }
+    return r;
+}
+inline Fv8V fv8Const(__m128 v)
+{
+    v = norm4(v);
+    Fv8V r;
+    r.c[0] = _mm256_broadcastss_ps(v);
+    r.c[1] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0x55));
+    r.c[2] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0xAA));
+    r.c[3] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0xFF));
+    return r;
+}
+inline Fv8V fv8FromRows(const __m128 rows[8])
+{
+    const __m256 r0 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[0]), rows[4], 1);
+    const __m256 r1 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[1]), rows[5], 1);
+    const __m256 r2 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[2]), rows[6], 1);
+    const __m256 r3 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[3]), rows[7], 1);
+    const __m256 t0 = _mm256_unpacklo_ps(r0, r1), t1 = _mm256_unpacklo_ps(r2, r3);
+    const __m256 t2 = _mm256_unpackhi_ps(r0, r1), t3 = _mm256_unpackhi_ps(r2, r3);
+    Fv8V r;
+    r.c[0] = _mm256_shuffle_ps(t0, t1, 0x44);
+    r.c[1] = _mm256_shuffle_ps(t0, t1, 0xEE);
+    r.c[2] = _mm256_shuffle_ps(t2, t3, 0x44);
+    r.c[3] = _mm256_shuffle_ps(t2, t3, 0xEE);
+    return r;
+}
+inline void fv8ToRows(const Fv8V &v, __m128 rows[8])
+{
+    const __m256 t0 = _mm256_unpacklo_ps(v.c[0], v.c[1]), t1 = _mm256_unpacklo_ps(v.c[2], v.c[3]);
+    const __m256 t2 = _mm256_unpackhi_ps(v.c[0], v.c[1]), t3 = _mm256_unpackhi_ps(v.c[2], v.c[3]);
+    const __m256 r0 = _mm256_shuffle_ps(t0, t1, 0x44), r1 = _mm256_shuffle_ps(t0, t1, 0xEE);
+    const __m256 r2 = _mm256_shuffle_ps(t2, t3, 0x44), r3 = _mm256_shuffle_ps(t2, t3, 0xEE);
+    rows[0] = _mm256_castps256_ps128(r0);
+    rows[4] = _mm256_extractf128_ps(r0, 1);
+    rows[1] = _mm256_castps256_ps128(r1);
+    rows[5] = _mm256_extractf128_ps(r1, 1);
+    rows[2] = _mm256_castps256_ps128(r2);
+    rows[6] = _mm256_extractf128_ps(r2, 1);
+    rows[3] = _mm256_castps256_ps128(r3);
+    rows[7] = _mm256_extractf128_ps(r3, 1);
+}
+
 // 1EE0 entry (vi10 = 0). Prologue 1EF8..1F78 in closed form, then the skinned path 1FE0 -> JR (1:1 value port of lbFull / lbVertex: the exact scalar vertex
 // chain, no AVX2/relaxed groups), memory + GIF only. R.vi[12] is live state (the routine leaves vi12 = idx of vertex 1). Returns false (nothing needs undoing:
 // the caller restores the undo log) for every case lbFull declines or that it does not model: N outside 4..67, DIV by zero, any aliasing between the output
@@ -475,16 +566,82 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, std:
         int32_t idx;
     };
     SkV V[67];
-    for (int32_t t = 0; t < N; ++t)
+    __m128 rA[67], rB[67], rS3[67], rS2[67];
+    for (int32_t t = 0; t < N; ++t) // gather + aliasing checks (same order of checks as before; any failure returns false before any store)
     {
         const int32_t idx = static_cast<int16_t>(ilw(vu, i4base + static_cast<uint32_t>(t), 0));
         const uint32_t qa = static_cast<uint32_t>(636 + idx), qb2 = static_cast<uint32_t>(716 + idx);
         const uint32_t q3 = static_cast<uint16_t>(s3base + static_cast<uint32_t>(t)), q2 = static_cast<uint16_t>(s2base + static_cast<uint32_t>(t));
         if (hits(i4base + static_cast<uint32_t>(t)) || hits(qa) || hits(qb2) || hits(q3) || hits(q2))
             return false;
-        const __m128 A = ldq(vu, qa), B = ldq(vu, qb2), S3 = ldq(vu, q3), S2 = ldq(vu, q2);
-        const __m128 mula = fmacV<4>(vf3, A, zero);
-        const __m128 T5 = fmacV<2>(vf4, bc<3>(A), mula);
+        rA[t] = ldq(vu, qa);
+        rB[t] = ldq(vu, qb2);
+        rS3[t] = ldq(vu, q3);
+        rS2[t] = ldq(vu, q2);
+        V[t].idx = idx;
+    }
+    // PERF-SVF: groups of 8 vertices (short last group padded with copies of its last vertex), AVX2 SoA; guard failure -> scalar chain below for that group
+    const Fv8V k1 = fv8Const(vf1), k2 = fv8Const(vf2), k3 = fv8Const(vf3), k4 = fv8Const(vf4), k16 = fv8Const(vf16), kaccw = fv8Const(accw);
+    for (int32_t t0 = 0; t0 < N; t0 += 8)
+    {
+        const int32_t n = (N - t0 < 8) ? (N - t0) : 8;
+        __m128 gA[8], gB[8], gS3[8], gS2[8];
+        for (int j = 0; j < 8; ++j)
+        {
+            const int32_t s = t0 + (j < n ? j : n - 1);
+            gA[j] = rA[s];
+            gB[j] = rB[s];
+            gS3[j] = rS3[s];
+            gS2[j] = rS2[s];
+        }
+        Fv8V A = fv8FromRows(gA), B = fv8FromRows(gB), S3 = fv8FromRows(gS3), S2 = fv8FromRows(gS2);
+        for (int c = 0; c < 4; ++c)
+        {
+            A.c[c] = fv8N(A.c[c]);
+            B.c[c] = fv8N(B.c[c]);
+            S3.c[c] = fv8N(S3.c[c]);
+            S2.c[c] = fv8N(S2.c[c]);
+        }
+        Fv8V z8;
+        z8.c[0] = z8.c[1] = z8.c[2] = z8.c[3] = _mm256_setzero_ps();
+        __m256i bad = _mm256_setzero_si256();
+        const Fv8V mula = fv8Op<15, false>(k3, A, z8, bad);
+        const Fv8V t5 = fv8Op<15, true>(k4, Fv8V{{A.c[3], A.c[3], A.c[3], A.c[3]}}, mula, bad);
+        const __m256 den = fv8N(t5.c[3]);
+        bool ok = !fv8Any(fv8IsZ(den)); // zero den: scalar path below reports it (returns false)
+        if (ok)
+        {
+            const __m256 qv = fv8N(fv8N(_mm256_div_ps(_mm256_set1_ps(1.0f), den)));
+            const Fv8V Q{{qv, qv, qv, qv}};
+            const Fv8V r7 = fv8Op<14, false>(t5, Q, z8, bad);
+            const Fv8V os2q = fv8Op<14, false>(S2, Q, z8, bad);
+            const Fv8V w = fv8Op<1, true>(k1, Q, kaccw, bad);
+            const Fv8V bv = fv8Op<15, false>(B, k16, z8, bad);
+            const Fv8V in = fv8Op<15, true>(k2, k16, bv, bad);
+            const Fv8V pr = fv8Op<15, false>(S3, in, z8, bad);
+            if (!fv8Any(bad))
+            {
+                __m128 oR7[8], oS2Q[8], oPr[8];
+                fv8ToRows(r7, oR7);
+                fv8ToRows(os2q, oS2Q);
+                fv8ToRows(pr, oPr);
+                alignas(32) float wf[8];
+                _mm256_store_ps(wf, w.c[3]);
+                for (int j = 0; j < n; ++j)
+                {
+                    V[t0 + j].R7 = oR7[j];
+                    V[t0 + j].S2Q = oS2Q[j];
+                    V[t0 + j].prod = oPr[j];
+                    V[t0 + j].Wraw = wf[j];
+                }
+                continue;
+            }
+        }
+        for (int32_t t = t0; t < t0 + n; ++t) // scalar fallback (the original chain)
+        {
+        const __m128 sA = rA[t], B = rB[t], S3 = rS3[t], S2 = rS2[t];
+        const __m128 mula = fmacV<4>(vf3, sA, zero);
+        const __m128 T5 = fmacV<2>(vf4, bc<3>(sA), mula);
         const float den = nrm1(_mm_cvtss_f32(bc<3>(T5)));
         if (den == 0.0f)
             return false; // lbFull declines (di != 0)
@@ -496,7 +653,7 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, std:
         const __m128 bv = fmacV<4>(B, vf16, zero);
         const __m128 in = fmacV<2>(vf2, vf16, bv);
         V[t].prod = fmacV<4>(S3, in, zero);
-        V[t].idx = idx;
+        }
     }
     const uint32_t m1012z = ldw(vu, 1012, 2), m1012w = ldw(vu, 1012, 3);
     const uint32_t ctlOld = ldw(vu, 1023, 3) & 0xFFFFu;
