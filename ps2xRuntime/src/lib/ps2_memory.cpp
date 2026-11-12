@@ -585,6 +585,7 @@ static void vif1EnqueueCopy(const uint8_t *p, uint32_t n)
     vif1EnqueueJob(std::move(v));
 }
 extern "C" bool ps2_vif1_on_worker() { return t_onVif1Worker; }
+extern "C" void ps2_vif1_mark_worker_thread() { t_onVif1Worker = true; }
 // PERF-SL: called by the per-frame sceGsSyncPath: remember how many jobs exist now and wait until the worker has finished the jobs that existed `lag` calls ago.
 // lag=1: at most one frame of VU1/GIF work is in flight while the EE builds the next one (steady cadence, bounded input latency).
 extern "C" void ps2_vif1_sync_lag(uint32_t lag)

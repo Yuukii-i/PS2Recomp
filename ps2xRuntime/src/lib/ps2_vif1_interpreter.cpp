@@ -1,11 +1,14 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
 extern "C" bool ps2_vif1_on_worker(); // PERF-HN (ps2_memory.cpp)
+extern "C" void ps2_vif1_mark_worker_thread();
+extern "C" void ps2_gs_async_batch(bool on);
 extern "C" bool ps2_fk_lookup(uint32_t chainSize, uint32_t pos, uint32_t *outSrc, uint32_t *outBytes, uint32_t *outBufOff);
 extern "C" void ps2_scanCameraRegion(const char *caller, uint64_t callIndex, uint32_t ra);
 extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint16_t dest, uint16_t num,
                                     uint8_t cl, uint8_t wl, uint8_t flg, uint16_t tops, uint32_t src_ea);
 #include "probe_ae.h"
+#include "ThreadNaming.h"
 #include <cstring>
 #include <immintrin.h>
 #include <cstdio>
@@ -14,6 +17,10 @@ extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint1
 #include <algorithm>
 #include <tuple>
 #include <mutex>
+#include <atomic>
+#include <thread>
+#include <condition_variable>
+#include <functional>
 #include <cstdarg>
 
 extern void ps2xSafeLog(const char *fmt, ...);
@@ -926,6 +933,276 @@ namespace
         ACT_CONST   = 1,
         ACT_PROTECT = 2
     };
+
+    // Task MG1: VIF1 two-stage pipeline (parser || VU1 exec), file-static engine
+    enum VpEventKind : uint8_t {
+        VP_WRITES = 1,
+        VP_MSCAL  = 2,
+        VP_MSCNT  = 3,
+        VP_GIF2   = 4,
+        VP_FLUSH  = 5
+    };
+
+    struct VpEvent {
+        uint8_t kind;
+        uint8_t hl;
+        uint32_t a, b, c;
+        const uint8_t *p;
+        uint32_t n;
+    };
+
+    struct VpRec {
+        uint16_t qw;
+        uint8_t mask;
+        uint8_t pad;
+        uint32_t lanes[4];
+    };
+
+    static constexpr uint32_t kVpEventCap = 65536;
+    static VpEvent vpEventRing[kVpEventCap];
+    static std::atomic<uint32_t> vpEventHead{0};
+    static std::atomic<uint32_t> vpEventTail{0};
+    static std::atomic<bool> vpConsumerWaiting{false};
+    static std::mutex vpConsumerMutex;
+    static std::condition_variable vpConsumerCv;
+    static std::atomic<bool> vpProducerWaiting{false};
+    static std::mutex vpProducerMutex;
+    static std::condition_variable vpProducerCv;
+
+    static constexpr uint32_t kVpRecCap = 262144;
+    static VpRec vpRecRing[kVpRecCap];
+    static std::atomic<uint32_t> vpRecHead{0};
+    static std::atomic<uint32_t> vpRecTail{0};
+    static std::atomic<bool> vpRecProducerWaiting{false};
+    static std::mutex vpRecProducerMutex;
+    static std::condition_variable vpRecProducerCv;
+
+    alignas(16) static uint8_t s_vpScratch[PS2_VU1_DATA_SIZE];
+    static uint8_t *s_vpVu1Data = nullptr;
+
+    static std::function<void(uint32_t, uint32_t, uint32_t)> vpMscalCb;
+    static std::function<void(uint32_t, uint32_t)> vpMscntCb;
+    static std::function<void(const uint8_t *, uint32_t, bool)> vpGif2Cb;
+
+    static std::atomic<uint32_t> vpFlushSeqGen{0};
+    static std::atomic<uint32_t> vpIdleSeq{0};
+    static std::mutex vpFlushMutex;
+    static std::condition_variable vpFlushCv;
+
+    static void vpExecThreadFunc();
+    static std::once_flag vpThreadOnce;
+    static void vpEnsureThreadStarted()
+    {
+        std::call_once(vpThreadOnce, []() {
+            std::thread(vpExecThreadFunc).detach();
+        });
+    }
+
+    static void vpPushEvent(const VpEvent &ev)
+    {
+        const uint32_t tail = vpEventTail.load(std::memory_order_seq_cst);
+        if (tail - vpEventHead.load(std::memory_order_seq_cst) >= kVpEventCap)
+        {
+            for (int spin = 0; spin < 4000; ++spin)
+            {
+                if (tail - vpEventHead.load(std::memory_order_seq_cst) < kVpEventCap)
+                    break;
+                _mm_pause();
+            }
+            if (tail - vpEventHead.load(std::memory_order_seq_cst) >= kVpEventCap)
+            {
+                std::unique_lock<std::mutex> lock(vpProducerMutex);
+                vpProducerWaiting.store(true, std::memory_order_seq_cst);
+                vpProducerCv.wait(lock, [&]() {
+                    return tail - vpEventHead.load(std::memory_order_seq_cst) < kVpEventCap;
+                });
+                vpProducerWaiting.store(false, std::memory_order_seq_cst);
+            }
+        }
+        vpEventRing[tail & (kVpEventCap - 1)] = ev;
+        vpEventTail.store(tail + 1, std::memory_order_seq_cst);
+        if (vpConsumerWaiting.load(std::memory_order_seq_cst))
+        {
+            std::lock_guard<std::mutex> lock(vpConsumerMutex);
+            vpConsumerCv.notify_one();
+        }
+    }
+
+    // PROBE-MG: pipeline stats (PS2X_VIF1_PIPE_STAT=1): exec busy/spin ticks, sleeps, drains, producer full-waits
+    static std::atomic<uint64_t> s_vpStBusy{0}, s_vpStSpin{0}, s_vpStSleeps{0}, s_vpStDrains{0}, s_vpStDrainWait{0}, s_vpStFull{0}, s_vpStEv[8];
+    static bool vpStatOn()
+    {
+        static const bool on = []() { const char *e = std::getenv("PS2X_VIF1_PIPE_STAT"); return e && e[0] == '1'; }();
+        return on;
+    }
+    static VpEvent vpPopEvent()
+    {
+        const uint32_t head = vpEventHead.load(std::memory_order_seq_cst);
+        if (head == vpEventTail.load(std::memory_order_seq_cst))
+        {
+            const uint64_t spT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
+            struct SpinAcct { uint64_t t0; ~SpinAcct() { if (t0) s_vpStSpin.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); } } spinAcct{spT0};
+            for (int spin = 0; spin < 4000; ++spin)
+            {
+                if (head != vpEventTail.load(std::memory_order_seq_cst))
+                    break;
+                _mm_pause();
+            }
+            if (head == vpEventTail.load(std::memory_order_seq_cst))
+            {
+                if (vpStatOn()) s_vpStSleeps.fetch_add(1, std::memory_order_relaxed); // PROBE-MG
+                std::unique_lock<std::mutex> lock(vpConsumerMutex);
+                vpConsumerWaiting.store(true, std::memory_order_seq_cst);
+                vpConsumerCv.wait(lock, [&]() {
+                    return head != vpEventTail.load(std::memory_order_seq_cst);
+                });
+                vpConsumerWaiting.store(false, std::memory_order_seq_cst);
+            }
+        }
+        VpEvent ev = vpEventRing[head & (kVpEventCap - 1)];
+        vpEventHead.store(head + 1, std::memory_order_seq_cst);
+        if (vpProducerWaiting.load(std::memory_order_seq_cst))
+        {
+            std::lock_guard<std::mutex> lock(vpProducerMutex);
+            vpProducerCv.notify_one();
+        }
+        return ev;
+    }
+
+    static std::vector<std::vector<uint8_t>> s_vpKeep; // PERF-MG: parser-owned packets referenced by queued VP_GIF2 events (inner buffers never move)
+    static std::atomic<uint64_t> s_vpStWhy[5]; // PROBE-MG: drains by site (end/mskpath3/mpg/directimage/syncunpack)
+    static void vpDrain(int why)
+    {
+        if (vpStatOn()) s_vpStWhy[why % 5].fetch_add(1, std::memory_order_relaxed);
+        vpEnsureThreadStarted();
+        const uint32_t seq = ++vpFlushSeqGen;
+        VpEvent ev{};
+        ev.kind = VP_FLUSH;
+        ev.a = seq;
+        vpPushEvent(ev);
+
+        const uint64_t dwT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
+        {
+        std::unique_lock<std::mutex> lock(vpFlushMutex);
+        vpFlushCv.wait(lock, [seq]() {
+            return static_cast<int32_t>(vpIdleSeq.load(std::memory_order_acquire) - seq) >= 0;
+        });
+        }
+        if (dwT0) // PROBE-MG
+        {
+            s_vpStDrainWait.fetch_add(__rdtsc() - dwT0, std::memory_order_relaxed);
+            s_vpStDrains.fetch_add(1, std::memory_order_relaxed);
+            static uint64_t s_last = 0;
+            const uint64_t now = __rdtsc();
+            if (now - s_last > 6000000000ull)
+            {
+                s_last = now;
+                const double ms = 1.0 / 3.0e6; // ~3 GHz TSC: ticks -> ms (approximate)
+                ::ps2xSafeLog("[vpipe] drains=%llu drainwait_ms=%.0f exec_busy_ms=%.0f exec_spin_ms=%.0f sleeps=%llu full=%llu ev[w/mscal/mscnt/gif/flush]=%llu/%llu/%llu/%llu/%llu\n",
+                              (unsigned long long)s_vpStDrains.exchange(0), s_vpStDrainWait.exchange(0) * ms, s_vpStBusy.exchange(0) * ms,
+                              s_vpStSpin.exchange(0) * ms, (unsigned long long)s_vpStSleeps.exchange(0), (unsigned long long)s_vpStFull.exchange(0),
+                              (unsigned long long)s_vpStEv[1].exchange(0), (unsigned long long)s_vpStEv[2].exchange(0), (unsigned long long)s_vpStEv[3].exchange(0),
+                              (unsigned long long)s_vpStEv[4].exchange(0), (unsigned long long)s_vpStEv[5].exchange(0));
+                ::ps2xSafeLog("[vpipe] drains by site end/mskpath3/mpg/directimage/syncunpack=%llu/%llu/%llu/%llu/%llu\n",
+                              (unsigned long long)s_vpStWhy[0].exchange(0), (unsigned long long)s_vpStWhy[1].exchange(0), (unsigned long long)s_vpStWhy[2].exchange(0),
+                              (unsigned long long)s_vpStWhy[3].exchange(0), (unsigned long long)s_vpStWhy[4].exchange(0));
+            }
+        }
+    }
+
+    static void vpPushRec(const VpRec &rec)
+    {
+        const uint32_t tail = vpRecTail.load(std::memory_order_seq_cst);
+        if (tail - vpRecHead.load(std::memory_order_seq_cst) >= kVpRecCap)
+        {
+            for (int spin = 0; spin < 4000; ++spin)
+            {
+                if (tail - vpRecHead.load(std::memory_order_seq_cst) < kVpRecCap)
+                    break;
+                _mm_pause();
+            }
+            if (tail - vpRecHead.load(std::memory_order_seq_cst) >= kVpRecCap)
+            {
+                if (vpStatOn()) s_vpStFull.fetch_add(1, std::memory_order_relaxed); // PROBE-MG
+                std::unique_lock<std::mutex> lock(vpRecProducerMutex);
+                vpRecProducerWaiting.store(true, std::memory_order_seq_cst);
+                vpRecProducerCv.wait(lock, [&]() {
+                    return tail - vpRecHead.load(std::memory_order_seq_cst) < kVpRecCap;
+                });
+                vpRecProducerWaiting.store(false, std::memory_order_seq_cst);
+            }
+        }
+        vpRecRing[tail & (kVpRecCap - 1)] = rec;
+        vpRecTail.store(tail + 1, std::memory_order_seq_cst);
+    }
+
+    static void vpExecThreadFunc()
+    {
+        ThreadNaming::SetCurrentThreadName("Vu1Exec");
+        ps2_vif1_mark_worker_thread();
+        ps2_gs_async_batch(true);
+        for (;;)
+        {
+            VpEvent ev = vpPopEvent();
+            const uint64_t buT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
+            struct BusyAcct { uint64_t t0; uint8_t k; ~BusyAcct() { if (t0) { s_vpStBusy.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); s_vpStEv[k & 7].fetch_add(1, std::memory_order_relaxed); } } } busyAcct{buT0, ev.kind};
+            switch (ev.kind)
+            {
+            case VP_MSCAL:
+                if (vpMscalCb)
+                    vpMscalCb(ev.a, ev.b, ev.c);
+                break;
+            case VP_MSCNT:
+                if (vpMscntCb)
+                    vpMscntCb(ev.b, ev.c);
+                break;
+            case VP_GIF2:
+                if (vpGif2Cb)
+                    vpGif2Cb(ev.p, ev.n, ev.hl != 0);
+                break;
+            case VP_WRITES:
+                if (s_vpVu1Data)
+                {
+                    for (uint32_t i = 0u; i < ev.b; ++i)
+                    {
+                        const VpRec &rec = vpRecRing[(ev.a + i) & (kVpRecCap - 1)];
+                        uint8_t *dst = s_vpVu1Data + (static_cast<size_t>(rec.qw) * 16u);
+                        if (rec.mask == 0x0Fu)
+                        {
+                            std::memcpy(dst, rec.lanes, 16);
+                        }
+                        else
+                        {
+                            uint32_t *dst32 = reinterpret_cast<uint32_t *>(dst);
+                            for (uint32_t f = 0u; f < 4u; ++f)
+                            {
+                                if (rec.mask & (1u << f))
+                                    dst32[f] = rec.lanes[f];
+                            }
+                        }
+                    }
+                }
+                vpRecHead.store(ev.a + ev.b, std::memory_order_seq_cst);
+                if (vpRecProducerWaiting.load(std::memory_order_seq_cst))
+                {
+                    std::lock_guard<std::mutex> lock(vpRecProducerMutex);
+                    vpRecProducerCv.notify_all();
+                }
+                break;
+            case VP_FLUSH:
+                ps2_gs_async_batch(false);
+                ps2_gs_async_batch(true);
+                vpIdleSeq.store(ev.a, std::memory_order_release);
+                {
+                    std::lock_guard<std::mutex> lock(vpFlushMutex);
+                    vpFlushCv.notify_all();
+                }
+                break;
+            default:
+                break;
+            }
+        }
+    }
 } // namespace
 
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
@@ -954,6 +1231,45 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     uint32_t kickUnpacksSkipped = 0;
     uint32_t kickBytesSkipped = 0;
     const auto tVif1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
+    static const bool s_vif1Pipe = []() {
+        const char *e = std::getenv("PS2X_VIF1_PIPE");
+        return !(e && e[0] == '0'); // default ON since A/B mg5 (silent: fps 39.3 -> 43.0); =0 disables
+    }();
+    const bool vpOn = s_vif1Pipe &&
+                      ps2_vif1_on_worker() &&
+                      !probe_ae::isEnabled() &&
+                      !isVu3dProbeEnabled() &&
+                      !probe_ae::isDcProbeEnabled() &&
+                      !(s_cuMovie && probe_ae::isMovieActivePublic()) &&
+                      !isUnpackVerifyEnabled();
+
+    if (vpOn)
+    {
+        s_vpVu1Data = m_vu1Data;
+        vpEnsureThreadStarted();
+        vpMscalCb = [this](uint32_t pc, uint32_t top, uint32_t itop) {
+            if (m_vu1MscalCallback)
+                m_vu1MscalCallback(pc, top, itop);
+        };
+        vpMscntCb = [this](uint32_t top, uint32_t itop) {
+            if (m_vu1MscntCallback)
+                m_vu1MscntCallback(top, itop);
+        };
+        vpGif2Cb = [this](const uint8_t *p, uint32_t n, bool hl) {
+            submitGifPacket(GifPathId::Path2, p, n, true, hl);
+        };
+    }
+    struct VpDrainGuard {
+        bool on;
+        ~VpDrainGuard() {
+            if (on)
+            {
+                vpDrain(0);
+                s_vpKeep.clear(); // PERF-MG: exec is idle, queued image packets are consumed
+            }
+        }
+    } vpGuard{vpOn};
 
 #if defined(PS2X_PROBE_AE) || 1
     if (probe_ae::isEnabled()) {
@@ -1099,12 +1415,19 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MSKPATH3)
         {
+            if (vpOn)
+                vpDrain(1);
             // VIF command docs: MSKPATH3 uses IMMEDIATE bit 15.
             const bool wasMasked = m_path3Masked;
             m_path3Masked = (imm & 0x8000u) != 0u;
             recordEpEvent("MSKPATH3 mask=%u", (imm & 0x8000u) ? 1u : 0u);
             if (wasMasked && !m_path3Masked)
                 flushMaskedPath3Packets();
+            if (vpOn)
+            {
+                ps2_gs_async_batch(false);
+                ps2_gs_async_batch(true);
+            }
             continue;
         }
         else if (opcode == VIF_MARK)
@@ -1162,7 +1485,19 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 #endif
 
             const bool skipMscal = probe_ae::isMovieSkipUnpackEnabled() && probe_ae::isMovieKickNative();
-            if (!skipMscal && m_vu1MscalCallback) {
+            if (vpOn)
+            {
+                if (!skipMscal && m_vu1MscalCallback)
+                {
+                    VpEvent ev{};
+                    ev.kind = VP_MSCAL;
+                    ev.a = startPC;
+                    ev.b = runTop;
+                    ev.c = runItop;
+                    vpPushEvent(ev);
+                }
+            }
+            else if (!skipMscal && m_vu1MscalCallback) {
                 const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 {
                     VsTimer vsVu(&g_vs.vu);
@@ -1197,7 +1532,18 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                           runTop, runItop, vif1_regs.tops & 0x3FFu);
 
             probe_ae::flushMovieBatch(nullptr, this);
-            if (m_vu1MscntCallback) {
+            if (vpOn)
+            {
+                if (m_vu1MscntCallback)
+                {
+                    VpEvent ev{};
+                    ev.kind = VP_MSCNT;
+                    ev.b = runTop;
+                    ev.c = runItop;
+                    vpPushEvent(ev);
+                }
+            }
+            else if (m_vu1MscntCallback) {
                 const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 {
                     VsTimer vsVu(&g_vs.vu);
@@ -1247,6 +1593,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MPG)
         {
+            if (vpOn)
+                vpDrain(2);
             uint32_t destAddr = (uint32_t)imm * 8u;
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
@@ -1265,6 +1613,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             pos += mpgBytes;
             if (pos > sizeBytes)
                 break;
+            if (vpOn)
+            {
+                ps2_gs_async_batch(false);
+                ps2_gs_async_batch(true);
+            }
             continue;
         }
         else if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
@@ -1297,7 +1650,19 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         (static_cast<uint64_t>(kGifFmtImage) << 58);
                     std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
                     std::memcpy(imagePacket.data() + 16u, data + pos, static_cast<size_t>(chunkQw) * 16u);
-                    submitGifPacket(GifPathId::Path2, imagePacket.data(), static_cast<uint32_t>(imagePacket.size()), true, directHl);
+                    if (vpOn)
+                    {
+                        // PERF-MG: keep the built packet alive until the end-of-job drain and queue it in order (was a drain per chunk, ~200/frame)
+                        s_vpKeep.push_back(std::move(imagePacket));
+                        VpEvent ev{};
+                        ev.kind = VP_GIF2;
+                        ev.hl = directHl ? 1 : 0;
+                        ev.p = s_vpKeep.back().data();
+                        ev.n = static_cast<uint32_t>(s_vpKeep.back().size());
+                        vpPushEvent(ev);
+                    }
+                    else
+                        submitGifPacket(GifPathId::Path2, imagePacket.data(), static_cast<uint32_t>(imagePacket.size()), true, directHl);
                     m_vif1PendingPath2ImageQwc -= chunkQw;
                     if (m_vif1PendingPath2ImageQwc == 0u)
                     {
@@ -1306,7 +1671,19 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 }
                 else
                 {
-                    submitGifPacket(GifPathId::Path2, data + pos, qwCount * 16, true, directHl);
+                    if (vpOn)
+                    {
+                        VpEvent ev{};
+                        ev.kind = VP_GIF2;
+                        ev.hl = directHl ? 1 : 0;
+                        ev.p = data + pos;
+                        ev.n = qwCount * 16;
+                        vpPushEvent(ev);
+                    }
+                    else
+                    {
+                        submitGifPacket(GifPathId::Path2, data + pos, qwCount * 16, true, directHl);
+                    }
 
                     const uint32_t pendingImageQw = pendingGifImageQwc(data + pos, qwCount * 16u);
                     if (pendingImageQw != 0u)
@@ -1389,6 +1766,18 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if ((imm & 0x8000u) != 0u)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
 
+            const uint32_t totalSpan = ((writeVectorCount - 1u) / wl) * cl + ((writeVectorCount - 1u) % wl);
+            const uint64_t lastVec = static_cast<uint64_t>(vuAddr) + totalSpan;
+            const bool rangeOk = (lastVec < 0x400u) && ((lastVec + 1u) * 16u <= PS2_VU1_DATA_SIZE);
+            const bool canFastPath = (cl >= wl && sourceVectorCount == writeVectorCount &&
+                                      vn <= 3u && vl <= 2u &&
+                                      ((vif1_regs.mode & 3u) == 0u) && rangeOk);
+            const bool destWrap = (cl >= wl) ? (vuAddr + totalSpan >= 0x400u) : (vuAddr + writeVectorCount > 0x400u);
+            const bool skipUnpack = s_skipUnpackEnabled && probe_ae::isMovieKickNative();
+            const bool syncUnpack = skipUnpack || (vl == 3u && vn != 3u) || destWrap;
+            if (vpOn && syncUnpack)
+                vpDrain(4);
+
             const uint8_t *srcBaseAt974 = (pos <= sizeBytes) ? (data + pos) : nullptr;
             uint32_t srcRdram = 0xFFFFFFFFu;
             if (m_rdram && srcBaseAt974 && srcBaseAt974 >= m_rdram && srcBaseAt974 < m_rdram + PS2_RAM_SIZE)
@@ -1442,7 +1831,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
 #endif
 
-            const bool skipUnpack = s_skipUnpackEnabled && probe_ae::isMovieKickNative();
             if (skipUnpack)
             {
                 kickUnpacksSkipped++;
@@ -1450,6 +1838,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
             else if (m_vu1Data && (totalBytes > 0 || cl == 0u) && pos + totalBytes <= sizeBytes)
             {
+                const bool vpAsync = vpOn && !syncUnpack;
                 if (isVu3dProbeEnabled())
                 {
                     s_erTaken[opcode & 0x7Fu].fetch_add(1, std::memory_order_relaxed);
@@ -1492,13 +1881,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     }
                     std::printf("%s", msg);
                 };
-
-                const uint32_t totalSpan = ((writeVectorCount - 1u) / wl) * cl + ((writeVectorCount - 1u) % wl);
-                const uint64_t lastVec = static_cast<uint64_t>(vuAddr) + totalSpan;
-                const bool rangeOk = (lastVec < 0x400u) && ((lastVec + 1u) * 16u <= PS2_VU1_DATA_SIZE);
-                const bool canFastPath = (cl >= wl && sourceVectorCount == writeVectorCount &&
-                                          vn <= 3u && vl <= 2u &&
-                                          ((vif1_regs.mode & 3u) == 0u) && rangeOk);
 
                 Act act[4][4];
                 uint32_t constVal[4][4];
@@ -1770,7 +2152,44 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 uint8_t *verifyRangeBase = nullptr;
 
                 if (canFastPath && fastActive) {
-                    if (verifyActive) {
+                    if (vpAsync) {
+                        runFastPath(s_vpScratch);
+                        if (!allProtect) {
+                            const uint32_t firstRecIndex = vpRecTail.load(std::memory_order_seq_cst);
+                            uint32_t recCount = 0;
+                            for (uint32_t i = 0u; i < writeVectorCount; ++i) {
+                                const uint32_t destVec = vuAddr + (i / wl) * cl + (i % wl);
+                                const uint32_t c = std::min(i % wl, 3u);
+                                uint8_t mask = 0;
+                                for (uint32_t f = 0u; f < 4u; ++f) {
+                                    if (act[c][f] != ACT_PROTECT)
+                                        mask |= static_cast<uint8_t>(1u << f);
+                                }
+                                if (mask != 0) {
+                                    VpRec rec;
+                                    rec.qw = static_cast<uint16_t>(destVec);
+                                    rec.mask = mask;
+                                    rec.pad = 0;
+                                    std::memcpy(rec.lanes, s_vpScratch + destVec * 16u, 16);
+                                    vpPushRec(rec);
+                                    ++recCount;
+                                }
+                            }
+                            if (recCount > 0) {
+                                VpEvent ev{};
+                                ev.kind = VP_WRITES;
+                                ev.a = firstRecIndex;
+                                ev.b = recCount;
+                                vpPushEvent(ev);
+                            }
+                        }
+                        if (s_unpackCountsOn)
+                        {
+                            s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
+                            s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
+                        }
+                        executeGeneric = false;
+                    } else if (verifyActive) {
                         const uint32_t minVec = vuAddr;
                         const uint32_t maxVec = static_cast<uint32_t>(lastVec);
                         verifyRangeBytes = (maxVec - minVec + 1u) * 16u;
@@ -1831,6 +2250,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
                 if (executeGeneric)
                 {
+                    const uint32_t firstRecIndex = vpRecTail.load(std::memory_order_seq_cst);
+                    uint32_t recCount = 0;
+                    uint8_t *vuMem = vpAsync ? s_vpScratch : m_vu1Data;
                     uint32_t srcIndex = 0u;
                     for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
                     {
@@ -1856,7 +2278,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     }
 
                     uint32_t lanes[4] = {0u, 0u, 0u, 0u};
-                    std::memcpy(lanes, m_vu1Data + destOff, sizeof(lanes));
+                    std::memcpy(lanes, vuMem + destOff, sizeof(lanes));
                     uint32_t decompressed[4] = {lanes[0], lanes[1], lanes[2], lanes[3]};
                     bool decoded = false;
 
@@ -1976,7 +2398,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     if (!handledFormat && decoded && !maskEnable && (vif1_regs.mode == 0u || vif1_regs.mode == 3u))
                     {
                         uint32_t copyBytes = (bytesPerVector < 16u) ? bytesPerVector : 16u;
-                        std::memcpy(m_vu1Data + destOff, srcVec, copyBytes);
+                        std::memcpy(vuMem + destOff, srcVec, copyBytes);
                         continue;
                     }
 
@@ -1985,6 +2407,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     const uint32_t colIdx = (cyclePos > 3u) ? 3u : cyclePos;
                     const uint32_t maskCycle = (cyclePos > 3u) ? 3u : cyclePos;
 
+                    uint8_t laneMask = 0;
                     for (uint32_t field = 0u; field < 4u; ++field)
                     {
                         uint32_t maskSpec = 0u;
@@ -2010,15 +2433,18 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                     if (mode == 2u)
                                         vif1_regs.row[field] = writeVal;
                                 }
+                                laneMask |= static_cast<uint8_t>(1u << field);
                             }
                         }
                         else if (maskSpec == 1u)
                         {
                             writeVal = vif1_regs.row[field];
+                            laneMask |= static_cast<uint8_t>(1u << field);
                         }
                         else if (maskSpec == 2u)
                         {
                             writeVal = vif1_regs.col[colIdx];
+                            laneMask |= static_cast<uint8_t>(1u << field);
                         }
                         else
                         {
@@ -2028,7 +2454,33 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         lanes[field] = writeVal;
                     }
 
-                    std::memcpy(m_vu1Data + destOff, lanes, sizeof(lanes));
+                    if (vpAsync)
+                    {
+                        std::memcpy(s_vpScratch + destOff, lanes, sizeof(lanes));
+                        if (laneMask != 0)
+                        {
+                            VpRec rec;
+                            rec.qw = static_cast<uint16_t>(destVec);
+                            rec.mask = laneMask;
+                            rec.pad = 0;
+                            std::memcpy(rec.lanes, lanes, sizeof(lanes));
+                            vpPushRec(rec);
+                            ++recCount;
+                        }
+                    }
+                    else
+                    {
+                        std::memcpy(m_vu1Data + destOff, lanes, sizeof(lanes));
+                    }
+                }
+
+                if (vpAsync && recCount > 0)
+                {
+                    VpEvent ev{};
+                    ev.kind = VP_WRITES;
+                    ev.a = firstRecIndex;
+                    ev.b = recCount;
+                    vpPushEvent(ev);
                 }
 
                 if (canFastPath && fastActive && verifyActive) {
@@ -2220,6 +2672,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 }
             }
             pos += totalBytes;
+
+            if (vpOn)
+            {
+                ps2_gs_async_batch(false);
+                ps2_gs_async_batch(true);
+            }
 
             if (pos > sizeBytes)
                 break;
