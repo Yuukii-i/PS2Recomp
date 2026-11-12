@@ -3894,10 +3894,94 @@ inline void svNovelPair(uint32_t pc, uint64_t hash)
 // HAND-MAINTAINED block (survey/capture probes, per-pc timers, Level B kernels, image variants): see vu1_native_hand.inc
 #include "../vu1_native_hand.inc"
 
+// PROBE-PC: per-start-pc unit time (PS2X_VU1_PCPROF=1). Each dispatch iteration is timed from the loop top to the next loop top (or run exit), so hot blocks,
+// hand kernels and slow pairs are all covered; the slice is attributed to the iteration's start pc. Slow iterations (a pair executed) go to the slow arrays.
+extern void ps2xSafeLog(const char *, ...);
+#include <atomic>
+#include <chrono>
+namespace
+{
+const bool s_pcpOn = []() { const char *e = std::getenv("PS2X_VU1_PCPROF"); return e && e[0] == '1'; }(); // PROBE-PC
+std::atomic<uint64_t> s_pcpT[2][0x800], s_pcpN[2][0x800]; // PROBE-PC: [0] unit (hot block / kernel), [1] slow pair
+uint64_t s_pcpCalls = 0, s_pcpTsc0 = 0;
+std::chrono::steady_clock::time_point s_pcpWin0;
+void pcpReport()
+{
+    using namespace std::chrono;
+    const auto now = steady_clock::now();
+    const uint64_t tsc = __rdtsc();
+    if (s_pcpTsc0 == 0u)
+    {
+        s_pcpWin0 = now;
+        s_pcpTsc0 = tsc;
+        return;
+    }
+    const double sec = duration<double>(now - s_pcpWin0).count();
+    if (sec < 5.0)
+        return;
+    const double msPerTick = sec * 1000.0 / double(tsc - s_pcpTsc0);
+    for (int k = 0; k < 2; ++k)
+    {
+        std::vector<std::pair<uint64_t, uint32_t>> v;
+        uint64_t tot = 0;
+        for (uint32_t i = 0; i < 0x800u; ++i)
+        {
+            const uint64_t t = s_pcpT[k][i].exchange(0, std::memory_order_relaxed);
+            if (t)
+                v.emplace_back(t, i);
+            tot += t;
+        }
+        std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        const size_t topN = k == 0 ? 40u : 16u;
+        char buf[4096];
+        int n = k == 0 ? std::snprintf(buf, sizeof(buf), "[pcprof] window_s=%.1f total_ms=%.1f top:", sec, tot * msPerTick)
+                       : std::snprintf(buf, sizeof(buf), "[pcprof] slow: total_ms=%.1f", tot * msPerTick);
+        for (size_t j = 0; j < v.size() && j < topN && n < 3900; ++j)
+            n += std::snprintf(buf + n, sizeof(buf) - n, " %04x:%.1fms/%llu", v[j].second * 8u, v[j].first * msPerTick,
+                               (unsigned long long)s_pcpN[k][v[j].second].load(std::memory_order_relaxed));
+        ps2xSafeLog("%s\n", buf);
+        for (uint32_t i = 0; i < 0x800u; ++i)
+            s_pcpN[k][i].store(0, std::memory_order_relaxed);
+    }
+    s_pcpWin0 = now;
+    s_pcpTsc0 = tsc;
+}
+struct PcpGuard
+{
+    uint64_t t0 = 0;
+    uint32_t idx = 0;
+    bool live = false, slow = false;
+    PcpGuard()
+    {
+        if (s_pcpOn && (++s_pcpCalls & 0xFFFu) == 0u)
+            pcpReport();
+    }
+    inline void flush()
+    {
+        if (!live)
+            return;
+        const uint64_t d = __rdtsc() - t0;
+        s_pcpT[slow][idx].fetch_add(d, std::memory_order_relaxed);
+        s_pcpN[slow][idx].fetch_add(1, std::memory_order_relaxed);
+        live = false;
+    }
+    inline void at(uint32_t pc)
+    {
+        flush();
+        idx = (pc >> 3) & 0x7FFu;
+        slow = false;
+        live = true;
+        t0 = __rdtsc();
+    }
+    ~PcpGuard() { flush(); }
+};
+} // namespace
+
 int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
 {
     c.hashValid = false; // the interpreter may have executed pairs since the last hot block
     SvPcGuard svg(vu.m_cycle); // PROBE-SURVEY
+    PcpGuard pcp; // PROBE-PC
     s_rgActive = -1; // PROBE-REGION: a region interrupted by the end of a run is discarded
     while (vu.m_cycle < c.budgetEnd && !vu.m_stopRequested)
     {
@@ -3905,6 +3989,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
         if ((pc & 7u) != 0u || pc >= 0x4000u)
             return 2;
         if (s_svOn && pc < 0x4000u) svg.at(pc); // PROBE-SURVEY
+        if (s_pcpOn) pcp.at(pc); // PROBE-PC
         if (s_rgOn) rgStep(vu, c, pc); // PROBE-REGION
         // PERF-IE: hot blocks with static timing (generated/vu1_hot_blocks.cpp); any unknown state falls back to the pair executors
         const bool useT = s_isT4020 && !s_same[pc >> 3] && kVu1HotStart_t4020[pc >> 3]; // PERF-VAR: pc where this image differs from main
@@ -4058,6 +4143,7 @@ int vu1NativeRun(VU1Interpreter &vu, VuNativeCtx &c)
         if (!fn)
             return 2;
         ++s_slowPairs;
+        pcp.slow = true; // PROBE-PC
         if (vu.m_xgkick.active)
             ++s_cause[5];
         const uint64_t tS0 = s_tscOn ? __rdtsc() : 0ull;
