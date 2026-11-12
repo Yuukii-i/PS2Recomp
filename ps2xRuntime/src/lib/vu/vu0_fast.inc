@@ -1,5 +1,5 @@
 // vu0_fast.inc -- Task V0B: fast path for straight-line VU0 FMAC microprograms
-// (PS2X_VU0_FAST=1 default OFF, PS2X_VU0_FAST_CHECK=1 default OFF).
+// (PS2X_VU0_FAST default ON, =0 disables;PS2X_VU0_FAST_CHECK=1 default OFF).
 // Included by ps2_runtime.cpp before PS2Runtime::executeVU0Microprogram. No header edits.
 
 #include <chrono>
@@ -69,7 +69,8 @@ inline bool isFastEnabled()
     static const bool s_on = []()
     {
         const char *e = std::getenv("PS2X_VU0_FAST");
-        return e && e[0] == '1';
+        // REVERSAL: PS2X_VU0_FAST=0 restores the generic path (docs/REVERSAL_MEMO.md)
+        return !(e && e[0] == '0');
     }();
     return s_on;
 }

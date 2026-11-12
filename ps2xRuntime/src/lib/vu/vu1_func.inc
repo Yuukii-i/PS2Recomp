@@ -37,7 +37,7 @@ inline uint32_t outOfWindow(__m128 v) // bit c set: lane c exponent outside [2,2
     return static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_cmplt_epi32(ev, _mm_set1_epi32(2)), _mm_cmpgt_epi32(ev, _mm_set1_epi32(253))))));
 }
 
-// KIND 4 = MUL (a*b, ac ignored), KIND 2 = MADD (ac + a*b). All four lanes (DEST = xyzw). Returns the 4 result lanes.
+// KIND: 0 = ADD (a+b), 1 = SUB (a-b), 2 = MADD (ac+a*b), 3 = MSUB (ac-a*b), 4 = MUL (a*b). All four lanes (DEST = xyzw).
 template <int KIND>
 inline __m128 fmacV(__m128 a, __m128 b, __m128 ac)
 {
@@ -49,7 +49,13 @@ inline __m128 fmacV(__m128 a, __m128 b, __m128 ac)
     const __m128i za = _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(a4), absMask), _mm_setzero_si128());
     const __m128i zb = _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(b4), absMask), _mm_setzero_si128());
     const uint32_t zmask = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(za, zb))));
-    if constexpr (KIND == 4)
+    if constexpr (KIND == 0 || KIND == 1)
+    {
+        val = (KIND == 0) ? _mm_add_ps(a4, b4) : _mm_sub_ps(a4, b4);
+        const uint32_t bothZ = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_and_si128(za, zb))));
+        bad = outOfWindow(val) & ~bothZ;
+    }
+    else if constexpr (KIND == 4)
     {
         val = _mm_mul_ps(a4, b4);
         bad = outOfWindow(val) & ~zmask;
@@ -57,7 +63,7 @@ inline __m128 fmacV(__m128 a, __m128 b, __m128 ac)
     else
     {
         ac4 = norm4(ac);
-        val = _mm_fmadd_ps(a4, b4, ac4);
+        val = (KIND == 2) ? _mm_fmadd_ps(a4, b4, ac4) : _mm_fnmadd_ps(a4, b4, ac4);
         prodf = _mm_mul_ps(a4, b4);
         const __m128i acz = _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(ac4), absMask), _mm_setzero_si128());
         const uint32_t aczm = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(acz)));
@@ -75,7 +81,17 @@ inline __m128 fmacV(__m128 a, __m128 b, __m128 ac)
     for (int l = 0; l < 4; ++l)
     {
         const double ad = static_cast<double>(A[l]), bd = static_cast<double>(B[l]);
-        const double ex = (KIND == 4) ? ad * bd : static_cast<double>(C[l]) + ad * bd;
+        double ex;
+        if constexpr (KIND == 0)
+            ex = ad + bd;
+        else if constexpr (KIND == 1)
+            ex = ad - bd;
+        else if constexpr (KIND == 2)
+            ex = static_cast<double>(C[l]) + ad * bd;
+        else if constexpr (KIND == 3)
+            ex = static_cast<double>(C[l]) - ad * bd;
+        else
+            ex = ad * bd;
         const double mag = std::fabs(ex);
         const bool zero = mag == 0.0;
         const bool over = mag > static_cast<double>(FLT_MAX);
@@ -327,13 +343,33 @@ inline float divQ(__m128 t) // lbDivQ without the DI flag (flags are not reprodu
         q = normRes(1.0f / den);
     return normRes(q);
 }
+inline float divQ2(float numRaw, float denRaw) // mirrors VU1Interpreter::execLower case 0x38 (DIV)
+{
+    const float num = nrm1(numRaw), den = nrm1(denRaw);
+    float q;
+    if (den == 0.0f)
+        q = (std::signbit(num) != std::signbit(den)) ? -FLT_MAX : FLT_MAX;
+    else
+        q = num / den;
+    return normRes(q);
+}
+inline __m128 maxV(__m128 a, __m128 b) // mirrors VU1Interpreter::execUpper MAX/MAXbc/MAXi
+{
+    const __m128 a4 = norm4(a), b4 = norm4(b);
+    return _mm_blendv_ps(b4, a4, _mm_cmpgt_ps(a4, b4));
+}
+inline __m128 miniV(__m128 a, __m128 b) // mirrors VU1Interpreter::execUpper MINI/MINIbc/MINIi
+{
+    const __m128 a4 = norm4(a), b4 = norm4(b);
+    return _mm_blendv_ps(b4, a4, _mm_cmplt_ps(a4, b4));
+}
 
 // Rigid path 2440 (per-vertex transform / trivial-reject / assemble, loop 24C8..25B0): 1:1 value + memory port of lbVert (vu1_native_hand.inc), which is exact on every
 // record without real clipping. Differences: runs in place on VU memory through stq (same program order of loads/stores as lbVert's private copy, so the data
 // seen by later loads is identical); flags / STATUS / cycles / exit registers dropped; the epilogue 25B8..2200 (1023 swap, XGKICK vi7, XTOP) added.
 // Real clipping (no mask of the 6 trivial-reject tests matches, routine 2900+) -> false (whole program falls back).
 static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t N, uint32_t i4base, uint32_t s2base, uint32_t s3base, uint32_t ubase, uint32_t vf27x, uint32_t vf27y,
-                      std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
+                      bool copyS, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
 {
     (void)vi13;
     constexpr int kMaxN = 300;
@@ -358,8 +394,9 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
     Cs[0] = ldq(vu, static_cast<uint32_t>(static_cast<uint16_t>(vi3)));
     int32_t pC = s16(vi3 + 1);
     As[0] = ldq(vu, static_cast<uint32_t>(716 + ix0));
-    Ss[0] = ldq(vu, static_cast<uint32_t>(static_cast<uint16_t>(pS)));
-    pS = s16(pS + 1);
+    Ss[0] = ldq(vu, copyS ? static_cast<uint32_t>(796 + ix0) : static_cast<uint32_t>(static_cast<uint16_t>(pS)));
+    if (!copyS)
+        pS = s16(pS + 1);
     Fb[0] = clipBitsV(Ps[0]);
     vi1 = (Fb[0] & 0x3Fu) ? 1 : 0;
     {
@@ -411,8 +448,9 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
             stq(vu, qd, _mm_blend_ps(ldq(vu, qd), f6, 0x7)); // lanes xyz only
         }
         As[it] = ldq(vu, static_cast<uint32_t>(716 + ix));
-        Ss[it] = ldq(vu, static_cast<uint32_t>(static_cast<uint16_t>(pS)));
-        pS = s16(pS + 1);
+        Ss[it] = ldq(vu, copyS ? static_cast<uint32_t>(796 + ix) : static_cast<uint32_t>(static_cast<uint16_t>(pS)));
+        if (!copyS)
+            pS = s16(pS + 1);
         Cs[it] = ldq(vu, static_cast<uint32_t>(static_cast<uint16_t>(pC)));
         pC = s16(pC + 1);
         const __m128 f7 = fmacV<4>(c1v, Ps[it], zero);
@@ -544,9 +582,10 @@ inline void fv8ToRows(const Fv8V &v, __m128 rows[8])
 // chain, no AVX2/relaxed groups), memory + GIF only. R.vi[12] is live state (the routine leaves vi12 = idx of vertex 1). Returns false (nothing needs undoing:
 // the caller restores the undo log) for every case lbFull declines or that it does not model: N outside 4..67, DIV by zero, any aliasing between the output
 // buffer and anything the real (software-pipelined) routine reads after its first stores, kick failure.
-static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
+// 1EE0 (vi10 = 0) and 1EF0 (vi10 = 1: reads S from 796+idx in both skinned 2210 and rigid 2670).
+static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool vi10, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
 {
-    const int32_t vi1s = static_cast<int16_t>(ilw(vu, 1011, 1)); // 1F00 ILW.y vi1, 1011 (< 0: rigid path at 2440)
+    const int32_t vi1s = static_cast<int16_t>(ilw(vu, 1011, 1)); // 1F00 ILW.y vi1, 1011 (< 0: rigid path at 2440 / 2670)
     const uint16_t vi12 = R.vi[12];
     const uint16_t w1018 = ilw(vu, 1018, 3); // vi5 (before the skinned path doubles it) = vertex count N
     const uint32_t s2base = static_cast<uint16_t>(ilw(vu, 1018, 0) + vi12); // vi2 = ILW.x 1018, += vi12 (2010 / 2490)
@@ -561,7 +600,7 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, std:
         if (w1018 < 1u || w1018 > 300u || vi13 == 1022u || vi13 == 1023u || ((vi13 + 1u) & 0x3FFu) == 1023u)
             return false;
         vi13 = static_cast<uint16_t>(vi13 + 1u);
-        return rigid2440(R, vu, vi13, top, static_cast<int32_t>(w1018), i4base, s2base, s3base, ubase, vf27x, vf27y, kicks, gif);
+        return rigid2440(R, vu, vi13, top, static_cast<int32_t>(w1018), i4base, s2base, s3base, ubase, vf27x, vf27y, vi10, kicks, gif);
     }
     if (w1018 < 4u || w1018 > 67u)
         return false;
@@ -587,7 +626,8 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, std:
     {
         const int32_t idx = static_cast<int16_t>(ilw(vu, i4base + static_cast<uint32_t>(t), 0));
         const uint32_t qa = static_cast<uint32_t>(636 + idx), qb2 = static_cast<uint32_t>(716 + idx);
-        const uint32_t q3 = static_cast<uint16_t>(s3base + static_cast<uint32_t>(t)), q2 = static_cast<uint16_t>(s2base + static_cast<uint32_t>(t));
+        const uint32_t q3 = static_cast<uint16_t>(s3base + static_cast<uint32_t>(t));
+        const uint32_t q2 = vi10 ? static_cast<uint32_t>(796 + idx) : static_cast<uint16_t>(s2base + static_cast<uint32_t>(t));
         if (hits(i4base + static_cast<uint32_t>(t)) || hits(qa) || hits(qb2) || hits(q3) || hits(q2))
             return false;
         rA[t] = ldq(vu, qa);
@@ -692,6 +732,230 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, std:
     return true;
 }
 
+// ---- Task F3 handlers: 0AF0, 0B40 (+0BC8/0C28), 15E0, 1900, 1C48 (+1C90/1CB0), 3160 (+3268) ----
+static bool handler0AF0(Regs &R, uint8_t *vu, uint16_t vi13)
+{
+    const uint16_t vi3 = ilw(vu, 1011, 0), vi2 = ilw(vu, 1011, 3);
+    const uint32_t count = static_cast<uint32_t>(vi2) + 1u;
+    if (count > 512u)
+        return false;
+    const uint16_t base = static_cast<uint16_t>(vi3 + 716u);
+    if (((vi13 - base) & 0x3FFu) < count)
+        return false;
+    const __m128 zero = _mm_setzero_ps();
+    logRange(vu, base, count);
+    for (uint32_t i = 0; i < count; ++i)
+        stqRaw(vu, static_cast<uint32_t>(base) + i, zero);
+    R.vf[1] = zero;
+    R.vi[2] = vi2;
+    R.vi[3] = vi3;
+    R.vi[4] = static_cast<uint16_t>(base + vi2);
+    return true;
+}
+
+static bool handler0B40(Regs &R, uint8_t *vu, uint16_t vi13)
+{
+    uint16_t vi1 = static_cast<uint16_t>(ilw(vu, 1018, 2) + R.vi[12]);
+    const uint16_t n = ilw(vu, 1018, 3);
+    if (n == 0u || n > 512u)
+        return false;
+    if (((vi13 - vi1) & 0x3FFu) < n)
+        return false;
+    const uint16_t vi2 = static_cast<uint16_t>(vi1 + n + 2u);
+    const __m128 zero = _mm_setzero_ps();
+    __m128 vf1 = _mm_blend_ps(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), ldq(vu, static_cast<uint32_t>(vi13) - 1u), 0x2);
+    __m128 vf4 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    const __m128 vf11 = _mm_set1_ps(1.0f);
+    uint16_t vi6 = ilw(vu, vi1, 0);
+    const uint16_t vi5 = ilw(vu, static_cast<uint16_t>(vi1 + 1u), 0);
+    __m128 vf12 = ldq(vu, static_cast<uint32_t>(636 + static_cast<int16_t>(vi6)));
+    __m128 vf2 = ldq(vu, static_cast<uint32_t>(636 + static_cast<int16_t>(vi5)));
+    vf12 = _mm_blend_ps(vf12, fmacV<0>(zero, bc<3>(vf12), zero), 0x4);
+    vf2 = _mm_blend_ps(vf2, fmacV<0>(zero, bc<3>(vf2), zero), 0x4);
+    __m128 vf3 = norm4(vf12);
+    vi1 = static_cast<uint16_t>(vi1 + 2u);
+    uint16_t vi7 = ilw(vu, vi1, 0);
+    uint16_t vi8 = ilw(vu, static_cast<uint16_t>(vi1 - 2u), 1);
+    uint16_t vi9 = 0u;
+    __m128 vf5 = zero, acc = zero;
+    bool macSignX = false; // 0BB0 MUL.x vf0, vf0, vf0 -> +0.0f (S=0)
+    for (uint32_t k = 0; k < n; ++k)
+    {
+        vf5 = norm4(vf3);
+        vi1 = static_cast<uint16_t>(vi1 + 1u);
+        vf3 = norm4(vf2);
+        vi9 = macSignX ? 128u : 0u; // 0BD0 FMAND vi9, vi3 (vi3=128) reads 0C10 MULy.x from k-1
+        vf2 = ldq(vu, static_cast<uint32_t>(636 + static_cast<int16_t>(vi7)));
+        acc = fmacV<0>(vf4, bc<1>(vf4), zero);
+        vi9 = static_cast<uint16_t>(vi9 + 32767u);
+        vf4 = _mm_blend_ps(vf4, fmacV<2>(vf11, bc<2>(vf4), acc), 0x1);
+        vi8 = static_cast<uint16_t>(vi9 + vi8);
+        const __m128 vf5_yzx = _mm_shuffle_ps(vf5, vf5, _MM_SHUFFLE(3, 0, 2, 1));
+        const __m128 vf3_zxy = _mm_shuffle_ps(vf3, vf3, _MM_SHUFFLE(3, 1, 0, 2));
+        acc = fmacV<4>(vf5_yzx, vf3_zxy, zero);
+        vi8 = static_cast<uint16_t>(vi8 & 0x8000u);
+        const __m128 vf3_yzx = _mm_shuffle_ps(vf3, vf3, _MM_SHUFFLE(3, 0, 2, 1));
+        const __m128 vf5_zxy = _mm_shuffle_ps(vf5, vf5, _MM_SHUFFLE(3, 1, 0, 2));
+        vf5 = _mm_blend_ps(vf5, fmacV<3>(vf3_yzx, vf5_zxy, acc), 0x7);
+        vi6 = static_cast<uint16_t>(vi6 | vi8);
+        vf2 = _mm_blend_ps(vf2, fmacV<0>(zero, bc<3>(vf2), zero), 0x4);
+        const uint32_t qdst = static_cast<uint16_t>(vi1 - 3u);
+        stqi(vu, qdst, _mm_insert_epi32(ldqi(vu, qdst), static_cast<int32_t>(vi6), 0));
+        vi6 = ilw(vu, static_cast<uint16_t>(vi1 - 2u), 0);
+        // 0C10 MULy.x vf0, vf4, vf1: sign bit of exact double product (execUpper/fastUpper flagsOf)
+        macSignX = std::signbit(static_cast<double>(nrm1(_mm_cvtss_f32(vf4))) * static_cast<double>(nrm1(_mm_cvtss_f32(bc<1>(vf1)))));
+        vi7 = ilw(vu, vi1, 0);
+        vf4 = fmacV<4>(vf5, vf2, zero);
+        vi8 = ilw(vu, static_cast<uint16_t>(vi1 - 2u), 1);
+    }
+    R.vf[1] = vf1; R.vf[2] = vf2; R.vf[3] = vf3; R.vf[4] = vf4; R.vf[5] = vf5; R.vf[11] = vf11; R.vf[12] = vf12;
+    R.acc = acc;
+    R.vi[2] = vi2; R.vi[3] = 128u; R.vi[4] = 0x8000u; R.vi[5] = vi5; R.vi[6] = vi6; R.vi[7] = vi7; R.vi[8] = vi8; R.vi[9] = vi9;
+    return true;
+}
+
+static bool handler15E0(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t vi1 = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 512u)
+        return false;
+    const uint16_t base1 = static_cast<uint16_t>(vi1 + 556u), base2 = static_cast<uint16_t>(vi1 + 716u);
+    const uint16_t nextVi13 = static_cast<uint16_t>(vi13 + 3u);
+    if (((nextVi13 - base2) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), half = _mm_set1_ps(0.5f);
+    __m128 vf3 = ldq(vu, vi13);
+    const __m128 m0 = ldq(vu, 989), m1 = ldq(vu, 990), m2 = ldq(vu, 991);
+    vf3 = fmacV<2>(m2, bc<2>(vf3), fmacV<2>(m1, bc<1>(vf3), fmacV<4>(m0, bc<0>(vf3), zero)));
+    const __m128 vf1 = ldq(vu, static_cast<uint16_t>(vi13 + 1u));
+    const __m128 vf2 = ldq(vu, static_cast<uint16_t>(vi13 + 2u));
+    vi13 = nextVi13;
+    const __m128 acc05 = fmacV<0>(zero, half, zero);
+    logRange(vu, base2, n);
+    for (uint32_t k = 0; k < n; ++k)
+    {
+        const __m128 nrm = ldq(vu, static_cast<uint32_t>(base1) + k);
+        const __m128 p = fmacV<4>(vf3, nrm, zero);
+        const __m128 d = fmacV<0>(fmacV<0>(p, bc<1>(p), zero), bc<2>(p), zero);
+        const __m128 pos = fmacV<2>(d, half, acc05);
+        const __m128 neg = fmacV<3>(d, half, acc05);
+        const __m128 c0 = ldq(vu, static_cast<uint32_t>(base2) + k);
+        const __m128 ac0 = fmacV<0>(c0, zero, zero);
+        const __m128 ac1 = fmacV<2>(vf1, bc<0>(pos), ac0);
+        const __m128 out = fmacV<2>(vf2, bc<0>(neg), ac1);
+        stqRaw(vu, static_cast<uint32_t>(base2) + k, out);
+    }
+    R.vf[1] = vf1; R.vf[2] = vf2; R.vf[3] = vf3;
+    return true;
+}
+
+static bool handler1900(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t vi2)
+{
+    const uint16_t vi11 = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 512u)
+        return false;
+    const uint16_t baseSrc = static_cast<uint16_t>(vi11 + 556u), baseDst = static_cast<uint16_t>(vi11 + 796u);
+    if (((vi13 - baseDst) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    const __m128 vf9 = ldq(vu, vi2), vf10 = ldq(vu, static_cast<uint32_t>(vi2) + 1u);
+    const __m128 vf11 = ldq(vu, static_cast<uint32_t>(vi2) + 2u), vf12 = ldq(vu, static_cast<uint32_t>(vi2) + 3u);
+    const __m128 m986 = ldq(vu, 986), m987 = ldq(vu, 987), m988 = ldq(vu, 988);
+    const auto mulMat = [&](__m128 c) {
+        __m128 a = fmacV<4>(vf9, bc<0>(c), zero);
+        a = fmacV<2>(vf10, bc<1>(c), a);
+        a = fmacV<2>(vf11, bc<2>(c), a);
+        return fmacV<2>(vf12, bc<3>(c), a);
+    };
+    const __m128 r2 = mulMat(m987), r3 = mulMat(m988), r12 = mulMat(m986);
+    logRange(vu, baseDst, n);
+    for (uint32_t k = 0; k < n; ++k)
+    {
+        const __m128 v = ldq(vu, static_cast<uint32_t>(baseSrc) + k);
+        __m128 a = fmacV<4>(r12, bc<0>(v), zero);
+        a = fmacV<2>(r2, bc<1>(v), a);
+        a = fmacV<2>(r3, bc<2>(v), a);
+        const __m128 res = fmacV<2>(vf12, one, a);
+        const uint32_t qd = static_cast<uint32_t>(baseDst) + k;
+        stqRaw(vu, qd, _mm_blend_ps(ldq(vu, qd), res, 0x7));
+    }
+    R.vf[2] = r2; R.vf[3] = r3; R.vf[4] = vf12; R.vf[12] = r12;
+    return true;
+}
+
+static bool handler1C48(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t vi1_0 = ilw(vu, 1018, 0), n = ilw(vu, 1018, 3);
+    if (n == 0u || n > 1024u)
+        return false;
+    const __m128 vf1 = ldq(vu, vi13);
+    const __m128 vf2 = ldq(vu, static_cast<uint16_t>(vi13 + 1u));
+    const __m128 vf3 = ldq(vu, static_cast<uint16_t>(vi13 + 2u));
+    const __m128 vf4 = ldq(vu, static_cast<uint16_t>(vi13 + 3u));
+    vi13 = static_cast<uint16_t>(vi13 + 4u);
+    const uint16_t base = static_cast<uint16_t>(vi1_0 + R.vi[12]);
+    if (((vi13 - base) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    logRange(vu, base, n);
+    __m128 vf6 = zero, acc = zero;
+    for (uint32_t k = 0; k < n; ++k)
+    {
+        const __m128 v = ldq(vu, static_cast<uint32_t>(base) + k);
+        acc = fmacV<4>(vf1, bc<0>(v), zero);
+        acc = fmacV<2>(vf2, bc<1>(v), acc);
+        acc = fmacV<2>(vf3, bc<2>(v), acc);
+        vf6 = fmacV<2>(vf4, one, acc);
+        stqRaw(vu, static_cast<uint32_t>(base) + k, vf6);
+    }
+    R.vf[1] = vf1; R.vf[2] = vf2; R.vf[3] = vf3; R.vf[4] = vf4; R.vf[6] = vf6;
+    R.acc = acc;
+    R.vi[2] = static_cast<uint16_t>(base + n + 1u);
+    return true;
+}
+
+static bool handler3160(Regs &R, uint8_t *vu, uint16_t vi13)
+{
+    const uint16_t vi1 = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n < 2u || n > 512u)
+        return false;
+    const uint16_t base = static_cast<uint16_t>(vi1 + 636u);
+    if (((vi13 - base) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    __m128 vf4 = ldq(vu, base);
+    __m128 vf1 = fmacV<1>(ldq(vu, base), one, zero); // SUBi.w vf1, vf1, vf0 (I = 1.0f)
+    for (uint32_t k = 1; k < n; ++k)
+    {
+        const __m128 vf2 = ldq(vu, static_cast<uint32_t>(base) + k);
+        vf4 = miniV(vf4, vf1);
+        vf1 = fmacV<1>(vf2, one, zero);
+    }
+    vf4 = miniV(vf4, vf1);
+    const __m128 vf3c = ldq(vu, 1008), vf1z = ldq(vu, 1006), vf2z = ldq(vu, 1007);
+    __m128 v1x = fmacV<1>(zero, bc<3>(vf4), zero); // 31E8 SUBw.x vf1, vf0, vf4
+    v1x = maxV(v1x, vf3c);                         // 31F0 MAX.x vf1, vf1, vf3
+    const __m128 v2x = miniV(v1x, zero);           // 31F8 MINI.x vf2, vf1, vf0
+    const __m128 inp0 = ldq(vu, base);
+    const __m128 v2w = fmacV<0>(bc<3>(inp0), bc<0>(v2x), zero); // 3200 ADDx.w vf2, vf1, vf2
+    const float q = divQ2(_mm_cvtss_f32(v2w), _mm_cvtss_f32(bc<3>(inp0)));
+    const __m128 qb = _mm_set1_ps(q);
+    logRange(vu, base, n);
+    __m128 vf3 = zero, acc = zero;
+    for (uint32_t k = 0; k < n; ++k)
+    {
+        const __m128 inp = ldq(vu, static_cast<uint32_t>(base) + k);
+        const __m128 xyw = fmacV<4>(inp, qb, zero);
+        acc = fmacV<4>(vf1z, bc<3>(xyw), zero);
+        const __m128 z = fmacV<2>(vf2z, one, acc);
+        vf3 = _mm_blend_ps(xyw, z, 0x4);
+        stqRaw(vu, static_cast<uint32_t>(base) + k, vf3);
+    }
+    R.vf[3] = vf3; R.vf[4] = vf4;
+    R.acc = acc;
+    return true;
+}
+
 static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
 {
     Regs R;
@@ -743,10 +1007,59 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             R.vi[3] = vi3;
             break;
         }
-        case 0x1EE0u: // Task F2: mesh transform (vi10 = 0 entry; 1EF0 = vi10 = 1 entry falls back via default)
-            if (!handler1EE0(R, vu, vi13, static_cast<uint16_t>(top), kicks, gif))
+        case 0x0AF0u:
+            if (!handler0AF0(R, vu, vi13))
+            {
+                s_fbPc = 0x0AF0u;
+                return false;
+            }
+            break;
+        case 0x0B40u:
+            if (!handler0B40(R, vu, vi13))
+            {
+                s_fbPc = 0x0B40u;
+                return false;
+            }
+            break;
+        case 0x15E0u:
+            if (!handler15E0(R, vu, vi13))
+            {
+                s_fbPc = 0x15E0u;
+                return false;
+            }
+            break;
+        case 0x1900u:
+            if (!handler1900(R, vu, vi13, vi2))
+            {
+                s_fbPc = 0x1900u;
+                return false;
+            }
+            break;
+        case 0x1C48u:
+            if (!handler1C48(R, vu, vi13))
+            {
+                s_fbPc = 0x1C48u;
+                return false;
+            }
+            break;
+        case 0x1EE0u: // Task F2: mesh transform (vi10 = 0 entry)
+            if (!handler1EE0(R, vu, vi13, static_cast<uint16_t>(top), false, kicks, gif))
             {
                 s_fbPc = 0x1EE0u;
+                return false;
+            }
+            break;
+        case 0x1EF0u: // Task F3: mesh transform (vi10 = 1 entry, reads S from 796+idx)
+            if (!handler1EE0(R, vu, vi13, static_cast<uint16_t>(top), true, kicks, gif))
+            {
+                s_fbPc = 0x1EF0u;
+                return false;
+            }
+            break;
+        case 0x3160u:
+            if (!handler3160(R, vu, vi13))
+            {
+                s_fbPc = 0x3160u;
                 return false;
             }
             break;
