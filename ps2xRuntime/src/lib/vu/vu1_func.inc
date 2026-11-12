@@ -44,17 +44,25 @@ inline __m128 fmacV(__m128 a, __m128 b, __m128 ac)
     const __m128 a4 = norm4(a), b4 = norm4(b);
     __m128 ac4 = _mm_setzero_ps(), val, prodf = _mm_setzero_ps();
     uint32_t bad;
+    // PERF-F2Z: lanes with an exactly-zero operand are exact in the fast path
+    const __m128i absMask = _mm_set1_epi32(0x7FFFFFFF);
+    const __m128i za = _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(a4), absMask), _mm_setzero_si128());
+    const __m128i zb = _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(b4), absMask), _mm_setzero_si128());
+    const uint32_t zmask = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(za, zb))));
     if constexpr (KIND == 4)
     {
         val = _mm_mul_ps(a4, b4);
-        bad = outOfWindow(val);
+        bad = outOfWindow(val) & ~zmask;
     }
     else
     {
         ac4 = norm4(ac);
         val = _mm_fmadd_ps(a4, b4, ac4);
         prodf = _mm_mul_ps(a4, b4);
-        bad = outOfWindow(val) | outOfWindow(prodf);
+        const __m128i acz = _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(ac4), absMask), _mm_setzero_si128());
+        const uint32_t aczm = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(acz)));
+        const uint32_t acin = ~outOfWindow(ac4) & 0xFu;
+        bad = (outOfWindow(val) & ~(zmask & (aczm | acin))) | (outOfWindow(prodf) & ~zmask);
     }
     if (bad == 0u)
         return val;
@@ -72,7 +80,9 @@ inline __m128 fmacV(__m128 a, __m128 b, __m128 ac)
         const bool zero = mag == 0.0;
         const bool over = mag > static_cast<double>(FLT_MAX);
         const bool under = (mag < static_cast<double>(FLT_MIN)) && !zero;
-        const uint32_t sg = std::signbit(ex) ? 0x80000000u : 0u;
+        uint64_t exb; // PERF-F2Z
+        std::memcpy(&exb, &ex, 8);
+        const uint32_t sg = static_cast<uint32_t>(exb >> 63) << 31;
         if (zero || under)
             out[l] = sg;
         else if (over)
