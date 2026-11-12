@@ -4358,6 +4358,16 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                 for (size_t i = 0; i < fbv.size() && i < 8u; ++i)
                     std::fprintf(out, " %04X:%llu", fbv[i].second, (unsigned long long)fbv[i].first);
                 std::fprintf(out, "\n");
+                std::fprintf(out, "func start_pcs:");
+                {
+                    std::vector<std::pair<uint64_t, uint32_t>> spv;
+                    for (const auto &kv : vu1func::s_startPcs)
+                        spv.emplace_back(kv.second, kv.first);
+                    std::sort(spv.begin(), spv.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+                    for (size_t i = 0; i < spv.size() && i < 6u; ++i)
+                        std::fprintf(out, " %04X:%llu", spv[i].second, (unsigned long long)spv[i].first);
+                }
+                std::fprintf(out, "\n");
             }
             std::fprintf(out, "run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);
             std::printf("[probe] replay run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);

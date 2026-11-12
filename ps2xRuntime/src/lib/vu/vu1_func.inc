@@ -205,6 +205,7 @@ static bool handler00A8(Regs &R, uint8_t *vu)
 }
 
 static uint64_t s_taken = 0, s_fallback = 0;
+static std::unordered_map<uint32_t, uint64_t> s_startPcs; // startPC of 0xF001 fallbacks -> count
 static std::unordered_map<uint32_t, uint64_t> s_fbPcs; // handler pc (or 0xF000 + reason) -> count
 static uint32_t s_fbPc = 0;
 
@@ -776,6 +777,7 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     if ((startPC & 0xFFFFu) != 8u)
     {
         s_fbPc = 0xF001u;
+        ++s_startPcs[startPC & 0xFFFFu];
         return false;
     }
     // Learned skip: 256-entry direct-mapped memo keyed by the first vi1 (ILW.x at TOP); 4+ consecutive fallbacks -> skip, every 64th still tries.
@@ -823,7 +825,8 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
 
 inline bool funcOn()
 {
-    static const bool on = []() { const char *e = std::getenv("PS2X_VU1_FUNC"); return e && e[0] == '1'; }();
+    // REVERSAL: PS2X_VU1_FUNC=0 restores the exact path (docs/REVERSAL_MEMO.md)
+    static const bool on = []() { const char *e = std::getenv("PS2X_VU1_FUNC"); return !(e && e[0] == '0'); }();
     return on;
 }
 inline bool replayFuncOn()
@@ -850,6 +853,16 @@ static void reportMaybe()
     int n = std::snprintf(buf, sizeof(buf), "[vfunc] taken=%llu fallback=%llu fb_pcs:", (unsigned long long)s_taken, (unsigned long long)s_fallback);
     for (size_t i = 0; i < v.size() && i < 8u && n > 0 && n < 440; ++i)
         n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %04X:%llu", v[i].second, (unsigned long long)v[i].first);
+    {
+        std::vector<std::pair<uint64_t, uint32_t>> sp;
+        for (const auto &kv : s_startPcs)
+            sp.emplace_back(kv.second, kv.first);
+        std::sort(sp.begin(), sp.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        if (n > 0 && n < 440)
+            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " start_pcs:");
+        for (size_t i = 0; i < sp.size() && i < 6u && n > 0 && n < 490; ++i)
+            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %04X:%llu", sp[i].second, (unsigned long long)sp[i].first);
+    }
     ps2xSafeLog("%s\n", buf);
 }
 
