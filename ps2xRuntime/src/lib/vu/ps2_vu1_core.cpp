@@ -3464,6 +3464,8 @@ template <class T> static T rpGet(const uint8_t *&p)
     return v;
 }
 
+#include "vu1_func.inc" // Task F1: functional VU1 engine (PS2X_VU1_FUNC=1 / PS2X_VU1_REPLAY_FUNC=1)
+
 void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint8_t *vuData, uint32_t dataSize,
                              GS &gs, PS2Memory *memory,
@@ -4178,8 +4180,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                 {
                     const uint8_t *p = file.data() + runsIdx[ri].off;
                     const uint32_t rStart = rpGet<uint32_t>(p);
-                    (void)rpGet<uint32_t>(p); // top (already in the state)
-                    (void)rpGet<uint32_t>(p); // itop
+                    const uint32_t rTop = rpGet<uint32_t>(p); // top (also already in the state)
+                    const uint32_t rItop = rpGet<uint32_t>(p); // itop
                     const uint32_t rMax = rpGet<uint32_t>(p);
                     const uint32_t wc0 = rpGet<uint32_t>(p);
                     const uint32_t wcA = rpGet<uint32_t>(p);
@@ -4262,7 +4264,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                         s_vfyCapture = &cap;
                         const auto rpT0 = std::chrono::steady_clock::now();
                         const uint64_t rpC0 = __rdtsc();
-                        run(vuCode, codeSize, vuData, dataSize, gs, memory, rMax);
+                        if (!(vu1func::replayFuncOn() && s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, rStart & 0x7FFFFFFFu, rTop, rItop, gs, memory, &cap, true))) // PS2X_VU1_REPLAY_FUNC
+                            run(vuCode, codeSize, vuData, dataSize, gs, memory, rMax);
                         rpRunTicks += __rdtsc() - rpC0;
                         rpRunNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rpT0).count());
                         s_vfyCapture = nullptr;
@@ -4297,7 +4300,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                         if (outDiff)
                             st.outdiff++;
                     }
-                    const bool anyBad = badVf >= 0 || badVi >= 0 || fAcc || fQpi || fFlags || fPc || fCyc || fWc || fMisc || badMem >= 0 || fGif;
+                    const bool anyBad = vu1func::replayFuncOn() ? (badMem >= 0 || fGif) // PS2X_VU1_REPLAY_FUNC: only memory and GIF output must match
+                                                                : (badVf >= 0 || badVi >= 0 || fAcc || fQpi || fFlags || fPc || fCyc || fWc || fMisc || badMem >= 0 || fGif);
                     cVf += badVf >= 0; cVi += badVi >= 0; cAcc += fAcc; cQpi += fQpi; cFlags += fFlags; cPc += fPc; cCyc += fCyc; cWc += fWc; cMisc += fMisc;
                     cMem += badMem >= 0; cGif += fGif;
                     if (anyBad)
@@ -4312,6 +4316,18 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             }
             std::fprintf(out, "replayed=%u skipped(other image)=%u MISMATCHED=%u | vf=%u vi=%u acc=%u qpi=%u flags=%u pc=%u cycles=%u workingClip=%u misc=%u mem=%u gif=%u\n",
                          total, skipped, bad, cVf, cVi, cAcc, cQpi, cFlags, cPc, cCyc, cWc, cMisc, cMem, cGif);
+            if (vu1func::replayFuncOn())
+            {
+                std::fprintf(out, "func taken=%llu fallback=%llu\n", (unsigned long long)vu1func::s_taken, (unsigned long long)vu1func::s_fallback);
+                std::vector<std::pair<uint64_t, uint32_t>> fbv;
+                for (const auto &kv : vu1func::s_fbPcs)
+                    fbv.emplace_back(kv.second, kv.first);
+                std::sort(fbv.begin(), fbv.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+                std::fprintf(out, "func fb_pcs:");
+                for (size_t i = 0; i < fbv.size() && i < 8u; ++i)
+                    std::fprintf(out, " %04X:%llu", fbv[i].second, (unsigned long long)fbv[i].first);
+                std::fprintf(out, "\n");
+            }
             std::fprintf(out, "run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);
             std::printf("[probe] replay run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);
             if (rpScramble != 0u)
@@ -4410,6 +4426,25 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         if (!capA.empty())
             memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));
         return;
+    }
+    if (m_unit == Unit::VU1 && vu1func::funcOn() && !s_vuAnyProbe && !s_vfyRef && !s_kickRec && memory != nullptr && codeSize == 16384u && dataSize == 16384u &&
+        vuCode == memory->getVU1Code() && (startPC & 0xFFFFu) == 8u) // Task F1: functional engine (PS2X_VU1_FUNC=1), image 86503d39 only
+    {
+        (void)getDecodedInstructionPairForPc(vuCode, codeSize, memory, 0u); // validate / rebuild the cache first so s_hcCurHash names the code image about to run
+        if (s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, s_vfyCapture, true))
+        {
+            m_activeVuData = vuData;
+            m_activeVuDataSize = dataSize;
+            m_activeGs = &gs;
+            m_activeMemory = memory;
+            m_state.pc = 0x10u; // as after the E-bit stop at 0000 (+ its delay slot at 0008)
+            m_state.ebit = true;
+            m_state.haltAfterDelaySlot = false;
+            m_state.stoppedByD = false;
+            m_state.stoppedByT = false;
+            m_state.branchPending = false;
+            return;
+        }
     }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
     if (m_unit == Unit::VU0)
