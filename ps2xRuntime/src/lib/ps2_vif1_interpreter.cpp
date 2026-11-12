@@ -969,7 +969,7 @@ namespace
     static std::mutex vpProducerMutex;
     static std::condition_variable vpProducerCv;
 
-    static constexpr uint32_t kVpRecCap = 262144;
+    static constexpr uint32_t kVpRecCap = 262144; // smaller rings (16K/64K) filled constantly and the full-ring spin cost more than it saved (A/B mh3)
     static VpRec vpRecRing[kVpRecCap];
     static std::atomic<uint32_t> vpRecHead{0};
     static std::atomic<uint32_t> vpRecTail{0};
@@ -998,12 +998,18 @@ namespace
         });
     }
 
+    static int vpSpinLimit() // PERF-MG2: PS2X_VPIPE_SPIN = pause iterations before a ring wait sleeps (default 4000)
+    {
+        static const int n = []() { const char *e = std::getenv("PS2X_VPIPE_SPIN"); return e ? static_cast<int>(std::strtol(e, nullptr, 10)) : 4000; }();
+        return n;
+    }
+
     static void vpPushEvent(const VpEvent &ev)
     {
         const uint32_t tail = vpEventTail.load(std::memory_order_seq_cst);
         if (tail - vpEventHead.load(std::memory_order_seq_cst) >= kVpEventCap)
         {
-            for (int spin = 0; spin < 4000; ++spin)
+            for (int spin = 0; spin < vpSpinLimit(); ++spin)
             {
                 if (tail - vpEventHead.load(std::memory_order_seq_cst) < kVpEventCap)
                     break;
@@ -1042,7 +1048,7 @@ namespace
         {
             const uint64_t spT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
             struct SpinAcct { uint64_t t0; ~SpinAcct() { if (t0) s_vpStSpin.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); } } spinAcct{spT0};
-            for (int spin = 0; spin < 4000; ++spin)
+            for (int spin = 0; spin < vpSpinLimit(); ++spin)
             {
                 if (head != vpEventTail.load(std::memory_order_seq_cst))
                     break;
@@ -1112,10 +1118,15 @@ namespace
 
     static void vpPushRec(const VpRec &rec)
     {
-        const uint32_t tail = vpRecTail.load(std::memory_order_seq_cst);
-        if (tail - vpRecHead.load(std::memory_order_seq_cst) >= kVpRecCap)
+        // PERF-MG2: the exec thread never reads vpRecTail (records are published by the VP_WRITES event's seq_cst store), so the tail is a
+        // relaxed producer-local counter, and the consumer head is only re-read when the cached value says the ring is full.
+        static uint32_t s_headCache = 0; // parser thread only
+        const uint32_t tail = vpRecTail.load(std::memory_order_relaxed);
+        if (tail - s_headCache >= kVpRecCap)
+            s_headCache = vpRecHead.load(std::memory_order_seq_cst);
+        if (tail - s_headCache >= kVpRecCap)
         {
-            for (int spin = 0; spin < 4000; ++spin)
+            for (int spin = 0; spin < vpSpinLimit(); ++spin)
             {
                 if (tail - vpRecHead.load(std::memory_order_seq_cst) < kVpRecCap)
                     break;
@@ -1131,9 +1142,10 @@ namespace
                 });
                 vpRecProducerWaiting.store(false, std::memory_order_seq_cst);
             }
+            s_headCache = vpRecHead.load(std::memory_order_seq_cst);
         }
         vpRecRing[tail & (kVpRecCap - 1)] = rec;
-        vpRecTail.store(tail + 1, std::memory_order_seq_cst);
+        vpRecTail.store(tail + 1, std::memory_order_relaxed);
     }
 
     static void vpExecThreadFunc()
