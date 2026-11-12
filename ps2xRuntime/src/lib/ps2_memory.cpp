@@ -499,9 +499,24 @@ namespace
 static std::function<void(const uint8_t *, uint32_t)> s_vif1Process; // bound by a PS2Memory member (private access)
 static std::function<void()> s_vif1DrainArbiter;
 extern "C" void ps2_gs_async_batch(bool on); // PERF-GB: gs/ps2_gif_arbiter.cpp
+// PROBE-TL: job timeline (PS2X_TL=1). Ring indexed by job sequence (enqueue order == worker pop order).
+static const bool g_tlOn = []() { const char *e = std::getenv("PS2X_TL"); return e && e[0] == '1'; }(); // PROBE-TL
+static std::atomic<uint64_t> g_tlEnq[1024]{};                                                           // PROBE-TL
+static std::atomic<uint64_t> g_tlNewest{0};                                                             // PROBE-TL: tsc of newest enqueue
+static std::atomic<uint64_t> g_tlJobs{0}, g_tlQueue{0}, g_tlDur{0}, g_tlDurMax{0};                      // PROBE-TL
+static std::atomic<uint64_t> g_tlFences{0}, g_tlFWait{0}, g_tlLead{0};                                  // PROBE-TL
+static void tlFence(uint64_t fT0, uint64_t fT1)                                                         // PROBE-TL
+{
+    const uint64_t nw = g_tlNewest.load(std::memory_order_relaxed);
+    g_tlFences.fetch_add(1, std::memory_order_relaxed);
+    g_tlFWait.fetch_add(fT1 - fT0, std::memory_order_relaxed);
+    if (nw && fT0 > nw)
+        g_tlLead.fetch_add(fT0 - nw, std::memory_order_relaxed);
+}
 static void vif1Worker()
 {
     t_onVif1Worker = true;
+    uint64_t tlSeq = 0; // PROBE-TL
     ThreadNaming::SetCurrentThreadName("Vif1Worker");
     { // PERF-LU
         static const bool s_sched = []() { const char *e = std::getenv("PS2X_SCHED"); return e && e[0] == '1'; }();
@@ -531,6 +546,7 @@ static void vif1Worker()
             st.cvSpace.notify_all();
         }
         g_vif1JobFbrst = job.fbrst;
+        const uint64_t tlStart = g_tlOn ? __rdtsc() : 0; // PROBE-TL
         const uint64_t wkT0 = __rdtsc(); // PROBE-KF
         ps2_gs_async_batch(true); // PERF-GB
         s_vif1Process(job.data.data(), static_cast<uint32_t>(job.data.size()));
@@ -539,6 +555,18 @@ static void vif1Worker()
         if (s_vif1DrainArbiter)
             s_vif1DrainArbiter();
         g_vif1JobFbrst = ~0u;
+        if (g_tlOn) // PROBE-TL
+        {
+            const uint64_t tlEnd = __rdtsc();
+            const uint64_t enq = g_tlEnq[tlSeq++ & 1023u].load(std::memory_order_relaxed);
+            const uint64_t dur = tlEnd - tlStart;
+            g_tlJobs.fetch_add(1, std::memory_order_relaxed);
+            if (tlStart > enq)
+                g_tlQueue.fetch_add(tlStart - enq, std::memory_order_relaxed);
+            g_tlDur.fetch_add(dur, std::memory_order_relaxed);
+            uint64_t mx = g_tlDurMax.load(std::memory_order_relaxed);
+            while (dur > mx && !g_tlDurMax.compare_exchange_weak(mx, dur, std::memory_order_relaxed)) {}
+        }
         recycleVifBuf(std::move(job.data)); // PERF-VP
         {
             std::lock_guard<std::mutex> lock(st.m);
@@ -574,6 +602,12 @@ static void vif1EnqueueJob(std::vector<uint8_t> &&data)
     st.queuedBytes += data.size();
     job.data = std::move(data);
     st.q.push_back(std::move(job));
+    if (g_tlOn) // PROBE-TL
+    {
+        const uint64_t t = __rdtsc();
+        g_tlEnq[st.enqueuedJobs & 1023u].store(t, std::memory_order_relaxed);
+        g_tlNewest.store(t, std::memory_order_relaxed);
+    }
     ++st.enqueuedJobs; // PERF-SL
     st.pending.store(true, std::memory_order_release);
     st.cvWork.notify_one();
@@ -608,6 +642,7 @@ extern "C" void ps2_vif1_sync_lag(uint32_t lag)
             --st.lagWaiters;
             g_waitTicks[0].fetch_add(__rdtsc() - fT0, std::memory_order_relaxed);
             g_waitTicks[5].fetch_add(1, std::memory_order_relaxed);
+            if (g_tlOn) tlFence(fT0, __rdtsc()); // PROBE-TL
         }
     }
 }
@@ -630,6 +665,7 @@ extern "C" void ps2_vif1_fence()
         st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
         g_waitTicks[0].fetch_add(__rdtsc() - fT0, std::memory_order_relaxed);
         g_waitTicks[5].fetch_add(1, std::memory_order_relaxed);
+        if (g_tlOn) tlFence(fT0, __rdtsc()); // PROBE-TL
         { // PROBE-FS
             const uint32_t fn = probe_getNewestDistinctFn(), cur = g_currentExecutingFunction;
             const uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress());
@@ -667,6 +703,18 @@ extern "C" void ps2_vif1_fence()
             // global ps2xSafeLog
             ps2xSafeLog("[wait] window_ms=%.0f EE ms: vif1_fence=%.0f (n=%.0f) vif1_enqueue=%.0f gs_fence=%.0f gs_backpressure=%.0f | vif1_worker_busy=%.0f vif1_worker_idle=%.0f\n", ms, v[0], v[5],
                         v[1], v[2], v[3], v[4], v[6]);
+            if (g_tlOn) // PROBE-TL
+            {
+                const double nj = static_cast<double>(g_tlJobs.exchange(0, std::memory_order_relaxed));
+                const double nf = static_cast<double>(g_tlFences.exchange(0, std::memory_order_relaxed));
+                const double q = static_cast<double>(g_tlQueue.exchange(0, std::memory_order_relaxed));
+                const double d = static_cast<double>(g_tlDur.exchange(0, std::memory_order_relaxed));
+                const double dm = static_cast<double>(g_tlDurMax.exchange(0, std::memory_order_relaxed));
+                const double fw = static_cast<double>(g_tlFWait.exchange(0, std::memory_order_relaxed));
+                const double ld = static_cast<double>(g_tlLead.exchange(0, std::memory_order_relaxed));
+                ps2xSafeLog("[tl] jobs=%llu queue_ms=%.2f dur_ms=%.2f durmax_ms=%.2f | fences=%llu fwait_ms=%.2f lead_ms=%.2f\n", (unsigned long long)nj, nj > 0 ? q / nj / tpm : 0.0,
+                            nj > 0 ? d / nj / tpm : 0.0, dm / tpm, (unsigned long long)nf, nf > 0 ? fw / nf / tpm : 0.0, nf > 0 ? ld / nf / tpm : 0.0);
+            }
             { // PROBE-GQ
                 uint64_t g[5];
                 ps2_gs_async_stats(g);
