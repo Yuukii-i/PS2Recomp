@@ -1139,6 +1139,8 @@ namespace
     static void vpExecThreadFunc()
     {
         ThreadNaming::SetCurrentThreadName("Vu1Exec");
+        if (const char *pe = std::getenv("PS2X_PROF_VU1EXEC"); pe && pe[0] == '1') // PROBE-MG: point the sampler (PS2X_PROF_SAMPLE=1) at this thread
+            probe_ae::recordMainGuestThread();
         ps2_vif1_mark_worker_thread();
         ps2_gs_async_batch(true);
         for (;;)
