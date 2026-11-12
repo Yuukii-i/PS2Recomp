@@ -54,8 +54,8 @@ namespace
 {
     constexpr uint32_t kVramSize = 4u * 1024u * 1024u;
     constexpr uint32_t kPrimStride = 80u; // uints per primitive, shared with the shaders
-    constexpr uint32_t kMaxPrims = 24576u;
-    constexpr uint32_t kMaxClutSlots = 2048u;
+    constexpr uint32_t kDefaultMaxPrims = 131072u;
+    constexpr uint32_t kDefaultMaxClutSlots = 8192u;
     constexpr uint32_t kStagingSize = 32u * 1024u * 1024u;
     constexpr uint32_t kViewport = 2048u;
 
@@ -561,8 +561,25 @@ namespace
             compare_ = c && c[0] == '1';
             const char *o = std::getenv("PS2X_GS_VK_MAXPRIM"); // debug bisect: only the first N GPU prims per frame
             maxPrimPerFrame_ = o ? static_cast<uint32_t>(std::strtoul(o, nullptr, 10)) : 0u;
+            const char *stg = std::getenv("PS2X_VK_PRIMSTAGE");
+            primStage_ = !(stg && stg[0] == '0');
             if (compare_)
                 ref_ = std::make_unique<GSCpuBackend>();
+
+            const char *ep = std::getenv("PS2X_VK_MAXPRIMS");
+            if (ep && *ep)
+            {
+                unsigned long v = std::strtoul(ep, nullptr, 10);
+                maxPrims_ = std::clamp<uint32_t>(static_cast<uint32_t>(v), 24576u, 262144u);
+            }
+            const char *ec = std::getenv("PS2X_VK_MAXCLUT");
+            if (ec && *ec)
+            {
+                unsigned long v = std::strtoul(ec, nullptr, 10);
+                maxClutSlots_ = std::clamp<uint32_t>(static_cast<uint32_t>(v), 2048u, 16384u);
+            }
+            if (maxPrims_ != kDefaultMaxPrims || maxClutSlots_ != kDefaultMaxClutSlots)
+                std::printf("[vk] capacities prims=%u clut=%u\n", maxPrims_, maxClutSlots_);
         }
 
         void Initialize(uint8_t *vram, uint32_t vramSize) override
@@ -1108,9 +1125,9 @@ namespace
                 return false;
             if (!makeBuf(down_, kVramSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, hv, true, VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
                 return false;
-            if (!makeBuf(prims_, static_cast<VkDeviceSize>(kMaxPrims) * kPrimStride * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
+            if (!makeBuf(prims_, static_cast<VkDeviceSize>(maxPrims_) * kPrimStride * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
                 return false;
-            if (!makeBuf(clutBuf_, static_cast<VkDeviceSize>(kMaxClutSlots) * 1024u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
+            if (!makeBuf(clutBuf_, static_cast<VkDeviceSize>(maxClutSlots_) * 1024u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
                 return false;
 
             VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
@@ -1168,9 +1185,9 @@ namespace
         {
             if (!makeBuf(alt_.staging, kStagingSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hv, true))
                 return false;
-            if (!makeBuf(alt_.prims, static_cast<VkDeviceSize>(kMaxPrims) * kPrimStride * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
+            if (!makeBuf(alt_.prims, static_cast<VkDeviceSize>(maxPrims_) * kPrimStride * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
                 return false;
-            if (!makeBuf(alt_.clut, static_cast<VkDeviceSize>(kMaxClutSlots) * 1024u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
+            if (!makeBuf(alt_.clut, static_cast<VkDeviceSize>(maxClutSlots_) * 1024u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hv, true))
                 return false;
             if (!makeBuf(snap_, kVramSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, hv, true, VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
                 return false;
@@ -1570,11 +1587,29 @@ namespace
             }
         }
 
+        enum FlushReason : uint32_t
+        {
+            FLUSH_REASON_OTHER = 0,
+            FLUSH_REASON_PRIMS = 1,
+            FLUSH_REASON_CLUT = 2,
+            FLUSH_REASON_STAGING = 3,
+        };
+
         // submit everything recorded; optionally download the given GPU-newer pages into the host VRAM
-        void flush(const PageSet *down)
+        void flush(const PageSet *down, FlushReason reason = FLUSH_REASON_OTHER)
         {
             if (!recording_ && !down)
                 return;
+            if (!down)
+            {
+                switch (reason)
+                {
+                case FLUSH_REASON_PRIMS:   ++flushWhyPrims_; break;
+                case FLUSH_REASON_CLUT:    ++flushWhyClut_; break;
+                case FLUSH_REASON_STAGING: ++flushWhyStaging_; break;
+                default:                   ++flushWhyOther_; break;
+                }
+            }
             beginRecording();
             endPass();
             std::vector<std::pair<uint32_t, uint32_t>> runs;
@@ -1672,7 +1707,7 @@ namespace
             for (const auto &run : runs)
                 total += static_cast<uint64_t>(run.second) * 8192u;
             if (stagingOff_ + total + runs.size() * 256u > kStagingSize)
-                flush(nullptr);
+                flush(nullptr, FLUSH_REASON_STAGING);
             if (!vkReady_)
                 return false;
             beginRecording();
@@ -1748,12 +1783,12 @@ namespace
             // everything that may flush (and so reset the rings) happens before the prim block is written
             if (!ensureUpload()) // CPU-written data must be in GPU VRAM before this draw
                 return 8;
-            if (primCount_ >= kMaxPrims)
-                flush(nullptr);
+            if (primCount_ >= maxPrims_)
+                flush(nullptr, FLUSH_REASON_PRIMS);
             if (clutChanged_ || curClutSlot_ < 0)
             {
-                if (clutSlots_ >= kMaxClutSlots)
-                    flush(nullptr);
+                if (clutSlots_ >= maxClutSlots_)
+                    flush(nullptr, FLUSH_REASON_CLUT);
                 if (!vkReady_)
                     return 8;
                 std::memcpy(clutBuf_.map + static_cast<size_t>(clutSlots_) * 1024u, cpu_->m_clut.data(), 1024u);
@@ -1763,8 +1798,18 @@ namespace
             if (!vkReady_)
                 return 8;
 
-            uint32_t *p = primMap_ + static_cast<size_t>(primCount_) * kPrimStride;
-            std::memset(p, 0, kPrimStride * 4u);
+            alignas(64) uint32_t rec[kPrimStride];
+            uint32_t *p;
+            if (primStage_)
+            {
+                std::memset(rec, 0, sizeof rec);
+                p = rec;
+            }
+            else
+            {
+                p = primMap_ + static_cast<size_t>(primCount_) * kPrimStride;
+                std::memset(p, 0, kPrimStride * 4u);
+            }
             const int ofx = ctx.xyoffset.ofx >> 4;
             const int ofy = ctx.xyoffset.ofy >> 4;
             int bminX, bmaxX, bminY, bmaxY;
@@ -1944,6 +1989,8 @@ namespace
             // a draw that reads what an earlier draw wrote as frame/Z must also be ordered; covered by the interlock for same-pixel,
             // and by the texture check above for sampled data.
             beginPass();
+            if (primStage_)
+                std::memcpy(primMap_ + static_cast<size_t>(primCount_) * kPrimStride, rec, kPrimStride * 4u);
             if (pendCount_ != 0u && pendFirst_ + pendCount_ == primCount_)
                 ++pendCount_;
             else
@@ -2068,12 +2115,14 @@ namespace
         {
             if (presents_ % 120u != 0u)
                 return;
-            std::printf("[vk] presents=%u gpuPrims=%llu cpuPrims=%llu syncs=%llu submits=%llu barriers=%llu sync_ms=%.1f upload_MB=%.1f fallback[line/frame/z/tex/clut/scissor/maxprim/other]=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu%s\n",
+            std::printf("[vk] presents=%u gpuPrims=%llu cpuPrims=%llu syncs=%llu submits=%llu barriers=%llu sync_ms=%.1f upload_MB=%.1f fallback[line/frame/z/tex/clut/scissor/maxprim/other]=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu flushwhy[prims/clut/staging/other]=%llu/%llu/%llu/%llu%s\n",
                         presents_, static_cast<unsigned long long>(gpuPrims_), static_cast<unsigned long long>(cpuPrims_),
                         static_cast<unsigned long long>(syncs_), static_cast<unsigned long long>(submits_), static_cast<unsigned long long>(barriers_),
                         syncMs_, uploadBytes_ / 1048576.0, static_cast<unsigned long long>(fallback_[1]), static_cast<unsigned long long>(fallback_[2]),
                         static_cast<unsigned long long>(fallback_[3]), static_cast<unsigned long long>(fallback_[4]), static_cast<unsigned long long>(fallback_[5]),
                         static_cast<unsigned long long>(fallback_[6]), static_cast<unsigned long long>(fallback_[7]), static_cast<unsigned long long>(fallback_[8]),
+                        static_cast<unsigned long long>(flushWhyPrims_), static_cast<unsigned long long>(flushWhyClut_),
+                        static_cast<unsigned long long>(flushWhyStaging_), static_cast<unsigned long long>(flushWhyOther_),
                         compare_ ? "" : "");
             std::printf("[vk] syncs by reason present=%llu transfer=%llu clut=%llu clear=%llu writevram=%llu readvram=%llu sync=%llu cpudraw=%llu download_MB=%.1f\n",
                         static_cast<unsigned long long>(syncReason_[0]), static_cast<unsigned long long>(syncReason_[1]),
@@ -2098,6 +2147,7 @@ namespace
         std::vector<uint8_t> refVram_;
         bool compare_ = false;
         uint32_t maxPrimPerFrame_ = 0;
+        bool primStage_ = false;
         uint8_t *host_ = nullptr;
         uint32_t hostSize_ = 0;
 
@@ -2150,6 +2200,9 @@ namespace
         };
         PageWriter lastWriter_[512];
         uint64_t primSerial_ = 0;
+        uint32_t maxPrims_ = kDefaultMaxPrims;
+        uint32_t maxClutSlots_ = kDefaultMaxClutSlots;
+        uint64_t flushWhyPrims_ = 0, flushWhyClut_ = 0, flushWhyStaging_ = 0, flushWhyOther_ = 0;
         uint32_t primCount_ = 0, clutSlots_ = 0, stagingOff_ = 0;
         uint32_t pendFirst_ = 0, pendCount_ = 0; // PERF-GB
         int32_t curClutSlot_ = -1;
