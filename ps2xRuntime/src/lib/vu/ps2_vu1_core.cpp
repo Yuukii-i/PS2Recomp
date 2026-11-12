@@ -1390,6 +1390,8 @@ uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
 // writes land immediately; only Q/P (fdiv/efu) keep their latency. Cycle counts become ~1 per pair.
 static thread_local std::vector<uint8_t> *s_vfyCapture = nullptr; // PROBE-GV (thread_local, see s_vfyRef): when set, XGKICK packets are captured instead of submitted
 extern "C" void ps2_vu1_set_capture(std::vector<uint8_t> *v) { s_vfyCapture = v; }
+static thread_local std::vector<uint32_t> *s_kickRec = nullptr;
+extern "C" void ps2_vu1_set_kick_record(std::vector<uint32_t> *v) { s_kickRec = v; }
 static thread_local int s_vfyFastOverride = -1;       // PROBE-GV (thread_local, see s_vfyRef): -1 env, 0 force exact, 1 force fast
 static inline int vu1VerifyMode() // PS2X_VU1_VERIFY: 1 = VU1 only, 2 = VU0 only, 3 = both
 {
@@ -2359,6 +2361,11 @@ void VU1Interpreter::finishXgkick()
     extern uint64_t g_vuPhase[4]; // PROBE-EP
     static const bool s_epTsc = []() { const char *e = std::getenv("PS2X_VU1_TSC"); return e && e[0] == '1'; }(); // PROBE-EP
     const uint64_t epT0 = s_epTsc ? __rdtsc() : 0ull; // PROBE-EP
+    if (s_kickRec)
+    {
+        s_kickRec->push_back(m_xgkick.sourceAddress / 16);
+        s_kickRec->push_back((m_xgkick.totalBytes + 15) / 16);
+    }
     if (s_vfyCapture)
         s_vfyCapture->insert(s_vfyCapture->end(), m_xgkick.packet.data(), m_xgkick.packet.data() + m_xgkick.totalBytes);
     else if (m_activeMemory)

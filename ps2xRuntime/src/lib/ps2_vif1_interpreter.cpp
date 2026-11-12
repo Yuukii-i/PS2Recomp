@@ -22,6 +22,8 @@ extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint1
 #include <condition_variable>
 #include <functional>
 #include <cstdarg>
+#include <bitset>
+#include <array>
 
 extern void ps2xSafeLog(const char *fmt, ...);
 
@@ -989,6 +991,7 @@ namespace
     extern "C" void ps2_vu1_set_capture(std::vector<uint8_t> *v);
 } // namespace (DB1: global-linkage extern must sit outside the anonymous namespace)
 extern std::function<void(uint32_t startPC, uint32_t top, uint32_t itop, uint8_t *vuData)> g_vu1MscalCallbackB;
+extern "C" void ps2_vu1_set_kick_record(std::vector<uint32_t> *v);
 namespace
 {
 
@@ -1019,15 +1022,20 @@ namespace
 
     alignas(64) static uint8_t s_vpShadow[PS2_VU1_DATA_SIZE];
 
-    // Task DB2: Dual VU1 executor state
+    static thread_local std::bitset<1024> s_tlVifWrites;
+    static thread_local std::bitset<1024> s_tlVifAfterPrev;
+
+    // Task DB2/DB3: Dual VU1 executor state
     struct VpSlot {
         std::atomic<uint32_t> done{0}; // k+1 when published, 0 after reset
-        uint8_t w[161][16];
+        uint8_t w[161][16];            // kept for VERIFY mode
         bool swapped{false};
-        bool wroteTable{false};
-        std::vector<uint8_t> gif;
-        std::vector<uint8_t> entryMem;
-        std::atomic<bool> entryReady{false};
+        bool kickOnly{false};
+        std::vector<uint16_t> dq;
+        std::vector<std::array<uint8_t, 16>> dv;
+        std::vector<uint8_t> gif;      // kept for VERIFY mode
+        std::vector<uint8_t> entryMem; // kept for VERIFY mode
+        std::atomic<bool> entryReady{false}; // kept for VERIFY mode
     };
     static VpSlot s_vpSlots[256];
     static std::atomic<uint32_t> vpVerifyDone{0};
@@ -1036,7 +1044,8 @@ namespace
         uint8_t key[16];
         uint8_t state; // 0 empty, 1 known, 2 conflict
         uint8_t swaps;
-        uint8_t writes;
+        uint8_t kickOnly;
+        uint16_t kYes, kNo, sYes, sNo; // PERF-DB3P saturating outcome counters
     };
     static PredEntry s_predTable[1024];
     static std::mutex s_predMutex;
@@ -1049,6 +1058,8 @@ namespace
     static std::atomic<uint64_t> s_vpStSpec{0};
     static std::atomic<uint64_t> s_vpStReruns{0};
     static std::atomic<uint64_t> s_vpStWaitsExact{0};
+    static std::atomic<uint64_t> s_vpStApplyQw{0};
+    static std::atomic<uint64_t> s_vpStDiffQw{0};
     alignas(16) static thread_local uint8_t s_threadKeys[256][16];
 
     static inline uint32_t hashKey16(const uint8_t *k)
@@ -1078,7 +1089,11 @@ namespace
         return empty;
     }
 
-    static void predUpdate(const uint8_t *key, bool swapped, bool wroteTable)
+    static bool vpStatOn(); // PROBE-DB3H (forward decl; defined below)
+    static std::atomic<uint32_t> s_db3NonKickHist[1024]; // PROBE-DB3H
+    static std::atomic<uint64_t> s_db3NonKickProgs{0};   // PROBE-DB3H
+
+    static void predUpdate(const uint8_t *key, bool swapped, bool kickOnly)
     {
         std::lock_guard<std::mutex> lock(s_predMutex);
         const uint32_t idx = hashKey16(key) & 1023u;
@@ -1094,13 +1109,16 @@ namespace
             }
             if (std::memcmp(s_predTable[cur].key, key, 16) == 0)
             {
-                if (s_predTable[cur].state == 1u)
-                {
-                    if (s_predTable[cur].swaps != (swapped ? 1u : 0u) ||
-                        s_predTable[cur].writes != (wroteTable ? 1u : 0u))
+                { // PERF-DB3P majority-based prediction (never state=2)
+                    PredEntry &e = s_predTable[cur];
+                    if (swapped) ++e.sYes; else ++e.sNo;
+                    if (kickOnly) ++e.kYes; else ++e.kNo;
+                    if (e.sYes >= 60000u || e.sNo >= 60000u || e.kYes >= 60000u || e.kNo >= 60000u)
                     {
-                        s_predTable[cur].state = 2u; // conflict: never predicted again
+                        e.sYes >>= 1; e.sNo >>= 1; e.kYes >>= 1; e.kNo >>= 1;
                     }
+                    e.swaps = (e.sYes >= e.sNo) ? 1u : 0u;
+                    e.kickOnly = ((uint32_t)e.kYes >= 3u * (uint32_t)e.kNo + 1u) ? 1u : 0u;
                 }
                 return;
             }
@@ -1110,7 +1128,11 @@ namespace
             std::memcpy(s_predTable[emptyIdx].key, key, 16);
             s_predTable[emptyIdx].state = 1u;
             s_predTable[emptyIdx].swaps = swapped ? 1u : 0u;
-            s_predTable[emptyIdx].writes = wroteTable ? 1u : 0u;
+            s_predTable[emptyIdx].kickOnly = kickOnly ? 1u : 0u;
+            s_predTable[emptyIdx].sYes = swapped ? 1u : 0u;   // PERF-DB3P
+            s_predTable[emptyIdx].sNo = swapped ? 0u : 1u;
+            s_predTable[emptyIdx].kYes = kickOnly ? 1u : 0u;
+            s_predTable[emptyIdx].kNo = kickOnly ? 0u : 1u;
         }
     }
 
@@ -1219,6 +1241,10 @@ namespace
         if (!copy)
             return;
 
+        // Section 3: On every VP_MSCAL event (own or not), save V into Vprev and clear V
+        s_tlVifAfterPrev = s_tlVifWrites;
+        s_tlVifWrites.reset();
+
         if ((k & 1u) != static_cast<uint32_t>(myThread))
         {
             // If k is NOT this thread's: read key(k) = 16 bytes at own copy + top*16 and keep it; continue.
@@ -1233,98 +1259,192 @@ namespace
         // Read and save key(k) before running (microcode could overwrite TOP)
         std::memcpy(s_threadKeys[k & 255u], copy + (static_cast<size_t>(ev.b & 0x3FFu) * 16u), 16);
 
-        // 1. Entry W:
-        uint8_t entryW[161][16];
-        uint8_t assumedW[161][16];
-        bool speculated = false;
+        alignas(64) static thread_local uint8_t E[PS2_VU1_DATA_SIZE];
+        static thread_local std::vector<uint8_t> s_cap;
+        static thread_local std::vector<uint32_t> s_kickRec;
 
-        if (k == 0u)
-        {
-            loadW(entryW, copy);
-        }
-        else if (s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k)
-        {
-            storeW(copy, s_vpSlots[(k - 1u) & 255u].w);
-            std::memcpy(entryW, s_vpSlots[(k - 1u) & 255u].w, sizeof(entryW));
-        }
-        else
-        {
-            const PredEntry pred = predLookup(s_threadKeys[(k - 1u) & 255u]);
-            if (pred.state == 1u && pred.writes == 0u)
+        auto runProgram = [&]() {
+            s_cap.clear();
+            s_kickRec.clear();
+            ps2_vu1_set_capture(&s_cap);
+            ps2_vu1_set_kick_record(&s_kickRec);
+            if (myThread == 0)
             {
-                speculated = true;
-                s_vpStSpec.fetch_add(1, std::memory_order_relaxed);
-                if (pred.swaps != 0u)
-                {
-                    swapToggle1023(copy);
-                }
-                loadW(assumedW, copy);
-                std::memcpy(entryW, assumedW, sizeof(entryW));
+                if (vpMscalCb)
+                    vpMscalCb(ev.a, ev.b, ev.c);
             }
             else
             {
-                s_vpStWaitsExact.fetch_add(1, std::memory_order_relaxed);
-                vpWaitCond([&]() {
-                    return s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k;
-                });
-                storeW(copy, s_vpSlots[(k - 1u) & 255u].w);
-                std::memcpy(entryW, s_vpSlots[(k - 1u) & 255u].w, sizeof(entryW));
+                if (g_vu1MscalCallbackB)
+                    g_vu1MscalCallbackB(ev.a, ev.b, ev.c, s_vpShadow);
             }
-        }
+            ps2_vu1_set_capture(nullptr);
+            ps2_vu1_set_kick_record(nullptr);
+        };
 
-        // 2. Run the program with capture on (thread_local vector).
-        static thread_local std::vector<uint8_t> s_cap;
-        s_cap.clear();
-        ps2_vu1_set_capture(&s_cap);
-        if (myThread == 0)
+        auto applyPrev = [&](uint32_t prevK) {
+            const auto &slotPrev = s_vpSlots[prevK & 255u];
+            for (size_t i = 0; i < slotPrev.dq.size(); ++i)
+            {
+                const uint16_t q = slotPrev.dq[i];
+                if (!s_tlVifAfterPrev.test(q))
+                {
+                    std::memcpy(copy + (q * 16u), slotPrev.dv[i].data(), 16);
+                    s_vpStApplyQw.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        auto computeDiff = [&](uint32_t curK, std::bitset<1024> &outDiffBits, bool &outKickOnly, bool &outSwapped) {
+            auto &slot = s_vpSlots[curK & 255u];
+            if (slot.dq.capacity() < 1024)
+            {
+                slot.dq.reserve(1024);
+                slot.dv.reserve(1024);
+            }
+            slot.dq.clear();
+            slot.dv.clear();
+            outDiffBits.reset();
+            for (uint32_t q = 0u; q < 1024u; ++q)
+            {
+                if (std::memcmp(copy + (q * 16u), E + (q * 16u), 16) != 0)
+                {
+                    outDiffBits.set(q);
+                    slot.dq.push_back(static_cast<uint16_t>(q));
+                    std::array<uint8_t, 16> val;
+                    std::memcpy(val.data(), copy + (q * 16u), 16);
+                    slot.dv.push_back(val);
+                }
+            }
+            s_vpStDiffQw.fetch_add(slot.dq.size(), std::memory_order_relaxed);
+            outSwapped = outDiffBits.test(1023);
+            outKickOnly = true;
+            uint32_t db3Non = 0; // PROBE-DB3H
+            for (uint16_t q : slot.dq)
+            {
+                if (q == 1023u)
+                    continue;
+                bool inKick = false;
+                for (size_t i = 0; i + 1 < s_kickRec.size(); i += 2)
+                {
+                    const uint32_t start = s_kickRec[i] & 1023u;
+                    const uint32_t count = s_kickRec[i + 1];
+                    if (count >= 1024u || ((q + 1024u - start) & 1023u) < count)
+                    {
+                        inKick = true;
+                        break;
+                    }
+                }
+                if (!inKick)
+                {
+                    outKickOnly = false;
+                    if (vpStatOn()) { s_db3NonKickHist[q].fetch_add(1, std::memory_order_relaxed); ++db3Non; } // PROBE-DB3H (no break: count all)
+                    else break;
+                }
+            }
+            if (db3Non) s_db3NonKickProgs.fetch_add(1, std::memory_order_relaxed); // PROBE-DB3H
+            predUpdate(s_threadKeys[curK & 255u], outSwapped, outKickOnly);
+            slot.swapped = outSwapped;
+            slot.kickOnly = outKickOnly;
+        };
+
+        if (k == 0u)
         {
-            if (vpMscalCb)
-                vpMscalCb(ev.a, ev.b, ev.c);
+            std::memcpy(E, copy, PS2_VU1_DATA_SIZE);
+            runProgram();
+            std::bitset<1024> kDiffBits;
+            bool kickOnly = false, swapped = false;
+            computeDiff(0u, kDiffBits, kickOnly, swapped);
+            s_vpSlots[0].done.store(1u, std::memory_order_release);
         }
         else
         {
-            if (g_vu1MscalCallbackB)
-                g_vu1MscalCallbackB(ev.a, ev.b, ev.c, s_vpShadow);
-        }
-        ps2_vu1_set_capture(nullptr);
-
-        // 3. If speculated: wait until slot(k-1).done == k; if slot(k-1).w != assumed: copy slot(k-1).w into own W and RE-RUN the program (clear capture first). Count re-runs.
-        if (speculated)
-        {
-            vpWaitCond([&]() {
-                return s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k;
-            });
-            if (std::memcmp(s_vpSlots[(k - 1u) & 255u].w, assumedW, sizeof(assumedW)) != 0)
+            const bool prevDone = (s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k);
+            bool speculate = false;
+            PredEntry pred{};
+            if (!prevDone)
             {
-                s_vpStReruns.fetch_add(1, std::memory_order_relaxed);
-                storeW(copy, s_vpSlots[(k - 1u) & 255u].w);
-                std::memcpy(entryW, s_vpSlots[(k - 1u) & 255u].w, sizeof(entryW));
-                s_cap.clear();
-                ps2_vu1_set_capture(&s_cap);
-                if (myThread == 0)
+                pred = predLookup(s_threadKeys[(k - 1u) & 255u]);
+                if (pred.state == 1u && pred.kickOnly != 0u)
+                    speculate = true;
+            }
+
+            if (speculate)
+            {
+                s_vpStSpec.fetch_add(1, std::memory_order_relaxed);
+                const bool predictedSwap = (pred.swaps != 0u);
+                if (predictedSwap)
+                    swapToggle1023(copy);
+                std::memcpy(E, copy, PS2_VU1_DATA_SIZE);
+
+                runProgram();
+
+                vpWaitCond([&]() {
+                    return s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k;
+                });
+                const auto &slotPrev = s_vpSlots[(k - 1u) & 255u];
+                const bool valid = slotPrev.kickOnly && (slotPrev.swapped == predictedSwap);
+
+                if (valid)
                 {
-                    if (vpMscalCb)
-                        vpMscalCb(ev.a, ev.b, ev.c);
+                    std::bitset<1024> kDiffBits;
+                    bool kickOnly = false, swapped = false;
+                    computeDiff(k, kDiffBits, kickOnly, swapped);
+
+                    // Apply k-1 skipping every q that program k wrote and skipping 1023
+                    for (size_t i = 0; i < slotPrev.dq.size(); ++i)
+                    {
+                        const uint16_t q = slotPrev.dq[i];
+                        if (q == 1023u)
+                            continue;
+                        if (kDiffBits.test(q))
+                            continue;
+                        if (!s_tlVifAfterPrev.test(q))
+                        {
+                            std::memcpy(copy + (q * 16u), slotPrev.dv[i].data(), 16);
+                            s_vpStApplyQw.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                    s_vpSlots[k & 255u].done.store(k + 1u, std::memory_order_release);
                 }
                 else
                 {
-                    if (g_vu1MscalCallbackB)
-                        g_vu1MscalCallbackB(ev.a, ev.b, ev.c, s_vpShadow);
+                    s_vpStReruns.fetch_add(1, std::memory_order_relaxed);
+                    std::memcpy(copy, E, PS2_VU1_DATA_SIZE);
+                    if (predictedSwap)
+                        swapToggle1023(copy);
+
+                    applyPrev(k - 1u);
+
+                    std::memcpy(E, copy, PS2_VU1_DATA_SIZE);
+                    runProgram();
+
+                    std::bitset<1024> kDiffBits;
+                    bool kickOnly = false, swapped = false;
+                    computeDiff(k, kDiffBits, kickOnly, swapped);
+                    s_vpSlots[k & 255u].done.store(k + 1u, std::memory_order_release);
                 }
-                ps2_vu1_set_capture(nullptr);
+            }
+            else
+            {
+                if (!prevDone)
+                {
+                    s_vpStWaitsExact.fetch_add(1, std::memory_order_relaxed);
+                    vpWaitCond([&]() {
+                        return s_vpSlots[(k - 1u) & 255u].done.load(std::memory_order_acquire) == k;
+                    });
+                }
+                applyPrev(k - 1u);
+
+                std::memcpy(E, copy, PS2_VU1_DATA_SIZE);
+                runProgram();
+
+                std::bitset<1024> kDiffBits;
+                bool kickOnly = false, swapped = false;
+                computeDiff(k, kDiffBits, kickOnly, swapped);
+                s_vpSlots[k & 255u].done.store(k + 1u, std::memory_order_release);
             }
         }
-
-        // 4. Outcome: swapped = own 1023 differs from entry W 1023; wroteTable = own 636..795 differs from entry W. Update the table for key(k). Publish slot(k): copy own W into slot(k).w, then done.store(k+1, release).
-        const bool swapped = (std::memcmp(copy + (1023u * 16u), entryW[0], 16) != 0);
-        const bool wroteTable = (std::memcmp(copy + (636u * 16u), &entryW[1][0], 160u * 16u) != 0);
-
-        predUpdate(s_threadKeys[k & 255u], swapped, wroteTable);
-
-        s_vpSlots[k & 255u].swapped = swapped;
-        s_vpSlots[k & 255u].wroteTable = wroteTable;
-        loadW(s_vpSlots[k & 255u].w, copy);
-        s_vpSlots[k & 255u].done.store(k + 1u, std::memory_order_release);
 
         // 5. Wait for the GIF turn t (atomic turnDone == t), submit the capture with submitGifPacket(Path1, ...) (X1 uses the same callback object; submitGifPacket is called by whichever thread holds the turn), then ps2_gs_async_batch(false); ps2_gs_async_batch(true) (flush so cross-thread order holds), then turnDone.store(t+1).
         vpWaitCond([&]() {
@@ -1754,13 +1874,16 @@ namespace
         }
         if (dual)
         {
-            if (!vpVerifyOn() && s_vpMscalK > 0u && ((s_vpMscalK - 1u) & 1u) == 1u && s_vpVu1Data)
-            {
-                storeW(s_vpVu1Data, s_vpSlots[(s_vpMscalK - 1u) & 255u].w);
-            }
             if (s_vpVu1Data)
             {
-                std::memcpy(s_vpShadow, s_vpVu1Data, PS2_VU1_DATA_SIZE);
+                if (!vpVerifyOn() && s_vpMscalK > 0u && ((s_vpMscalK - 1u) & 1u) == 1u)
+                {
+                    std::memcpy(s_vpVu1Data, s_vpShadow, PS2_VU1_DATA_SIZE);
+                }
+                else
+                {
+                    std::memcpy(s_vpShadow, s_vpVu1Data, PS2_VU1_DATA_SIZE);
+                }
             }
             s_vpMscalK = 0u;
             s_vpTurnT = 0u;
@@ -1770,6 +1893,8 @@ namespace
                 s_vpSlots[i].done.store(0u, std::memory_order_relaxed);
                 s_vpSlots[i].entryReady.store(false, std::memory_order_relaxed);
                 s_vpSlots[i].gif.clear();
+                s_vpSlots[i].dq.clear();
+                s_vpSlots[i].dv.clear();
             }
             vpVerifyDone.store(0u, std::memory_order_release);
             if (vpVerifyOn())
@@ -1783,19 +1908,38 @@ namespace
             const uint64_t now = __rdtsc();
             if (now - s_last > 6000000000ull)
             {
-                s_last = now;
                 const double ms = 1.0 / 3.0e6; // ~3 GHz TSC: ticks -> ms (approximate)
-                ::ps2xSafeLog("[vpipe] drains=%llu drainwait_ms=%.0f exec_busy_ms=%.0f x1_busy_ms=%.0f exec_spin_ms=%.0f sleeps=%llu full=%llu ev[w/mscal/mscnt/gif/flush]=%llu/%llu/%llu/%llu/%llu x1_runs=%llu spec=%llu reruns=%llu waits_exact=%llu\n",
+                const double sec = s_last ? static_cast<double>(now - s_last) / 3.0e9 : 2.0;
+                s_last = now;
+                const double invSec = sec > 0.0 ? (1.0 / sec) : 1.0;
+                const uint64_t applyQwSec = static_cast<uint64_t>(s_vpStApplyQw.exchange(0) * invSec);
+                const uint64_t diffQwSec = static_cast<uint64_t>(s_vpStDiffQw.exchange(0) * invSec);
+                ::ps2xSafeLog("[vpipe] drains=%llu drainwait_ms=%.0f exec_busy_ms=%.0f x1_busy_ms=%.0f exec_spin_ms=%.0f sleeps=%llu full=%llu ev[w/mscal/mscnt/gif/flush]=%llu/%llu/%llu/%llu/%llu x1_runs=%llu spec=%llu reruns=%llu waits_exact=%llu applyQw=%llu diffQw=%llu\n",
                               (unsigned long long)s_vpStDrains.exchange(0), s_vpStDrainWait.exchange(0) * ms, s_vpStBusy.exchange(0) * ms,
                               s_vpStBusy1.exchange(0) * ms,
                               s_vpStSpin.exchange(0) * ms, (unsigned long long)s_vpStSleeps.exchange(0), (unsigned long long)s_vpStFull.exchange(0),
                               (unsigned long long)s_vpStEv[1].exchange(0), (unsigned long long)s_vpStEv[2].exchange(0), (unsigned long long)s_vpStEv[3].exchange(0),
                               (unsigned long long)s_vpStEv[4].exchange(0), (unsigned long long)s_vpStEv[5].exchange(0),
                               (unsigned long long)s_vpStX1Runs.exchange(0), (unsigned long long)s_vpStSpec.exchange(0),
-                              (unsigned long long)s_vpStReruns.exchange(0), (unsigned long long)s_vpStWaitsExact.exchange(0));
+                              (unsigned long long)s_vpStReruns.exchange(0), (unsigned long long)s_vpStWaitsExact.exchange(0),
+                              (unsigned long long)applyQwSec, (unsigned long long)diffQwSec);
                 ::ps2xSafeLog("[vpipe] drains by site end/mskpath3/mpg/directimage/syncunpack=%llu/%llu/%llu/%llu/%llu\n",
                               (unsigned long long)s_vpStWhy[0].exchange(0), (unsigned long long)s_vpStWhy[1].exchange(0), (unsigned long long)s_vpStWhy[2].exchange(0),
                               (unsigned long long)s_vpStWhy[3].exchange(0), (unsigned long long)s_vpStWhy[4].exchange(0));
+                { // PROBE-DB3H
+                    uint32_t cnt[1024];
+                    for (uint32_t i = 0; i < 1024u; ++i) cnt[i] = s_db3NonKickHist[i].exchange(0, std::memory_order_relaxed);
+                    char buf[512]; size_t n = 0; buf[0] = 0;
+                    for (int t = 0; t < 16; ++t)
+                    {
+                        uint32_t best = 0, bi = 0;
+                        for (uint32_t i = 0; i < 1024u; ++i) if (cnt[i] > best) { best = cnt[i]; bi = i; }
+                        if (!best) break;
+                        n += static_cast<size_t>(std::snprintf(buf + n, sizeof(buf) - n, " %u:%u", bi, best));
+                        cnt[bi] = 0;
+                    }
+                    ::ps2xSafeLog("[vpipe] nonkick progs=%llu top:%s\n", (unsigned long long)s_db3NonKickProgs.exchange(0), buf);
+                }
             }
         }
     }
@@ -1900,6 +2044,8 @@ namespace
                     for (uint32_t i = 0u; i < ev.b; ++i)
                     {
                         const VpRec &rec = vpRecRing[(ev.a + i) & (kVpRecCap - 1)];
+                        if (rec.qw < 1024u)
+                            s_tlVifWrites.set(rec.qw);
                         uint8_t *dst = s_vpVu1Data + (static_cast<size_t>(rec.qw) * 16u);
                         if (rec.mask == 0x0Fu)
                         {
@@ -1924,6 +2070,8 @@ namespace
                 }
                 break;
             case VP_FLUSH:
+                s_tlVifWrites.reset();
+                s_tlVifAfterPrev.reset();
                 ps2_gs_async_batch(false);
                 ps2_gs_async_batch(true);
                 vpIdleSeq.store(ev.a, std::memory_order_release);
@@ -1954,6 +2102,8 @@ namespace
                 for (uint32_t i = 0u; i < ev.b; ++i)
                 {
                     const VpRec &rec = vpRecRing[(ev.a + i) & (kVpRecCap - 1)];
+                    if (rec.qw < 1024u)
+                        s_tlVifWrites.set(rec.qw);
                     uint8_t *dst = s_vpShadow + (static_cast<size_t>(rec.qw) * 16u);
                     if (rec.mask == 0x0Fu)
                     {
@@ -1980,6 +2130,8 @@ namespace
                 break;
             }
             case VP_FLUSH:
+                s_tlVifWrites.reset();
+                s_tlVifAfterPrev.reset();
                 ps2_gs_async_batch(false);
                 ps2_gs_async_batch(true);
                 vpIdleSeq1.store(ev.a, std::memory_order_release);
