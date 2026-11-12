@@ -1389,6 +1389,7 @@ uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
 // PERF-GJ: fast mode (PS2X_VU1_FAST=1) drops the per-register hazard/latency scheduler: vf/vi/acc/flag/store
 // writes land immediately; only Q/P (fdiv/efu) keep their latency. Cycle counts become ~1 per pair.
 static thread_local std::vector<uint8_t> *s_vfyCapture = nullptr; // PROBE-GV (thread_local, see s_vfyRef): when set, XGKICK packets are captured instead of submitted
+extern "C" void ps2_vu1_set_capture(std::vector<uint8_t> *v) { s_vfyCapture = v; }
 static thread_local int s_vfyFastOverride = -1;       // PROBE-GV (thread_local, see s_vfyRef): -1 env, 0 force exact, 1 force fast
 static inline int vu1VerifyMode() // PS2X_VU1_VERIFY: 1 = VU1 only, 2 = VU0 only, 3 = both
 {

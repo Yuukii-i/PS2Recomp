@@ -983,11 +983,78 @@ namespace
     static std::function<void(uint32_t, uint32_t, uint32_t)> vpMscalCb;
     static std::function<void(uint32_t, uint32_t)> vpMscntCb;
     static std::function<void(const uint8_t *, uint32_t, bool)> vpGif2Cb;
+    static std::function<void(const uint8_t *, uint32_t)> vpGif1Cb;
+
+    extern "C" void ps2_vu1_set_capture(std::vector<uint8_t> *v);
+} // namespace (DB1: global-linkage extern must sit outside the anonymous namespace)
+extern std::function<void(uint32_t startPC, uint32_t top, uint32_t itop, uint8_t *vuData)> g_vu1MscalCallbackB;
+namespace
+{
+
+    static inline bool vpDualOn()
+    {
+        static const bool on = []() {
+            const char *e = std::getenv("PS2X_VU1_DUAL");
+            return e && e[0] == '1';
+        }();
+        return on;
+    }
+
+    static std::atomic<uint32_t> vpEventHead1{0};
+    static std::atomic<bool> vpConsumer1Waiting{false};
+    static std::mutex vpConsumer1Mutex;
+    static std::condition_variable vpConsumer1Cv;
+
+    static std::atomic<uint32_t> vpRecHead1{0};
+
+    alignas(64) static uint8_t s_vpShadow[PS2_VU1_DATA_SIZE];
 
     static std::atomic<uint32_t> vpFlushSeqGen{0};
     static std::atomic<uint32_t> vpIdleSeq{0};
+    static std::atomic<uint32_t> vpIdleSeq1{0};
     static std::mutex vpFlushMutex;
     static std::condition_variable vpFlushCv;
+
+    static std::atomic<uint64_t> s_vpStBusy1{0};
+
+    static void vpExec2ThreadFunc();
+    static std::once_flag vpThread1Once;
+    static std::atomic<bool> vpThread1Started{false};
+    static void vpEnsureThread1Started()
+    {
+        std::call_once(vpThread1Once, []() {
+            vpThread1Started.store(true, std::memory_order_seq_cst);
+            std::thread(vpExec2ThreadFunc).detach();
+        });
+    }
+
+    static inline uint32_t vpEventLag(uint32_t tail, bool dual)
+    {
+        const uint32_t h0 = vpEventHead.load(std::memory_order_seq_cst);
+        uint32_t lag = tail - h0;
+        if (dual && vpThread1Started.load(std::memory_order_seq_cst))
+        {
+            const uint32_t h1 = vpEventHead1.load(std::memory_order_seq_cst);
+            const uint32_t lag1 = tail - h1;
+            if (lag1 > lag)
+                lag = lag1;
+        }
+        return lag;
+    }
+
+    static inline uint32_t vpRecLag(uint32_t tail, bool dual)
+    {
+        const uint32_t h0 = vpRecHead.load(std::memory_order_seq_cst);
+        uint32_t lag = tail - h0;
+        if (dual && vpThread1Started.load(std::memory_order_seq_cst))
+        {
+            const uint32_t h1 = vpRecHead1.load(std::memory_order_seq_cst);
+            const uint32_t lag1 = tail - h1;
+            if (lag1 > lag)
+                lag = lag1;
+        }
+        return lag;
+    }
 
     static void vpExecThreadFunc();
     static std::once_flag vpThreadOnce;
@@ -1006,21 +1073,22 @@ namespace
 
     static void vpPushEvent(const VpEvent &ev)
     {
+        const bool dual = vpDualOn();
         const uint32_t tail = vpEventTail.load(std::memory_order_seq_cst);
-        if (tail - vpEventHead.load(std::memory_order_seq_cst) >= kVpEventCap)
+        if (vpEventLag(tail, dual) >= kVpEventCap)
         {
             for (int spin = 0; spin < vpSpinLimit(); ++spin)
             {
-                if (tail - vpEventHead.load(std::memory_order_seq_cst) < kVpEventCap)
+                if (vpEventLag(tail, dual) < kVpEventCap)
                     break;
                 _mm_pause();
             }
-            if (tail - vpEventHead.load(std::memory_order_seq_cst) >= kVpEventCap)
+            if (vpEventLag(tail, dual) >= kVpEventCap)
             {
                 std::unique_lock<std::mutex> lock(vpProducerMutex);
                 vpProducerWaiting.store(true, std::memory_order_seq_cst);
                 vpProducerCv.wait(lock, [&]() {
-                    return tail - vpEventHead.load(std::memory_order_seq_cst) < kVpEventCap;
+                    return vpEventLag(tail, dual) < kVpEventCap;
                 });
                 vpProducerWaiting.store(false, std::memory_order_seq_cst);
             }
@@ -1032,6 +1100,42 @@ namespace
             std::lock_guard<std::mutex> lock(vpConsumerMutex);
             vpConsumerCv.notify_one();
         }
+        if (dual && vpConsumer1Waiting.load(std::memory_order_seq_cst))
+        {
+            std::lock_guard<std::mutex> lock(vpConsumer1Mutex);
+            vpConsumer1Cv.notify_one();
+        }
+    }
+
+    static VpEvent vpPopEvent1()
+    {
+        const uint32_t head = vpEventHead1.load(std::memory_order_seq_cst);
+        if (head == vpEventTail.load(std::memory_order_seq_cst))
+        {
+            for (int spin = 0; spin < vpSpinLimit(); ++spin)
+            {
+                if (head != vpEventTail.load(std::memory_order_seq_cst))
+                    break;
+                _mm_pause();
+            }
+            if (head == vpEventTail.load(std::memory_order_seq_cst))
+            {
+                std::unique_lock<std::mutex> lock(vpConsumer1Mutex);
+                vpConsumer1Waiting.store(true, std::memory_order_seq_cst);
+                vpConsumer1Cv.wait(lock, [&]() {
+                    return head != vpEventTail.load(std::memory_order_seq_cst);
+                });
+                vpConsumer1Waiting.store(false, std::memory_order_seq_cst);
+            }
+        }
+        VpEvent ev = vpEventRing[head & (kVpEventCap - 1)];
+        vpEventHead1.store(head + 1, std::memory_order_seq_cst);
+        if (vpProducerWaiting.load(std::memory_order_seq_cst))
+        {
+            std::lock_guard<std::mutex> lock(vpProducerMutex);
+            vpProducerCv.notify_one();
+        }
+        return ev;
     }
 
     // PROBE-MG: pipeline stats (PS2X_VIF1_PIPE_STAT=1): exec busy/spin ticks, sleeps, drains, producer full-waits
@@ -1081,6 +1185,9 @@ namespace
     {
         if (vpStatOn()) s_vpStWhy[why % 5].fetch_add(1, std::memory_order_relaxed);
         vpEnsureThreadStarted();
+        const bool dual = vpDualOn();
+        if (dual)
+            vpEnsureThread1Started();
         const uint32_t seq = ++vpFlushSeqGen;
         VpEvent ev{};
         ev.kind = VP_FLUSH;
@@ -1090,9 +1197,17 @@ namespace
         const uint64_t dwT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
         {
         std::unique_lock<std::mutex> lock(vpFlushMutex);
-        vpFlushCv.wait(lock, [seq]() {
-            return static_cast<int32_t>(vpIdleSeq.load(std::memory_order_acquire) - seq) >= 0;
+        vpFlushCv.wait(lock, [seq, dual]() {
+            const bool idle0 = static_cast<int32_t>(vpIdleSeq.load(std::memory_order_acquire) - seq) >= 0;
+            if (!dual)
+                return idle0;
+            const bool idle1 = static_cast<int32_t>(vpIdleSeq1.load(std::memory_order_acquire) - seq) >= 0;
+            return idle0 && idle1;
         });
+        }
+        if (dual && s_vpVu1Data)
+        {
+            std::memcpy(s_vpShadow, s_vpVu1Data, PS2_VU1_DATA_SIZE);
         }
         if (dwT0) // PROBE-MG
         {
@@ -1104,8 +1219,9 @@ namespace
             {
                 s_last = now;
                 const double ms = 1.0 / 3.0e6; // ~3 GHz TSC: ticks -> ms (approximate)
-                ::ps2xSafeLog("[vpipe] drains=%llu drainwait_ms=%.0f exec_busy_ms=%.0f exec_spin_ms=%.0f sleeps=%llu full=%llu ev[w/mscal/mscnt/gif/flush]=%llu/%llu/%llu/%llu/%llu\n",
+                ::ps2xSafeLog("[vpipe] drains=%llu drainwait_ms=%.0f exec_busy_ms=%.0f x1_busy_ms=%.0f exec_spin_ms=%.0f sleeps=%llu full=%llu ev[w/mscal/mscnt/gif/flush]=%llu/%llu/%llu/%llu/%llu\n",
                               (unsigned long long)s_vpStDrains.exchange(0), s_vpStDrainWait.exchange(0) * ms, s_vpStBusy.exchange(0) * ms,
+                              s_vpStBusy1.exchange(0) * ms,
                               s_vpStSpin.exchange(0) * ms, (unsigned long long)s_vpStSleeps.exchange(0), (unsigned long long)s_vpStFull.exchange(0),
                               (unsigned long long)s_vpStEv[1].exchange(0), (unsigned long long)s_vpStEv[2].exchange(0), (unsigned long long)s_vpStEv[3].exchange(0),
                               (unsigned long long)s_vpStEv[4].exchange(0), (unsigned long long)s_vpStEv[5].exchange(0));
@@ -1120,29 +1236,33 @@ namespace
     {
         // PERF-MG2: the exec thread never reads vpRecTail (records are published by the VP_WRITES event's seq_cst store), so the tail is a
         // relaxed producer-local counter, and the consumer head is only re-read when the cached value says the ring is full.
+        const bool dual = vpDualOn();
         static uint32_t s_headCache = 0; // parser thread only
         const uint32_t tail = vpRecTail.load(std::memory_order_relaxed);
         if (tail - s_headCache >= kVpRecCap)
-            s_headCache = vpRecHead.load(std::memory_order_seq_cst);
+        {
+            const uint32_t lag = vpRecLag(tail, dual);
+            s_headCache = tail - lag;
+        }
         if (tail - s_headCache >= kVpRecCap)
         {
             for (int spin = 0; spin < vpSpinLimit(); ++spin)
             {
-                if (tail - vpRecHead.load(std::memory_order_seq_cst) < kVpRecCap)
+                if (vpRecLag(tail, dual) < kVpRecCap)
                     break;
                 _mm_pause();
             }
-            if (tail - vpRecHead.load(std::memory_order_seq_cst) >= kVpRecCap)
+            if (vpRecLag(tail, dual) >= kVpRecCap)
             {
                 if (vpStatOn()) s_vpStFull.fetch_add(1, std::memory_order_relaxed); // PROBE-MG
                 std::unique_lock<std::mutex> lock(vpRecProducerMutex);
                 vpRecProducerWaiting.store(true, std::memory_order_seq_cst);
                 vpRecProducerCv.wait(lock, [&]() {
-                    return tail - vpRecHead.load(std::memory_order_seq_cst) < kVpRecCap;
+                    return vpRecLag(tail, dual) < kVpRecCap;
                 });
                 vpRecProducerWaiting.store(false, std::memory_order_seq_cst);
             }
-            s_headCache = vpRecHead.load(std::memory_order_seq_cst);
+            s_headCache = tail - vpRecLag(tail, dual);
         }
         vpRecRing[tail & (kVpRecCap - 1)] = rec;
         vpRecTail.store(tail + 1, std::memory_order_relaxed);
@@ -1163,8 +1283,22 @@ namespace
             switch (ev.kind)
             {
             case VP_MSCAL:
-                if (vpMscalCb)
-                    vpMscalCb(ev.a, ev.b, ev.c);
+                if (vpDualOn())
+                {
+                    static thread_local std::vector<uint8_t> cap;
+                    cap.clear();
+                    ps2_vu1_set_capture(&cap);
+                    if (vpMscalCb)
+                        vpMscalCb(ev.a, ev.b, ev.c);
+                    ps2_vu1_set_capture(nullptr);
+                    if (!cap.empty() && vpGif1Cb)
+                        vpGif1Cb(cap.data(), static_cast<uint32_t>(cap.size()));
+                }
+                else
+                {
+                    if (vpMscalCb)
+                        vpMscalCb(ev.a, ev.b, ev.c);
+                }
                 break;
             case VP_MSCNT:
                 if (vpMscntCb)
@@ -1217,6 +1351,65 @@ namespace
             }
         }
     }
+
+    static void vpExec2ThreadFunc()
+    {
+        ThreadNaming::SetCurrentThreadName("Vu1Exec2");
+        ps2_vif1_mark_worker_thread();
+        ps2_gs_async_batch(true);
+        for (;;)
+        {
+            VpEvent ev = vpPopEvent1();
+            switch (ev.kind)
+            {
+            case VP_WRITES:
+            {
+                const uint64_t t0 = vpStatOn() ? __rdtsc() : 0ull;
+                for (uint32_t i = 0u; i < ev.b; ++i)
+                {
+                    const VpRec &rec = vpRecRing[(ev.a + i) & (kVpRecCap - 1)];
+                    uint8_t *dst = s_vpShadow + (static_cast<size_t>(rec.qw) * 16u);
+                    if (rec.mask == 0x0Fu)
+                    {
+                        std::memcpy(dst, rec.lanes, 16);
+                    }
+                    else
+                    {
+                        uint32_t *dst32 = reinterpret_cast<uint32_t *>(dst);
+                        for (uint32_t f = 0u; f < 4u; ++f)
+                        {
+                            if (rec.mask & (1u << f))
+                                dst32[f] = rec.lanes[f];
+                        }
+                    }
+                }
+                if (t0)
+                    s_vpStBusy1.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
+                vpRecHead1.store(ev.a + ev.b, std::memory_order_seq_cst);
+                if (vpRecProducerWaiting.load(std::memory_order_seq_cst))
+                {
+                    std::lock_guard<std::mutex> lock(vpRecProducerMutex);
+                    vpRecProducerCv.notify_all();
+                }
+                break;
+            }
+            case VP_FLUSH:
+                ps2_gs_async_batch(false);
+                ps2_gs_async_batch(true);
+                vpIdleSeq1.store(ev.a, std::memory_order_release);
+                {
+                    std::lock_guard<std::mutex> lock(vpFlushMutex);
+                    vpFlushCv.notify_all();
+                }
+                break;
+            case VP_MSCAL:
+            case VP_MSCNT:
+            case VP_GIF2:
+            default:
+                break;
+            }
+        }
+    }
 } // namespace
 
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
@@ -1262,6 +1455,14 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     {
         s_vpVu1Data = m_vu1Data;
         vpEnsureThreadStarted();
+        const bool dualOn = vpDualOn();
+        if (dualOn)
+        {
+            vpEnsureThread1Started();
+            vpGif1Cb = [this](const uint8_t *p, uint32_t n) {
+                submitGifPacket(GifPathId::Path1, p, n, true, false);
+            };
+        }
         vpMscalCb = [this](uint32_t pc, uint32_t top, uint32_t itop) {
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(pc, top, itop);

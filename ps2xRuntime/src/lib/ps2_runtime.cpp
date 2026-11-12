@@ -1525,6 +1525,9 @@ bool PS2Runtime::isIopMemoryRange(uint32_t address, size_t size) const
     return m_iopSubsystem && m_iopSubsystem->isMemoryRange(address, size);
 }
 
+static VU1Interpreter s_vu1B(VU1Interpreter::Unit::VU1);
+std::function<void(uint32_t startPC, uint32_t top, uint32_t itop, uint8_t *vuData)> g_vu1MscalCallbackB;
+
 bool PS2Runtime::syncCoreSubsystems()
 {
     uint8_t *const rdram = m_memory.getRDRAM();
@@ -1588,6 +1591,27 @@ bool PS2Runtime::syncCoreSubsystems()
                                          g_vifVpuStatBits.store(stopBits, std::memory_order_release);
                                      else
                                          cpuContext->vu0_vpu_stat = (cpuContext->vu0_vpu_stat & ~0x0600u) | stopBits; });
+    g_vu1MscalCallbackB = [this](uint32_t startPC, uint32_t top, uint32_t itop, uint8_t *vuData)
+    {
+        g_diagMscalCount.fetch_add(1, std::memory_order_relaxed);
+        const bool onWorker = g_vif1JobFbrst != ~0u;
+        R5900Context *cpuContext = nullptr;
+        uint32_t fbrst = g_vif1JobFbrst;
+        if (!onWorker)
+        {
+            cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+            if (!cpuContext)
+            {
+                cpuContext = &m_cpuContext;
+            }
+            fbrst = cpuContext->vu0_fbrst;
+        }
+        s_vu1B.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
+        s_vu1B.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
+        s_vu1B.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                      vuData, PS2_VU1_DATA_SIZE,
+                      m_gs, &m_memory, startPC, top, itop, 65536);
+    };
     m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
                                  {
                                      const bool onWorker = g_vif1JobFbrst != ~0u;
