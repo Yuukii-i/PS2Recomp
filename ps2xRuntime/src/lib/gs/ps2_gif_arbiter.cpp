@@ -176,8 +176,75 @@ std::atomic<bool> s_gsAsyncStarted{false};
 std::atomic<uint64_t> g_gsqBusy{0}, g_gsqIdle{0}, g_gsqBlocked{0}, g_gsqPeak{0}, g_gsqPkts{0}; // PROBE-GQ
 extern "C" uint64_t ps2x_ft2_gsBusy() { return g_gsqBusy.load(std::memory_order_relaxed); } // PERF-LN
 
+// PERF-MF (PS2X_GIF_COALESCE, default ON): in batch mode the VIF1 worker appends consecutive PATH1 (XGKICK) and whole PATH2 packets into one contiguous buffer of up to 64 KB
+// instead of one pooled vector each (~6400 packets per frame in the shop). GS::processGIFPacket walks tag by tag to the end of its buffer and keeps no
+// per-call state except the native image-upload shape it tests at the start of a buffer, so a concatenation of whole packets draws exactly the same as
+// the packets one by one. Only packets whose tags cover the packet exactly are appended, and never one whose first tag could be that image shape.
+// Order is kept: the open buffer is sealed into t_gsPending before any non-coalesced packet and on every flush.
+thread_local std::vector<uint8_t> t_gsCoalesce;
+constexpr size_t kGifCoalesceChunk = 64u * 1024u;
+std::atomic<uint64_t> g_gifCoPkts{0}, g_gifCoChunks{0};
+
+bool gifCoalesceEnabled()
+{
+    static const bool on = []() {
+        const char *e = std::getenv("PS2X_GIF_COALESCE");
+        const bool en = !(e && e[0] == '0'); // default ON since A/B mf2 (Vif1Worker -1.25, GsWorker -1.75 ms/frame); =0 disables
+        if (en)
+        {
+            ::ps2xSafeLog("[gifco] ON chunk=%u\n", static_cast<unsigned>(kGifCoalesceChunk));
+            std::fflush(stderr);
+        }
+        return en;
+    }();
+    return on;
+}
+
+inline bool gifCoalesceOk(const uint8_t *d, uint32_t n)
+{
+    if (n < 16u || (n & 15u) != 0u || n > kGifCoalesceChunk)
+        return false;
+    uint32_t off = 0;
+    for (int guard = 0; off < n; ++guard)
+    {
+        if (guard >= 256 || off + 16u > n)
+            return false;
+        uint64_t lo, hi;
+        std::memcpy(&lo, d + off, 8);
+        std::memcpy(&hi, d + off + 8, 8);
+        const uint32_t nloop = static_cast<uint32_t>(lo & 0x7FFFu);
+        const uint32_t flg = static_cast<uint32_t>((lo >> 58) & 0x3u);
+        uint32_t nreg = static_cast<uint32_t>((lo >> 60) & 0xFu);
+        if (nreg == 0u)
+            nreg = 16u;
+        if (off == 0u && nloop == 4u && flg == 0u && nreg == 1u && (hi & 0xFull) == 0xEull)
+            return false; // possible native image-upload setup tag (GS::tryProcessNativeImageUploadPacket looks at the buffer start only)
+        uint64_t bytes;
+        if (flg == 0u)
+            bytes = static_cast<uint64_t>(nloop) * nreg * 16u;
+        else if (flg == 1u)
+            bytes = ((static_cast<uint64_t>(nloop) * nreg + 1u) & ~1ull) * 8u;
+        else
+            return false; // IMAGE / disabled: leave to the normal path
+        if (bytes > n - off - 16u)
+            return false;
+        off += 16u + static_cast<uint32_t>(bytes);
+    }
+    return off == n;
+}
+
+inline void gsCoalesceSeal()
+{
+    if (t_gsCoalesce.empty())
+        return;
+    t_gsPending.push_back(std::move(t_gsCoalesce));
+    t_gsCoalesce = std::vector<uint8_t>();
+    g_gifCoChunks.fetch_add(1, std::memory_order_relaxed);
+}
+
 void gsFlushPending()
 {
+    gsCoalesceSeal(); // PERF-MF
     if (t_gsPending.empty())
         return;
     GsAsyncState &st = gsAsync();
@@ -404,6 +471,22 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
 
+    if ((pathId == GifPathId::Path1 || pathId == GifPathId::Path2) && t_gsBatch && m_queue.empty() && gifCoalesceEnabled() && gsAsyncEnabled() &&
+        s_gsAsyncStarted.load(std::memory_order_acquire) && gifCoalesceOk(data, sizeBytes)) // PERF-MF
+    {
+        if (!t_gsCoalesce.empty() && t_gsCoalesce.size() + sizeBytes > kGifCoalesceChunk)
+            gsCoalesceSeal();
+        if (t_gsCoalesce.capacity() == 0u)
+        {
+            t_gsCoalesce = takePacketBuf(kGifCoalesceChunk);
+            t_gsCoalesce.clear();
+        }
+        t_gsCoalesce.insert(t_gsCoalesce.end(), data, data + sizeBytes);
+        t_gsPendingBytes += sizeBytes;
+        g_gifCoPkts.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     GifArbiterPacket pkt;
     pkt.pathId = pathId;
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
@@ -435,6 +518,8 @@ void GifArbiter::drain()
 
     if (gsAsyncEnabled() && t_gsBatch && s_gsAsyncStarted.load(std::memory_order_acquire)) // PERF-GB
     {
+        if (!m_queue.empty())
+            gsCoalesceSeal(); // PERF-MF: coalesced packets are older than anything queued now
         for (size_t i = 0; i < m_queue.size(); ++i)
         {
             auto &pkt = m_queue[i];
