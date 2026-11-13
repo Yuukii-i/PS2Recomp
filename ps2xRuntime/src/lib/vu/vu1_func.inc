@@ -18,6 +18,72 @@ namespace vu1func
 constexpr uint64_t kImageHash = 0x86503d3905e35276ull; // FNV-1a of the 16 KB VU1 code image == s_hcCurHash (set by rebuildDecodedCodeCache)
 constexpr uint32_t kMaxKickBytes = 0x10000u;           // == XgkickPipeline::kBufferSize
 
+// PROBE-VX: Vu1Exec time split (PS2X_VX=1). Counters are plain: only the thread that called ps2xVxMarkThread() writes them.
+namespace vx // PROBE-VX
+{
+enum { kH0050, kH0060, kH0070, kH0088, kH0C80, kH0AF0, kH0B40, kH15E0, kH1900, kH1C48, kH1EE0S, kH1EE0R, kH3160, kH00A8, kHClip, kHOther, kHN };
+static const char *const kHNames[kHN] = {"0050", "0060", "0070", "0088", "0c80", "0af0", "0b40", "15e0", "1900", "1c48", "1ee0s", "1ee0r", "3160", "00a8", "clip", "other"}; // PROBE-VX
+inline bool on() // PROBE-VX
+{
+    static const bool v = []() { const char *e = std::getenv("PS2X_VX"); return e && e[0] == '1'; }();
+    return v;
+}
+static thread_local bool t_exec = false; // PROBE-VX
+inline bool act() { return on() && t_exec; } // PROBE-VX
+struct St // PROBE-VX
+{
+    uint64_t evT[8] = {}, evN[8] = {}, idleT = 0, compT = 0, gifT = 0, fbT = 0, fbN = 0, hT[kHN] = {}, hN[kHN] = {}, frames = 0, tsc0 = 0;
+    std::chrono::steady_clock::time_point t0{};
+    uint32_t tick = 0;
+};
+static St g_vx; // PROBE-VX
+inline uint32_t slotOf(uint32_t h, const uint8_t *vu) // PROBE-VX
+{
+    switch (h)
+    {
+    case 0x0050u: return kH0050;
+    case 0x0060u: return kH0060;
+    case 0x0070u: return kH0070;
+    case 0x0088u: return kH0088;
+    case 0x0C80u: return kH0C80;
+    case 0x0AF0u: return kH0AF0;
+    case 0x0B40u: return kH0B40;
+    case 0x15E0u: return kH15E0;
+    case 0x1900u: return kH1900;
+    case 0x1C48u: return kH1C48;
+    case 0x1EE0u:
+    case 0x1EF0u: { const uint8_t *p = vu + 1011u * 16u + 4u; return (static_cast<int16_t>(p[0] | (p[1] << 8)) < 0) ? kH1EE0R : kH1EE0S; } // ILW.y 1011 < 0 = rigid
+    case 0x3160u: return kH3160;
+    case 0x00A8u: return kH00A8;
+    default: return kHOther;
+    }
+}
+struct HScope // PROBE-VX: per-handler timing at the dispatch site; clip time is carved out of the rigid handler
+{
+    uint64_t t = 0, clip0 = 0;
+    uint32_t slot = 0;
+    void end(uint64_t now)
+    {
+        if (!t)
+            return;
+        uint64_t d = now - t;
+        if (slot == kH1EE0R)
+            d -= (g_vx.hT[kHClip] - clip0);
+        g_vx.hT[slot] += d;
+        ++g_vx.hN[slot];
+        t = 0;
+    }
+    void begin(uint32_t s, uint64_t now)
+    {
+        end(now);
+        slot = s;
+        t = now;
+        clip0 = g_vx.hT[kHClip];
+    }
+    ~HScope() { end(__rdtsc()); }
+};
+} // namespace vx
+
 inline __m128 norm4(__m128 v) // vuhot::N4 (normalizeOperand on 4 lanes)
 {
     const __m128i bits = _mm_castps_si128(v);
@@ -625,9 +691,12 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
                 }
             if (hit < 0)
             {
-                if (!clipPolygon(vu, vi13, vi5, vi6, Wd[j], vi8, vi9, vi10, copyS, c1v, c2v, c5v,
+                const uint64_t vxClip0 = vx::act() ? __rdtsc() : 0ull; // PROBE-VX
+                const bool vxClipOk = clipPolygon(vu, vi13, vi5, vi6, Wd[j], vi8, vi9, vi10, copyS, c1v, c2v, c5v,
                                  Ps[j - 2], Ps[j - 1], Ps[j], fmacV<0>(V7(Ss[j - 2]), zero, zero), V7(Ss[j - 1]), V7(Ss[j]),
-                                 clampI(Lit[j - 2]), clampI(Lit[j - 1]), Lit[j], kicks, gif))
+                                 clampI(Lit[j - 2]), clampI(Lit[j - 1]), Lit[j], kicks, gif); // PROBE-VX
+                if (vxClip0) { vx::g_vx.hT[vx::kHClip] += __rdtsc() - vxClip0; ++vx::g_vx.hN[vx::kHClip]; } // PROBE-VX
+                if (!vxClipOk) // PROBE-VX
                     return fb1EE0(kFbRigidClip);
             }
             else if (hit == 5) // ISW.x vi5, 1022 (delay slot of the IBNE at 28F8)
@@ -1170,11 +1239,14 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
     R.vi[12] = static_cast<uint16_t>(top);
     uint16_t vi13 = R.vi[12];
     uint16_t vi1 = ilw(vu, vi13, 0);
+    const bool vxA = vx::act(); // PROBE-VX
+    vx::HScope vxHs; // PROBE-VX
     for (uint32_t step = 0; step < 100000u; ++step)
     {
         vi13 = static_cast<uint16_t>(vi13 + 1u);                      // 0028 IADDIU vi13, vi13, 1
         const uint16_t vi2 = ilw(vu, static_cast<uint32_t>(vi13) - 1u, 1); // 0038 ILW.y vi2, -1(vi13)
         const uint32_t h = (static_cast<uint32_t>(vi1) << 3) & 0x3FFFu;
+        if (vxA) { if (h) vxHs.begin(vx::slotOf(h, vu), __rdtsc()); else vxHs.end(__rdtsc()); } // PROBE-VX
         switch (h)
         {
         case 0x0000u: // program end (E bit)
@@ -1406,10 +1478,19 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
     static thread_local std::vector<std::pair<uint32_t, uint32_t>> kicks;
     static thread_local std::vector<uint8_t> gif;
     bool ok = false;
+    const uint64_t vxT0 = vx::act() ? __rdtsc() : 0ull; // PROBE-VX
+    uint64_t vxT1 = 0; // PROBE-VX
+    struct VxGif { uint64_t &t1; uint64_t t0; ~VxGif() { if (t0 && t1) vx::g_vx.gifT += __rdtsc() - t1; } } vxGif{vxT1, vxT0}; // PROBE-VX: submit time (t1 set only when ok)
     if (dataSize == 16384u)
         ok = vu1FuncRun(vuData, startPC, top, itop, kicks, gif);
     else
         s_fbPc = 0xF002u;
+    if (vxT0) // PROBE-VX
+    {
+        const uint64_t n = __rdtsc();
+        if (ok) { vx::g_vx.compT += n - vxT0; vxT1 = n; }
+        else { vx::g_vx.fbT += n - vxT0; ++vx::g_vx.fbN; }
+    }
     if (stats)
     {
         if (ok)
@@ -1468,3 +1549,57 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
     return true;
 }
 } // namespace vu1func
+
+// PROBE-VX: entry points used by vpExecThreadFunc (ps2_vif1_interpreter.cpp, declared extern there)
+bool ps2xVxOn() { return vu1func::vx::on(); } // PROBE-VX
+void ps2xVxMarkThread() { vu1func::vx::t_exec = true; } // PROBE-VX
+void ps2xVxIdle(uint64_t ticks) { vu1func::vx::g_vx.idleT += ticks; } // PROBE-VX
+void ps2xVxEv(uint32_t kind, uint64_t ticks) // PROBE-VX
+{
+    using namespace vu1func::vx;
+    St &s = g_vx;
+    s.evT[kind & 7u] += ticks;
+    ++s.evN[kind & 7u];
+    if (kind == 5u)
+        ++s.frames; // VP_FLUSH == one VIF1 drain
+    if ((++s.tick & 63u) != 0u)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    if (s.tsc0 == 0u)
+    {
+        s.t0 = now;
+        s.tsc0 = __rdtsc();
+        return;
+    }
+    const double sec = std::chrono::duration<double>(now - s.t0).count();
+    if (sec < 5.0)
+        return;
+    const uint64_t tn = __rdtsc();
+    const double ms = 1000.0 / (static_cast<double>(tn - s.tsc0) / sec); // ms per tick
+    const double fr = s.frames ? static_cast<double>(s.frames) : 1.0;
+    uint64_t busy = 0;
+    for (int i = 0; i < 8; ++i)
+        busy += s.evT[i];
+    const double k = ms / fr; // ms per frame per tick
+    uint32_t ord[kHN];
+    for (uint32_t i = 0; i < kHN; ++i)
+        ord[i] = i;
+    std::sort(ord, ord + kHN, [&](uint32_t a, uint32_t b) { return s.hT[a] > s.hT[b]; });
+    char hb[512];
+    int n = 0;
+    hb[0] = 0;
+    for (int i = 0; i < 8 && n < 440; ++i)
+    {
+        const uint32_t h = ord[i];
+        if (s.hT[h] == 0u)
+            break;
+        n += std::snprintf(hb + n, sizeof(hb) - static_cast<size_t>(n), " %s=%.2f(%.1f)", kHNames[h], s.hT[h] * k, static_cast<double>(s.hN[h]) / fr);
+    }
+    ::ps2xSafeLog("[vx] frames=%llu ms/frame: busy=%.2f idle=%.2f | w=%.2f mscal=%.2f mscnt=%.2f gif=%.2f flush=%.2f other=%.2f | func: compute=%.2f gifsubmit=%.2f fallback=%.2f(n/frame %.1f) | h:%s\n",
+                  (unsigned long long)s.frames, busy * k, s.idleT * k, s.evT[1] * k, s.evT[2] * k, s.evT[3] * k, s.evT[4] * k, s.evT[5] * k,
+                  (s.evT[0] + s.evT[6] + s.evT[7]) * k, s.compT * k, s.gifT * k, s.fbT * k, static_cast<double>(s.fbN) / fr, hb);
+    St fresh;
+    fresh.t0 = now;
+    fresh.tsc0 = tn;
+    s = fresh;
+}

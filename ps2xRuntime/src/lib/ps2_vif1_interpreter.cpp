@@ -26,6 +26,7 @@ extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint1
 #include <array>
 
 extern void ps2xSafeLog(const char *fmt, ...);
+extern bool ps2xVxOn(); extern void ps2xVxMarkThread(); extern void ps2xVxIdle(uint64_t); extern void ps2xVxEv(uint32_t, uint64_t); // PROBE-VX
 
 // =========================================================================
 // Task DZ: VIF1 UNPACK ring buffer & VIF1 register dump
@@ -1987,9 +1988,14 @@ namespace
             probe_ae::recordMainGuestThread();
         ps2_vif1_mark_worker_thread();
         ps2_gs_async_batch(true);
+        const bool vxOn = ::ps2xVxOn(); // PROBE-VX
+        if (vxOn) ::ps2xVxMarkThread(); // PROBE-VX
         for (;;)
         {
+            const uint64_t vxA = vxOn ? __rdtsc() : 0ull; // PROBE-VX
             VpEvent ev = vpPopEvent();
+            const uint64_t vxB = vxOn ? __rdtsc() : 0ull; // PROBE-VX
+            if (vxOn) ::ps2xVxIdle(vxB - vxA); // PROBE-VX
             const uint64_t buT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
             struct BusyAcct { uint64_t t0; uint8_t k; ~BusyAcct() { if (t0) { s_vpStBusy.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); s_vpStEv[k & 7].fetch_add(1, std::memory_order_relaxed); } } } busyAcct{buT0, ev.kind};
             switch (ev.kind)
@@ -2083,6 +2089,7 @@ namespace
             default:
                 break;
             }
+            if (vxOn) ::ps2xVxEv(static_cast<uint32_t>(ev.kind), __rdtsc() - vxB); // PROBE-VX
         }
     }
 
