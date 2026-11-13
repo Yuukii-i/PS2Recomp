@@ -961,18 +961,20 @@ struct V0ProfEntry
     uint64_t calls = 0;
     uint64_t ticks = 0;
     uint64_t instrs = 0;
+    uint64_t fastCalls = 0; // PROBE-V0P
 };
 static V0ProfEntry s_v0pEntries[512];
 static uint64_t s_v0pTotalCalls = 0;
 static uint64_t s_v0pTotalTicks = 0;
 static uint32_t s_v0pLastInstrs = 0;
-static void v0ProfRecord(uint32_t startPC, uint64_t ticks, uint32_t instrs, uint64_t imageHash)
+static void v0ProfRecord(uint32_t startPC, uint64_t ticks, uint32_t instrs, uint64_t imageHash, bool fast = false) // PROBE-V0P
 {
     static uint64_t s_prevTsc = __rdtsc();
     static auto s_prevT = std::chrono::steady_clock::now();
     const uint32_t idx = (startPC & 0xFFFu) >> 3;
     V0ProfEntry &e = s_v0pEntries[idx];
     ++e.calls;
+    if (fast) ++e.fastCalls; // PROBE-V0P
     e.ticks += ticks;
     e.instrs += instrs;
     ++s_v0pTotalCalls;
@@ -1004,8 +1006,9 @@ static void v0ProfRecord(uint32_t startPC, uint64_t ticks, uint32_t instrs, uint
             break;
         const double entryMs = static_cast<double>(pe.ticks) / tpms;
         const double nsPerCall = (static_cast<double>(pe.ticks) / tpns) / static_cast<double>(pe.calls);
-        pos += std::snprintf(buf + pos, sizeof(buf) - static_cast<size_t>(pos), " %03x:%.1fms/%llu(%.0fns)",
-                             order[i] << 3, entryMs, static_cast<unsigned long long>(pe.calls), nsPerCall);
+        pos += std::snprintf(buf + pos, sizeof(buf) - static_cast<size_t>(pos), " %03x:%.1fms/%llu(%.0fns,%c)",
+                             order[i] << 3, entryMs, static_cast<unsigned long long>(pe.calls), nsPerCall,
+                             (pe.fastCalls * 2u > pe.calls) ? 'F' : 'G'); // PROBE-V0P
     }
     extern void ps2xSafeLog(const char *fmt, ...);
     ps2xSafeLog("%s\n", buf);
@@ -1015,6 +1018,9 @@ static void v0ProfRecord(uint32_t startPC, uint64_t ticks, uint32_t instrs, uint
     s_prevTsc = nowTsc;
     s_prevT = nowT;
 }
+
+// PROBE-V0P: exported hooks so the VU0 fast path (ps2_runtime.cpp) can feed the same profiler
+bool ps2xV0ProfOn() { return v0ProfOn(); }
 
 void VU1Interpreter::resetScheduler()
 {
@@ -3261,6 +3267,7 @@ void vu1NativeSelectImage(uint64_t hash); // PERF-VAR: generated/vu1_native_disp
 bool vu1NativeSupportsImage(uint64_t hash);
 static uint64_t s_hcCurHash = 0; // PROBE-HC: hash of the VU1 microcode image currently loaded
 static uint64_t s_hcUnitHash[2] = {0, 0}; // PROBE-BLK: image hash per unit (VU0 and VU1 both rebuild through the same code)
+void ps2xV0ProfRecordFast(uint32_t startPC, uint64_t ticks) { v0ProfRecord(startPC, ticks, 0u, s_hcUnitHash[0], true); } // PROBE-V0P
 void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
                                              const PS2Memory *memory, uint64_t generation)
 {

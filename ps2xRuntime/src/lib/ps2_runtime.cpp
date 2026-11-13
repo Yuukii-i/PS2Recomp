@@ -4569,7 +4569,12 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         }
         else if (fastOn && fastProg)
         {
+            extern bool ps2xV0ProfOn();                                      // PROBE-V0P
+            extern void ps2xV0ProfRecordFast(uint32_t, uint64_t);            // PROBE-V0P
+            const bool v0pFast = ps2xV0ProfOn();                             // PROBE-V0P
+            const uint64_t v0pFastT0 = v0pFast ? __rdtsc() : 0u;             // PROBE-V0P
             vu0fast::executeFast(*fastProg, ctx);
+            if (v0pFast) ps2xV0ProfRecordFast(startPC, __rdtsc() - v0pFastT0); // PROBE-V0P
         }
         else
         {
