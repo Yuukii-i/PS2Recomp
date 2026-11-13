@@ -229,6 +229,8 @@ static uint32_t s_fbPc = 0;
 enum Fb1EE0Reason : int { kFbRigidN = 0, kFbSkinN, kFbSkinAlias13, kFbSkinGatherAlias, kFbSkinDivZero, kFbSkinKick, kFbRigidClip, kFbRigidKick, kFbClipKick, kFbCount };
 static const char *const kFb1EE0Names[kFbCount] = {"rigidN_or_vi13", "skinN_range", "skin_alias_1012_1013_1023_vi13", "skin_gather_alias", "skin_div_zero", "skin_kick", "rigid_clipPolygon", "rigid_kick", "clip_kick"};
 static uint64_t s_fb1EE0[kFbCount] = {};
+static constexpr uint32_t kMaxSkinN = 255;        // 4N+1 output qwords must fit in 1024
+static uint64_t s_skinNHist[7] = {};              // N hitting the skinN guard: 0,1,2,3,<100,100..199,200+
 static bool fb1EE0(int reason)
 {
     ++s_fb1EE0[reason];
@@ -799,10 +801,18 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
         vi13 = static_cast<uint16_t>(vi13 + 1u);
         return rigid2440(R, vu, vi13, top, static_cast<int32_t>(w1018), i4base, s2base, s3base, ubase, vf27x, vf27y, vi10, kicks, gif);
     }
-    if (w1018 < 4u || w1018 > 67u)
+    // skinN guard: N in [1, 255]; every output qword ubase + 4N must fit in 1024 and each input stream (vi4/vi3/vi2 bases + N) must not wrap past 1024
+    const auto skinNFail = [&]() {
+        const uint32_t n = w1018;
+        ++s_skinNHist[n <= 3u ? n : (n < 100u ? 4u : (n < 200u ? 5u : 6u))]; // 0..3, 68..99 (and 4..67 bounds fails), 100..199, 200+
         return fb1EE0(kFbSkinN);
+    };
+    if (w1018 < 1u || w1018 > kMaxSkinN)
+        return skinNFail();
     const int32_t N = w1018;
     const uint32_t span = 4u * static_cast<uint32_t>(N) + 1u;
+    if (ubase + span > 1024u || i4base + static_cast<uint32_t>(N) > 1024u || s3base + static_cast<uint32_t>(N) > 1024u || (!vi10 && s2base + static_cast<uint32_t>(N) > 1024u))
+        return skinNFail();
     const auto hits = [&](uint32_t q) { return ((q - ubase) & 0x3FFu) < span; };
     if (hits(1012) || hits(1013) || hits(1023) || hits(vi13) || hits(vi13 + 1u))
         return fb1EE0(kFbSkinAlias13);
@@ -817,8 +827,8 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
         float Wraw;
         int32_t idx;
     };
-    SkV V[67];
-    __m128 rA[67], rB[67], rS3[67], rS2[67];
+    SkV V[kMaxSkinN];
+    __m128 rA[kMaxSkinN], rB[kMaxSkinN], rS3[kMaxSkinN], rS2[kMaxSkinN];
     for (int32_t t = 0; t < N; ++t) // gather + aliasing checks (same order of checks as before; any failure returns false before any store)
     {
         const int32_t idx = static_cast<int16_t>(ilw(vu, i4base + static_cast<uint32_t>(t), 0));
@@ -925,7 +935,7 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3)); // ISW.z / ISW.w toggle
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
         return fb1EE0(kFbSkinKick);
-    R.vi[12] = static_cast<uint16_t>(V[1].idx); // ILW.x vi12, 1(vi4)
+    R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0)); // ILW.x vi12, 1(vi4) (read from VU mem: V[1] does not exist for N==1)
     return true;
 }
 
@@ -1153,7 +1163,7 @@ static bool handler3160(Regs &R, uint8_t *vu, uint16_t vi13)
     return true;
 }
 
-static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
+static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool oneShot)
 {
     Regs R;
     std::memset(&R, 0, sizeof(R));
@@ -1271,6 +1281,8 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             s_fbPc = h;
             return false;
         }
+        if (oneShot) // startPC 0040: vi15 = 0, so the handler's JR vi15 lands on 0000 (E bit) -> program ends after one handler
+            return true;
         vi1 = ilw(vu, vi13, 0); // every handler ends with ILW.x vi1, 0(vi13)
     }
     s_fbPc = 0xF030u; // step budget
@@ -1284,7 +1296,8 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     kicks.clear();
     gif.clear();
     s_fbPc = 0u;
-    if ((startPC & 0xFFFFu) != 8u)
+    const bool oneShot = (startPC & 0xFFFFu) == 0x40u; // 0040: vi15 := 0, then entry at 0010; one handler, then END
+    if ((startPC & 0xFFFFu) != 8u && !oneShot)
     {
         s_fbPc = 0xF001u;
         ++s_startPcs[startPC & 0xFFFFu];
@@ -1317,7 +1330,7 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     }
     std::vector<UndoEnt> &log = undoLog();
     log.clear();
-    if (vu1FuncRunInner(vu, top, kicks, gif))
+    if (vu1FuncRunInner(vu, top, kicks, gif, oneShot))
     {
         if (memoOn)
             m.streak = 0;
@@ -1359,7 +1372,7 @@ static void reportMaybe()
     for (const auto &kv : s_fbPcs)
         v.emplace_back(kv.second, kv.first);
     std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-    char buf[512];
+    char buf[768];
     int n = std::snprintf(buf, sizeof(buf), "[vfunc] taken=%llu fallback=%llu fb_pcs:", (unsigned long long)s_taken, (unsigned long long)s_fallback);
     for (size_t i = 0; i < v.size() && i < 8u && n > 0 && n < 440; ++i)
         n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %04X:%llu", v[i].second, (unsigned long long)v[i].first);
@@ -1380,6 +1393,10 @@ static void reportMaybe()
             if (s_fb1EE0[r] != 0u)
                 n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %s:%llu", kFb1EE0Names[r], (unsigned long long)s_fb1EE0[r]);
     }
+    if (s_fb1EE0[kFbSkinN] != 0u && n > 0 && n < 700)
+        n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " skinN: 0:%llu 1:%llu 2:%llu 3:%llu 4-99:%llu 100-199:%llu 200+:%llu",
+                           (unsigned long long)s_skinNHist[0], (unsigned long long)s_skinNHist[1], (unsigned long long)s_skinNHist[2], (unsigned long long)s_skinNHist[3],
+                           (unsigned long long)s_skinNHist[4], (unsigned long long)s_skinNHist[5], (unsigned long long)s_skinNHist[6]);
     ps2xSafeLog("%s\n", buf);
 }
 
