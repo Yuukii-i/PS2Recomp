@@ -1646,8 +1646,10 @@ bool PS2Runtime::syncCoreSubsystems()
     return true;
 }
 
+extern "C" void ps2xPerfPtOptOut(); // PERF-PT (defined in probe_prof.cpp)
 bool PS2Runtime::initialize(const char *title)
 {
+    ps2xPerfPtOptOut(); // PERF-PT
     try
     {
         if (!m_memory.initialize())
@@ -6498,3 +6500,4 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("[run] exiting loop");
 }
+

@@ -82,6 +82,20 @@ namespace probe_ae {
         DWORD currentPid = GetCurrentProcessId();
         DWORD samplerTid = GetCurrentThreadId();
 
+        // High-resolution waitable timer (immune to Win11 timer coalescing); falls back to Sleep(1).
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        {
+            PROCESS_POWER_THROTTLING_STATE pts{};
+            pts.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+            pts.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+            pts.StateMask = 0;
+            SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pts, sizeof(pts));
+        }
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+        HANDLE hTimer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+
         char exePath[MAX_PATH] = {};
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
 
@@ -626,7 +640,16 @@ namespace probe_ae {
                 mainSamplesCount = 0;
             }
 
-            Sleep(1);
+            if (hTimer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -10000LL; // 1 ms relative, 100-ns units
+                if (SetWaitableTimer(hTimer, &due, 0, nullptr, nullptr, FALSE))
+                    WaitForSingleObject(hTimer, INFINITE);
+                else
+                    Sleep(1);
+            } else {
+                Sleep(1);
+            }
         }
     }
 
@@ -674,3 +697,42 @@ extern "C" void ps2x_sched_apply(int flags) // flags: 1 = process level, 2 = cur
     (void)flags;
 #endif
 }
+
+// PERF-PT: opt out of EcoQoS / timer coalescing (env PS2X_NO_THROTTLE=1).
+extern void ps2xSafeLog(const char *fmt, ...);
+#ifdef _WIN32
+#ifndef PROCESS_POWER_THROTTLING_CURRENT_VERSION
+#define PROCESS_POWER_THROTTLING_CURRENT_VERSION 1
+#endif
+#ifndef PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+#define PROCESS_POWER_THROTTLING_EXECUTION_SPEED 0x1
+#endif
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+#ifndef THREAD_POWER_THROTTLING_CURRENT_VERSION
+#define THREAD_POWER_THROTTLING_CURRENT_VERSION 1
+#endif
+#ifndef THREAD_POWER_THROTTLING_EXECUTION_SPEED
+#define THREAD_POWER_THROTTLING_EXECUTION_SPEED 0x1
+#endif
+extern "C" void ps2xPerfPtOptOut()
+{
+    static const bool enabled = []() { const char *e = std::getenv("PS2X_NO_THROTTLE"); return e && e[0] == '1'; }();
+    if (!enabled)
+        return;
+    PROCESS_POWER_THROTTLING_STATE ps{};
+    ps.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    ps.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    ps.StateMask = 0;
+    BOOL okP = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &ps, sizeof(ps));
+    THREAD_POWER_THROTTLING_STATE ts{};
+    ts.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+    ts.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+    ts.StateMask = 0;
+    BOOL okT = SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &ts, sizeof(ts));
+    ps2xSafeLog("[throttle] opt-out ok=%d\n", (int)(okP && okT));
+}
+#else
+extern "C" void ps2xPerfPtOptOut() {}
+#endif
