@@ -985,6 +985,8 @@ namespace
     static uint8_t *s_vpVu1Data = nullptr;
 
     static std::function<void(uint32_t, uint32_t, uint32_t)> vpMscalCb;
+    static void (*vpMscalFn)(void *, uint32_t, uint32_t, uint32_t) = nullptr; // PERF-V1G
+    static void *vpMscalCtx = nullptr; // PERF-V1G
     static std::function<void(uint32_t, uint32_t)> vpMscntCb;
     static std::function<void(const uint8_t *, uint32_t, bool)> vpGif2Cb;
     static std::function<void(const uint8_t *, uint32_t)> vpGif1Cb;
@@ -1990,28 +1992,31 @@ namespace
         ps2_gs_async_batch(true);
         const bool vxOn = ::ps2xVxOn(); // PROBE-VX
         if (vxOn) ::ps2xVxMarkThread(); // PROBE-VX
+        const bool statOn = vpStatOn(); // PERF-V1G
+        const bool dualOn = vpDualOn(); // PERF-V1G
+        const bool verifyOn = vpVerifyOn(); // PERF-V1G
         for (;;)
         {
             const uint64_t vxA = vxOn ? __rdtsc() : 0ull; // PROBE-VX
             VpEvent ev = vpPopEvent();
             const uint64_t vxB = vxOn ? __rdtsc() : 0ull; // PROBE-VX
             if (vxOn) ::ps2xVxIdle(vxB - vxA); // PROBE-VX
-            const uint64_t buT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
+            const uint64_t buT0 = statOn ? __rdtsc() : 0ull; // PROBE-MG // PERF-V1G
             struct BusyAcct { uint64_t t0; uint8_t k; ~BusyAcct() { if (t0) { s_vpStBusy.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); s_vpStEv[k & 7].fetch_add(1, std::memory_order_relaxed); } } } busyAcct{buT0, ev.kind};
             switch (ev.kind)
             {
             case VP_MSCAL:
-                if (vpDualOn())
+                if (dualOn) // PERF-V1G
                 {
-                    if (vpVerifyOn())
+                    if (verifyOn) // PERF-V1G
                         vpRunVerifyX0(ev);
                     else
                         vpRunMscal(ev, 0);
                 }
                 else
                 {
-                    if (vpMscalCb)
-                        vpMscalCb(ev.a, ev.b, ev.c);
+                    if (vpMscalFn) // PERF-V1G
+                        vpMscalFn(vpMscalCtx, ev.a, ev.b, ev.c);
                 }
                 break;
             case VP_MSCNT:
@@ -2019,9 +2024,9 @@ namespace
                     vpMscntCb(ev.b, ev.c);
                 break;
             case VP_GIF2:
-                if (vpDualOn())
+                if (dualOn) // PERF-V1G
                 {
-                    if (vpVerifyOn())
+                    if (verifyOn) // PERF-V1G
                     {
                         if (vpGif2Cb)
                             vpGif2Cb(ev.p, ev.n, ev.hl != 0);
@@ -2218,6 +2223,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 submitGifPacket(GifPathId::Path1, p, n, true, false);
             };
         }
+        vpMscalCtx = this; // PERF-V1G
+        vpMscalFn = [](void *ctx, uint32_t pc, uint32_t top, uint32_t itop) { // PERF-V1G
+            auto *self = static_cast<PS2Memory *>(ctx);
+            if (self->m_vu1MscalCallback)
+                self->m_vu1MscalCallback(pc, top, itop);
+        };
         vpMscalCb = [this](uint32_t pc, uint32_t top, uint32_t itop) {
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(pc, top, itop);

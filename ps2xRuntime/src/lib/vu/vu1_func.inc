@@ -8,6 +8,7 @@
 // whenever a lane of the result or of the product leaves the exponent window [2,253]. (vu1_hot_ops.h itself cannot be included in this TU: its fmacR
 // touches private VU1Interpreter members and needs `#define private public`.)
 #include <cfloat>
+#include <cstdlib> // PERF-V1G
 #include <unordered_map>
 #include <utility>
 
@@ -194,28 +195,59 @@ struct UndoEnt
     uint16_t qword;
     uint8_t old[16];
 };
-inline std::vector<UndoEnt> &undoLog()
+struct UndoLog // PERF-V1G: flat buffer; clear() is size=0, alloc() skips zero-fill
 {
-    static thread_local std::vector<UndoEnt> log = []() { std::vector<UndoEnt> v; v.reserve(2048); return v; }();
+    UndoEnt *data = nullptr;
+    uint32_t size = 0;
+    uint32_t cap = 0;
+    UndoLog()
+    {
+        cap = 2048u;
+        data = static_cast<UndoEnt *>(std::malloc(cap * sizeof(UndoEnt)));
+    }
+    ~UndoLog() { std::free(data); }
+    void clear() { size = 0; }
+    void ensure(uint32_t need)
+    {
+        if (size + need <= cap)
+            return;
+        uint32_t nc = cap ? cap * 2u : 2048u;
+        while (nc < size + need)
+            nc *= 2u;
+        data = static_cast<UndoEnt *>(std::realloc(data, nc * sizeof(UndoEnt)));
+        cap = nc;
+    }
+    void push(uint32_t qi, const uint8_t *vu)
+    {
+        ensure(1u);
+        UndoEnt &e = data[size++];
+        e.qword = static_cast<uint16_t>(qi);
+        std::memcpy(e.old, vu + (qi << 4), 16);
+    }
+    UndoEnt *alloc(uint32_t count)
+    {
+        ensure(count);
+        UndoEnt *p = data + size;
+        size += count;
+        return p;
+    }
+};
+inline UndoLog &undoLog()
+{
+    static thread_local UndoLog log;
     return log;
 }
 // The ONLY function that writes VU memory inside the engine: logs the old qword first (undo log replaces the 16 KB snapshot).
 inline void stq(uint8_t *vu, uint32_t q, __m128 v)
 {
     const uint32_t qi = q & 0x3FFu;
-    UndoEnt e;
-    e.qword = static_cast<uint16_t>(qi);
-    std::memcpy(e.old, vu + (qi << 4), 16);
-    undoLog().push_back(e);
+    undoLog().push(qi, vu); // PERF-V1G
     _mm_storeu_ps(reinterpret_cast<float *>(vu + (qi << 4)), v);
 }
 // PERF: bulk-log `count` qwords starting at q (one resize + memcpys instead of a push_back per store); the stores into that range may then use stqRaw.
 inline void logRange(const uint8_t *vu, uint32_t q, uint32_t count)
 {
-    std::vector<UndoEnt> &log = undoLog();
-    const size_t base = log.size();
-    log.resize(base + count);
-    UndoEnt *e = log.data() + base;
+    UndoEnt *e = undoLog().alloc(count); // PERF-V1G
     for (uint32_t i = 0; i < count; ++i)
     {
         const uint32_t qi = (q + i) & 0x3FFu;
@@ -224,11 +256,103 @@ inline void logRange(const uint8_t *vu, uint32_t q, uint32_t count)
     }
 }
 inline void stqRaw(uint8_t *vu, uint32_t q, __m128 v) { _mm_storeu_ps(reinterpret_cast<float *>(vu + ((q & 0x3FFu) << 4)), v); } // range already logged
+inline void stqiRaw(uint8_t *vu, uint32_t q, __m128i v) { stqRaw(vu, q, _mm_castsi128_ps(v)); } // PERF-V1G
 inline uint16_t ilw(const uint8_t *vu, uint32_t q, uint32_t f) // ILW.f: low 16 bits of word f
 {
     uint32_t w;
     std::memcpy(&w, vu + ((q & 0x3FFu) << 4) + 4u * f, 4);
     return static_cast<uint16_t>(w & 0xFFFFu);
+}
+
+// PERF-SVF: 8-wide struct-of-arrays AVX2 vertex chain, copied from lbVertex8 / lb8Op / lb8FromRows / lb8ToRows (vu1_native_hand.inc lines ~601-812; flags/sticky/mac
+// bookkeeping dropped, only the value + exactness guard kept). Exact whenever no result lane of any op leaves the exponent window [2,253] (except certain zeros);
+// otherwise the caller runs the scalar fmacV chain for that group. (PERF-V1G: placed before handler00A8 so both 00A8 and 1EE0 share it.)
+struct Fv8V
+{
+    __m256 c[4];
+};
+inline __m256 fv8N(__m256 v) // == lb8N == vuhot::N4 on 8 lanes
+{
+    const __m256i bits = _mm256_castps_si256(v);
+    const __m256i expo = _mm256_and_si256(_mm256_srli_epi32(bits, 23), _mm256_set1_epi32(0xFF));
+    const __m256i sign = _mm256_and_si256(bits, _mm256_set1_epi32(static_cast<int>(0x80000000u)));
+    const __m256i isZero = _mm256_cmpeq_epi32(expo, _mm256_setzero_si256());
+    const __m256i isFF = _mm256_cmpeq_epi32(expo, _mm256_set1_epi32(0xFF));
+    __m256i r = _mm256_blendv_epi8(bits, sign, isZero);
+    r = _mm256_blendv_epi8(r, _mm256_or_si256(sign, _mm256_set1_epi32(0x7F7FFFFF)), isFF);
+    return _mm256_castsi256_ps(r);
+}
+inline __m256i fv8OutWin(__m256 v)
+{
+    const __m256i ev = _mm256_and_si256(_mm256_srli_epi32(_mm256_castps_si256(v), 23), _mm256_set1_epi32(0xFF));
+    return _mm256_or_si256(_mm256_cmpgt_epi32(_mm256_set1_epi32(2), ev), _mm256_cmpgt_epi32(ev, _mm256_set1_epi32(253)));
+}
+inline __m256i fv8IsZ(__m256 v) { return _mm256_castps_si256(_mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_EQ_OQ)); }
+inline bool fv8Any(__m256i m) { return !_mm256_testz_si256(m, m); }
+
+template <int DEST, bool MADD>
+inline Fv8V fv8Op(const Fv8V &a, const Fv8V &b, const Fv8V &ac, __m256i &bad)
+{
+    Fv8V r;
+    for (int c = 0; c < 4; ++c)
+    {
+        if (((DEST >> (3 - c)) & 1) == 0)
+        {
+            r.c[c] = _mm256_setzero_ps();
+            continue;
+        }
+        const __m256 av = a.c[c], bv = b.c[c];
+        const __m256 val = MADD ? _mm256_fmadd_ps(av, bv, ac.c[c]) : _mm256_mul_ps(av, bv);
+        r.c[c] = val;
+        const __m256i za = _mm256_or_si256(fv8IsZ(av), fv8IsZ(bv));
+        __m256i zok = _mm256_and_si256(fv8IsZ(val), za);
+        if (MADD)
+            zok = _mm256_and_si256(zok, fv8IsZ(ac.c[c]));
+        bad = _mm256_or_si256(bad, _mm256_andnot_si256(zok, fv8OutWin(val)));
+        if (MADD)
+            bad = _mm256_or_si256(bad, _mm256_andnot_si256(za, fv8OutWin(_mm256_mul_ps(av, bv))));
+    }
+    return r;
+}
+inline Fv8V fv8Const(__m128 v)
+{
+    v = norm4(v);
+    Fv8V r;
+    r.c[0] = _mm256_broadcastss_ps(v);
+    r.c[1] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0x55));
+    r.c[2] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0xAA));
+    r.c[3] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0xFF));
+    return r;
+}
+inline Fv8V fv8FromRows(const __m128 rows[8])
+{
+    const __m256 r0 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[0]), rows[4], 1);
+    const __m256 r1 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[1]), rows[5], 1);
+    const __m256 r2 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[2]), rows[6], 1);
+    const __m256 r3 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[3]), rows[7], 1);
+    const __m256 t0 = _mm256_unpacklo_ps(r0, r1), t1 = _mm256_unpacklo_ps(r2, r3);
+    const __m256 t2 = _mm256_unpackhi_ps(r0, r1), t3 = _mm256_unpackhi_ps(r2, r3);
+    Fv8V r;
+    r.c[0] = _mm256_shuffle_ps(t0, t1, 0x44);
+    r.c[1] = _mm256_shuffle_ps(t0, t1, 0xEE);
+    r.c[2] = _mm256_shuffle_ps(t2, t3, 0x44);
+    r.c[3] = _mm256_shuffle_ps(t2, t3, 0xEE);
+    return r;
+}
+inline void fv8ToRows(const Fv8V &v, __m128 rows[8])
+{
+    const __m256 t0 = _mm256_unpacklo_ps(v.c[0], v.c[1]), t1 = _mm256_unpacklo_ps(v.c[2], v.c[3]);
+    const __m256 t2 = _mm256_unpackhi_ps(v.c[0], v.c[1]), t3 = _mm256_unpackhi_ps(v.c[2], v.c[3]);
+    const __m256 r0 = _mm256_shuffle_ps(t0, t1, 0x44), r1 = _mm256_shuffle_ps(t0, t1, 0xEE);
+    const __m256 r2 = _mm256_shuffle_ps(t2, t3, 0x44), r3 = _mm256_shuffle_ps(t2, t3, 0xEE);
+    rows[0] = _mm256_castps256_ps128(r0);
+    rows[4] = _mm256_extractf128_ps(r0, 1);
+    rows[1] = _mm256_castps256_ps128(r1);
+    rows[5] = _mm256_extractf128_ps(r1, 1);
+    rows[2] = _mm256_castps256_ps128(r2);
+    rows[6] = _mm256_extractf128_ps(r2, 1);
+    rows[3] = _mm256_castps256_ps128(r3);
+    rows[7] = _mm256_extractf128_ps(r3, 1);
 }
 
 // Handler 00A8: matrix setup (00A8..0150) + table transform loop (0158..0180), docs/VU1_HANDLER_FORMS.md sections 1, 2 (verified bit-exact there).
@@ -266,20 +390,84 @@ static bool handler00A8(Regs &R, uint8_t *vu)
     uint16_t vi7 = static_cast<uint16_t>(vi3 + 716u);
     if (vi2 == 0u || vi2 > 512u) // 0 would be 65536 passes; anything this large is not a real table transform
         return false;
-    do
+    if (vi2 <= 80u) // PERF-V1G: vi1 (477..477+vi2), vi5 (636..636+vi2-1), vi7 (716..716+vi2-1) are disjoint; 8-wide exact compute + bulk logRange/stqRaw
     {
-        const __m128 cur = vf5;
-        stq(vu, vi7++, R.vf[31]);                         // 0158 SQI vf31
-        acc = fmacV<4>(vf1, bc<0>(cur), zero);            // 0158 MULAx
-        acc = fmacV<2>(vf2, bc<1>(cur), acc);             // 0160 MADDAy
-        const __m128 xy = ldq(vu, vi1);                   // 0160 LQ.xy vf5, 0(vi1)
-        acc = fmacV<2>(vf3, bc<2>(cur), acc);             // 0168 MADDAz
-        stq(vu, vi5++, vf6);                              // 0168 SQI vf6 (value of the previous pass)
-        const __m128 nv6 = fmacV<2>(vf4, bc<3>(cur), acc); // 0170 MADDw vf6
-        const __m128 zw = ldq(vu, vi1++);                 // 0170 LQI.zw vf5
-        vf6 = nv6;
-        vf5 = _mm_shuffle_ps(xy, zw, _MM_SHUFFLE(3, 2, 1, 0)); // x,y from xy ; z,w from zw
-    } while (vi5 != vi6);                                 // 0178 IBNE vi6, vi5
+        __m128 in[80], out[80];
+        in[0] = vf5;
+        for (uint16_t k = 1u; k < vi2; ++k)
+            in[k] = ldq(vu, static_cast<uint32_t>(vi1) + (k - 1u));
+        const Fv8V k1 = fv8Const(vf1), k2 = fv8Const(vf2), k3 = fv8Const(vf3), k4 = fv8Const(vf4);
+        Fv8V z8;
+        z8.c[0] = z8.c[1] = z8.c[2] = z8.c[3] = _mm256_set_m128(zero, zero);
+        for (uint16_t k0 = 0; k0 < vi2; k0 = static_cast<uint16_t>(k0 + 8u))
+        {
+            const uint16_t n = (vi2 - k0 < 8u) ? static_cast<uint16_t>(vi2 - k0) : 8u;
+            __m128 rows[8];
+            for (uint16_t j = 0; j < 8u; ++j)
+                rows[j] = (j < n) ? in[k0 + j] : zero;
+            Fv8V C = fv8FromRows(rows);
+            for (int c = 0; c < 4; ++c)
+                C.c[c] = fv8N(C.c[c]);
+            __m256i bad = _mm256_setzero_si256();
+            const Fv8V a0 = fv8Op<15, false>(k1, Fv8V{{C.c[0], C.c[0], C.c[0], C.c[0]}}, z8, bad);
+            const Fv8V a1 = fv8Op<15, true>(k2, Fv8V{{C.c[1], C.c[1], C.c[1], C.c[1]}}, a0, bad);
+            const Fv8V a2 = fv8Op<15, true>(k3, Fv8V{{C.c[2], C.c[2], C.c[2], C.c[2]}}, a1, bad);
+            const Fv8V r6 = fv8Op<15, true>(k4, Fv8V{{C.c[3], C.c[3], C.c[3], C.c[3]}}, a2, bad);
+            if (!fv8Any(bad))
+            {
+                __m128 oRows[8];
+                fv8ToRows(r6, oRows);
+                for (uint16_t j = 0; j < n; ++j)
+                    out[k0 + j] = oRows[j];
+                if (k0 + n == vi2)
+                {
+                    __m128 aRows[8];
+                    fv8ToRows(a2, aRows);
+                    acc = aRows[n - 1u];
+                }
+            }
+            else
+            {
+                for (uint16_t j = 0; j < n; ++j)
+                {
+                    const __m128 cur = in[k0 + j];
+                    acc = fmacV<4>(vf1, bc<0>(cur), zero);
+                    acc = fmacV<2>(vf2, bc<1>(cur), acc);
+                    acc = fmacV<2>(vf3, bc<2>(cur), acc);
+                    out[k0 + j] = fmacV<2>(vf4, bc<3>(cur), acc);
+                }
+            }
+        }
+        logRange(vu, vi7, vi2);
+        for (uint16_t k = 0; k < vi2; ++k)
+            stqRaw(vu, static_cast<uint32_t>(vi7) + k, zero);
+        logRange(vu, vi5, vi2);
+        stqRaw(vu, vi5, vf6);
+        for (uint16_t k = 1u; k < vi2; ++k)
+            stqRaw(vu, static_cast<uint32_t>(vi5) + k, out[k - 1u]);
+        vi1 = static_cast<uint16_t>(vi1 + vi2);
+        vi5 = vi6;
+        vi7 = static_cast<uint16_t>(vi7 + vi2);
+        vf5 = ldq(vu, static_cast<uint32_t>(vi1) - 1u);
+        vf6 = out[vi2 - 1u];
+    }
+    else
+    {
+        do
+        {
+            const __m128 cur = vf5;
+            stq(vu, vi7++, R.vf[31]);                         // 0158 SQI vf31
+            acc = fmacV<4>(vf1, bc<0>(cur), zero);            // 0158 MULAx
+            acc = fmacV<2>(vf2, bc<1>(cur), acc);             // 0160 MADDAy
+            const __m128 xy = ldq(vu, vi1);                   // 0160 LQ.xy vf5, 0(vi1)
+            acc = fmacV<2>(vf3, bc<2>(cur), acc);             // 0168 MADDAz
+            stq(vu, vi5++, vf6);                              // 0168 SQI vf6 (value of the previous pass)
+            const __m128 nv6 = fmacV<2>(vf4, bc<3>(cur), acc); // 0170 MADDw vf6
+            const __m128 zw = ldq(vu, vi1++);                 // 0170 LQI.zw vf5
+            vf6 = nv6;
+            vf5 = _mm_shuffle_ps(xy, zw, _MM_SHUFFLE(3, 2, 1, 0)); // x,y from xy ; z,w from zw
+        } while (vi5 != vi6);                                 // 0178 IBNE vi6, vi5
+    }
     R.vf[1] = vf1; R.vf[2] = vf2; R.vf[3] = vf3; R.vf[4] = vf4; R.vf[5] = vf5; R.vf[6] = vf6; R.vf[7] = vf7; R.vf[8] = vf8; R.vf[25] = vf25;
     R.acc = acc;
     R.vi[1] = vi1; R.vi[2] = vi2; R.vi[3] = vi3; R.vi[5] = vi5; R.vi[6] = vi6; R.vi[7] = vi7;
@@ -459,34 +647,37 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
     const __m128 zero = _mm_setzero_ps(), vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
     const uint16_t retVi12 = static_cast<uint16_t>((copyS ? 0x2720u : 0x24F8u) >> 3);
 
-    // 2900..2960: save integer context to 1020..1022
-    stqi(vu, 1022u, _mm_set_epi32(vi8 & 0xFFFF, vi7 & 0xFFFF, vi6 & 0xFFFF, vi5 & 0xFFFF));
-    stqi(vu, 1021u, _mm_set_epi32(retVi12, 0x7FFF, vi10 & 0xFFFF, vi9 & 0xFFFF));
-    stqi(vu, 1020u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1020u), vi13, 0), 5, 1));
+    // 2900..2960: save integer context to 1020..1022 (PERF-V1G: bulk logRange + stqiRaw)
+    logRange(vu, 1020u, 3u);
+    stqiRaw(vu, 1022u, _mm_set_epi32(vi8 & 0xFFFF, vi7 & 0xFFFF, vi6 & 0xFFFF, vi5 & 0xFFFF));
+    stqiRaw(vu, 1021u, _mm_set_epi32(retVi12, 0x7FFF, vi10 & 0xFFFF, vi9 & 0xFFFF));
+    stqiRaw(vu, 1020u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1020u), vi13, 0), 5, 1));
     const uint32_t clipMode = ldw(vu, 1012u, 1u) & 1u;
 
     // 2968..29E8: spill triangle vertices + wrap-around vertex 0 into 918..929
     vf13 = maxV(vf13, zero); // 2978 MAXx.xyzw vf13, vf13, vf0
-    stq(vu, 918u, vf28);
-    stq(vu, 921u, vf29);
-    stq(vu, 924u, vf10);
-    stq(vu, 927u, vf28);
-    stq(vu, 920u, vf30);
-    stq(vu, 923u, vf31);
-    stq(vu, 926u, vf7);
-    stq(vu, 925u, vf13);
-    stq(vu, 929u, vf30); // 29B0 delay slot of IBEQ
+    logRange(vu, 918u, 60u); // PERF-V1G: covers 918..929 spill + 918..977 ping-pong buffers (<= 9 verts + wrap = 30 qwords per side)
+    logRange(vu, 876u, 1u);  // PERF-V1G: GIF tag qword 876
+    stqRaw(vu, 918u, vf28);
+    stqRaw(vu, 921u, vf29);
+    stqRaw(vu, 924u, vf10);
+    stqRaw(vu, 927u, vf28);
+    stqRaw(vu, 920u, vf30);
+    stqRaw(vu, 923u, vf31);
+    stqRaw(vu, 926u, vf7);
+    stqRaw(vu, 925u, vf13);
+    stqRaw(vu, 929u, vf30); // 29B0 delay slot of IBEQ
     if (clipMode != 0u)
     {
-        stq(vu, 919u, vf13);
-        stq(vu, 922u, vf13);
-        stq(vu, 928u, vf13);
+        stqRaw(vu, 919u, vf13);
+        stqRaw(vu, 922u, vf13);
+        stqRaw(vu, 928u, vf13);
     }
     else
     {
-        stq(vu, 919u, vf11);
-        stq(vu, 922u, vf12);
-        stq(vu, 928u, vf11);
+        stqRaw(vu, 919u, vf11);
+        stqRaw(vu, 922u, vf12);
+        stqRaw(vu, 928u, vf11);
     }
 
     // 29F0..2C70: 6 frustum planes (-Z, +Z, -X, +X, -Y, +Y), ping-ponging 918 <-> 948
@@ -532,9 +723,9 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
 
             if (!out0)
             {
-                stq(vu, outPtr++, vf17);
-                stq(vu, outPtr++, vf18);
-                stq(vu, outPtr++, vf19);
+                stqRaw(vu, outPtr++, vf17);
+                stqRaw(vu, outPtr++, vf18);
+                stqRaw(vu, outPtr++, vf19);
                 ++outCount;
             }
             if (out0 != out1)
@@ -559,11 +750,11 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
                 const __m128 col = fmacV<0>(fmacV<4>(fmacV<2>(vf22, bD0, fmacV<4>(vf18, bD1, zero)), bQ, zero), _mm_set1_ps(0.001f), zero);
                 const __m128 st = fmacV<4>(fmacV<2>(vf23, bD0, fmacV<4>(vf19, bD1, zero)), bQ, zero);
                 const __m128 m1012 = ldq(vu, 1012u); // 2F18 + 2F40: SQ.yzw m1012, 876(vi0)
-                stq(vu, 876u, _mm_blend_ps(ldq(vu, 876u), m1012, 0xE));
+                stqRaw(vu, 876u, _mm_blend_ps(ldq(vu, 876u), m1012, 0xE));
 
-                stq(vu, outPtr++, pos);
-                stq(vu, outPtr++, col);
-                stq(vu, outPtr++, st);
+                stqRaw(vu, outPtr++, pos);
+                stqRaw(vu, outPtr++, col);
+                stqRaw(vu, outPtr++, st);
                 ++outCount;
             }
             vf17 = fmacV<0>(vf21, zero, zero);
@@ -580,9 +771,9 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
         const __m128 w0 = ldq(vu, pl.outBase + 0u);
         const __m128 w1 = ldq(vu, pl.outBase + 1u);
         const __m128 w2 = ldq(vu, pl.outBase + 2u);
-        stq(vu, outPtr++, w0);
-        stq(vu, outPtr++, w1);
-        stq(vu, outPtr++, w2);
+        stqRaw(vu, outPtr++, w0);
+        stqRaw(vu, outPtr++, w1);
+        stqRaw(vu, outPtr++, w2);
         if (p == 5)
             vf19_last = fmacV<2>(c2v, bc<3>(w0), fmacV<4>(c1v, w0, zero));
         polyCount = outCount;
@@ -590,7 +781,7 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
 
     // 2C78..2D48: emit clipped polygon GIF packet at 876..
     const uint32_t tagX = (static_cast<uint32_t>(polyCount) + 32768u) & 0xFFFFu;
-    stqi(vu, 876u, _mm_insert_epi32(ldqi(vu, 876u), static_cast<int32_t>(tagX), 0));
+    stqiRaw(vu, 876u, _mm_insert_epi32(ldqi(vu, 876u), static_cast<int32_t>(tagX), 0));
     if (!kick(vu, 1023u, kicks, gif))
         return fb1EE0(kFbClipKick);
 
@@ -598,6 +789,7 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
     uint32_t ptr = 918u;
     uint32_t outQ = 877u;
     __m128 vf25 = ldq(vu, ptr + 3u);
+    logRange(vu, 877u, static_cast<uint32_t>(polyCount) * 4u); // PERF-V1G
     for (int32_t k = 0; k < polyCount; ++k)
     {
         const __m128 qb = _mm_set1_ps(q);
@@ -616,10 +808,10 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
         ptr += 3u;
         vf25 = ldq(vu, ptr + 3u);
         const __m128i fw = ftoiS<16>(vf8);
-        stq(vu, outQ + 1u, vf27);
-        stqi(vu, outQ + 2u, rg);
-        stqi(vu, outQ + 3u, xy);
-        stqi(vu, outQ + 0u, _mm_insert_epi32(ldqi(vu, outQ + 0u), _mm_extract_epi32(fw, 3), 3));
+        stqRaw(vu, outQ + 1u, vf27);
+        stqiRaw(vu, outQ + 2u, rg);
+        stqiRaw(vu, outQ + 3u, xy);
+        stqiRaw(vu, outQ + 0u, _mm_insert_epi32(ldqi(vu, outQ + 0u), _mm_extract_epi32(fw, 3), 3));
         outQ += 4u;
     }
     return kick(vu, 876u, kicks, gif);
@@ -649,7 +841,8 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
     Wd[0] = s16(static_cast<int32_t>(ldw(vu, static_cast<uint32_t>(vi4_0), 0) & 0xFFFFu)); // ILW.x vi7, 0(vi4)
     const int32_t ix0 = Wd[0] & 0x7FFF;
     Ps[0] = ldq(vu, static_cast<uint32_t>(636 + ix0));
-    stqi(vu, static_cast<uint32_t>(vi6), _mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))); // SQI vf27
+    logRange(vu, static_cast<uint32_t>(vi6), static_cast<uint32_t>(4 * N + 1)); // PERF-V1G: bulk-log [ubase, ubase + 4N]
+    stqiRaw(vu, static_cast<uint32_t>(vi6), _mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))); // SQI vf27
     vi6 = s16(vi6 + 1);
     Cs[0] = ldq(vu, static_cast<uint32_t>(static_cast<uint16_t>(vi3)));
     int32_t pC = s16(vi3 + 1);
@@ -713,7 +906,7 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
         vi6 = s16(vi6 + 4);
         {
             const uint32_t qd = static_cast<uint32_t>(static_cast<uint16_t>(vi6 - 3));
-            stq(vu, qd, _mm_blend_ps(ldq(vu, qd), f6, 0x7)); // lanes xyz only
+            stqRaw(vu, qd, _mm_blend_ps(ldq(vu, qd), f6, 0x7)); // lanes xyz only // PERF-V1G
         }
         As[it] = ldq(vu, static_cast<uint32_t>(716 + ix));
         Ss[it] = ldq(vu, copyS ? static_cast<uint32_t>(796 + ix) : static_cast<uint32_t>(static_cast<uint16_t>(pS)));
@@ -734,9 +927,9 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
             __m128i xy = ftoiS<16>(f5);
             const __m128i ww = ftoiS<16>(f8);
             xy = _mm_insert_epi32(xy, _mm_extract_epi32(ww, 3), 3);
-            stqi(vu, static_cast<uint32_t>(static_cast<uint16_t>(vi6 - 2)), rg);
-            stqi(vu, static_cast<uint32_t>(static_cast<uint16_t>(vi6 - 4)), xy);
-            stqi(vu, static_cast<uint32_t>(static_cast<uint16_t>(vi6 - 1)), xy);
+            stqiRaw(vu, static_cast<uint32_t>(static_cast<uint16_t>(vi6 - 2)), rg); // PERF-V1G
+            stqiRaw(vu, static_cast<uint32_t>(static_cast<uint16_t>(vi6 - 4)), xy);
+            stqiRaw(vu, static_cast<uint32_t>(static_cast<uint16_t>(vi6 - 1)), xy);
         }
         Fb[it] = clipBitsV(Ps[it]);
         Qf[it] = divQ(Tv[it]);
@@ -753,97 +946,6 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
         return fb1EE0(kFbRigidKick);
     R.vi[12] = top; // XTOP vi12
     return true;
-}
-
-// PERF-SVF: 8-wide struct-of-arrays AVX2 vertex chain, copied from lbVertex8 / lb8Op / lb8FromRows / lb8ToRows (vu1_native_hand.inc lines ~601-812; flags/sticky/mac
-// bookkeeping dropped, only the value + exactness guard kept). Exact whenever no result lane of any op leaves the exponent window [2,253] (except certain zeros);
-// otherwise the caller runs the scalar fmacV chain for that group.
-struct Fv8V
-{
-    __m256 c[4];
-};
-inline __m256 fv8N(__m256 v) // == lb8N == vuhot::N4 on 8 lanes
-{
-    const __m256i bits = _mm256_castps_si256(v);
-    const __m256i expo = _mm256_and_si256(_mm256_srli_epi32(bits, 23), _mm256_set1_epi32(0xFF));
-    const __m256i sign = _mm256_and_si256(bits, _mm256_set1_epi32(static_cast<int>(0x80000000u)));
-    const __m256i isZero = _mm256_cmpeq_epi32(expo, _mm256_setzero_si256());
-    const __m256i isFF = _mm256_cmpeq_epi32(expo, _mm256_set1_epi32(0xFF));
-    __m256i r = _mm256_blendv_epi8(bits, sign, isZero);
-    r = _mm256_blendv_epi8(r, _mm256_or_si256(sign, _mm256_set1_epi32(0x7F7FFFFF)), isFF);
-    return _mm256_castsi256_ps(r);
-}
-inline __m256i fv8OutWin(__m256 v)
-{
-    const __m256i ev = _mm256_and_si256(_mm256_srli_epi32(_mm256_castps_si256(v), 23), _mm256_set1_epi32(0xFF));
-    return _mm256_or_si256(_mm256_cmpgt_epi32(_mm256_set1_epi32(2), ev), _mm256_cmpgt_epi32(ev, _mm256_set1_epi32(253)));
-}
-inline __m256i fv8IsZ(__m256 v) { return _mm256_castps_si256(_mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_EQ_OQ)); }
-inline bool fv8Any(__m256i m) { return !_mm256_testz_si256(m, m); }
-
-template <int DEST, bool MADD>
-inline Fv8V fv8Op(const Fv8V &a, const Fv8V &b, const Fv8V &ac, __m256i &bad)
-{
-    Fv8V r;
-    for (int c = 0; c < 4; ++c)
-    {
-        if (((DEST >> (3 - c)) & 1) == 0)
-        {
-            r.c[c] = _mm256_setzero_ps();
-            continue;
-        }
-        const __m256 av = a.c[c], bv = b.c[c];
-        const __m256 val = MADD ? _mm256_fmadd_ps(av, bv, ac.c[c]) : _mm256_mul_ps(av, bv);
-        r.c[c] = val;
-        const __m256i za = _mm256_or_si256(fv8IsZ(av), fv8IsZ(bv));
-        __m256i zok = _mm256_and_si256(fv8IsZ(val), za);
-        if (MADD)
-            zok = _mm256_and_si256(zok, fv8IsZ(ac.c[c]));
-        bad = _mm256_or_si256(bad, _mm256_andnot_si256(zok, fv8OutWin(val)));
-        if (MADD)
-            bad = _mm256_or_si256(bad, _mm256_andnot_si256(za, fv8OutWin(_mm256_mul_ps(av, bv))));
-    }
-    return r;
-}
-inline Fv8V fv8Const(__m128 v)
-{
-    v = norm4(v);
-    Fv8V r;
-    r.c[0] = _mm256_broadcastss_ps(v);
-    r.c[1] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0x55));
-    r.c[2] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0xAA));
-    r.c[3] = _mm256_broadcastss_ps(_mm_shuffle_ps(v, v, 0xFF));
-    return r;
-}
-inline Fv8V fv8FromRows(const __m128 rows[8])
-{
-    const __m256 r0 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[0]), rows[4], 1);
-    const __m256 r1 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[1]), rows[5], 1);
-    const __m256 r2 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[2]), rows[6], 1);
-    const __m256 r3 = _mm256_insertf128_ps(_mm256_castps128_ps256(rows[3]), rows[7], 1);
-    const __m256 t0 = _mm256_unpacklo_ps(r0, r1), t1 = _mm256_unpacklo_ps(r2, r3);
-    const __m256 t2 = _mm256_unpackhi_ps(r0, r1), t3 = _mm256_unpackhi_ps(r2, r3);
-    Fv8V r;
-    r.c[0] = _mm256_shuffle_ps(t0, t1, 0x44);
-    r.c[1] = _mm256_shuffle_ps(t0, t1, 0xEE);
-    r.c[2] = _mm256_shuffle_ps(t2, t3, 0x44);
-    r.c[3] = _mm256_shuffle_ps(t2, t3, 0xEE);
-    return r;
-}
-inline void fv8ToRows(const Fv8V &v, __m128 rows[8])
-{
-    const __m256 t0 = _mm256_unpacklo_ps(v.c[0], v.c[1]), t1 = _mm256_unpacklo_ps(v.c[2], v.c[3]);
-    const __m256 t2 = _mm256_unpackhi_ps(v.c[0], v.c[1]), t3 = _mm256_unpackhi_ps(v.c[2], v.c[3]);
-    const __m256 r0 = _mm256_shuffle_ps(t0, t1, 0x44), r1 = _mm256_shuffle_ps(t0, t1, 0xEE);
-    const __m256 r2 = _mm256_shuffle_ps(t2, t3, 0x44), r3 = _mm256_shuffle_ps(t2, t3, 0xEE);
-    rows[0] = _mm256_castps256_ps128(r0);
-    rows[4] = _mm256_extractf128_ps(r0, 1);
-    rows[1] = _mm256_castps256_ps128(r1);
-    rows[5] = _mm256_extractf128_ps(r1, 1);
-    rows[2] = _mm256_castps256_ps128(r2);
-    rows[6] = _mm256_extractf128_ps(r2, 1);
-    rows[3] = _mm256_castps256_ps128(r3);
-    rows[7] = _mm256_extractf128_ps(r3, 1);
 }
 
 // 1EE0 entry (vi10 = 0). Prologue 1EF8..1F78 in closed form, then the skinned path 1FE0 -> JR (1:1 value port of lbFull / lbVertex: the exact scalar vertex
@@ -1232,14 +1334,12 @@ static bool handler3160(Regs &R, uint8_t *vu, uint16_t vi13)
     return true;
 }
 
-static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool oneShot)
+static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool oneShot, bool vxA)
 {
-    Regs R;
-    std::memset(&R, 0, sizeof(R));
+    Regs R; // PERF-V1G: skip 560-byte memset; only R.vi[12] is live across handlers
     R.vi[12] = static_cast<uint16_t>(top);
     uint16_t vi13 = R.vi[12];
     uint16_t vi1 = ilw(vu, vi13, 0);
-    const bool vxA = vx::act(); // PROBE-VX
     vx::HScope vxHs; // PROBE-VX
     for (uint32_t step = 0; step < 100000u; ++step)
     {
@@ -1275,12 +1375,13 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
                 return false;
             }
             __m128 vf1 = _mm_setzero_ps();
+            logRange(vu, vi3, count); // PERF-V1G
             do
             {
                 vf1 = ldq(vu, vi13);
                 vi13 = static_cast<uint16_t>(vi13 + 1u);
                 vi3 = static_cast<uint16_t>(vi3 + 1u);
-                stq(vu, static_cast<uint32_t>(vi3) - 1u, vf1);
+                stqRaw(vu, static_cast<uint32_t>(vi3) - 1u, vf1);
             } while (vi3 != vi2);
             R.vf[1] = vf1;
             R.vi[3] = vi3;
@@ -1362,7 +1463,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
 }
 
 // startPC / TOP / ITOP: only the main entry 0008 is supported (TOP is read by XTOP at 0010; ITOP is not used by the supported handlers).
-static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t itop, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
+static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t itop, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool vxA)
 {
     (void)itop;
     kicks.clear();
@@ -1384,34 +1485,34 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     static thread_local Memo memo[256] = {};
     static thread_local uint32_t skipCount = 0;
     static const bool memoOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_MEMO"); return e && e[0] && e[0] != '0'; }();
-    const uint16_t first = memoOn ? ilw(vu, top, 0) : static_cast<uint16_t>(0);
-    Memo dummy = {};
-    Memo &m = memoOn ? memo[first & 0xFFu] : dummy;
+    Memo *m = nullptr; // PERF-V1G: skip dummy Memo init when !memoOn
     if (memoOn)
     {
-        if (m.key != first)
+        const uint16_t first = ilw(vu, top, 0);
+        m = &memo[first & 0xFFu];
+        if (m->key != first)
         {
-            m.key = first;
-            m.streak = 0;
+            m->key = first;
+            m->streak = 0;
         }
-        if (m.streak >= 4u && (++skipCount & 63u) != 0u)
+        if (m->streak >= 4u && (++skipCount & 63u) != 0u)
         {
             s_fbPc = 0xF040u;
             return false;
         }
     }
-    std::vector<UndoEnt> &log = undoLog();
+    UndoLog &log = undoLog(); // PERF-V1G
     log.clear();
-    if (vu1FuncRunInner(vu, top, kicks, gif, oneShot))
+    if (vu1FuncRunInner(vu, top, kicks, gif, oneShot, vxA))
     {
-        if (memoOn)
-            m.streak = 0;
+        if (m)
+            m->streak = 0;
         return true;
     }
-    if (memoOn)
-        ++m.streak;
-    for (size_t i = log.size(); i-- > 0;)
-        std::memcpy(vu + (static_cast<uint32_t>(log[i].qword) << 4), log[i].old, 16);
+    if (m)
+        ++m->streak;
+    for (uint32_t i = log.size; i-- > 0;)
+        std::memcpy(vu + (static_cast<uint32_t>(log.data[i].qword) << 4), log.data[i].old, 16);
     log.clear();
     kicks.clear();
     gif.clear();
@@ -1482,7 +1583,7 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
     uint64_t vxT1 = 0; // PROBE-VX
     struct VxGif { uint64_t &t1; uint64_t t0; ~VxGif() { if (t0 && t1) vx::g_vx.gifT += __rdtsc() - t1; } } vxGif{vxT1, vxT0}; // PROBE-VX: submit time (t1 set only when ok)
     if (dataSize == 16384u)
-        ok = vu1FuncRun(vuData, startPC, top, itop, kicks, gif);
+        ok = vu1FuncRun(vuData, startPC, top, itop, kicks, gif, vxT0 != 0ull); // PERF-V1G
     else
         s_fbPc = 0xF002u;
     if (vxT0) // PROBE-VX
