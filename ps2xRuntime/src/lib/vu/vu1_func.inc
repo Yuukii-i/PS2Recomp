@@ -225,6 +225,16 @@ static std::unordered_map<uint32_t, uint64_t> s_startPcs; // startPC of 0xF001 f
 static std::unordered_map<uint32_t, uint64_t> s_fbPcs; // handler pc (or 0xF000 + reason) -> count
 static uint32_t s_fbPc = 0;
 
+// 1EE0 fallback reasons (counted just before returning false; printed in the periodic [vfunc] line as 1ee0_why)
+enum Fb1EE0Reason : int { kFbRigidN = 0, kFbSkinN, kFbSkinAlias13, kFbSkinGatherAlias, kFbSkinDivZero, kFbSkinKick, kFbRigidClip, kFbRigidKick, kFbClipKick, kFbCount };
+static const char *const kFb1EE0Names[kFbCount] = {"rigidN_or_vi13", "skinN_range", "skin_alias_1012_1013_1023_vi13", "skin_gather_alias", "skin_div_zero", "skin_kick", "rigid_clipPolygon", "rigid_kick", "clip_kick"};
+static uint64_t s_fb1EE0[kFbCount] = {};
+static bool fb1EE0(int reason)
+{
+    ++s_fb1EE0[reason];
+    return false;
+}
+
 static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
 {
     const uint32_t q0 = addr & 0x3FFu;
@@ -514,7 +524,7 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
     const uint32_t tagX = (static_cast<uint32_t>(polyCount) + 32768u) & 0xFFFFu;
     stqi(vu, 876u, _mm_insert_epi32(ldqi(vu, 876u), static_cast<int32_t>(tagX), 0));
     if (!kick(vu, 1023u, kicks, gif))
-        return false;
+        return fb1EE0(kFbClipKick);
 
     float q = divQ2(1.0f, _mm_cvtss_f32(bc<3>(vf19_last)));
     uint32_t ptr = 918u;
@@ -616,7 +626,7 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
                 if (!clipPolygon(vu, vi13, vi5, vi6, Wd[j], vi8, vi9, vi10, copyS, c1v, c2v, c5v,
                                  Ps[j - 2], Ps[j - 1], Ps[j], fmacV<0>(V7(Ss[j - 2]), zero, zero), V7(Ss[j - 1]), V7(Ss[j]),
                                  clampI(Lit[j - 2]), clampI(Lit[j - 1]), Lit[j], kicks, gif))
-                    return false;
+                    return fb1EE0(kFbRigidClip);
             }
             else if (hit == 5) // ISW.x vi5, 1022 (delay slot of the IBNE at 28F8)
                 stqi(vu, 1022u, _mm_insert_epi32(ldqi(vu, 1022u), vi5, 0));
@@ -669,7 +679,7 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
     const uint32_t e6 = ilw(vu, 1023, 3), e7 = ilw(vu, 1023, 2);
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(e6), 2), static_cast<int>(e7), 3));
     if (!kick(vu, e7, kicks, gif))
-        return false;
+        return fb1EE0(kFbRigidKick);
     R.vi[12] = top; // XTOP vi12
     return true;
 }
@@ -785,17 +795,17 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
     if (vi1s < 0)
     {
         if (w1018 < 1u || w1018 > 300u || vi13 == 1022u || vi13 == 1023u || ((vi13 + 1u) & 0x3FFu) == 1023u)
-            return false;
+            return fb1EE0(kFbRigidN);
         vi13 = static_cast<uint16_t>(vi13 + 1u);
         return rigid2440(R, vu, vi13, top, static_cast<int32_t>(w1018), i4base, s2base, s3base, ubase, vf27x, vf27y, vi10, kicks, gif);
     }
     if (w1018 < 4u || w1018 > 67u)
-        return false;
+        return fb1EE0(kFbSkinN);
     const int32_t N = w1018;
     const uint32_t span = 4u * static_cast<uint32_t>(N) + 1u;
     const auto hits = [&](uint32_t q) { return ((q - ubase) & 0x3FFu) < span; };
     if (hits(1012) || hits(1013) || hits(1023) || hits(vi13) || hits(vi13 + 1u))
-        return false;
+        return fb1EE0(kFbSkinAlias13);
     vi13 = static_cast<uint16_t>(vi13 + 1u);
 
     const __m128 zero = _mm_setzero_ps();
@@ -816,7 +826,7 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
         const uint32_t q3 = static_cast<uint16_t>(s3base + static_cast<uint32_t>(t));
         const uint32_t q2 = vi10 ? static_cast<uint32_t>(796 + idx) : static_cast<uint16_t>(s2base + static_cast<uint32_t>(t));
         if (hits(i4base + static_cast<uint32_t>(t)) || hits(qa) || hits(qb2) || hits(q3) || hits(q2))
-            return false;
+            return fb1EE0(kFbSkinGatherAlias);
         rA[t] = ldq(vu, qa);
         rB[t] = ldq(vu, qb2);
         rS3[t] = ldq(vu, q3);
@@ -887,7 +897,7 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
         const __m128 T5 = fmacV<2>(vf4, bc<3>(sA), mula);
         const float den = nrm1(_mm_cvtss_f32(bc<3>(T5)));
         if (den == 0.0f)
-            return false; // lbFull declines (di != 0)
+            return fb1EE0(kFbSkinDivZero); // lbFull declines (di != 0)
         const float Q = normRes(normRes(1.0f / den));
         const __m128 qb = _mm_set1_ps(Q);
         V[t].R7 = fmacV<4>(T5, qb, zero);
@@ -914,7 +924,7 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
     }
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3)); // ISW.z / ISW.w toggle
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
-        return false;
+        return fb1EE0(kFbSkinKick);
     R.vi[12] = static_cast<uint16_t>(V[1].idx); // ILW.x vi12, 1(vi4)
     return true;
 }
@@ -1362,6 +1372,13 @@ static void reportMaybe()
             n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " start_pcs:");
         for (size_t i = 0; i < sp.size() && i < 6u && n > 0 && n < 490; ++i)
             n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %04X:%llu", sp[i].second, (unsigned long long)sp[i].first);
+    }
+    {
+        if (n > 0 && n < 490)
+            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " 1ee0_why:");
+        for (int r = 0; r < kFbCount && n > 0 && n < 500; ++r)
+            if (s_fb1EE0[r] != 0u)
+                n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %s:%llu", kFb1EE0Names[r], (unsigned long long)s_fb1EE0[r]);
     }
     ps2xSafeLog("%s\n", buf);
 }

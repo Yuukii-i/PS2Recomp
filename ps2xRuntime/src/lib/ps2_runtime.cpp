@@ -3976,7 +3976,8 @@ static inline bool acctBatchEnabled()
 {
     static const bool s_on = []() {
         const char *e = std::getenv("PS2X_ACCT_BATCH");
-        const bool on = e && e[0] == '1';
+        // REVERSAL: PS2X_ACCT_BATCH=0 restores per-call accountCycles (docs/REVERSAL_MEMO.md)
+        const bool on = !(e && e[0] == '0');
         if (on) { ::ps2xSafeLog("[acctbatch] ON\n"); fflush(stderr); }
         return on;
     }();
