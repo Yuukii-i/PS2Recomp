@@ -592,6 +592,125 @@ static PS2_FORCEINLINE void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m12
         }                                                                            \
     } while (0)
 
+// P variants: pc store elided from the generated code; slow (runtime) branch stores ctx->pc first.
+#define READ8P(pcv, addr) ([&]() -> uint8_t {                 \
+    uint32_t _addr = (uint32_t)(addr);                        \
+    if (PS2Runtime::isSpecialAddress(_addr)) {                \
+        ctx->pc = (pcv);                                      \
+        return runtime->Load8(rdram, ctx, _addr); }           \
+    return FAST_READ8(_addr); }())
+
+#define READ16P(pcv, addr) ([&]() -> uint16_t {               \
+    uint32_t _addr = (uint32_t)(addr);                        \
+    if (PS2Runtime::isSpecialAddress(_addr)) {                \
+        ctx->pc = (pcv);                                      \
+        return runtime->Load16(rdram, ctx, _addr); }          \
+    return FAST_READ16(_addr); }())
+
+#define READ32P(pcv, addr) ([&]() -> uint32_t {               \
+    uint32_t _addr = (uint32_t)(addr);                        \
+    if (PS2Runtime::isSpecialAddress(_addr)) {                \
+        ctx->pc = (pcv);                                      \
+        return runtime->Load32(rdram, ctx, _addr); }          \
+    return FAST_READ32(_addr); }())
+
+#define READ64P(pcv, addr) ([&]() -> uint64_t {               \
+    uint32_t _addr = (uint32_t)(addr);                        \
+    if (PS2Runtime::isSpecialAddress(_addr)) {                \
+        ctx->pc = (pcv);                                      \
+        return runtime->Load64(rdram, ctx, _addr); }          \
+    return FAST_READ64(_addr); }())
+
+#define READ128P(pcv, addr) ([&]() -> __m128i {               \
+    uint32_t _addr = (uint32_t)(addr);                        \
+    if (PS2Runtime::isSpecialAddress(_addr)) {                \
+        ctx->pc = (pcv);                                      \
+        return runtime->Load128(rdram, ctx, _addr); }         \
+    return FAST_READ128(_addr); }())
+
+#define WRITE8P(pcv, addr, val)                                                      \
+    do                                                                               \
+    {                                                                                \
+        uint32_t _addr = (addr);                                                     \
+        if (PS2Runtime::isSpecialAddress(_addr))                                     \
+        {                                                                            \
+            ctx->pc = (pcv);                                                         \
+            runtime->Store8(rdram, ctx, _addr, (val));                               \
+        }                                                                            \
+        else                                                                         \
+        {                                                                            \
+            ps2TraceGuestWrite(rdram, _addr, 1u, (uint8_t)(val), 0u, "WRITE8", ctx); \
+            FAST_WRITE8(_addr, (val));                                               \
+        }                                                                            \
+    } while (0)
+
+#define WRITE16P(pcv, addr, val)                                                       \
+    do                                                                                 \
+    {                                                                                  \
+        uint32_t _addr = (addr);                                                       \
+        if (PS2Runtime::isSpecialAddress(_addr))                                       \
+        {                                                                              \
+            ctx->pc = (pcv);                                                           \
+            runtime->Store16(rdram, ctx, _addr, (val));                                \
+        }                                                                              \
+        else                                                                           \
+        {                                                                              \
+            ps2TraceGuestWrite(rdram, _addr, 2u, (uint16_t)(val), 0u, "WRITE16", ctx); \
+            FAST_WRITE16(_addr, (val));                                                \
+        }                                                                              \
+    } while (0)
+
+#define WRITE32P(pcv, addr, val)                                                       \
+    do                                                                                 \
+    {                                                                                  \
+        uint32_t _addr = (addr);                                                       \
+        if (PS2Runtime::isSpecialAddress(_addr))                                       \
+        {                                                                              \
+            ctx->pc = (pcv);                                                           \
+            runtime->Store32(rdram, ctx, _addr, (val));                                \
+        }                                                                              \
+        else                                                                           \
+        {                                                                              \
+            ps2TraceGuestWrite(rdram, _addr, 4u, (uint32_t)(val), 0u, "WRITE32", ctx); \
+            FAST_WRITE32(_addr, (val));                                                \
+        }                                                                              \
+    } while (0)
+
+#define WRITE64P(pcv, addr, val)                                                       \
+    do                                                                                 \
+    {                                                                                  \
+        uint32_t _addr = (addr);                                                       \
+        if (PS2Runtime::isSpecialAddress(_addr))                                       \
+        {                                                                              \
+            ctx->pc = (pcv);                                                           \
+            runtime->Store64(rdram, ctx, _addr, (val));                                \
+        }                                                                              \
+        else                                                                           \
+        {                                                                              \
+            ps2TraceGuestWrite(rdram, _addr, 8u, (uint64_t)(val), 0u, "WRITE64", ctx); \
+            FAST_WRITE64(_addr, (val));                                                \
+        }                                                                              \
+    } while (0)
+
+#define WRITE128P(pcv, addr, val)                                                    \
+    do                                                                               \
+    {                                                                                \
+        uint32_t _addr = (addr);                                                     \
+        __m128i _value = (val);                                                      \
+        if (PS2Runtime::isSpecialAddress(_addr))                                     \
+        {                                                                            \
+            ctx->pc = (pcv);                                                         \
+            runtime->Store128(rdram, ctx, _addr, _value);                            \
+        }                                                                            \
+        else                                                                         \
+        {                                                                            \
+            const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value)); \
+            const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value)); \
+            ps2TraceGuestWrite(rdram, _addr, 16u, _lo, _hi, "WRITE128", ctx);        \
+            FAST_WRITE128(_addr, _value);                                            \
+        }                                                                            \
+    } while (0)
+
 // Packed Compare Greater Than (PCGT)
 #define PS2_PCGTW(a, b) _mm_cmpgt_epi32((__m128i)(a), (__m128i)(b))
 #define PS2_PCGTH(a, b) _mm_cmpgt_epi16((__m128i)(a), (__m128i)(b))
