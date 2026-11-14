@@ -1649,6 +1649,172 @@ static bool handler1A68(Regs &R, uint8_t *vu, uint16_t &vi13)
     return true;
 }
 
+// PERF-V1O: handler 0198 (0198..02D8, 41 pairs) -- 4-directional diffuse light (4x4 color matrix * max(dot, 0))
+static bool handler0198(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 156u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 716u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 d0 = ldq(vu, vi13);
+    const __m128 d1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
+    const __m128 d2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
+    const __m128 c0 = ldq(vu, static_cast<uint32_t>(vi13) + 3u);
+    const __m128 c1 = ldq(vu, static_cast<uint32_t>(vi13) + 4u);
+    const __m128 c2 = ldq(vu, static_cast<uint32_t>(vi13) + 5u);
+    const __m128 c3 = ldq(vu, static_cast<uint32_t>(vi13) + 6u);
+    vi13 = static_cast<uint16_t>(vi13 + 7u);
+    const __m128 m986 = ldq(vu, 986), m987 = ldq(vu, 987), m988 = ldq(vu, 988);
+    const __m128 Lx = fmacV<2>(d2, bc<2>(m986), fmacV<2>(d1, bc<1>(m986), fmacV<4>(d0, bc<0>(m986), zero)));
+    const __m128 Ly = fmacV<2>(d2, bc<2>(m987), fmacV<2>(d1, bc<1>(m987), fmacV<4>(d0, bc<0>(m987), zero)));
+    const __m128 Lz = fmacV<2>(d2, bc<2>(m988), fmacV<2>(d1, bc<1>(m988), fmacV<4>(d0, bc<0>(m988), zero)));
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 Nrm = ldq(vu, static_cast<uint32_t>(base) + 556u + j);
+        const __m128 Col = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 dot = fmacV<2>(Lz, bc<2>(Nrm), fmacV<2>(Ly, bc<1>(Nrm), fmacV<4>(Lx, bc<0>(Nrm), zero)));
+        const __m128 diff = maxV(dot, zero);
+        const __m128 contrib = fmacV<2>(c3, bc<3>(diff), fmacV<2>(c2, bc<2>(diff), fmacV<2>(c1, bc<1>(diff), fmacV<4>(c0, bc<0>(diff), zero))));
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
+    }
+    (void)R;
+    return true;
+}
+
+// PERF-V1O: handler 0B38 (0B38..0C30, 32 pairs) -- triangle strip backface cull (sets bit 15 ADC flag on index words)
+static bool handler0B38(Regs &R, uint8_t *vu, uint16_t top)
+{
+    const uint16_t vi1_0 = static_cast<uint16_t>(ilw(vu, 1018, 2) + top);
+    const uint16_t n = ilw(vu, 1018, 3);
+    if (n == 0u || n > 1024u)
+        return false;
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 vf1y = bc<1>(ldq(vu, top)); // 0B58 LQ.y vf1, -1(vi13)
+    const __m128 vf11 = _mm_set1_ps(1.0f);
+    __m128 vf4 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    uint16_t vi6 = ilw(vu, vi1_0, 0);
+    const uint16_t vi5_0 = ilw(vu, static_cast<uint16_t>(vi1_0 + 1u), 0);
+    __m128 vf12 = ldq(vu, 636u + vi6);
+    vf12 = _mm_blend_ps(vf12, fmacV<0>(zero, bc<3>(vf12), zero), 0x4);
+    __m128 vf2 = ldq(vu, 636u + vi5_0);
+    vf2 = _mm_blend_ps(vf2, fmacV<0>(zero, bc<3>(vf2), zero), 0x4);
+    __m128 vf3 = norm4(vf12);
+    uint16_t vi7 = ilw(vu, static_cast<uint16_t>(vi1_0 + 2u), 0);
+    uint16_t vi8 = ilw(vu, vi1_0, 1);
+    uint32_t sx = 0u; // 0BB0 MUL.x vf0, vf0, vf0
+    logRange(vu, vi1_0, n);
+    for (uint32_t k = 0; k < n; ++k)
+    {
+        const __m128 vf5 = norm4(vf3);
+        vf3 = norm4(vf2);
+        const uint16_t vi9 = static_cast<uint16_t>((sx ? 0x80u : 0u) + 32767u);
+        vf2 = ldq(vu, 636u + vi7);
+        vi8 = static_cast<uint16_t>((vi8 + vi9) & 0x8000u);
+        vi6 = static_cast<uint16_t>(vi6 | vi8);
+        const __m128 p5 = _mm_shuffle_ps(vf5, vf5, _MM_SHUFFLE(3, 0, 2, 1));
+        const __m128 p3 = _mm_shuffle_ps(vf3, vf3, _MM_SHUFFLE(3, 1, 0, 2));
+        const __m128 q3 = _mm_shuffle_ps(vf3, vf3, _MM_SHUFFLE(3, 0, 2, 1));
+        const __m128 q5 = _mm_shuffle_ps(vf5, vf5, _MM_SHUFFLE(3, 1, 0, 2));
+        const __m128 cross = fmacV<3>(q3, q5, fmacV<4>(p5, p3, zero));
+        const __m128 vf5c = _mm_blend_ps(vf5, cross, 0x7);
+        vf2 = _mm_blend_ps(vf2, fmacV<0>(zero, bc<3>(vf2), zero), 0x4);
+        const uint32_t qd = static_cast<uint16_t>(vi1_0 + k) & 0x3FFu;
+        stqiRaw(vu, qd, _mm_insert_epi32(ldqi(vu, qd), static_cast<int>(vi6), 0));
+        vi6 = ilw(vu, static_cast<uint16_t>(vi1_0 + k + 1u), 0);
+        const __m128 vf4x = fmacV<2>(vf11, bc<2>(vf4), fmacV<0>(vf4, bc<1>(vf4), zero));
+        const __m128 mul0 = fmacV<4>(vf4x, vf1y, zero);
+        sx = static_cast<uint32_t>(_mm_movemask_ps(mul0) & 1);
+        vi7 = ilw(vu, static_cast<uint16_t>(vi1_0 + k + 3u), 0);
+        vf4 = fmacV<4>(vf5c, vf2, zero);
+        vi8 = ilw(vu, static_cast<uint16_t>(vi1_0 + k + 1u), 1);
+    }
+    (void)R;
+    return true;
+}
+
+// PERF-V1O: handler 1910 (1910..1A40, 39 pairs) -- position transform by 978..981 * 0..3(vi2), reads live-in vf9
+static bool handler1910(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t vi2)
+{
+    (void)R;
+    (void)vu;
+    (void)vi13;
+    (void)vi2;
+    // 1930/1950/19B0/19D0 read live-in vf9 (loaded at 1908 in 1900's delay slot, not by 1910); vu1FuncExec has no access to entry vf9.
+    return false;
+}
+
+// PERF-V1O: handler 1CD8 (1CD8..1E38, 45 pairs) -- projective UV transform (writes .xyz to 796+base+j, preserves .w)
+static bool handler1CD8(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t vi2)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 236u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 796u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    const __m128 T0 = ldq(vu, vi2), T1 = ldq(vu, static_cast<uint32_t>(vi2) + 1u);
+    const __m128 T2 = ldq(vu, static_cast<uint32_t>(vi2) + 2u), T3 = ldq(vu, static_cast<uint32_t>(vi2) + 3u);
+    const auto mulMat = [&](__m128 B) {
+        return fmacV<2>(T3, bc<3>(B), fmacV<2>(T2, bc<2>(B), fmacV<2>(T1, bc<1>(B), fmacV<4>(T0, bc<0>(B), zero))));
+    };
+    const __m128 M0 = mulMat(ldq(vu, 978)), M1 = mulMat(ldq(vu, 979));
+    const __m128 M2 = mulMat(ldq(vu, 980)), M3 = mulMat(ldq(vu, 981));
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + 476u + j);
+        const __m128 V = fmacV<2>(M3, one, fmacV<2>(M2, bc<2>(P), fmacV<2>(M1, bc<1>(P), fmacV<4>(M0, bc<0>(P), zero))));
+        const __m128 oldUV = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 acc = _mm_blend_ps(fmacV<4>(oldUV, bc<2>(V), zero), zero, 0x4); // ADDA.z 0 + MULAz.xy
+        const __m128 res = fmacV<2>(V, bc<2>(oldUV), acc);
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, _mm_blend_ps(oldUV, res, 0x7));
+    }
+    (void)R;
+    return true;
+}
+
+// PERF-V1O: handler 32A0 (32A0..3450, 44 pairs) -- silhouette shadow-volume extrusion (updates .xyz at 476+base+j, preserves .w)
+static bool handler32A0(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 236u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 476u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    const __m128 cmd0 = ldq(vu, vi13);
+    vi13 = static_cast<uint16_t>(vi13 + 1u);
+    const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v985 = ldq(vu, 985);
+    const __m128 L = fmacV<2>(v985, one, fmacV<2>(m991, bc<2>(cmd0), fmacV<2>(m990, bc<1>(cmd0), fmacV<4>(m989, bc<0>(cmd0), zero))));
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 Nrm = ldq(vu, static_cast<uint32_t>(base) + 556u + j);
+        const __m128 dVec = fmacV<1>(L, P, zero);
+        const __m128 d2Vec = fmacV<4>(dVec, dVec, zero);
+        const __m128 d2 = fmacV<2>(one, bc<2>(d2Vec), fmacV<2>(one, bc<1>(d2Vec), fmacV<4>(one, bc<0>(d2Vec), zero)));
+        const __m128 qVec = _mm_set1_ps(rsqrtQ(1.0f, _mm_cvtss_f32(d2)));
+        const __m128 dir = fmacV<4>(dVec, qVec, zero);
+        const __m128 prod = fmacV<4>(Nrm, dVec, zero);
+        const __m128 dot = fmacV<0>(fmacV<0>(prod, bc<1>(prod), zero), bc<2>(prod), zero);
+        const uint32_t dotBits = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_castps_si128(dot)));
+        const uint32_t vi2_f = ((dotBits & 0x80000000u) ? 0x80u : 0u) | (((dotBits & 0x7FFFFFFFu) == 0u) ? 0x08u : 0u);
+        const __m128 scale = fmacV<4>(_mm_set1_ps(static_cast<float>(vi2_f) * 0.0625f), bc<3>(cmd0), zero);
+        const __m128 acc = fmacV<0>(P, zero, zero);
+        const __m128 res = fmacV<2>(dir, scale, acc);
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, _mm_blend_ps(P, res, 0x7));
+    }
+    (void)R;
+    return true;
+}
+
 static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool oneShot, bool vxA)
 {
     static const bool funcNewOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_NEW"); return e && e[0] == '1'; }(); // PERF-V1M
@@ -1812,6 +1978,41 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             if (!funcNewOn || !handler1A68(R, vu, vi13))
             {
                 s_fbPc = 0x1A68u;
+                return false;
+            }
+            break;
+        case 0x0198u: // PERF-V1O
+            if (!funcNewOn || !handler0198(R, vu, vi13))
+            {
+                s_fbPc = 0x0198u;
+                return false;
+            }
+            break;
+        case 0x0B38u: // PERF-V1O
+            if (!funcNewOn || !handler0B38(R, vu, R.vi[12]))
+            {
+                s_fbPc = 0x0B38u;
+                return false;
+            }
+            break;
+        case 0x1910u: // PERF-V1O
+            if (!funcNewOn || !handler1910(R, vu, vi13, vi2))
+            {
+                s_fbPc = 0x1910u;
+                return false;
+            }
+            break;
+        case 0x1CD8u: // PERF-V1O
+            if (!funcNewOn || !handler1CD8(R, vu, vi13, vi2))
+            {
+                s_fbPc = 0x1CD8u;
+                return false;
+            }
+            break;
+        case 0x32A0u: // PERF-V1O
+            if (!funcNewOn || !handler32A0(R, vu, vi13))
+            {
+                s_fbPc = 0x32A0u;
                 return false;
             }
             break;

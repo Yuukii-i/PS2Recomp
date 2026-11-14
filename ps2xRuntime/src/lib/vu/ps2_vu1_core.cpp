@@ -4134,15 +4134,29 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                             wr32(top, 0u, (pc >> 3) & 0x7FFu);
                             wr32(1011u, 0u, base);
                             wr32(1011u, 3u, nVert);
+                            const uint16_t matBase = static_cast<uint16_t>((top >= 80u && top < 160u) ? 200u : 80u); // PERF-V1O: 1CD8/1910 0(vi2)..3(vi2)
+                            if (pc == 0x1CD8u || pc == 0x1910u)
+                                wr32(top, 1u, matBase);
+                            const uint16_t stripBase = (top >= 200u && top < 470u) ? 10u : 200u; // PERF-V1O: 0B38 index strip
+                            if (pc == 0x0B38u)
+                            {
+                                wr32(1018u, 2u, static_cast<uint16_t>(stripBase - top));
+                                wr32(1018u, 3u, nVert);
+                            }
 
                             if ((ti % 5u) != 0u) // 80% randomized floats; 20% raw corpus floats
                             {
-                                const uint32_t cmdWords = (pc == 0x02E0u) ? 7u : (pc == 0x1720u) ? 3u : (pc == 0x0840u || pc == 0x0628u || pc == 0x1A68u) ? 2u : 4u; // PERF-V1N
+                                const uint32_t cmdWords = (pc == 0x02E0u || pc == 0x0198u) ? 7u : (pc == 0x1720u) ? 3u : (pc == 0x0840u || pc == 0x0628u || pc == 0x1A68u) ? 2u : (pc == 0x32A0u) ? 1u : (pc == 0x0B38u || pc == 0x1CD8u || pc == 0x1910u) ? 0u : 4u; // PERF-V1O
                                 for (uint32_t cw = 1u; cw <= cmdWords; ++cw)
                                     fuzzQword(rng, fuzzMem.data(), top + cw);
-                                static const uint32_t kConsts[] = {982u, 983u, 984u, 985u, 986u, 987u, 988u, 989u, 990u, 991u, 1010u, 1015u, 1017u}; // PERF-V1N
+                                static const uint32_t kConsts[] = {978u, 979u, 980u, 981u, 982u, 983u, 984u, 985u, 986u, 987u, 988u, 989u, 990u, 991u, 1010u, 1015u, 1017u}; // PERF-V1O
                                 for (uint32_t cq : kConsts)
                                     fuzzQword(rng, fuzzMem.data(), cq);
+                                if (pc == 0x1CD8u || pc == 0x1910u)
+                                {
+                                    for (uint32_t mw = 0u; mw < 4u; ++mw)
+                                        fuzzQword(rng, fuzzMem.data(), matBase + mw);
+                                }
                                 for (uint32_t j = 0; j < static_cast<uint32_t>(nVert) + 3u; ++j)
                                     fuzzQword(rng, fuzzMem.data(), 476u + base + j);
                                 for (uint32_t j = 0; j < static_cast<uint32_t>(nVert) + 4u; ++j) // PERF-V1N: 02E0 reads N[0..n+3]
@@ -4150,8 +4164,20 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                                 for (uint32_t j = 0; j < nVert; ++j)
                                 {
                                     fuzzQword(rng, fuzzMem.data(), 716u + base + j);
-                                    if (pc == 0x1A68u) // PERF-V1N: 1A68 writes .xyz to 796+base+j, preserves .w
+                                    if (pc == 0x1A68u || pc == 0x1CD8u) // PERF-V1O: 1A68/1CD8 write .xyz to 796+base+j, preserve .w
                                         fuzzQword(rng, fuzzMem.data(), 796u + base + j);
+                                }
+                                if (pc == 0x0B38u) // PERF-V1O: 0B38 winding sign (top.y), index strip, 636+idx vertices
+                                {
+                                    fuzzQword(rng, fuzzMem.data(), top);
+                                    wr32(top, 0u, (pc >> 3) & 0x7FFu);
+                                    for (uint32_t k = 0u; k < static_cast<uint32_t>(nVert) + 3u; ++k)
+                                    {
+                                        wr32(stripBase + k, 0u, static_cast<uint32_t>(rngNext(rng) % 80u));
+                                        wr32(stripBase + k, 1u, static_cast<uint32_t>(rngNext(rng) & 0xFFFFu));
+                                    }
+                                    for (uint32_t j = 0u; j < 80u; ++j)
+                                        fuzzQword(rng, fuzzMem.data(), 636u + j);
                                 }
                                 if (pc == 0x0CC0u && (ti & 1u) == 0u)
                                 {
