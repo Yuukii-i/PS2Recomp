@@ -588,6 +588,7 @@ extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg) // PROBE-FT2
     e.tsc.store(__rdtsc(), std::memory_order_release);
     if (type == 0) ps2_ft2_ev(14, probe_getNewestDistinctFn()); // PROBE-FT2: EEFN sampled at every VBLANK
 }
+extern bool ps2xVwOn(); extern void ps2xVwJob(uint64_t idle, uint64_t outside, uint64_t proc); // PROBE-VW (ps2_vif1_interpreter.cpp)
 static void vif1Worker()
 {
     t_onVif1Worker = true;
@@ -607,14 +608,18 @@ static void vif1Worker()
     if (const char *pe = std::getenv("PS2X_PROF_VU1WORKER"); pe && pe[0] == '1')
         probe_ae::recordMainGuestThread();
     Vif1AsyncState &st = vifAsync();
+    const bool vwOn = ps2xVwOn(); // PROBE-VW
     for (;;)
     {
+        uint64_t vwIdle = 0, vwW1 = 0; // PROBE-VW
         Vif1Job job;
         {
             std::unique_lock<std::mutex> lock(st.m);
             const uint64_t idT0 = __rdtsc(); // PROBE-KF: worker idle = waiting for the EE to enqueue the next job
             st.cvWork.wait(lock, [&] { return !st.q.empty(); });
-            g_waitTicks[6].fetch_add(__rdtsc() - idT0, std::memory_order_relaxed);
+            vwIdle = __rdtsc() - idT0; // PROBE-VW
+            vwW1 = idT0 + vwIdle; // PROBE-VW
+            g_waitTicks[6].fetch_add(vwIdle, std::memory_order_relaxed);
             job = std::move(st.q.front());
             st.q.pop_front();
             st.queuedBytes -= job.data.size();
@@ -626,7 +631,9 @@ static void vif1Worker()
         const uint64_t wkT0 = __rdtsc(); // PROBE-KF
         if (g_ps2Ft2On) ps2_ft2_ev(2, ft2Seq); // PROBE-FT2: JOB_START
         ps2_gs_async_batch(true); // PERF-GB
+        const uint64_t vwP0 = vwOn ? __rdtsc() : 0ull; // PROBE-VW
         s_vif1Process(job.data.data(), static_cast<uint32_t>(job.data.size()));
+        const uint64_t vwP1 = vwOn ? __rdtsc() : 0ull; // PROBE-VW
         if (g_ps2Ft2On) ps2_ft2_ev(3, ft2Seq++); // PROBE-FT2: JOB_PARSE_END
         ps2_gs_async_batch(false); // PERF-GB: hand the job's GIF packets to the GS queue under one lock
         g_waitTicks[4].fetch_add(__rdtsc() - wkT0, std::memory_order_relaxed);
@@ -659,6 +666,7 @@ static void vif1Worker()
             else if (st.lagWaiters != 0u)
                 st.cvIdle.notify_all();
         }
+        if (vwOn) ps2xVwJob(vwIdle, (vwP0 - vwW1) + (__rdtsc() - vwP1), vwP1 - vwP0); // PROBE-VW
     }
 }
 static void vif1EnqueueJob(std::vector<uint8_t> &&data)

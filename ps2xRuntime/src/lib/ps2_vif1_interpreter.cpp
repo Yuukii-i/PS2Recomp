@@ -30,6 +30,128 @@ extern void ps2xSafeLog(const char *fmt, ...);
 extern bool ps2xVxOn(); extern void ps2xVxMarkThread(); extern void ps2xVxIdle(uint64_t); extern void ps2xVxEv(uint32_t, uint64_t); // PROBE-VX
 extern void ps2xVu1Path1Batch(bool); extern void ps2xVu1FlushPath1(); // PERF-V1I
 
+// PROBE-VW: Vif1Worker (VIF1 parser thread) time split (PS2X_VW=1). Plain counters: only the Vif1Worker thread writes them.
+namespace vw // PROBE-VW
+{
+inline bool on() // PROBE-VW
+{
+    static const bool v = []() { const char *e = std::getenv("PS2X_VW"); return e && e[0] == '1'; }();
+    return v;
+}
+enum { kCDirect = 32, kCMscal, kCMpg, kCState, kCNop, kCMark, kCOther, kCN }; // PROBE-VW (0..31 = unpack idx|masked<<4)
+struct St // PROBE-VW
+{
+    uint64_t t[kCN] = {}, n[kCN] = {}, qw[kCN] = {};
+    uint64_t blkRing = 0, blkDrain = 0, outside = 0, idle = 0, proc = 0, jobs = 0;
+    uint64_t tsc0 = 0;
+    std::chrono::steady_clock::time_point t0{};
+};
+static St g; // PROBE-VW
+inline uint32_t cls(uint8_t op) // PROBE-VW
+{
+    if ((op & 0x60) == 0x60)
+        return (op & 0x0Fu) | ((op & 0x10u) ? 16u : 0u);
+    switch (op)
+    {
+    case 0x50: case 0x51: return kCDirect;
+    case 0x14: case 0x15: case 0x17: return kCMscal;
+    case 0x4A: return kCMpg;
+    case 0x01: case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x10: case 0x11: case 0x13: case 0x20: case 0x30: case 0x31: return kCState;
+    case 0x00: return kCNop;
+    case 0x07: return kCMark;
+    default: return kCOther;
+    }
+}
+static const char *const kUN[16] = {"S-32", "S-16", "S-8", "S?", "V2-32", "V2-16", "V2-8", "V2?", "V3-32", "V3-16", "V3-8", "V3?", "V4-32", "V4-16", "V4-8", "V4-5"}; // PROBE-VW
+struct Iter // PROBE-VW: one VIF code, timed from decode to the end of its loop iteration (blocked time carved out)
+{
+    uint64_t t = 0, blk0 = 0;
+    uint8_t op = 0;
+    uint8_t num = 0;
+    uint16_t imm = 0;
+    Iter(bool en, uint8_t o, uint8_t nm, uint16_t im) : op(o), num(nm), imm(im)
+    {
+        if (en)
+        {
+            blk0 = g.blkRing + g.blkDrain;
+            t = __rdtsc();
+        }
+    }
+    ~Iter()
+    {
+        if (!t)
+            return;
+        uint64_t d = __rdtsc() - t;
+        const uint64_t b = g.blkRing + g.blkDrain - blk0;
+        d = d > b ? d - b : 0;
+        const uint32_t c = cls(op);
+        g.t[c] += d;
+        ++g.n[c];
+        if (c < 32u)
+            g.qw[c] += num ? num : 256u;
+        else if (c == kCDirect)
+            g.qw[c] += imm ? imm : 65536u;
+    }
+};
+} // namespace vw
+inline void vwBlk(bool drain, uint64_t t0) { if (drain) vw::g.blkDrain += __rdtsc() - t0; else vw::g.blkRing += __rdtsc() - t0; } // PROBE-VW
+// PROBE-VW: called by vif1Worker (ps2_memory.cpp) once per job; prints every ~5 s
+bool ps2xVwOn() { return vw::on(); } // PROBE-VW
+void ps2xVwJob(uint64_t idle, uint64_t outside, uint64_t proc) // PROBE-VW
+{
+    using namespace vw;
+    St &s = g;
+    s.idle += idle;
+    s.outside += outside;
+    s.proc += proc;
+    ++s.jobs;
+    const auto now = std::chrono::steady_clock::now();
+    if (s.tsc0 == 0u)
+    {
+        s.t0 = now;
+        s.tsc0 = __rdtsc();
+        return;
+    }
+    const double sec = std::chrono::duration<double>(now - s.t0).count();
+    if (sec < 5.0)
+        return;
+    const uint64_t tn = __rdtsc();
+    const double ms = 1000.0 / (static_cast<double>(tn - s.tsc0) / sec); // ms per tick
+    const double fr = s.jobs ? static_cast<double>(s.jobs) : 1.0;
+    const double k = ms / fr;
+    uint64_t un = 0, unQw = 0;
+    uint32_t ord[32];
+    for (uint32_t i = 0; i < 32; ++i)
+    {
+        ord[i] = i;
+        un += s.t[i];
+        unQw += s.qw[i];
+    }
+    std::sort(ord, ord + 32, [&](uint32_t a, uint32_t b) { return s.t[a] > s.t[b]; });
+    char ub[400];
+    int n = 0;
+    ub[0] = 0;
+    for (int i = 0; i < 5 && n < 340; ++i)
+    {
+        const uint32_t c = ord[i];
+        if (!s.t[c])
+            break;
+        n += std::snprintf(ub + n, sizeof(ub) - n, " %s%s %.2f(%.0f,%.0fqw)", kUN[c & 15u], (c & 16u) ? "m" : "", s.t[c] * k, s.n[c] / fr, s.qw[c] / fr);
+    }
+    const uint64_t blk = s.blkRing + s.blkDrain;
+    const uint64_t busy = s.proc > blk ? s.proc - blk : 0;
+    const uint64_t classified = un + s.t[kCDirect] + s.t[kCMscal];
+    const uint64_t other = busy > classified ? busy - classified : 0;
+    ::ps2xSafeLog("[vw] frames=%llu ms/frame: busy=%.2f | unpack=%.2f (%.0f qw/f;%s) direct=%.2f(%.0f,%.0fqw) mscal=%.2f(%.0f) mpg=%.2f(%.0f) state=%.2f(%.0f) nop=%.2f mark=%.2f other=%.2f | blocked: ringfull=%.2f drain=%.2f | outside=%.2f idle=%.2f\n",
+                  (unsigned long long)s.jobs, busy * k, un * k, unQw / fr, ub, s.t[kCDirect] * k, s.n[kCDirect] / fr, s.qw[kCDirect] / fr,
+                  s.t[kCMscal] * k, s.n[kCMscal] / fr, s.t[kCMpg] * k, s.n[kCMpg] / fr, s.t[kCState] * k, s.n[kCState] / fr, s.t[kCNop] * k, s.t[kCMark] * k,
+                  other * k, s.blkRing * k, s.blkDrain * k, s.outside * k, s.idle * k);
+    std::fflush(stderr);
+    s = St{};
+    s.t0 = now;
+    s.tsc0 = tn;
+}
+
 // =========================================================================
 // Task DZ: VIF1 UNPACK ring buffer & VIF1 register dump
 // =========================================================================
@@ -1757,6 +1879,7 @@ namespace
         const uint32_t tail = vpEventTail.load(std::memory_order_seq_cst);
         if (vpEventLag(tail, dual) >= kVpEventCap)
         {
+            const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
             for (int spin = 0; spin < vpSpinLimit(); ++spin)
             {
                 if (vpEventLag(tail, dual) < kVpEventCap)
@@ -1772,6 +1895,7 @@ namespace
                 });
                 vpProducerWaiting.store(false, std::memory_order_seq_cst);
             }
+            if (vwT) vwBlk(false, vwT); // PROBE-VW
         }
         vpEventRing[tail & (kVpEventCap - 1)] = ev;
         vpEventTail.store(tail + 1, std::memory_order_seq_cst);
@@ -1920,6 +2044,7 @@ namespace
 
         const uint64_t dwT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
         {
+        const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
         std::unique_lock<std::mutex> lock(vpFlushMutex);
         vpFlushCv.wait(lock, [seq, dual]() {
             const bool idle0 = static_cast<int32_t>(vpIdleSeq.load(std::memory_order_acquire) - seq) >= 0;
@@ -1928,6 +2053,7 @@ namespace
             const bool idle1 = static_cast<int32_t>(vpIdleSeq1.load(std::memory_order_acquire) - seq) >= 0;
             return idle0 && idle1;
         });
+        if (vwT) vwBlk(true, vwT); // PROBE-VW
         }
         if (dual)
         {
@@ -2016,6 +2142,8 @@ namespace
         if (tail - s_headCache >= kVpRecCap)
         {
             vpFlushPendingWrites(); // PERF-V1H: publish pending writes before waiting on consumer to prevent deadlock
+            const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
+            struct VwG { uint64_t t; ~VwG() { if (t) vwBlk(false, t); } } vwG{vwT}; // PROBE-VW
             for (int spin = 0; spin < vpSpinLimit(); ++spin)
             {
                 if (vpRecLag(tail, dual) < kVpRecCap)
@@ -2355,6 +2483,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 #endif
 
     uint32_t pos = 0;
+    const bool vwOn = vpOn && vw::on(); // PROBE-VW
 
     while (pos + 4 <= sizeBytes)
     {
@@ -2371,6 +2500,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         uint16_t imm = cmd & 0xFFFF;
         uint8_t num = (cmd >> 16) & 0xFF;
         const bool irq = (cmd & 0x80000000u) != 0u;
+        vw::Iter vwIter(vwOn, opcode, num, imm); // PROBE-VW
 
         if (m_vu1Data && isVu3dProbeEnabled())
         {
