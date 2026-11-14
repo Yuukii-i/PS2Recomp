@@ -981,6 +981,12 @@ namespace
     static std::mutex vpRecProducerMutex;
     static std::condition_variable vpRecProducerCv;
 
+    // PERF-V1H: coalesced pending VP_WRITES run (parser thread only)
+    static constexpr uint32_t kVpWriteCoalesceCap = 4096u;
+    static uint32_t s_vpPendingFirst = 0u;
+    static uint32_t s_vpPendingCount = 0u;
+    static inline void vpFlushPendingWrites();
+
     alignas(16) static uint8_t s_vpScratch[PS2_VU1_DATA_SIZE];
     static uint8_t *s_vpVu1Data = nullptr;
 
@@ -1743,6 +1749,8 @@ namespace
 
     static void vpPushEvent(const VpEvent &ev)
     {
+        if (ev.kind != VP_WRITES) // PERF-V1H
+            vpFlushPendingWrites();
         const bool dual = vpDualOn();
         const uint32_t tail = vpEventTail.load(std::memory_order_seq_cst);
         if (vpEventLag(tail, dual) >= kVpEventCap)
@@ -1775,6 +1783,49 @@ namespace
             std::lock_guard<std::mutex> lock(vpConsumer1Mutex);
             vpConsumer1Cv.notify_one();
         }
+    }
+
+    // PERF-V1H: flush coalesced VP_WRITES run before any other event, wait/drain, cap, or job end
+    static inline void vpFlushPendingWrites()
+    {
+        if (s_vpPendingCount == 0u)
+            return;
+        VpEvent ev{};
+        ev.kind = VP_WRITES;
+        ev.a = s_vpPendingFirst;
+        ev.b = s_vpPendingCount;
+        s_vpPendingCount = 0u;
+        vpPushEvent(ev);
+    }
+
+    // PERF-V1H: coalesce contiguous UNPACK record runs into one VP_WRITES event (disabled in dual/verify mode)
+    static inline void vpQueueWrites(uint32_t firstRecIndex, uint32_t recCount)
+    {
+        if (recCount == 0u)
+            return;
+        if (vpDualOn())
+        {
+            VpEvent ev{};
+            ev.kind = VP_WRITES;
+            ev.a = firstRecIndex;
+            ev.b = recCount;
+            vpPushEvent(ev);
+            return;
+        }
+        if (s_vpPendingCount != 0u &&
+            s_vpPendingFirst + s_vpPendingCount == firstRecIndex &&
+            s_vpPendingCount + recCount <= kVpWriteCoalesceCap)
+        {
+            s_vpPendingCount += recCount;
+            if (s_vpPendingCount >= kVpWriteCoalesceCap)
+                vpFlushPendingWrites();
+            return;
+        }
+        vpFlushPendingWrites();
+        s_vpPendingFirst = firstRecIndex;
+        s_vpPendingCount = recCount;
+        if (s_vpPendingCount >= kVpWriteCoalesceCap)
+            vpFlushPendingWrites();
     }
 
     static VpEvent vpPopEvent1()
@@ -1853,6 +1904,7 @@ namespace
     static std::atomic<uint64_t> s_vpStWhy[5]; // PROBE-MG: drains by site (end/mskpath3/mpg/directimage/syncunpack)
     static void vpDrain(int why)
     {
+        vpFlushPendingWrites(); // PERF-V1H
         if (vpStatOn()) s_vpStWhy[why % 5].fetch_add(1, std::memory_order_relaxed);
         vpEnsureThreadStarted();
         const bool dual = vpDualOn();
@@ -1961,6 +2013,7 @@ namespace
         }
         if (tail - s_headCache >= kVpRecCap)
         {
+            vpFlushPendingWrites(); // PERF-V1H: publish pending writes before waiting on consumer to prevent deadlock
             for (int spin = 0; spin < vpSpinLimit(); ++spin)
             {
                 if (vpRecLag(tail, dual) < kVpRecCap)
@@ -2052,23 +2105,53 @@ namespace
             case VP_WRITES:
                 if (s_vpVu1Data)
                 {
-                    for (uint32_t i = 0u; i < ev.b; ++i)
+                    if (dualOn) // PERF-V1H: s_tlVifWrites is only read by vpRunMscal in dual/verify mode
                     {
-                        const VpRec &rec = vpRecRing[(ev.a + i) & (kVpRecCap - 1)];
-                        if (rec.qw < 1024u)
-                            s_tlVifWrites.set(rec.qw);
-                        uint8_t *dst = s_vpVu1Data + (static_cast<size_t>(rec.qw) * 16u);
-                        if (rec.mask == 0x0Fu)
+                        for (uint32_t i = 0u; i < ev.b; ++i)
                         {
-                            std::memcpy(dst, rec.lanes, 16);
-                        }
-                        else
-                        {
-                            uint32_t *dst32 = reinterpret_cast<uint32_t *>(dst);
-                            for (uint32_t f = 0u; f < 4u; ++f)
+                            const VpRec &rec = vpRecRing[(ev.a + i) & (kVpRecCap - 1)];
+                            if (rec.qw < 1024u)
+                                s_tlVifWrites.set(rec.qw);
+                            uint8_t *dst = s_vpVu1Data + (static_cast<size_t>(rec.qw) * 16u);
+                            if (rec.mask == 0x0Fu)
                             {
-                                if (rec.mask & (1u << f))
-                                    dst32[f] = rec.lanes[f];
+                                std::memcpy(dst, rec.lanes, 16);
+                            }
+                            else
+                            {
+                                uint32_t *dst32 = reinterpret_cast<uint32_t *>(dst);
+                                for (uint32_t f = 0u; f < 4u; ++f)
+                                {
+                                    if (rec.mask & (1u << f))
+                                        dst32[f] = rec.lanes[f];
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // PERF-V1H: split into mask==0xF fast path (16-byte copy) and masked path, no s_tlVifWrites overhead
+                        uint32_t i = 0u;
+                        while (i < ev.b)
+                        {
+                            for (; i < ev.b; ++i)
+                            {
+                                const VpRec &rec = vpRecRing[(ev.a + i) & (kVpRecCap - 1)];
+                                if (rec.mask != 0x0Fu)
+                                    break;
+                                std::memcpy(s_vpVu1Data + (static_cast<size_t>(rec.qw) * 16u), rec.lanes, 16);
+                            }
+                            for (; i < ev.b; ++i)
+                            {
+                                const VpRec &rec = vpRecRing[(ev.a + i) & (kVpRecCap - 1)];
+                                if (rec.mask == 0x0Fu)
+                                    break;
+                                uint32_t *dst32 = reinterpret_cast<uint32_t *>(s_vpVu1Data + (static_cast<size_t>(rec.qw) * 16u));
+                                const uint8_t m = rec.mask;
+                                if (m & 1u) dst32[0] = rec.lanes[0];
+                                if (m & 2u) dst32[1] = rec.lanes[1];
+                                if (m & 4u) dst32[2] = rec.lanes[2];
+                                if (m & 8u) dst32[3] = rec.lanes[3];
                             }
                         }
                     }
@@ -2081,8 +2164,11 @@ namespace
                 }
                 break;
             case VP_FLUSH:
-                s_tlVifWrites.reset();
-                s_tlVifAfterPrev.reset();
+                if (dualOn) // PERF-V1H
+                {
+                    s_tlVifWrites.reset();
+                    s_tlVifAfterPrev.reset();
+                }
                 ps2_gs_async_batch(false);
                 ps2_gs_async_batch(true);
                 vpIdleSeq.store(ev.a, std::memory_order_release);
@@ -2246,6 +2332,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         ~VpDrainGuard() {
             if (on)
             {
+                vpFlushPendingWrites(); // PERF-V1H
                 vpDrain(0);
                 s_vpKeep.clear(); // PERF-MG: exec is idle, queued image packets are consumed
             }
@@ -3168,11 +3255,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                 }
                             }
                             if (recCount > 0) {
-                                VpEvent ev{};
-                                ev.kind = VP_WRITES;
-                                ev.a = firstRecIndex;
-                                ev.b = recCount;
-                                vpPushEvent(ev);
+                                vpQueueWrites(firstRecIndex, recCount); // PERF-V1H
                             }
                         }
                         if (s_unpackCountsOn)
@@ -3468,11 +3551,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
                 if (vpAsync && recCount > 0)
                 {
-                    VpEvent ev{};
-                    ev.kind = VP_WRITES;
-                    ev.a = firstRecIndex;
-                    ev.b = recCount;
-                    vpPushEvent(ev);
+                    vpQueueWrites(firstRecIndex, recCount); // PERF-V1H
                 }
 
                 if (canFastPath && fastActive && verifyActive) {
