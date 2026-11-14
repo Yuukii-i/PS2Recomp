@@ -433,10 +433,25 @@ extern std::function<void()> g_vif1ApplyVpuStat;        // ps2_runtime.cpp: merg
 extern thread_local uint32_t g_vif1JobFbrst;            // ps2_runtime.cpp: FBRST for the job being run by the worker (~0u = none)
 namespace
 {
+    struct DmaChainWalkResult // PERF-GC
+    {
+        uint32_t tagAddr = 0u;
+        uint32_t asr0 = 0u;
+        uint32_t asr1 = 0u;
+        uint32_t chcr = 0u;
+    };
     struct Vif1Job
     {
         std::vector<uint8_t> data;
         uint32_t fbrst = 0u;
+        bool isSourceChain = false; // PERF-GC
+        uint32_t initialTadr = 0u;  // PERF-GC
+        uint32_t initialChcr = 0u;  // PERF-GC
+        uint32_t initialAsr0 = 0u;  // PERF-GC
+        uint32_t initialAsr1 = 0u;  // PERF-GC
+        uint32_t initialMadr = 0u;  // PERF-GC
+        uint32_t initialQwc = 0u;   // PERF-GC
+        uint64_t copySeq = 0u;      // PERF-GC
     };
     struct Vif1AsyncState
     {
@@ -449,6 +464,18 @@ namespace
         std::atomic<bool> pending{false}; // queue non-empty or worker busy
         uint64_t enqueuedJobs = 0, doneJobs = 0; // PERF-SL: job sequence numbers (guarded by m)
         uint32_t lagWaiters = 0;                 // PERF-SL: EE threads waiting in ps2_vif1_sync_lag
+        std::atomic<uint64_t> copyEnqueuedSeq{0}; // PERF-GC
+        std::atomic<uint64_t> copyDoneSeq{0};     // PERF-GC
+        std::mutex copyDoneMtx;                   // PERF-GC
+        std::condition_variable copyDoneCv;       // PERF-GC
+        uint32_t pubTadr = 0u;                    // PERF-GC
+        uint32_t pubMadr = 0u;                    // PERF-GC
+        uint32_t pubQwc = 0u;                     // PERF-GC
+        uint32_t pubChcr = 0u;                    // PERF-GC
+        uint32_t pubAsr0 = 0u;                    // PERF-GC
+        uint32_t pubAsr1 = 0u;                    // PERF-GC
+        std::atomic<bool> pubSyncPending{false};  // PERF-GC
+        std::atomic<bool> pubDStatPending{false}; // PERF-GC
     };
     Vif1AsyncState &vifAsync()
     {
@@ -458,6 +485,11 @@ namespace
     bool vif1AsyncEnabled()
     {
         static const bool on = []() { const char *e = std::getenv("PS2X_VIF1_ASYNC"); return e && e[0] == '1'; }();
+        return on;
+    }
+    bool dma1WorkerCopyEnabled() // PERF-GC
+    {
+        static const bool on = []() { const char *e = std::getenv("PS2X_DMA1_WORKER_COPY"); return !(e && e[0] == '0'); }();
         return on;
     }
     bool markNoFenceEnabled() // PERF-V1K
@@ -504,6 +536,59 @@ namespace
 }
 static std::function<void(const uint8_t *, uint32_t)> s_vif1Process; // bound by a PS2Memory member (private access)
 static std::function<void()> s_vif1DrainArbiter;
+static std::function<DmaChainWalkResult(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::vector<uint8_t> &)> s_vif1WalkChain; // PERF-GC
+static std::function<void(uint32_t)> s_vif1QueueDmacCause; // PERF-GC
+static thread_local bool t_vif1ScanOnly = false;   // PERF-GC tag-only pre-scan mode for s_vif1WalkChain
+static thread_local bool t_vif1ScanHitSpr = false; // PERF-GC set when scan sees a scratchpad tag/payload
+static void waitDma1CopyDone() // PERF-GC
+{
+    if (t_onVif1Worker)
+        return;
+    Vif1AsyncState &st = vifAsync();
+    const uint64_t want = st.copyEnqueuedSeq.load(std::memory_order_acquire);
+    if (st.copyDoneSeq.load(std::memory_order_acquire) >= want)
+        return;
+    for (int i = 0; i < 64; ++i)
+    {
+        if (st.copyDoneSeq.load(std::memory_order_acquire) >= want)
+            return;
+        _mm_pause();
+    }
+    std::unique_lock<std::mutex> lock(st.copyDoneMtx);
+    st.copyDoneCv.wait(lock, [&] { return st.copyDoneSeq.load(std::memory_order_acquire) >= want; });
+}
+static void syncDma1PublishedToIoRegs(std::unordered_map<uint32_t, uint32_t> &ioRegs) // PERF-GC
+{
+    if (t_onVif1Worker)
+        return;
+    Vif1AsyncState &st = vifAsync();
+    if (!st.pubSyncPending.load(std::memory_order_acquire) && !st.pubDStatPending.load(std::memory_order_acquire))
+        return;
+    std::lock_guard<std::mutex> lock(st.copyDoneMtx);
+    if (st.pubSyncPending.exchange(false, std::memory_order_acq_rel))
+    {
+        static constexpr uint32_t kVif1Base = 0x10009000u;
+        ioRegs[kVif1Base + 0x00u] = st.pubChcr;
+        ioRegs[kVif1Base + 0x10u] = st.pubMadr;
+        ioRegs[kVif1Base + 0x20u] = st.pubQwc;
+        ioRegs[kVif1Base + 0x30u] = st.pubTadr;
+        ioRegs[kVif1Base + 0x40u] = st.pubAsr0;
+        ioRegs[kVif1Base + 0x50u] = st.pubAsr1;
+    }
+    if (st.pubDStatPending.exchange(false, std::memory_order_acq_rel))
+    {
+        static constexpr uint32_t kDStat = 0x1000E010u;
+        uint32_t dstat = ioRegs.count(kDStat) ? ioRegs[kDStat] : 0u;
+        dstat |= (1u << 1u);
+        const uint32_t status = dstat & 0x3FFu;
+        const uint32_t mask = (dstat >> 16u) & 0x3FFu;
+        if ((status & mask) != 0u)
+            dstat |= (1u << 31u);
+        else
+            dstat &= ~(1u << 31u);
+        ioRegs[kDStat] = dstat;
+    }
+}
 extern "C" void ps2_gs_async_batch(bool on); // PERF-GB: gs/ps2_gif_arbiter.cpp
 extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 // PROBE-TL: job timeline (PS2X_TL=1). Ring indexed by job sequence (enqueue order == worker pop order).
@@ -538,7 +623,7 @@ static uint64_t g_firstTsc = 0;
 static std::chrono::steady_clock::time_point g_firstT;
 static bool g_haveFirst = false; // touched only by the VBLANK (EE scheduler) thread
 static const char *const kNames[] = {"VBLANK", "DMA1_KICK", "JOB_START", "JOB_PARSE_END", "EXEC_LAST", "JOB_DONE", "FENCE_IN", "FENCE_OUT",
-                                     "SYNCPATH_IN", "SYNCPATH_OUT", "GIF_SUBMIT_BLOCK_IN", "GIF_SUBMIT_BLOCK_OUT", "GS_FRAME_DONE", "PRESENT", "EEFN"}; // PROBE-FT2
+                                     "SYNCPATH_IN", "SYNCPATH_OUT", "GIF_SUBMIT_BLOCK_IN", "GIF_SUBMIT_BLOCK_OUT", "GS_FRAME_DONE", "PRESENT", "EEFN", "COPY_DONE"}; // PROBE-FT2 // PERF-GC
 static void dump()
 {
     if (g_dumped.exchange(true))
@@ -636,15 +721,55 @@ static void vif1Worker()
         const uint64_t tlStart = g_tlOn ? __rdtsc() : 0; // PROBE-TL
         const uint64_t wkT0 = __rdtsc(); // PROBE-KF
         if (g_ps2Ft2On) ps2_ft2_ev(2, ft2Seq); // PROBE-FT2: JOB_START
-        ps2_gs_async_batch(true); // PERF-GB
-        const uint64_t vwP0 = vwOn ? __rdtsc() : 0ull; // PROBE-VW
-        s_vif1Process(job.data.data(), static_cast<uint32_t>(job.data.size()));
-        const uint64_t vwP1 = vwOn ? __rdtsc() : 0ull; // PROBE-VW
-        if (g_ps2Ft2On) ps2_ft2_ev(3, ft2Seq++); // PROBE-FT2: JOB_PARSE_END
-        ps2_gs_async_batch(false); // PERF-GB: hand the job's GIF packets to the GS queue under one lock
-        g_waitTicks[4].fetch_add(__rdtsc() - wkT0, std::memory_order_relaxed);
-        if (s_vif1DrainArbiter)
-            s_vif1DrainArbiter();
+        std::vector<uint8_t> workBuf; // PERF-GC
+        if (job.isSourceChain) // PERF-GC
+        {
+            workBuf = takeVifBuf();
+            const DmaChainWalkResult res = s_vif1WalkChain(0x10009000u, job.initialChcr, job.initialTadr, job.initialAsr0, job.initialAsr1, workBuf);
+            {
+                std::lock_guard<std::mutex> cLock(st.copyDoneMtx);
+                st.pubTadr = res.tagAddr;
+                st.pubMadr = job.initialMadr;
+                st.pubQwc = workBuf.empty() ? job.initialQwc : 0u;
+                st.pubChcr = res.chcr & ~0x100u;
+                st.pubAsr0 = res.asr0;
+                st.pubAsr1 = res.asr1;
+                st.pubDStatPending.store(true, std::memory_order_release);
+                st.pubSyncPending.store(true, std::memory_order_release);
+            }
+            if (s_vif1QueueDmacCause)
+                s_vif1QueueDmacCause(1u);
+            {
+                std::lock_guard<std::mutex> cLock(st.copyDoneMtx);
+                st.copyDoneSeq.store(job.copySeq, std::memory_order_release);
+            }
+            st.copyDoneCv.notify_all();
+            if (g_ps2Ft2On) ps2_ft2_ev(15, job.copySeq); // PROBE-FT2: COPY_DONE
+        }
+        else
+        {
+            workBuf = std::move(job.data);
+        }
+        uint64_t vwP0 = 0ull, vwP1 = 0ull; // PROBE-VW
+        if (!workBuf.empty()) // PERF-GC
+        {
+            ps2_gs_async_batch(true); // PERF-GB
+            vwP0 = vwOn ? __rdtsc() : 0ull; // PROBE-VW
+            s_vif1Process(workBuf.data(), static_cast<uint32_t>(workBuf.size()));
+            vwP1 = vwOn ? __rdtsc() : 0ull; // PROBE-VW
+            if (g_ps2Ft2On) ps2_ft2_ev(3, ft2Seq++); // PROBE-FT2: JOB_PARSE_END
+            ps2_gs_async_batch(false); // PERF-GB: hand the job's GIF packets to the GS queue under one lock
+            g_waitTicks[4].fetch_add(__rdtsc() - wkT0, std::memory_order_relaxed);
+            if (s_vif1DrainArbiter)
+                s_vif1DrainArbiter();
+        }
+        else
+        {
+            vwP0 = vwOn ? __rdtsc() : 0ull; // PROBE-VW
+            vwP1 = vwP0;
+            if (g_ps2Ft2On) ps2_ft2_ev(3, ft2Seq++); // PROBE-FT2: JOB_PARSE_END
+            g_waitTicks[4].fetch_add(__rdtsc() - wkT0, std::memory_order_relaxed);
+        }
         g_vif1JobFbrst = ~0u;
         if (g_tlOn) // PROBE-TL
         {
@@ -658,7 +783,7 @@ static void vif1Worker()
             uint64_t mx = g_tlDurMax.load(std::memory_order_relaxed);
             while (dur > mx && !g_tlDurMax.compare_exchange_weak(mx, dur, std::memory_order_relaxed)) {}
         }
-        recycleVifBuf(std::move(job.data)); // PERF-VP
+        recycleVifBuf(std::move(workBuf)); // PERF-VP
         {
             std::lock_guard<std::mutex> lock(st.m);
             st.busy = false;
@@ -675,25 +800,14 @@ static void vif1Worker()
         if (vwOn) ps2xVwJob(vwIdle, (vwP0 - vwW1) + (__rdtsc() - vwP1), vwP1 - vwP0); // PROBE-VW
     }
 }
-static void vif1EnqueueJob(std::vector<uint8_t> &&data)
+static void vif1PushJobLocked(Vif1AsyncState &st, Vif1Job &&job) // PERF-GC
 {
-    if (data.empty())
-        return;
-    Vif1AsyncState &st = vifAsync();
-    const uint32_t fbrst = g_vif1FbrstProvider ? g_vif1FbrstProvider() : 0u;
-    std::unique_lock<std::mutex> lock(st.m);
-    const uint64_t eqT0 = __rdtsc(); // PROBE-KF
-    st.cvSpace.wait(lock, [&] { return st.q.empty() || st.queuedBytes + data.size() <= kVif1AsyncMaxBytes; });
-    g_waitTicks[1].fetch_add(__rdtsc() - eqT0, std::memory_order_relaxed);
     if (!st.started)
     {
         st.started = true;
         std::thread(vif1Worker).detach();
     }
-    Vif1Job job;
-    job.fbrst = fbrst;
-    st.queuedBytes += data.size();
-    job.data = std::move(data);
+    st.queuedBytes += job.data.size();
     st.q.push_back(std::move(job));
     if (g_tlOn) // PROBE-TL
     {
@@ -705,6 +819,41 @@ static void vif1EnqueueJob(std::vector<uint8_t> &&data)
     if (g_ps2Ft2On) ps2_ft2_ev(1, st.enqueuedJobs); // PROBE-FT2: DMA1_KICK
     st.pending.store(true, std::memory_order_release);
     st.cvWork.notify_one();
+}
+static void vif1EnqueueJob(std::vector<uint8_t> &&data)
+{
+    if (data.empty())
+        return;
+    Vif1AsyncState &st = vifAsync();
+    const uint32_t fbrst = g_vif1FbrstProvider ? g_vif1FbrstProvider() : 0u;
+    std::unique_lock<std::mutex> lock(st.m);
+    const uint64_t eqT0 = __rdtsc(); // PROBE-KF
+    st.cvSpace.wait(lock, [&] { return st.q.empty() || st.queuedBytes + data.size() <= kVif1AsyncMaxBytes; });
+    g_waitTicks[1].fetch_add(__rdtsc() - eqT0, std::memory_order_relaxed);
+    Vif1Job job;
+    job.fbrst = fbrst;
+    job.data = std::move(data);
+    vif1PushJobLocked(st, std::move(job));
+}
+static void vif1EnqueueSourceChainJob(uint32_t tadr, uint32_t chcr, uint32_t asr0, uint32_t asr1, uint32_t madr, uint32_t qwc) // PERF-GC
+{
+    Vif1AsyncState &st = vifAsync();
+    const uint32_t fbrst = g_vif1FbrstProvider ? g_vif1FbrstProvider() : 0u;
+    std::unique_lock<std::mutex> lock(st.m);
+    const uint64_t eqT0 = __rdtsc(); // PROBE-KF
+    st.cvSpace.wait(lock, [&] { return st.q.empty() || st.queuedBytes <= kVif1AsyncMaxBytes; });
+    g_waitTicks[1].fetch_add(__rdtsc() - eqT0, std::memory_order_relaxed);
+    Vif1Job job;
+    job.fbrst = fbrst;
+    job.isSourceChain = true;
+    job.initialTadr = tadr;
+    job.initialChcr = chcr;
+    job.initialAsr0 = asr0;
+    job.initialAsr1 = asr1;
+    job.initialMadr = madr;
+    job.initialQwc = qwc;
+    job.copySeq = st.copyEnqueuedSeq.fetch_add(1, std::memory_order_acq_rel) + 1u;
+    vif1PushJobLocked(st, std::move(job));
 }
 static void vif1EnqueueCopy(const uint8_t *p, uint32_t n)
 {
@@ -1700,6 +1849,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         return true;
     }
 
+    if (!t_onVif1Worker && ((address & 0xFFFFFF00u) == 0x10009000u || address == 0x1000E010u)) // PERF-GC
+    {
+        waitDma1CopyDone();
+        syncDma1PublishedToIoRegs(m_ioRegisters);
+    }
+
     if (address == 0x1000E010u)
     {
         const uint32_t current = m_ioRegisters.count(address) ? m_ioRegisters[address] : 0u;
@@ -1879,26 +2034,42 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 }
                 else if (mode == 1)
                 {
-                    uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
+                    if (!s_vif1Process) // PERF-GC
+                    {
+                        s_vif1DrainArbiter = [this]() { if (m_gifArbiter) m_gifArbiter->drain(); };
+                        s_vif1Process = [this](const uint8_t *d, uint32_t n) { processVIF1Data(d, n); };
+                    }
+                    if (!s_vif1QueueDmacCause) // PERF-GC
+                    {
+                        s_vif1QueueDmacCause = [this](uint32_t cause) { queueCompletedDmacCause(cause); };
+                    }
+                    if (!s_vif1WalkChain) // PERF-GC
+                    {
+                        s_vif1WalkChain = [this](uint32_t channelBase, uint32_t chcr, uint32_t tagAddr, uint32_t asr0, uint32_t asr1, std::vector<uint8_t> &chainBuf) -> DmaChainWalkResult
+                        {
                     const uint32_t initialTagAddr = tagAddr;
-                    if (channelBase == 0x10009000u) {
+                    const bool scanOnly = t_vif1ScanOnly; // PERF-GC
+                    if (channelBase == 0x10009000u && !scanOnly) {
 #if defined(PS2X_PROBE_AE) || 1
                         if (probe_ae::isEnabled()) {
                             probe_ae::onAwDma1KickStart(tagAddr, chcr);
                         }
 #endif
                     }
-                    uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
-                    uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
                     const int kMaxChainTags = 1 << 20;
-                    std::vector<uint8_t> chainBuf = takeVifBuf(); // PERF-VP
                     std::vector<probe_ae::AySpan> aySpans;
                     auto tChainStart = std::chrono::steady_clock::now();
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
+                        if (scanOnly) // PERF-GC
+                        {
+                            if (isScratchpad(srcAddr))
+                                t_vif1ScanHitSpr = true;
+                            return;
+                        }
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
                         if (channelBase == 0x10009000u) {
@@ -1967,6 +2138,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     {
                         const uint32_t currentTagAddr = tagAddr;
                         const bool tagInSPR = isScratchpad(tagAddr);
+                        if (scanOnly && tagInSPR) // PERF-GC
+                        {
+                            t_vif1ScanHitSpr = true;
+                            break;
+                        }
                         uint32_t physTag = 0;
                         try
                         {
@@ -2069,6 +2245,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
+                        if (scanOnly) // PERF-GC: tag-only scan, no copy / probes
+                        {
+                            if (hasPayload)
+                                appendData(dataAddr, tagQwc);
+                            if (t_vif1ScanHitSpr || endChain || (irq && tieEnabled))
+                                break;
+                            continue;
+                        }
+
                         if (transferTagData)
                             appendVifTagData(currentTagAddr);
 
@@ -2131,6 +2316,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                     }
 
+                    if (scanOnly) // PERF-GC
+                        return DmaChainWalkResult{tagAddr, asr0, asr1, chcr};
+
                     if (tagsProcessed >= kMaxChainTags)
                     {
                         static bool s_capHitReported = false;
@@ -2172,12 +2360,60 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (s_fkOn)
                             ps2_fk_setSpans(static_cast<uint32_t>(chainBuf.size()), aySpans);
                     }
-                    m_ioRegisters[channelBase + 0x30] = tagAddr;
-                    m_ioRegisters[channelBase + 0x40] = asr0;
-                    m_ioRegisters[channelBase + 0x50] = asr1;
-                    chcr = (chcr & ~(0x3u << 4)) | ((asp & 0x3u) << 4);
-                    chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
-                    m_ioRegisters[channelBase + 0x00] = chcr;
+                        chcr = (chcr & ~(0x3u << 4)) | ((asp & 0x3u) << 4);
+                        chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
+                        return DmaChainWalkResult{tagAddr, asr0, asr1, chcr};
+                        };
+                    }
+
+                    const uint32_t tagAddr = m_ioRegisters[channelBase + 0x30]; // PERF-GC
+                    const uint32_t asr0 = m_ioRegisters[channelBase + 0x40];    // PERF-GC
+                    const uint32_t asr1 = m_ioRegisters[channelBase + 0x50];    // PERF-GC
+                    const bool hasSprRef = isScratchpad(tagAddr) || isScratchpad(asr0) || isScratchpad(asr1); // PERF-GC
+                    if (channelBase == 0x10009000u && vif1AsyncEnabled() && dma1WorkerCopyEnabled()) // PERF-GC
+                    {
+                        static uint64_t s_gcWorker = 0, s_gcSprInit = 0, s_gcSprScan = 0;
+                        static auto s_gcLast = std::chrono::steady_clock::now();
+                        bool useWorker = !hasSprRef;
+                        if (hasSprRef)
+                            ++s_gcSprInit;
+                        else
+                        {
+                            t_vif1ScanOnly = true;
+                            t_vif1ScanHitSpr = false;
+                            std::vector<uint8_t> scanDummy;
+                            s_vif1WalkChain(channelBase, chcr, tagAddr, asr0, asr1, scanDummy);
+                            t_vif1ScanOnly = false;
+                            if (t_vif1ScanHitSpr)
+                            {
+                                useWorker = false;
+                                ++s_gcSprScan;
+                            }
+                            else
+                                ++s_gcWorker;
+                        }
+                        const auto gcNow = std::chrono::steady_clock::now();
+                        if (gcNow - s_gcLast >= std::chrono::seconds(5))
+                        {
+                            s_gcLast = gcNow;
+                            ps2xSafeLog("[gc] worker=%llu spr_init=%llu spr_scan=%llu\n",
+                                        (unsigned long long)s_gcWorker, (unsigned long long)s_gcSprInit, (unsigned long long)s_gcSprScan);
+                        }
+                        if (useWorker)
+                        {
+                            processPendingTransfers();
+                            g_gsFrameKicks.fetch_add(1, std::memory_order_release);
+                            vif1EnqueueSourceChainJob(tagAddr, chcr, asr0, asr1, madr, qwc);
+                            return true;
+                        }
+                    }
+
+                    std::vector<uint8_t> chainBuf = takeVifBuf(); // PERF-VP
+                    const DmaChainWalkResult res = s_vif1WalkChain(channelBase, chcr, tagAddr, asr0, asr1, chainBuf); // PERF-GC
+                    m_ioRegisters[channelBase + 0x30] = res.tagAddr;
+                    m_ioRegisters[channelBase + 0x40] = res.asr0;
+                    m_ioRegisters[channelBase + 0x50] = res.asr1;
+                    m_ioRegisters[channelBase + 0x00] = res.chcr;
 
                     if (!chainBuf.empty())
                     {
@@ -2697,6 +2933,9 @@ void PS2Memory::processPendingTransfers()
 
         m_ioRegisters[D_STAT] = dstat;
     };
+
+    if (hadGif || hadVif0 || hadVif1) // PERF-GC
+        syncDma1PublishedToIoRegs(m_ioRegisters);
 
     if (hadGif)
     {
@@ -3245,6 +3484,12 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
 
     if (address >= 0x10000000 && address < 0x10010000)
     {
+        if (!t_onVif1Worker && ((address & 0xFFFFFF00u) == 0x10009000u || address == 0x1000E010u)) // PERF-GC
+        {
+            waitDma1CopyDone();
+            syncDma1PublishedToIoRegs(m_ioRegisters);
+        }
+
         if (address >= 0x10008000 && address < 0x1000F000)
         {
             if ((address & 0xFF) == 0x00)
