@@ -460,6 +460,12 @@ namespace
         static const bool on = []() { const char *e = std::getenv("PS2X_VIF1_ASYNC"); return e && e[0] == '1'; }();
         return on;
     }
+    bool markNoFenceEnabled() // PERF-V1K
+    {
+        static const bool on = []() { const char *e = std::getenv("PS2X_MARK_NOFENCE"); return !(e && e[0] == '0'); }();
+        return on;
+    }
+    constexpr uint32_t kVif1StcClearMask = (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13); // PERF-V1K
     thread_local bool t_onVif1Worker = false;
     constexpr size_t kVif1AsyncMaxBytes = 16u * 1024u * 1024u;
 
@@ -743,6 +749,10 @@ extern "C" uint32_t probe_getNewestDistinctFn(); // PROBE-FS
 extern thread_local uint32_t g_currentExecutingFunction;
 struct FenceSite { uint32_t fn, cur; uintptr_t ra; uint64_t ticks, n; };
 static FenceSite s_fenceSites[24]; // PROBE-FS: EE thread only (the worker returns before the wait)
+std::atomic<uint32_t> g_vif1PublishedMark{0u};     // PERF-V1K
+std::atomic<uint32_t> g_vif1PublishedStatBits{0u}; // PERF-V1K
+std::atomic<bool> g_vif1PendingStc{false};         // PERF-V1K
+
 extern "C" void ps2_vif1_fence()
 {
     if (!vif1AsyncEnabled() || t_onVif1Worker)
@@ -1712,7 +1722,17 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (address >= 0x10003C00u && address < 0x10003E00u)
     {
+        if (address == 0x10003C10u && value == 0x8u && !t_onVif1Worker && markNoFenceEnabled()) // PERF-V1K: FBRST.STC only
+        {
+            m_vifWriteCount.fetch_add(1, std::memory_order_relaxed);
+            g_vif1PublishedStatBits.fetch_and(~kVif1StcClearMask, std::memory_order_acq_rel);
+            g_vif1PendingStc.store(true, std::memory_order_release);
+            return true;
+        }
+
         ps2_vif1_fence(); // PERF-HN
+        if (g_vif1PendingStc.exchange(false, std::memory_order_acq_rel)) // PERF-V1K
+            vif1_regs.stat &= ~kVif1StcClearMask;
         m_vifWriteCount.fetch_add(1, std::memory_order_relaxed);
 
         switch (address)
@@ -1722,6 +1742,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             {
                 const bool wasPath3Masked = m_path3Masked;
                 std::memset(&vif1_regs, 0, sizeof(vif1_regs));
+                g_vif1PublishedMark.store(0u, std::memory_order_release);     // PERF-V1K
+                g_vif1PublishedStatBits.store(0u, std::memory_order_release); // PERF-V1K
+                g_vif1PendingStc.store(false, std::memory_order_release);     // PERF-V1K
                 m_vif1PendingPath2ImageQwc = 0u;
                 m_vif1PendingPath2DirectHl = false;
                 m_path3Masked = false;
@@ -1730,13 +1753,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             }
             if (value & 0x8u) // STC
             {
-                vif1_regs.stat &= ~((1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13));
+                vif1_regs.stat &= ~kVif1StcClearMask;
+                g_vif1PublishedStatBits.fetch_and(~kVif1StcClearMask, std::memory_order_acq_rel); // PERF-V1K
             }
             break;
         case 0x10003C30u:
             vif1_regs.mark = value & 0xFFFFu;
             m_ioRegisters[0x10003C30u] = value & 0xFFFFu;
             vif1_regs.stat &= ~(1u << 6); // clear MRK flag on CPU write
+            g_vif1PublishedMark.store(value & 0xFFFFu, std::memory_order_release);      // PERF-V1K
+            g_vif1PublishedStatBits.fetch_and(~(1u << 6), std::memory_order_acq_rel);   // PERF-V1K
             break;
         case 0x10003C40u:
             vif1_regs.cycle = value & 0xFFFFu;
@@ -3204,11 +3230,15 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
     if (address == 0x10003C00u) // VIF1_STAT
     {
         ps2_vif1_fence(); // PERF-HN
+        if (g_vif1PendingStc.exchange(false, std::memory_order_acq_rel)) // PERF-V1K
+            vif1_regs.stat &= ~kVif1StcClearMask;
         return vif1_regs.stat;
     }
 
     if (address == 0x10003C30u) // VIF1_MARK
     {
+        if (!t_onVif1Worker && markNoFenceEnabled()) // PERF-V1K
+            return g_vif1PublishedMark.load(std::memory_order_acquire);
         ps2_vif1_fence(); // PERF-HN
         return vif1_regs.mark;
     }

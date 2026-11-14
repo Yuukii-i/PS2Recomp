@@ -33,10 +33,10 @@ extern void ps2xVu1Path1Batch(bool); extern void ps2xVu1FlushPath1(); // PERF-V1
 // PROBE-VW: Vif1Worker (VIF1 parser thread) time split (PS2X_VW=1). Plain counters: only the Vif1Worker thread writes them.
 namespace vw // PROBE-VW
 {
+static const bool g_on = []() { const char *e = std::getenv("PS2X_VW"); return e && e[0] == '1'; }(); // PERF-V1J
 inline bool on() // PROBE-VW
 {
-    static const bool v = []() { const char *e = std::getenv("PS2X_VW"); return e && e[0] == '1'; }();
-    return v;
+    return g_on;
 }
 enum { kCDirect = 32, kCMscal, kCMpg, kCState, kCNop, kCMark, kCOther, kCN }; // PROBE-VW (0..31 = unpack idx|masked<<4)
 struct St // PROBE-VW
@@ -438,6 +438,25 @@ extern "C" void ps2_vif1_dumpEhShapes() {
 
 
 extern void recordCompletedIntcCause(uint32_t cause);
+extern std::atomic<uint32_t> g_vif1PublishedMark;     // PERF-V1K
+extern std::atomic<uint32_t> g_vif1PublishedStatBits; // PERF-V1K
+extern std::atomic<bool> g_vif1PendingStc;         // PERF-V1K
+
+static inline void publishVif1MarkAndStat(uint32_t mark, uint32_t stat) // PERF-V1K
+{
+    constexpr uint32_t kPublishedStatMask = (1u << 6) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13);
+    g_vif1PublishedMark.store(mark & 0xFFFFu, std::memory_order_release);
+    g_vif1PublishedStatBits.store(stat & kPublishedStatMask, std::memory_order_release);
+}
+
+static inline bool traceVifEnabled() // PERF-V1K
+{
+    static const bool on = []() {
+        const char *env = std::getenv("PS2X_TRACE_VIF");
+        return env && (env[0] == '1' || env[0] == 't');
+    }();
+    return on;
+}
 
 namespace probe_ae {
     void onMovieKickMscalCount(uint32_t count);
@@ -898,6 +917,161 @@ namespace
         default: vifUnpackZx<VL, 3>(zx, vuData, src, count, destVec, cl, wl, bpv, dm, cv, pm); break;
         }
     }
+
+    // PERF-V1J: decode UNPACK directly into VpRec slots (no s_vpScratch round-trip, branch-free inner loop).
+    struct VpRecSlot {
+        uint16_t qw;
+        uint8_t mask;
+        uint8_t pad;
+        uint32_t lanes[4];
+    };
+
+    static inline void vifEmitRec(VpRecSlot *&out, uint32_t destVec, uint8_t mask, __m128i lanes)
+    {
+        const uint32_t hdr = (destVec & 0xFFFFu) | (static_cast<uint32_t>(mask) << 16);
+        std::memcpy(out, &hdr, 4);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(out->lanes), lanes);
+        out += (mask != 0u);
+    }
+
+    template <int VL, int VN, bool ZX, bool ALL_DECODED, bool WL1>
+    uint32_t vifUnpackToRecLoop(VpRecSlot *out, const uint8_t *src, uint32_t count, uint32_t destVec, uint32_t cl, uint32_t wl,
+                                uint32_t bpv, uint8_t unmaskedMask, const uint8_t *recMask, const __m128i *dm, const __m128i *cv)
+    {
+        VpRecSlot *const outStart = out;
+        uint32_t i = 0u;
+        const __m128i dm0 = ALL_DECODED ? _mm_setzero_si128() : dm[0];
+        const __m128i cv0 = ALL_DECODED ? _mm_setzero_si128() : cv[0];
+        const uint8_t rm0 = ALL_DECODED ? unmaskedMask : recMask[0];
+
+        if constexpr (WL1 && VL == 1 && VN == 1)
+        {
+            // Hot format V2-16 (4 bytes/vec): 4 vectors per 16-byte load
+            for (; i + 4u <= count; i += 4u, src += 16, destVec += 4u * cl)
+            {
+                const __m128i raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(src));
+                const __m128i lo = ZX ? _mm_cvtepu16_epi32(raw) : _mm_cvtepi16_epi32(raw);
+                const __m128i hi = ZX ? _mm_cvtepu16_epi32(_mm_srli_si128(raw, 8)) : _mm_cvtepi16_epi32(_mm_srli_si128(raw, 8));
+                __m128i d0 = lo;
+                __m128i d1 = _mm_srli_si128(lo, 8);
+                __m128i d2 = hi;
+                __m128i d3 = _mm_srli_si128(hi, 8);
+                if constexpr (!ALL_DECODED)
+                {
+                    d0 = _mm_or_si128(_mm_and_si128(d0, dm0), cv0);
+                    d1 = _mm_or_si128(_mm_and_si128(d1, dm0), cv0);
+                    d2 = _mm_or_si128(_mm_and_si128(d2, dm0), cv0);
+                    d3 = _mm_or_si128(_mm_and_si128(d3, dm0), cv0);
+                }
+                vifEmitRec(out, destVec, rm0, d0);
+                vifEmitRec(out, destVec + cl, rm0, d1);
+                vifEmitRec(out, destVec + 2u * cl, rm0, d2);
+                vifEmitRec(out, destVec + 3u * cl, rm0, d3);
+            }
+        }
+        else if constexpr (WL1 && VL == 0 && VN == 1)
+        {
+            // Hot format V2-32 (8 bytes/vec): 2 vectors per 16-byte load
+            for (; i + 2u <= count; i += 2u, src += 16, destVec += 2u * cl)
+            {
+                const __m128i raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(src));
+                __m128i d0 = raw;
+                __m128i d1 = _mm_srli_si128(raw, 8);
+                if constexpr (!ALL_DECODED)
+                {
+                    d0 = _mm_or_si128(_mm_and_si128(d0, dm0), cv0);
+                    d1 = _mm_or_si128(_mm_and_si128(d1, dm0), cv0);
+                }
+                vifEmitRec(out, destVec, rm0, d0);
+                vifEmitRec(out, destVec + cl, rm0, d1);
+            }
+        }
+
+        uint32_t cyclePos = 0u;
+        for (; i < count; ++i)
+        {
+            const __m128i dec = (VL == 0 && VN == 2 && i + 1u < count)
+                                    ? _mm_loadu_si128(reinterpret_cast<const __m128i *>(src))
+                                    : vifDecode<VL, VN, ZX>(src);
+            if constexpr (WL1)
+            {
+                const __m128i lanes = ALL_DECODED ? dec : _mm_or_si128(_mm_and_si128(dec, dm0), cv0);
+                vifEmitRec(out, destVec, rm0, lanes);
+                destVec += cl;
+            }
+            else
+            {
+                const uint32_t c = (cyclePos > 3u) ? 3u : cyclePos;
+                const uint8_t rm = ALL_DECODED ? unmaskedMask : recMask[c];
+                const __m128i lanes = ALL_DECODED ? dec : _mm_or_si128(_mm_and_si128(dec, dm[c]), cv[c]);
+                vifEmitRec(out, destVec, rm, lanes);
+                ++cyclePos;
+                ++destVec;
+                if (cyclePos == wl)
+                {
+                    cyclePos = 0u;
+                    destVec += (cl - wl);
+                }
+            }
+            src += bpv;
+        }
+        return static_cast<uint32_t>(out - outStart);
+    }
+
+    template <int VL, int VN, bool ZX>
+    uint32_t vifUnpackToRecMode(bool allDecoded, bool wl1, VpRecSlot *out, const uint8_t *src, uint32_t count, uint32_t destVec,
+                                uint32_t cl, uint32_t wl, uint32_t bpv, uint8_t unmaskedMask, const uint8_t *recMask,
+                                const __m128i *dm, const __m128i *cv)
+    {
+        if (allDecoded)
+        {
+            if (wl1)
+                return vifUnpackToRecLoop<VL, VN, ZX, true, true>(out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+            return vifUnpackToRecLoop<VL, VN, ZX, true, false>(out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        }
+        if (wl1)
+            return vifUnpackToRecLoop<VL, VN, ZX, false, true>(out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        return vifUnpackToRecLoop<VL, VN, ZX, false, false>(out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+    }
+
+    template <int VL, int VN>
+    uint32_t vifUnpackToRecZx(bool zx, bool allDecoded, bool wl1, VpRecSlot *out, const uint8_t *src, uint32_t count, uint32_t destVec,
+                              uint32_t cl, uint32_t wl, uint32_t bpv, uint8_t unmaskedMask, const uint8_t *recMask,
+                              const __m128i *dm, const __m128i *cv)
+    {
+        if constexpr (VL == 0)
+            return vifUnpackToRecMode<VL, VN, false>(allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        else if (zx)
+            return vifUnpackToRecMode<VL, VN, true>(allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        else
+            return vifUnpackToRecMode<VL, VN, false>(allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+    }
+
+    template <int VL>
+    uint32_t vifUnpackToRecVn(uint32_t vn, bool zx, bool allDecoded, bool wl1, VpRecSlot *out, const uint8_t *src, uint32_t count, uint32_t destVec,
+                              uint32_t cl, uint32_t wl, uint32_t bpv, uint8_t unmaskedMask, const uint8_t *recMask,
+                              const __m128i *dm, const __m128i *cv)
+    {
+        switch (vn)
+        {
+        case 0: return vifUnpackToRecZx<VL, 0>(zx, allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        case 1: return vifUnpackToRecZx<VL, 1>(zx, allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        case 2: return vifUnpackToRecZx<VL, 2>(zx, allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        default: return vifUnpackToRecZx<VL, 3>(zx, allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        }
+    }
+
+    static inline uint32_t vifUnpackToRec(uint32_t vl, uint32_t vn, bool zx, bool allDecoded, bool wl1, VpRecSlot *out, const uint8_t *src,
+                                          uint32_t count, uint32_t destVec, uint32_t cl, uint32_t wl, uint32_t bpv,
+                                          uint8_t unmaskedMask, const uint8_t *recMask, const __m128i *dm, const __m128i *cv)
+    {
+        switch (vl)
+        {
+        case 0: return vifUnpackToRecVn<0>(vn, zx, allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        case 1: return vifUnpackToRecVn<1>(vn, zx, allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        default: return vifUnpackToRecVn<2>(vn, zx, allDecoded, wl1, out, src, count, destVec, cl, wl, bpv, unmaskedMask, recMask, dm, cv);
+        }
+    }
 } // namespace
 
 void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
@@ -1085,6 +1259,16 @@ namespace
         uint8_t pad;
         uint32_t lanes[4];
     };
+    static_assert(sizeof(VpRec) == sizeof(VpRecSlot) && alignof(VpRec) == alignof(VpRecSlot), "VpRec layout mismatch"); // PERF-V1J
+
+    static const bool g_v1jCheckOn = []() { // PERF-V1J
+        const char *e = std::getenv("PS2X_V1J_CHECK");
+        return e && e[0] == '1';
+    }();
+    static uint64_t s_v1jUnpacks = 0; // PERF-V1J
+    static uint64_t s_v1jMismatches = 0; // PERF-V1J
+    static char s_v1jFirstMsg[256] = {}; // PERF-V1J
+    static std::chrono::steady_clock::time_point s_v1jLastPrint{}; // PERF-V1J
 
     static constexpr uint32_t kVpEventCap = 65536;
     static VpEvent vpEventRing[kVpEventCap];
@@ -1128,22 +1312,24 @@ extern "C" void ps2_vu1_set_kick_record(std::vector<uint32_t> *v);
 namespace
 {
 
+    static const bool g_vpVerifyOn = []() { // PERF-V1J
+        const char *e = std::getenv("PS2X_VU1_DUAL_VERIFY");
+        return e && e[0] == '1';
+    }();
+
     static inline bool vpVerifyOn()
     {
-        static const bool on = []() {
-            const char *e = std::getenv("PS2X_VU1_DUAL_VERIFY");
-            return e && e[0] == '1';
-        }();
-        return on;
+        return g_vpVerifyOn;
     }
+
+    static const bool g_vpDualOn = []() { // PERF-V1J
+        const char *e = std::getenv("PS2X_VU1_DUAL");
+        return (e && e[0] == '1') || g_vpVerifyOn;
+    }();
 
     static inline bool vpDualOn()
     {
-        static const bool on = []() {
-            const char *e = std::getenv("PS2X_VU1_DUAL");
-            return (e && e[0] == '1') || vpVerifyOn();
-        }();
-        return on;
+        return g_vpDualOn;
     }
 
     static std::atomic<uint32_t> vpEventHead1{0};
@@ -1343,10 +1529,10 @@ namespace
         });
     }
 
-    static int vpSpinLimit() // PERF-MG2: PS2X_VPIPE_SPIN = pause iterations before a ring wait sleeps (default 4000)
+    static const int g_vpSpinLimit = []() { const char *e = std::getenv("PS2X_VPIPE_SPIN"); return e ? static_cast<int>(std::strtol(e, nullptr, 10)) : 4000; }(); // PERF-V1J
+    static inline int vpSpinLimit() // PERF-MG2: PS2X_VPIPE_SPIN = pause iterations before a ring wait sleeps (default 4000)
     {
-        static const int n = []() { const char *e = std::getenv("PS2X_VPIPE_SPIN"); return e ? static_cast<int>(std::strtol(e, nullptr, 10)) : 4000; }();
-        return n;
+        return g_vpSpinLimit;
     }
 
     template <typename Pred>
@@ -1987,10 +2173,10 @@ namespace
 
     // PROBE-MG: pipeline stats (PS2X_VIF1_PIPE_STAT=1): exec busy/spin ticks, sleeps, drains, producer full-waits
     static std::atomic<uint64_t> s_vpStBusy{0}, s_vpStSpin{0}, s_vpStSleeps{0}, s_vpStDrains{0}, s_vpStDrainWait{0}, s_vpStFull{0}, s_vpStEv[8];
-    static bool vpStatOn()
+    static const bool g_vpStatOn = []() { const char *e = std::getenv("PS2X_VIF1_PIPE_STAT"); return e && e[0] == '1'; }(); // PERF-V1J
+    static inline bool vpStatOn()
     {
-        static const bool on = []() { const char *e = std::getenv("PS2X_VIF1_PIPE_STAT"); return e && e[0] == '1'; }();
-        return on;
+        return g_vpStatOn;
     }
     static VpEvent vpPopEvent()
     {
@@ -2127,19 +2313,55 @@ namespace
         }
     }
 
+    // PERF-V1J: shared producer-local head cache and bulk record reservation for vpRecRing
+    static uint32_t s_vpRecHeadCache = 0; // parser thread only
+
+    static inline uint32_t vpReserveRecs(uint32_t count, bool dual)
+    {
+        const uint32_t tail = vpRecTail.load(std::memory_order_relaxed);
+        if ((tail - s_vpRecHeadCache) + count > kVpRecCap)
+        {
+            const uint32_t lag = vpRecLag(tail, dual);
+            s_vpRecHeadCache = tail - lag;
+            if (lag + count > kVpRecCap)
+            {
+                vpFlushPendingWrites(); // PERF-V1H: publish pending writes before waiting on consumer to prevent deadlock
+                const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
+                struct VwG { uint64_t t; ~VwG() { if (t) vwBlk(false, t); } } vwG{vwT}; // PROBE-VW
+                for (int spin = 0; spin < vpSpinLimit(); ++spin)
+                {
+                    if (vpRecLag(tail, dual) + count <= kVpRecCap)
+                        break;
+                    _mm_pause();
+                }
+                if (vpRecLag(tail, dual) + count > kVpRecCap)
+                {
+                    if (vpStatOn()) s_vpStFull.fetch_add(1, std::memory_order_relaxed); // PROBE-MG
+                    std::unique_lock<std::mutex> lock(vpRecProducerMutex);
+                    vpRecProducerWaiting.store(true, std::memory_order_seq_cst);
+                    vpRecProducerCv.wait(lock, [&]() {
+                        return vpRecLag(tail, dual) + count <= kVpRecCap;
+                    });
+                    vpRecProducerWaiting.store(false, std::memory_order_seq_cst);
+                }
+                s_vpRecHeadCache = tail - vpRecLag(tail, dual);
+            }
+        }
+        return tail;
+    }
+
     static void vpPushRec(const VpRec &rec)
     {
         // PERF-MG2: the exec thread never reads vpRecTail (records are published by the VP_WRITES event's seq_cst store), so the tail is a
         // relaxed producer-local counter, and the consumer head is only re-read when the cached value says the ring is full.
         const bool dual = vpDualOn();
-        static uint32_t s_headCache = 0; // parser thread only
         const uint32_t tail = vpRecTail.load(std::memory_order_relaxed);
-        if (tail - s_headCache >= kVpRecCap)
+        if (tail - s_vpRecHeadCache >= kVpRecCap)
         {
             const uint32_t lag = vpRecLag(tail, dual);
-            s_headCache = tail - lag;
+            s_vpRecHeadCache = tail - lag;
         }
-        if (tail - s_headCache >= kVpRecCap)
+        if (tail - s_vpRecHeadCache >= kVpRecCap)
         {
             vpFlushPendingWrites(); // PERF-V1H: publish pending writes before waiting on consumer to prevent deadlock
             const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
@@ -2160,7 +2382,7 @@ namespace
                 });
                 vpRecProducerWaiting.store(false, std::memory_order_seq_cst);
             }
-            s_headCache = tail - vpRecLag(tail, dual);
+            s_vpRecHeadCache = tail - vpRecLag(tail, dual);
         }
         vpRecRing[tail & (kVpRecCap - 1)] = rec;
         vpRecTail.store(tail + 1, std::memory_order_relaxed);
@@ -2392,14 +2614,53 @@ namespace
             }
         }
     }
+
+    // PERF-V1J: hoisted out of per-UNPACK scope to eliminate function-local static init guards
+    static std::atomic<uint64_t> s_ciFastCount{0};
+    static std::atomic<uint64_t> s_ciGenericCount{0};
+    static std::atomic<uint64_t> s_ciMismCount{0};
+    static std::atomic<uint32_t> s_ciMismLogged{0};
+    static std::chrono::steady_clock::time_point s_ciLastSecLog{};
+
+    struct DbShapeKey {
+        uint8_t vn, vl, cl, wl, mask, mode, flg, usn, num;
+        uint16_t vuAddr;
+        bool operator<(const DbShapeKey &o) const {
+            return std::tie(vn, vl, cl, wl, mask, mode, flg, usn, num, vuAddr) <
+                   std::tie(o.vn, o.vl, o.cl, o.wl, o.mask, o.mode, o.flg, o.usn, o.num, o.vuAddr);
+        }
+    };
+    struct DbShapeStats {
+        uint64_t vecs = 0;
+        uint32_t calls = 0;
+    };
+    static std::map<DbShapeKey, DbShapeStats> s_dbGenericShapes;
+    static std::atomic<uint64_t> s_dbFastVecs{0};
+    static std::atomic<uint64_t> s_dbGenericVecs{0};
+
+    static void ciLogMsg(const char *msg) {
+        static FILE *s_f = nullptr;
+        static bool s_tried = false;
+        if (!s_tried) {
+            s_tried = true;
+            s_f = std::fopen("logs/probe_bh_sink.txt", "a");
+        }
+        if (s_f) {
+            std::fputs(msg, s_f);
+            std::fflush(s_f);
+        }
+        std::printf("%s", msg);
+    }
 } // namespace
 
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
         return;
+    // PERF-V1J: hoist per-call probe/config checks out of the per-VIF-code loop
+    const bool statOn = vifStatOn();
     VsTimer vsFn(&g_vs.fn);
-    if (vifStatOn())
+    if (statOn)
     {
         ++g_vs.calls;
         vifStatReport();
@@ -2412,7 +2673,23 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     probe_ae::onBhVif1Start();
     probe_ae::onBxKick();
     // PERF-CU: the MSCAL scan, the clock reads and the movie bookkeeping only feed probes / the movie HLE
-    const bool cuProbe = probe_ae::isEnabled();
+    const bool aeProbe = probe_ae::isEnabled();
+    const bool cuProbe = aeProbe;
+    const bool vu3dProbe = isVu3dProbeEnabled();
+    const bool dcProbe = probe_ae::isDcProbeEnabled();
+    const bool movieHleFrame = probe_ae::isMovieHleFrameMode();
+    const bool movieHleVerify = probe_ae::isMovieHleVerify();
+    const bool movieKickNative = s_skipUnpackEnabled && probe_ae::isMovieKickNative();
+    const bool unpackQuiet = s_unpackQuiet;
+    const bool unpackCountsOn = s_unpackCountsOn;
+    const bool fastActive = isUnpackFastEnabled();
+    const bool verifyActive = isUnpackVerifyEnabled();
+    const bool uvOn = s_uvOn;
+    const bool dualOn = vpDualOn();
+    const bool v1jCheck = g_v1jCheckOn;
+    static const bool g_v1jNewPath = []() { const char *e = std::getenv("PS2X_V1J_PATH"); return !(e && e[0] == '0'); }(); // PERF-V1J
+    const bool v1jNew = g_v1jNewPath; // PERF-V1J
+
     static const bool s_cuMovie = probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify();
     // PERF-XS: the scan was 2.7% of the VU1 worker outside movies (HLE is on by default): its result is only read by the movie HLE, which acts only while a movie is active
     uint32_t mscal0x48Count = (cuProbe || (s_cuMovie && probe_ae::isMovieActivePublic())) ? count0x48MscalsInKick(data, sizeBytes) : 0u;
@@ -2427,17 +2704,16 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     }();
     const bool vpOn = s_vif1Pipe &&
                       ps2_vif1_on_worker() &&
-                      !probe_ae::isEnabled() &&
-                      !isVu3dProbeEnabled() &&
-                      !probe_ae::isDcProbeEnabled() &&
+                      !aeProbe &&
+                      !vu3dProbe &&
+                      !dcProbe &&
                       !(s_cuMovie && probe_ae::isMovieActivePublic()) &&
-                      !isUnpackVerifyEnabled();
+                      !verifyActive;
 
     if (vpOn)
     {
         s_vpVu1Data = m_vu1Data;
         vpEnsureThreadStarted();
-        const bool dualOn = vpDualOn();
         if (dualOn)
         {
             vpEnsureThread1Started();
@@ -2476,7 +2752,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     } vpGuard{vpOn};
 
 #if defined(PS2X_PROBE_AE) || 1
-    if (probe_ae::isEnabled()) {
+    if (aeProbe) {
         probe_ae::onVif1DmaStart(sizeBytes);
         probe_ae::onAwVifKickStart();
     }
@@ -2487,8 +2763,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
     while (pos + 4 <= sizeBytes)
     {
+        if (g_vif1PendingStc.load(std::memory_order_relaxed) &&
+            g_vif1PendingStc.exchange(false, std::memory_order_acq_rel)) // PERF-V1K
+        {
+            vif1_regs.stat &= ~((1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13));
+        }
 
-        if (vifStatOn())
+        if (statOn)
             ++g_vs.codes;
         uint32_t pos_cmd = pos;
         uint32_t cmd;
@@ -2502,7 +2783,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         const bool irq = (cmd & 0x80000000u) != 0u;
         vw::Iter vwIter(vwOn, opcode, num, imm); // PROBE-VW
 
-        if (m_vu1Data && isVu3dProbeEnabled())
+        if (m_vu1Data && vu3dProbe)
         {
             // Task FI2: who changes VU1 data qw 476..479 (raw DMA-chain-looking words)? attribute to previous VIFcode
             static uint32_t s_fiShadow[16];
@@ -2544,17 +2825,18 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             uint8_t num;
             uint16_t imm;
             bool irq;
+            bool aeProbe; // PERF-V1J
             uint32_t pos_payload;
             const uint32_t &pos;
             ~VcScopeGuard() {
 #if defined(PS2X_PROBE_AE) || 1
-                if (probe_ae::isEnabled()) {
+                if (aeProbe) {
                     uint32_t consumed = (pos > pos_payload) ? (pos - pos_payload) : 0u;
                     probe_ae::onAwVifCode(pos_cmd, cmd, num, imm, irq, consumed);
                 }
 #endif
             }
-        } vcGuard{pos_cmd, cmd, num, imm, irq, pos_payload, pos};
+        } vcGuard{pos_cmd, cmd, num, imm, irq, aeProbe, pos_payload, pos};
 
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
@@ -2563,19 +2845,15 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         {
             vif1_regs.stat |= (1u << 10); // VIS
             vif1_regs.stat |= (1u << 11); // INT
+            publishVif1MarkAndStat(vif1_regs.mark, vif1_regs.stat); // PERF-V1K
             recordCompletedIntcCause(5u);
 #if defined(PS2X_PROBE_AE) || 1
-            if (probe_ae::isEnabled()) {
+            if (aeProbe) {
                 probe_ae::onVif1Irq();
                 probe_ae::onCause5Raise();
             }
 #endif
-            static int s_traceVif = -1;
-            if (s_traceVif == -1) {
-                const char *env = std::getenv("PS2X_TRACE_VIF");
-                s_traceVif = (env && (env[0] == '1' || env[0] == 't')) ? 1 : 0;
-            }
-            if (s_traceVif) {
+            if (traceVifEnabled()) { // PERF-V1K
                 std::fprintf(stderr, "[vif1:irq] cmd=0x%08x opcode=0x%02x imm=0x%04x\n", cmd, opcode, imm);
                 std::fflush(stderr);
             }
@@ -2597,14 +2875,14 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.ofst = imm & 0x3FFu;
             vif1_regs.tops = vif1_regs.base & 0x3FFu;
             vif1_regs.stat &= ~(1u << 7); // clear DBF
-            recordEpEvent("OFFSET val=0x%X tops=%u", imm & 0x3FFu, vif1_regs.tops & 0x3FFu);
+            if (vu3dProbe) recordEpEvent("OFFSET val=0x%X tops=%u", imm & 0x3FFu, vif1_regs.tops & 0x3FFu);
             continue;
         }
         else if (opcode == VIF_BASE)
         {
             // BASE only updates the base register. TOPS changes on OFFSET/MSCAL.
             vif1_regs.base = imm & 0x3FFu;
-            recordEpEvent("BASE val=0x%X", imm & 0x3FFu);
+            if (vu3dProbe) recordEpEvent("BASE val=0x%X", imm & 0x3FFu);
             continue;
         }
         else if (opcode == VIF_ITOP)
@@ -2616,7 +2894,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         else if (opcode == VIF_STMOD)
         {
             vif1_regs.mode = imm & 3u;
-            recordEpEvent("STMOD mode=%u", vif1_regs.mode);
+            if (vu3dProbe) recordEpEvent("STMOD mode=%u", vif1_regs.mode);
             continue;
         }
         else if (opcode == VIF_MSKPATH3)
@@ -2626,7 +2904,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             // VIF command docs: MSKPATH3 uses IMMEDIATE bit 15.
             const bool wasMasked = m_path3Masked;
             m_path3Masked = (imm & 0x8000u) != 0u;
-            recordEpEvent("MSKPATH3 mask=%u", (imm & 0x8000u) ? 1u : 0u);
+            if (vu3dProbe) recordEpEvent("MSKPATH3 mask=%u", (imm & 0x8000u) ? 1u : 0u);
             if (wasMasked && !m_path3Masked)
                 flushMaskedPath3Packets();
             if (vpOn)
@@ -2642,9 +2920,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.stat |= (1u << 6); // MRK
             if (!ps2_vif1_on_worker()) // PERF-HN: m_ioRegisters is an unsynchronised map; the MARK read uses vif1_regs.mark
                 m_ioRegisters[0x10003C30u] = imm;
+            publishVif1MarkAndStat(vif1_regs.mark, vif1_regs.stat); // PERF-V1K
             recordCompletedIntcCause(5u);
 #if defined(PS2X_PROBE_AE) || 1
-            if (probe_ae::isEnabled()) {
+            if (aeProbe) {
                 probe_ae::onVif1Mark(imm);
                 probe_ae::onCause5Raise();
                 if (imm == 0x2000u) {
@@ -2652,13 +2931,15 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 }
             }
 #endif
-            std::fprintf(stderr, "[vif1:mark] imm=0x%04x irq=%d\n", imm, irq ? 1 : 0);
-            std::fflush(stderr);
+            if (traceVifEnabled()) { // PERF-V1K
+                std::fprintf(stderr, "[vif1:mark] imm=0x%04x irq=%d\n", imm, irq ? 1 : 0);
+                std::fflush(stderr);
+            }
             continue;
         }
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
         {
-            recordEpEvent("FLUSH op=0x%02X", opcode);
+            if (vu3dProbe) recordEpEvent("FLUSH op=0x%02X", opcode);
             continue;
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
@@ -2677,12 +2958,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            recordEpEvent("%s pc=0x%03X top=%u itop=%u tops=%u",
-                          (opcode == VIF_MSCAL ? "MSCAL" : "MSCALF"),
-                          startPC, runTop, runItop, vif1_regs.tops & 0x3FFu);
+            if (vu3dProbe)
+                recordEpEvent("%s pc=0x%03X top=%u itop=%u tops=%u",
+                              (opcode == VIF_MSCAL ? "MSCAL" : "MSCALF"),
+                              startPC, runTop, runItop, vif1_regs.tops & 0x3FFu);
 
 #if defined(PS2X_PROBE_AE) || 1
-            if (probe_ae::isEnabled()) {
+            if (aeProbe) {
                 probe_ae::onBbVif1Mscal(startPC, runItop, runTop, runTop,
                                         vif1_regs.base & 0x3FFu, vif1_regs.ofst & 0x3FFu,
                                         vif1_regs.cycle & 0xFFu, (vif1_regs.cycle >> 8) & 0xFFu,
@@ -2690,7 +2972,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
 #endif
 
-            const bool skipMscal = probe_ae::isMovieSkipUnpackEnabled() && probe_ae::isMovieKickNative();
+            const bool skipMscal = movieKickNative;
             if (vpOn)
             {
                 if (!skipMscal && m_vu1MscalCallback)
@@ -2700,7 +2982,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     ev.a = startPC;
                     ev.b = runTop;
                     ev.c = runItop;
-                    if (vpDualOn())
+                    if (dualOn)
                     {
                         ev.n = s_vpMscalK++;
                         ev.t = s_vpTurnT++;
@@ -2712,12 +2994,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 {
                     VsTimer vsVu(&g_vs.vu);
-                    if (vifStatOn())
+                    if (statOn)
                         ++g_vs.mscal;
                     m_vu1MscalCallback(startPC, runTop, runItop);
                 }
 #if defined(PS2X_PROBE_AE) || 1
-                if (probe_ae::isEnabled()) {
+                if (aeProbe) {
                     auto tVu1End = std::chrono::steady_clock::now();
                     probe_ae::onAyTimeVu1(std::chrono::duration_cast<std::chrono::microseconds>(tVu1End - tVu1Start).count());
                 }
@@ -2739,15 +3021,16 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            recordEpEvent("MSCNT top=%u itop=%u tops=%u",
-                          runTop, runItop, vif1_regs.tops & 0x3FFu);
+            if (vu3dProbe)
+                recordEpEvent("MSCNT top=%u itop=%u tops=%u",
+                              runTop, runItop, vif1_regs.tops & 0x3FFu);
 
             probe_ae::flushMovieBatch(nullptr, this);
             if (vpOn)
             {
                 if (m_vu1MscntCallback)
                 {
-                    if (vpDualOn())
+                    if (dualOn)
                         vpDrain(0);
                     VpEvent ev{};
                     ev.kind = VP_MSCNT;
@@ -2760,12 +3043,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 const auto tVu1Start = cuProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 {
                     VsTimer vsVu(&g_vs.vu);
-                    if (vifStatOn())
+                    if (statOn)
                         ++g_vs.mscal;
                     m_vu1MscntCallback(runTop, runItop);
                 }
 #if defined(PS2X_PROBE_AE) || 1
-                if (probe_ae::isEnabled()) {
+                if (aeProbe) {
                     auto tVu1End = std::chrono::steady_clock::now();
                     probe_ae::onAyTimeVu1(std::chrono::duration_cast<std::chrono::microseconds>(tVu1End - tVu1Start).count());
                 }
@@ -2780,7 +3063,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             uint32_t maskValue = 0;
             std::memcpy(&maskValue, data + pos, sizeof(maskValue));
             vif1_regs.mask = maskValue;
-            recordEpEvent("STMASK mask=0x%08X", maskValue);
+            if (vu3dProbe) recordEpEvent("STMASK mask=0x%08X", maskValue);
             pos += 4;
             continue;
         }
@@ -2789,8 +3072,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (pos + 16 > sizeBytes)
                 break;
             std::memcpy(vif1_regs.row, data + pos, 16);
-            recordEpEvent("STROW row=%08X %08X %08X %08X",
-                          vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3]);
+            if (vu3dProbe)
+                recordEpEvent("STROW row=%08X %08X %08X %08X",
+                              vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3]);
             pos += 16;
             continue;
         }
@@ -2799,8 +3083,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (pos + 16 > sizeBytes)
                 break;
             std::memcpy(vif1_regs.col, data + pos, 16);
-            recordEpEvent("STCOL col=%08X %08X %08X %08X",
-                          vif1_regs.col[0], vif1_regs.col[1], vif1_regs.col[2], vif1_regs.col[3]);
+            if (vu3dProbe)
+                recordEpEvent("STCOL col=%08X %08X %08X %08X",
+                              vif1_regs.col[0], vif1_regs.col[1], vif1_regs.col[2], vif1_regs.col[3]);
             pos += 16;
             continue;
         }
@@ -2811,7 +3096,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             uint32_t destAddr = (uint32_t)imm * 8u;
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
-            recordEpEvent("MPG addr=0x%X num=%u", destAddr, instructionCount);
+            if (vu3dProbe) recordEpEvent("MPG addr=0x%X num=%u", destAddr, instructionCount);
             if (m_vu1Code && destAddr < PS2_VU1_CODE_SIZE && mpgBytes > 0)
             {
                 uint32_t copyBytes = mpgBytes;
@@ -2841,7 +3126,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (qwCount == 0)
                 qwCount = 65536;
             const uint32_t availableQw = (sizeBytes - pos) / 16u;
-            if (vifStatOn())
+            if (statOn)
             {
                 ++g_vs.directs;
                 g_vs.directBytes += static_cast<uint64_t>(std::min(qwCount, availableQw)) * 16u;
@@ -2872,7 +3157,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         ev.hl = directHl ? 1 : 0;
                         ev.p = s_vpKeep.back().data();
                         ev.n = static_cast<uint32_t>(s_vpKeep.back().size());
-                        if (vpDualOn())
+                        if (dualOn)
                             ev.t = s_vpTurnT++;
                         vpPushEvent(ev);
                     }
@@ -2893,7 +3178,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         ev.hl = directHl ? 1 : 0;
                         ev.p = data + pos;
                         ev.n = qwCount * 16;
-                        if (vpDualOn())
+                        if (dualOn)
                             ev.t = s_vpTurnT++;
                         vpPushEvent(ev);
                     }
@@ -2923,7 +3208,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         {
             VsTimer vsUnpack(&g_vs.unpack);
             VsShapeTimer vsShape;
-            if (vifStatOn())
+            if (statOn)
                 ++g_vs.unpacks;
             uint8_t vn = (opcode >> 2) & 0x3;
             uint8_t vl = opcode & 0x3;
@@ -2965,7 +3250,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 wl = 1u;
             }
 
-            vsShape.set((opcode & 0x7Fu) | (cl << 7) | (wl << 15) | ((maskEnable ? 1u : 0u) << 23) | ((vif1_regs.mode & 3u) << 24) | (((imm >> 14) & 1u) << 26) | (((imm >> 15) & 1u) << 27), writeVectorCount);
+            if (statOn)
+                vsShape.set((opcode & 0x7Fu) | (cl << 7) | (wl << 15) | ((maskEnable ? 1u : 0u) << 23) | ((vif1_regs.mode & 3u) << 24) | (((imm >> 14) & 1u) << 26) | (((imm >> 15) & 1u) << 27), writeVectorCount);
             uint32_t sourceVectorCount = writeVectorCount;
             if (cl < wl)
             {
@@ -2990,39 +3276,40 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                       vn <= 3u && vl <= 2u &&
                                       ((vif1_regs.mode & 3u) == 0u) && rangeOk);
             const bool destWrap = (cl >= wl) ? (vuAddr + totalSpan >= 0x400u) : (vuAddr + writeVectorCount > 0x400u);
-            const bool skipUnpack = s_skipUnpackEnabled && probe_ae::isMovieKickNative();
+            const bool skipUnpack = movieKickNative;
             const bool syncUnpack = skipUnpack || (vl == 3u && vn != 3u) || destWrap;
             if (vpOn && syncUnpack)
                 vpDrain(4);
 
-            const uint8_t *srcBaseAt974 = (pos <= sizeBytes) ? (data + pos) : nullptr;
             uint32_t srcRdram = 0xFFFFFFFFu;
-            if (m_rdram && srcBaseAt974 && srcBaseAt974 >= m_rdram && srcBaseAt974 < m_rdram + PS2_RAM_SIZE)
+            if (vu3dProbe) // PERF-V1J: only compute srcRdram/w0 when VU3D probe is active
             {
-                srcRdram = static_cast<uint32_t>(srcBaseAt974 - m_rdram);
+                const uint8_t *srcBaseAt974 = (pos <= sizeBytes) ? (data + pos) : nullptr;
+                if (m_rdram && srcBaseAt974 && srcBaseAt974 >= m_rdram && srcBaseAt974 < m_rdram + PS2_RAM_SIZE)
+                {
+                    srcRdram = static_cast<uint32_t>(srcBaseAt974 - m_rdram);
+                }
+                uint32_t w0[4]{0, 0, 0, 0};
+                uint32_t avail = (pos <= sizeBytes) ? (sizeBytes - pos) : 0u;
+                if (avail >= 16u && srcBaseAt974)
+                {
+                    std::memcpy(w0, srcBaseAt974, 16);
+                }
+                else if (avail > 0u && srcBaseAt974)
+                {
+                    std::memcpy(w0, srcBaseAt974, avail);
+                }
+                recordEpEvent("UNPACK cmd=0x%02X dest=%u num=%u cl=%u wl=%u flg=%u tops=%u src=0x%08X w0=%08X %08X %08X %08X mask=%08X mode=%u row=%08X %08X %08X %08X col=%08X %08X %08X %08X",
+                              opcode, vuAddr, writeVectorCount,
+                              cl, wl, (imm & 0x8000u) ? 1u : 0u, vif1_regs.tops & 0x3FFu,
+                              srcRdram, w0[0], w0[1], w0[2], w0[3],
+                              vif1_regs.mask, vif1_regs.mode & 3u,
+                              vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3],
+                              vif1_regs.col[0], vif1_regs.col[1], vif1_regs.col[2], vif1_regs.col[3]);
             }
-            uint32_t w0[4]{0, 0, 0, 0};
-            uint32_t avail = (pos <= sizeBytes) ? (sizeBytes - pos) : 0u;
-            if (avail >= 16u && srcBaseAt974)
-            {
-                std::memcpy(w0, srcBaseAt974, 16);
-            }
-            else if (avail > 0u && srcBaseAt974)
-            {
-                std::memcpy(w0, srcBaseAt974, avail);
-            }
-
-            if (isVu3dProbeEnabled()) // PERF-UV: 24 variadic arguments were pushed for every UNPACK even when the probe is off
-            recordEpEvent("UNPACK cmd=0x%02X dest=%u num=%u cl=%u wl=%u flg=%u tops=%u src=0x%08X w0=%08X %08X %08X %08X mask=%08X mode=%u row=%08X %08X %08X %08X col=%08X %08X %08X %08X",
-                          opcode, vuAddr, writeVectorCount,
-                          cl, wl, (imm & 0x8000u) ? 1u : 0u, vif1_regs.tops & 0x3FFu,
-                          srcRdram, w0[0], w0[1], w0[2], w0[3],
-                          vif1_regs.mask, vif1_regs.mode & 3u,
-                          vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3],
-                          vif1_regs.col[0], vif1_regs.col[1], vif1_regs.col[2], vif1_regs.col[3]);
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
-            if (!s_unpackQuiet && cl == 0u && probe_ae::isDcProbeEnabled())
+            if (!unpackQuiet && cl == 0u && dcProbe)
             {
                 static std::atomic<uint32_t> s_dc16Cl0Count{0};
                 uint32_t cnt = s_dc16Cl0Count.fetch_add(1, std::memory_order_relaxed);
@@ -3034,13 +3321,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 }
             }
 #if defined(PS2X_PROBE_AE) || 1
-            if (!s_unpackQuiet && (probe_ae::isEnabled() || probe_ae::isMovieHleFrameMode() || probe_ae::isMovieHleVerify())) {
+            if (!unpackQuiet && (aeProbe || movieHleFrame || movieHleVerify)) {
                 uint8_t fmt = opcode & 0x0Fu;
                 uint32_t usn = (imm & 0x4000u) != 0u ? 1u : 0u;
                 uint32_t flg = (imm & 0x8000u) != 0u ? 1u : 0u;
                 uint32_t addr = imm & 0x3FFu;
                 uint32_t computed_words = totalBytes / 4u;
-                if (probe_ae::isEnabled()) {
+                if (aeProbe) {
                     probe_ae::onAwUnpack(fmt, num, cl, wl, usn, flg, addr, computed_words);
                     probe_ae::onAyUnpackCheck(fmt, addr, num, pos_payload, data + pos_payload, sizeBytes);
                 }
@@ -3056,55 +3343,20 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             else if (m_vu1Data && (totalBytes > 0 || cl == 0u) && pos + totalBytes <= sizeBytes)
             {
                 const bool vpAsync = vpOn && !syncUnpack;
-                if (isVu3dProbeEnabled())
+                if (vu3dProbe)
                 {
                     s_erTaken[opcode & 0x7Fu].fetch_add(1, std::memory_order_relaxed);
                 }
                 const uint8_t *srcBase = data + pos;
-
-                // PERF-VS: the fast/generic counters only feed the probe log lines; two atomic RMWs per UNPACK (1.4M/s) are skipped when no probe is on
-                static std::atomic<uint64_t> s_ciFastCount{0};
-                static std::atomic<uint64_t> s_ciGenericCount{0};
-                static std::atomic<uint64_t> s_ciMismCount{0};
-                static std::atomic<uint32_t> s_ciMismLogged{0};
-                static std::chrono::steady_clock::time_point s_ciLastSecLog{};
-
-                struct DbShapeKey {
-                    uint8_t vn, vl, cl, wl, mask, mode, flg, usn, num;
-                    uint16_t vuAddr;
-                    bool operator<(const DbShapeKey &o) const {
-                        return std::tie(vn, vl, cl, wl, mask, mode, flg, usn, num, vuAddr) <
-                               std::tie(o.vn, o.vl, o.cl, o.wl, o.mask, o.mode, o.flg, o.usn, o.num, o.vuAddr);
-                    }
-                };
-                struct DbShapeStats {
-                    uint64_t vecs = 0;
-                    uint32_t calls = 0;
-                };
-                static std::map<DbShapeKey, DbShapeStats> s_dbGenericShapes;
-                static std::atomic<uint64_t> s_dbFastVecs{0};
-                static std::atomic<uint64_t> s_dbGenericVecs{0};
-
-                auto ciLogMsg = [](const char *msg) {
-                    static FILE *s_f = nullptr;
-                    static bool s_tried = false;
-                    if (!s_tried) {
-                        s_tried = true;
-                        s_f = std::fopen("logs/probe_bh_sink.txt", "a");
-                    }
-                    if (s_f) {
-                        std::fputs(msg, s_f);
-                        std::fflush(s_f);
-                    }
-                    std::printf("%s", msg);
-                };
 
                 Act act[4][4];
                 uint32_t constVal[4][4];
                 bool allDecoded = true;
                 bool allProtect = true;
 
-                if (canFastPath) {
+                // PERF-V1J: on the hot vpAsync+uvOn fast path, skip building act[4][4]/constVal[4][4] unless v1jCheck needs the old path
+                const bool needOldActTable = canFastPath && (!vpAsync || !fastActive || !uvOn || !v1jNew || v1jCheck); // PERF-V1J
+                if (needOldActTable) {
                     const uint32_t maxC = std::min<uint32_t>(wl, 4u);
                     for (uint32_t c = 0u; c < maxC; ++c) {
                         for (uint32_t f = 0u; f < 4u; ++f) {
@@ -3359,20 +3611,198 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     }
                 };
 
-                const bool verifyActive = isUnpackVerifyEnabled();
-                const bool fastActive = isUnpackFastEnabled();
-
                 bool executeGeneric = true;
-                std::vector<uint8_t> savedBefore;
-                std::vector<uint8_t> fastResult;
+                static std::vector<uint8_t> s_verifySavedBefore; // PERF-V1J
+                static std::vector<uint8_t> s_verifyFastResult;  // PERF-V1J
+                std::vector<uint8_t> &savedBefore = s_verifySavedBefore;
+                std::vector<uint8_t> &fastResult = s_verifyFastResult;
                 size_t verifyRangeBytes = 0;
                 uint8_t *verifyRangeBase = nullptr;
 
                 if (canFastPath && fastActive) {
-                    if (vpAsync) {
+                    if (vpAsync && uvOn && v1jNew) { // PERF-V1J
+                        // PERF-V1J: precompute cycle-position blend/record masks, reserve vpRecRing slots once, decode straight into slots, publish once
+                        const uint8_t unmaskedMask = static_cast<uint8_t>((vn == 0u) ? 0x0Fu : ((1u << (vn + 1u)) - 1u));
+                        uint8_t recMask[4] = {};
+                        __m128i dm[4], cv[4];
+                        bool fastAllDecoded = true;
+                        bool fastAllProtect = false;
+
+                        if (maskEnable)
+                        {
+                            fastAllProtect = true;
+                            const uint32_t maxC = std::min<uint32_t>(wl, 4u);
+                            const uint32_t maskReg = vif1_regs.mask;
+                            for (uint32_t c = 0u; c < maxC; ++c)
+                            {
+                                uint8_t rm = 0u;
+                                alignas(16) uint32_t dmA[4] = {}, cvA[4] = {};
+                                for (uint32_t f = 0u; f < 4u; ++f)
+                                {
+                                    const uint32_t spec = (maskReg >> (((c * 4u) + f) * 2u)) & 0x3u;
+                                    if (spec == 3u || (spec == 0u && vn != 0u && f >= static_cast<uint32_t>(components)))
+                                    {
+                                        fastAllDecoded = false;
+                                    }
+                                    else if (spec == 1u)
+                                    {
+                                        rm |= static_cast<uint8_t>(1u << f);
+                                        cvA[f] = vif1_regs.row[f];
+                                        fastAllDecoded = false;
+                                        fastAllProtect = false;
+                                    }
+                                    else if (spec == 2u)
+                                    {
+                                        rm |= static_cast<uint8_t>(1u << f);
+                                        cvA[f] = vif1_regs.col[c];
+                                        fastAllDecoded = false;
+                                        fastAllProtect = false;
+                                    }
+                                    else
+                                    {
+                                        rm |= static_cast<uint8_t>(1u << f);
+                                        dmA[f] = 0xFFFFFFFFu;
+                                        fastAllProtect = false;
+                                    }
+                                }
+                                recMask[c] = rm;
+                                dm[c] = _mm_load_si128(reinterpret_cast<const __m128i *>(dmA));
+                                cv[c] = _mm_load_si128(reinterpret_cast<const __m128i *>(cvA));
+                            }
+                            if (fastAllDecoded)
+                            {
+                                // maskEnable was set, but mask register had all-zero specs -> same as unmasked
+                                recMask[0] = unmaskedMask;
+                            }
+                        }
+
+                        if (!fastAllProtect)
+                        {
+                            const uint32_t tail = vpReserveRecs(writeVectorCount, dualOn);
+                            const uint32_t ringIdx = tail & (kVpRecCap - 1u);
+                            const bool contiguous = (ringIdx + writeVectorCount <= kVpRecCap);
+                            VpRec wrapBuf[256];
+                            VpRec *const outStart = contiguous ? (vpRecRing + ringIdx) : wrapBuf;
+                            const uint32_t actualRecCount = vifUnpackToRec(
+                                vl, vn, zeroExtend, fastAllDecoded, (wl == 1u),
+                                reinterpret_cast<VpRecSlot *>(outStart), srcBase, writeVectorCount,
+                                vuAddr, cl, wl, bytesPerVector, unmaskedMask, recMask, dm, cv);
+                            if (!contiguous)
+                            {
+                                for (uint32_t i = 0u; i < actualRecCount; ++i)
+                                    vpRecRing[(tail + i) & (kVpRecCap - 1u)] = wrapBuf[i];
+                            }
+
+                            if (v1jCheck)
+                            {
+                                runFastPath(s_vpScratch);
+                                std::vector<VpRec> oldRecs;
+                                oldRecs.reserve(writeVectorCount);
+                                for (uint32_t i = 0u; i < writeVectorCount; ++i)
+                                {
+                                    const uint32_t destVec = vuAddr + (i / wl) * cl + (i % wl);
+                                    const uint32_t c = std::min(i % wl, 3u);
+                                    uint8_t mask = 0;
+                                    for (uint32_t f = 0u; f < 4u; ++f)
+                                    {
+                                        if (act[c][f] != ACT_PROTECT)
+                                            mask |= static_cast<uint8_t>(1u << f);
+                                    }
+                                    if (mask != 0)
+                                    {
+                                        VpRec rec;
+                                        rec.qw = static_cast<uint16_t>(destVec);
+                                        rec.mask = mask;
+                                        rec.pad = 0;
+                                        std::memcpy(rec.lanes, s_vpScratch + destVec * 16u, 16);
+                                        oldRecs.push_back(rec);
+                                    }
+                                }
+                                ++s_v1jUnpacks;
+                                bool mism = (actualRecCount != oldRecs.size());
+                                uint32_t badK = 0;
+                                if (!mism)
+                                {
+                                    for (uint32_t k = 0u; k < actualRecCount; ++k)
+                                    {
+                                        const VpRec &nr = vpRecRing[(tail + k) & (kVpRecCap - 1u)];
+                                        const VpRec &or_ = oldRecs[k];
+                                        if (nr.qw != or_.qw || nr.mask != or_.mask)
+                                        {
+                                            mism = true;
+                                            badK = k;
+                                            break;
+                                        }
+                                        for (uint32_t f = 0u; f < 4u; ++f)
+                                        {
+                                            if ((or_.mask & (1u << f)) != 0u && nr.lanes[f] != or_.lanes[f])
+                                            {
+                                                mism = true;
+                                                badK = k;
+                                                break;
+                                            }
+                                        }
+                                        if (mism) break;
+                                    }
+                                }
+                                if (mism)
+                                {
+                                    ++s_v1jMismatches;
+                                    if (s_v1jFirstMsg[0] == '\0')
+                                    {
+                                        if (actualRecCount != oldRecs.size())
+                                        {
+                                            std::snprintf(s_v1jFirstMsg, sizeof(s_v1jFirstMsg),
+                                                          "count vn=%u vl=%u cl=%u wl=%u m=%u zx=%u vu=0x%03X n=%u old=%zu new=%u",
+                                                          vn, vl, cl, wl, maskEnable ? 1u : 0u, zeroExtend ? 1u : 0u,
+                                                          vuAddr, writeVectorCount, oldRecs.size(), actualRecCount);
+                                        }
+                                        else
+                                        {
+                                            const VpRec &nr = vpRecRing[(tail + badK) & (kVpRecCap - 1u)];
+                                            const VpRec &or_ = oldRecs[badK];
+                                            std::snprintf(s_v1jFirstMsg, sizeof(s_v1jFirstMsg),
+                                                          "vn=%u vl=%u cl=%u wl=%u m=%u k=%u old(qw=%u,m=%X,%08X_%08X_%08X_%08X) new(qw=%u,m=%X,%08X_%08X_%08X_%08X)",
+                                                          vn, vl, cl, wl, maskEnable ? 1u : 0u, badK,
+                                                          or_.qw, or_.mask, or_.lanes[0], or_.lanes[1], or_.lanes[2], or_.lanes[3],
+                                                          nr.qw, nr.mask, nr.lanes[0], nr.lanes[1], nr.lanes[2], nr.lanes[3]);
+                                        }
+                                    }
+                                }
+                                const auto now = std::chrono::steady_clock::now();
+                                if (s_v1jLastPrint.time_since_epoch().count() == 0)
+                                    s_v1jLastPrint = now;
+                                else if (std::chrono::duration<double>(now - s_v1jLastPrint).count() >= 5.0)
+                                {
+                                    s_v1jLastPrint = now;
+                                    std::printf("[v1j] unpacks=%llu mismatches=%llu first: %s\n",
+                                                (unsigned long long)s_v1jUnpacks,
+                                                (unsigned long long)s_v1jMismatches,
+                                                s_v1jFirstMsg[0] ? s_v1jFirstMsg : "none");
+                                    std::fflush(stdout);
+                                }
+                            }
+
+                            if (actualRecCount > 0u)
+                            {
+                                vpRecTail.store(tail + actualRecCount, std::memory_order_relaxed);
+                                vpQueueWrites(tail, actualRecCount); // PERF-V1H
+                            }
+                        }
+                        else if (v1jCheck)
+                        {
+                            ++s_v1jUnpacks;
+                        }
+                        if (unpackCountsOn)
+                        {
+                            s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
+                            s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
+                        }
+                        executeGeneric = false;
+                    } else if (vpAsync) {
                         runFastPath(s_vpScratch);
                         if (!allProtect) {
-                            const uint32_t firstRecIndex = vpRecTail.load(std::memory_order_seq_cst);
+                            const uint32_t firstRecIndex = vpRecTail.load(std::memory_order_relaxed);
                             uint32_t recCount = 0;
                             for (uint32_t i = 0u; i < writeVectorCount; ++i) {
                                 const uint32_t destVec = vuAddr + (i / wl) * cl + (i % wl);
@@ -3396,7 +3826,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                 vpQueueWrites(firstRecIndex, recCount); // PERF-V1H
                             }
                         }
-                        if (s_unpackCountsOn)
+                        if (unpackCountsOn)
                         {
                             s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
                             s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
@@ -3418,13 +3848,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         executeGeneric = true;
                     } else {
                         runFastPath(m_vu1Data);
-                        if (s_unpackCountsOn)
+                        if (unpackCountsOn)
                         {
                             s_ciFastCount.fetch_add(1, std::memory_order_relaxed);
                             s_dbFastVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
                         }
                         executeGeneric = false;
-                        if (probe_ae::isDcProbeEnabled() || isVu3dProbeEnabled()) {
+                        if (dcProbe || vu3dProbe) {
                             uint32_t srcOff = (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE) ? static_cast<uint32_t>(srcBase - m_rdram) : 0u;
                             ps2_vif1_recordDzUnpack(opcode, static_cast<uint8_t>(vn), static_cast<uint8_t>(vl),
                                                     static_cast<uint8_t>((imm & 0x4000u) ? 1u : 0u),
@@ -3434,12 +3864,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         }
                     }
                 } else {
-                    if (s_unpackCountsOn)
+                    if (unpackCountsOn)
                     {
                         s_ciGenericCount.fetch_add(1, std::memory_order_relaxed);
                         s_dbGenericVecs.fetch_add(writeVectorCount, std::memory_order_relaxed);
                     }
-                    if (probe_ae::isEnabled()) {
+                    if (aeProbe) {
                         DbShapeKey key{static_cast<uint8_t>(vn), static_cast<uint8_t>(vl),
                                        static_cast<uint8_t>(cl), static_cast<uint8_t>(wl),
                                        static_cast<uint8_t>(maskEnable ? 1u : 0u),
@@ -3452,7 +3882,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         entry.calls++;
                     }
                 }
-                if (executeGeneric && (probe_ae::isDcProbeEnabled() || isVu3dProbeEnabled())) {
+                if (executeGeneric && (dcProbe || vu3dProbe)) {
                     uint32_t srcOff = (m_rdram && srcBase >= m_rdram && srcBase < m_rdram + PS2_RAM_SIZE) ? static_cast<uint32_t>(srcBase - m_rdram) : 0u;
                     ps2_vif1_recordDzUnpack(opcode, static_cast<uint8_t>(vn), static_cast<uint8_t>(vl),
                                             static_cast<uint8_t>((imm & 0x4000u) ? 1u : 0u),
@@ -3602,7 +4032,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     }
 
                     if (!handledFormat && decoded) {
-                        if (isVu3dProbeEnabled() && vn < 4u && vl < 4u) {
+                        if (vu3dProbe && vn < 4u && vl < 4u) {
                             uint32_t u = (imm & 0x4000u) ? 1u : 0u;
                             s_ehHandledFalse[vn][vl][u].fetch_add(1, std::memory_order_relaxed);
                         }
@@ -3706,7 +4136,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         }
                     }
                 }
-                if (isVu3dProbeEnabled()) {
+                if (vu3dProbe) {
                     if (vn < 4u && vl < 4u) {
                         uint32_t u = (imm & 0x4000u) ? 1u : 0u;
                         s_ehShapeSeen[vn][vl][u].store(true, std::memory_order_relaxed);
@@ -3737,7 +4167,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                                 vif1_regs.mask, vif1_regs.row, vif1_regs.col);
                     }
                 }
-                if (m_vu1Data && isVu3dProbeEnabled()) // PERF-UV
+                if (m_vu1Data && vu3dProbe) // PERF-UV
                 {
                     uint32_t eff = vuAddr;
                     uint32_t lastVec = (cl >= wl) ? ((eff + ((writeVectorCount - 1u) / wl) * cl + ((writeVectorCount - 1u) % wl)) & 0x3FFu) : ((eff + writeVectorCount - 1u) & 0x3FFu);
@@ -3748,7 +4178,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                   eff, dwFirst[0], dwFirst[1], dwFirst[2], dwFirst[3],
                                   dwLast[0], dwLast[1], dwLast[2], dwLast[3]);
                 }
-                if (isVu3dProbeEnabled())
+                if (vu3dProbe)
                 {
                     ps2_scanCameraRegion("unpack", 0, 0);
 
@@ -3803,7 +4233,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         std::fflush(stdout);
                     }
                 }
-                if (opcode == 0x6Cu && writeVectorCount == 10u && isVu3dProbeEnabled())
+                if (opcode == 0x6Cu && writeVectorCount == 10u && vu3dProbe)
                 {
                     if (vuAddr == 235u)
                     {
@@ -3843,7 +4273,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                               (unsigned long long)s_ciMismCount.load(std::memory_order_relaxed));
                 ciLogMsg(buf);
 
-                if (probe_ae::isEnabled()) {
+                if (aeProbe) {
                     std::vector<std::pair<DbShapeKey, DbShapeStats>> sortedShapes(s_dbGenericShapes.begin(), s_dbGenericShapes.end());
                     std::sort(sortedShapes.begin(), sortedShapes.end(), [](const auto &a, const auto &b) {
                         if (a.second.vecs != b.second.vecs) return a.second.vecs > b.second.vecs;
@@ -3875,7 +4305,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
             else
             {
-                if (isVu3dProbeEnabled())
+                if (vu3dProbe)
                 {
                     s_erDropped[opcode & 0x7Fu].fetch_add(1, std::memory_order_relaxed);
                 }
@@ -3895,7 +4325,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         else
         {
 #if defined(PS2X_PROBE_AE) || 1
-            if (probe_ae::isEnabled()) {
+            if (aeProbe) {
                 probe_ae::onVifUnknown(opcode, imm);
             }
 #endif
@@ -3904,7 +4334,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     }
 
 #if defined(PS2X_PROBE_AE) || 1
-    if (probe_ae::isEnabled()) {
+    if (aeProbe) {
         probe_ae::onVif1DmaEnd();
         probe_ae::onAwVifKickEnd(m_rdram);
         auto tVif1End = std::chrono::steady_clock::now();
