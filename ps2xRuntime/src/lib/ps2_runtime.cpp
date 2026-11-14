@@ -23,6 +23,13 @@ void dump_trace() {}
 }
 #include "ps2_log.h"
 
+namespace ps2x::audio
+{
+    // PERF-AU2: Host SPU2 audio stream lifecycle (header-rule safe).
+    void startSpu2Output();
+    void stopSpu2Output();
+}
+
 #if AGRESSIVE_LOGS
 namespace {
     struct Ps2LogDisabler {
@@ -1411,6 +1418,7 @@ PS2Runtime::~PS2Runtime()
         m_audioBackend.stopAll();
         m_audioBackend.setAudioReady(false);
 #else
+        ps2x::audio::stopSpu2Output(); // PERF-AU2
         if (IsAudioDeviceReady())
         {
             CloseAudioDevice();
@@ -1673,6 +1681,7 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+        ps2x::audio::startSpu2Output(); // PERF-AU2
 #endif
         SetTargetFPS(60);
         if (m_debugUiInitCallback)

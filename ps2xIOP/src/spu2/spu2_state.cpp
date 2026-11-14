@@ -22,14 +22,33 @@ namespace ps2x::iop::detail
     Spu2State::Spu2State()
         : m_ram(kRamSize, 0u)
     {
+        for (auto &c : m_cores)
+        {
+            c.vmixl = 0x00FFFFFFu;
+            c.vmixr = 0x00FFFFFFu;
+        }
     }
 
     void Spu2State::reset(bool clearRam)
     {
-        m_cores = {};
+        {
+            std::lock_guard<std::mutex> lock(m_regMutex);
+            m_cores = {};
+            for (auto &c : m_cores)
+            {
+                // PS2 sceSdInit enables dry mix for all voices by default.
+                c.vmixl = 0x00FFFFFFu;
+                c.vmixr = 0x00FFFFFFu;
+            }
+            m_pendingKon = {};
+            m_pendingKoff = {};
+            m_pendingReset = true;
+            m_keyOnCount = 0u;
+        }
         m_transChannels = {};
         if (clearRam)
         {
+            std::lock_guard<std::mutex> ramLock(m_ramMutex);
             if (m_ram.size() != kRamSize)
                 m_ram.assign(kRamSize, 0u);
             else
@@ -39,7 +58,11 @@ namespace ps2x::iop::detail
 
     void Spu2State::writeRam(uint32_t spuAddr, const void *src, uint32_t size)
     {
-        if (!src || size == 0u || m_ram.size() < kRamSize)
+        if (!src || size == 0u)
+            return;
+
+        std::lock_guard<std::mutex> ramLock(m_ramMutex);
+        if (m_ram.size() < kRamSize)
             return;
 
         uint32_t dst = spuAddr % kRamSize;
@@ -57,7 +80,11 @@ namespace ps2x::iop::detail
 
     void Spu2State::readRam(uint32_t spuAddr, void *dst, uint32_t size) const
     {
-        if (!dst || size == 0u || m_ram.size() < kRamSize)
+        if (!dst || size == 0u)
+            return;
+
+        std::lock_guard<std::mutex> ramLock(m_ramMutex);
+        if (m_ram.size() < kRamSize)
             return;
 
         uint32_t src = spuAddr % kRamSize;
@@ -73,8 +100,30 @@ namespace ps2x::iop::detail
         }
     }
 
+    void Spu2State::readRamBlock16(uint32_t spuAddr, uint8_t outBlock[16]) const
+    {
+        std::lock_guard<std::mutex> ramLock(m_ramMutex);
+        if (m_ram.size() < kRamSize)
+        {
+            std::memset(outBlock, 0, 16u);
+            return;
+        }
+        const uint32_t src = (spuAddr & ~0xFu) % kRamSize;
+        if (src + 16u <= kRamSize)
+        {
+            std::memcpy(outBlock, m_ram.data() + src, 16u);
+        }
+        else
+        {
+            const uint32_t first = kRamSize - src;
+            std::memcpy(outBlock, m_ram.data() + src, first);
+            std::memcpy(outBlock + first, m_ram.data(), 16u - first);
+        }
+    }
+
     void Spu2State::setParam(uint16_t entry, uint16_t value)
     {
+        std::lock_guard<std::mutex> lock(m_regMutex);
         Core &c = m_cores[coreIndex(entry)];
         Voice &v = c.voices[voiceIndex(entry)];
         switch (entry & 0xFF00u)
@@ -104,6 +153,7 @@ namespace ps2x::iop::detail
 
     uint16_t Spu2State::getParam(uint16_t entry) const
     {
+        std::lock_guard<std::mutex> lock(m_regMutex);
         const Core &c = m_cores[coreIndex(entry)];
         const Voice &v = c.voices[voiceIndex(entry)];
         switch (entry & 0xFF00u)
@@ -133,7 +183,9 @@ namespace ps2x::iop::detail
 
     void Spu2State::setSwitch(uint16_t entry, uint32_t value)
     {
-        Core &c = m_cores[coreIndex(entry)];
+        std::lock_guard<std::mutex> lock(m_regMutex);
+        const uint32_t ci = coreIndex(entry);
+        Core &c = m_cores[ci];
         const uint32_t mask = value & 0x00FFFFFFu;
         switch (entry & 0xFF00u)
         {
@@ -143,17 +195,22 @@ namespace ps2x::iop::detail
             c.kon |= mask;
             c.koff &= ~mask;
             c.endx &= ~mask;
+            m_pendingKon[ci] |= mask;
+            m_pendingKoff[ci] &= ~mask;
             for (uint32_t i = 0u; i < kNumVoices; ++i)
             {
                 if ((mask & (1u << i)) != 0u)
                 {
                     c.voices[i].nax = c.voices[i].ssa;
+                    ++m_keyOnCount;
                 }
             }
             break;
         case 0x1600u:                         // SD_S_KOFF
             c.koff |= mask;
             c.kon &= ~mask;
+            m_pendingKoff[ci] |= mask;
+            m_pendingKon[ci] &= ~mask;
             break;
         case 0x1700u: c.endx &= ~mask; break; // SD_S_ENDX (write clears)
         case 0x1800u: c.vmixl = mask; break;  // SD_S_VMIXL
@@ -166,6 +223,7 @@ namespace ps2x::iop::detail
 
     uint32_t Spu2State::getSwitch(uint16_t entry) const
     {
+        std::lock_guard<std::mutex> lock(m_regMutex);
         const Core &c = m_cores[coreIndex(entry)];
         switch (entry & 0xFF00u)
         {
@@ -184,6 +242,7 @@ namespace ps2x::iop::detail
 
     void Spu2State::setAddr(uint16_t entry, uint32_t value)
     {
+        std::lock_guard<std::mutex> lock(m_regMutex);
         Core &c = m_cores[coreIndex(entry)];
         Voice &v = c.voices[voiceIndex(entry)];
         const uint32_t addr = value & 0x00FFFFFFu;
@@ -192,8 +251,14 @@ namespace ps2x::iop::detail
         case 0x1C00u: c.eea = addr; break;  // SD_A_EEA
         case 0x1D00u: c.esa = addr; break;  // SD_A_ESA
         case 0x1E00u: c.irqa = addr; break; // SD_A_IRQA
-        case 0x2000u: v.ssa = addr; break;  // SD_VA_SSA
-        case 0x2100u: v.lsax = addr; break; // SD_VA_LSAX
+        case 0x2000u:                       // SD_VA_SSA
+            v.ssa = addr;
+            v.lsaxExplicit = false;
+            break;
+        case 0x2100u:                       // SD_VA_LSAX
+            v.lsax = addr;
+            v.lsaxExplicit = true;
+            break;
         case 0x2200u: v.nax = addr; break;  // SD_VA_NAX
         default: break;
         }
@@ -201,6 +266,7 @@ namespace ps2x::iop::detail
 
     uint32_t Spu2State::getAddr(uint16_t entry) const
     {
+        std::lock_guard<std::mutex> lock(m_regMutex);
         const Core &c = m_cores[coreIndex(entry)];
         const Voice &v = c.voices[voiceIndex(entry)];
         switch (entry & 0xFF00u)
@@ -217,6 +283,7 @@ namespace ps2x::iop::detail
 
     void Spu2State::setCoreAttr(uint16_t entry, uint16_t value)
     {
+        std::lock_guard<std::mutex> lock(m_regMutex);
         Core &c = m_cores[coreIndex(entry)];
         switch (entry & 0xFFFEu)
         {
@@ -231,6 +298,7 @@ namespace ps2x::iop::detail
 
     uint16_t Spu2State::getCoreAttr(uint16_t entry) const
     {
+        std::lock_guard<std::mutex> lock(m_regMutex);
         const Core &c = m_cores[coreIndex(entry)];
         switch (entry & 0xFFFEu)
         {
@@ -245,6 +313,7 @@ namespace ps2x::iop::detail
 
     void Spu2State::setEffectAttr(int32_t core, int32_t mode, int16_t depthL, int16_t depthR, int32_t delay, int32_t feedback)
     {
+        std::lock_guard<std::mutex> lock(m_regMutex);
         Core &c = m_cores[static_cast<uint32_t>(core) & 1u];
         c.effectAttr.mode = mode;
         c.effectAttr.depthL = depthL;
@@ -255,6 +324,42 @@ namespace ps2x::iop::detail
 
     const Spu2State::EffectAttr &Spu2State::getEffectAttr(int32_t core) const
     {
+        std::lock_guard<std::mutex> lock(m_regMutex);
         return m_cores[static_cast<uint32_t>(core) & 1u].effectAttr;
+    }
+
+    void Spu2State::snapshotForMixer(MixerSnapshot &outSnapshot)
+    {
+        std::lock_guard<std::mutex> lock(m_regMutex);
+        outSnapshot.cores = m_cores;
+        outSnapshot.pendingKon = m_pendingKon;
+        outSnapshot.pendingKoff = m_pendingKoff;
+        outSnapshot.pendingReset = m_pendingReset;
+        outSnapshot.keyOnCount = m_keyOnCount;
+        m_pendingKon = {};
+        m_pendingKoff = {};
+        m_pendingReset = false;
+    }
+
+    void Spu2State::commitMixerFeedback(const MixerFeedback &feedback)
+    {
+        std::lock_guard<std::mutex> lock(m_regMutex);
+        for (uint32_t ci = 0u; ci < kNumCores; ++ci)
+        {
+            Core &c = m_cores[ci];
+            const uint32_t retriggered = m_pendingKon[ci];
+            c.endx |= (feedback.newlyEndedMask[ci] & ~retriggered);
+            for (uint32_t vi = 0u; vi < kNumVoices; ++vi)
+            {
+                if ((retriggered & (1u << vi)) != 0u)
+                    continue;
+                Voice &v = c.voices[vi];
+                const auto &u = feedback.voices[ci][vi];
+                v.envx = u.envx;
+                v.nax = u.nax;
+                if (u.updateLsax && !v.lsaxExplicit)
+                    v.lsax = u.lsax;
+            }
+        }
     }
 }

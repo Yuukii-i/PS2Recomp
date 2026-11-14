@@ -17,6 +17,7 @@
 #include "imports/iop_sysmem.h"
 #include "imports/iop_timrman.h"
 #include "imports/iop_vblank.h"
+#include "spu2/spu2_mixer.h" // PERF-AU2
 #include "spu2/spu2_state.h" // PERF-AU1
 #include "iop_emulator_const.h"
 
@@ -160,6 +161,12 @@ namespace ps2x::iop::detail
               loadcore(memory, imports)
         {
             reset();
+            ps2x::iop::registerActiveSpu2State(&spu2); // PERF-AU2
+        }
+
+        ~Impl()
+        {
+            ps2x::iop::unregisterActiveSpu2State(&spu2); // PERF-AU2
         }
 
         void reset()

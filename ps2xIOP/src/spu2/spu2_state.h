@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace ps2x::iop::detail
@@ -27,6 +28,7 @@ namespace ps2x::iop::detail
             uint32_t ssa = 0u;
             uint32_t lsax = 0u;
             uint32_t nax = 0u;
+            bool lsaxExplicit = false;
         };
 
         struct EffectAttr
@@ -114,8 +116,42 @@ namespace ps2x::iop::detail
         [[nodiscard]] TransChannel &transChannel(uint32_t ch) noexcept { return m_transChannels[ch & 1u]; }
         [[nodiscard]] const TransChannel &transChannel(uint32_t ch) const noexcept { return m_transChannels[ch & 1u]; }
 
+        // PERF-AU2: Lock-light mixer synchronization and 16-byte ADPCM block read.
+        struct MixerSnapshot
+        {
+            std::array<Core, kNumCores> cores{};
+            std::array<uint32_t, kNumCores> pendingKon{};
+            std::array<uint32_t, kNumCores> pendingKoff{};
+            bool pendingReset = false;
+            uint64_t keyOnCount = 0u;
+        };
+
+        struct MixerFeedback
+        {
+            struct VoiceUpdate
+            {
+                uint16_t envx = 0u;
+                uint32_t nax = 0u;
+                uint32_t lsax = 0u;
+                bool updateLsax = false;
+            };
+
+            std::array<std::array<VoiceUpdate, kNumVoices>, kNumCores> voices{};
+            std::array<uint32_t, kNumCores> newlyEndedMask{};
+        };
+
+        void snapshotForMixer(MixerSnapshot &outSnapshot);
+        void commitMixerFeedback(const MixerFeedback &feedback);
+        void readRamBlock16(uint32_t spuAddr, uint8_t outBlock[16]) const;
+
     private:
+        mutable std::mutex m_regMutex;
+        mutable std::mutex m_ramMutex;
         std::array<Core, kNumCores> m_cores{};
+        std::array<uint32_t, kNumCores> m_pendingKon{};
+        std::array<uint32_t, kNumCores> m_pendingKoff{};
+        bool m_pendingReset = false;
+        uint64_t m_keyOnCount = 0u;
         std::array<TransChannel, 2> m_transChannels{};
         std::vector<uint8_t> m_ram;
     };

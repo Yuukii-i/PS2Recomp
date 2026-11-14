@@ -33,6 +33,17 @@ namespace ps2x::iop::detail
         std::vector<std::string> g_libsdFirstLogs;
         uint32_t g_libsdLoggedCount = 0u;
         constexpr uint32_t kMaxVerbatimLogs = 50u;
+        bool g_loggedSweepVol = false;
+        bool g_loggedEffectBypass = false;
+
+        void recordSpu2NoticeOnce(bool &flag, const char *msg)
+        {
+            std::lock_guard<std::mutex> lock(g_libsdDiagMutex);
+            if (flag)
+                return;
+            flag = true;
+            g_libsdFirstLogs.emplace_back(msg);
+        }
 
         const char *libsdOrdinalName(uint16_t ordinal) noexcept
         {
@@ -107,6 +118,8 @@ namespace ps2x::iop::detail
         g_libsdDiag = {};
         g_libsdFirstLogs.clear();
         g_libsdLoggedCount = 0u;
+        g_loggedSweepVol = false;
+        g_loggedEffectBypass = false;
     }
 
     std::optional<IopLibsd::CompletionCallback> IopLibsd::takeCompletionCallback() noexcept
@@ -136,9 +149,15 @@ namespace ps2x::iop::detail
             break;
 
         case 5: // sceSdSetParam(u16 entry, u16 value)
-            m_spu2.setParam(static_cast<uint16_t>(a0 & 0xFFFFu), static_cast<uint16_t>(a1 & 0xFFFFu));
+        {
+            const uint16_t entry = static_cast<uint16_t>(a0 & 0xFFFFu);
+            const uint16_t value = static_cast<uint16_t>(a1 & 0xFFFFu);
+            if (((entry & 0xFF00u) == 0x0000u || (entry & 0xFF00u) == 0x0100u) && (value & 0x8000u) != 0u)
+                recordSpu2NoticeOnce(g_loggedSweepVol, "[spu2] sweep volume mode requested, treating as fixed");
+            m_spu2.setParam(entry, value);
             ret = 0u;
             break;
+        }
 
         case 6: // sceSdGetParam(u16 entry)
             ret = m_spu2.getParam(static_cast<uint16_t>(a0 & 0xFFFFu));
@@ -165,9 +184,15 @@ namespace ps2x::iop::detail
             break;
 
         case 11: // sceSdSetCoreAttr(u16 entry, u16 value)
-            m_spu2.setCoreAttr(static_cast<uint16_t>(a0 & 0xFFFFu), static_cast<uint16_t>(a1 & 0xFFFFu));
+        {
+            const uint16_t entry = static_cast<uint16_t>(a0 & 0xFFFFu);
+            const uint16_t value = static_cast<uint16_t>(a1 & 0xFFFFu);
+            if ((entry & 0xFFFEu) == 0x0002u && value != 0u)
+                recordSpu2NoticeOnce(g_loggedEffectBypass, "[spu2] effect/reverb enable requested, bypassed for now");
+            m_spu2.setCoreAttr(entry, value);
             ret = 0u;
             break;
+        }
 
         case 12: // sceSdGetCoreAttr(u16 entry)
             ret = m_spu2.getCoreAttr(static_cast<uint16_t>(a0 & 0xFFFFu));
@@ -260,6 +285,8 @@ namespace ps2x::iop::detail
                 const int16_t depthR = static_cast<int16_t>(m_memory.read16(a1 + 10u));
                 const int32_t delay = static_cast<int32_t>(m_memory.read32(a1 + 12u));
                 const int32_t feedback = static_cast<int32_t>(m_memory.read32(a1 + 16u));
+                if (mode != 0)
+                    recordSpu2NoticeOnce(g_loggedEffectBypass, "[spu2] sceSdSetEffectAttr non-zero mode requested, bypassed for now");
                 m_spu2.setEffectAttr(static_cast<int32_t>(a0), mode, depthL, depthR, delay, feedback);
             }
             ret = 0u;
