@@ -27,7 +27,91 @@ extern std::atomic<uint32_t> g_trackedCurScene;
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <array>
 #include "probe_ae.h"
+
+// PERF-AU1: Local declaration for ps2xIOP libsd diagnostics (header rule safe).
+namespace ps2x::iop
+{
+    struct LibsdDiagSnapshot
+    {
+        uint64_t totalCalls = 0u;
+        uint64_t keyOns = 0u;
+        uint64_t transferBytes = 0u;
+        std::array<uint64_t, 28> ordinalCounts{};
+    };
+
+    void getLibsdDiagnostics(LibsdDiagSnapshot &outSnapshot, std::vector<std::string> &outPendingLogs);
+}
+
+namespace
+{
+    bool isSg2LleEnabled()
+    {
+        static const bool enabled = []() {
+            const char *env = std::getenv("PS2X_SG2_LLE");
+            return env && env[0] != '\0' && std::strcmp(env, "0") != 0;
+        }();
+        return enabled;
+    }
+
+    void flushSg2LleDiagnostics(uint32_t packetCount, uint32_t statusNonZeroBytes, bool countRpc)
+    {
+        static std::mutex s_diagMutex;
+        static uint64_t s_rpcCalls = 0u;
+        static uint64_t s_packets = 0u;
+        static uint32_t s_lastStatusNonZero = 0u;
+        static auto s_lastReport = std::chrono::steady_clock::now();
+
+        ps2x::iop::LibsdDiagSnapshot snap{};
+        std::vector<std::string> pendingLogs;
+        ps2x::iop::getLibsdDiagnostics(snap, pendingLogs);
+
+        for (const std::string &line : pendingLogs)
+        {
+            ::ps2xSafeLog("[sg2lle:libsd] %s\n", line.c_str());
+        }
+
+        std::lock_guard<std::mutex> lock(s_diagMutex);
+        if (countRpc)
+        {
+            ++s_rpcCalls;
+            s_packets += packetCount;
+            s_lastStatusNonZero = statusNonZeroBytes;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastReport).count() >= 5)
+        {
+            s_lastReport = now;
+            const double xferKB = static_cast<double>(snap.transferBytes) / 1024.0;
+            ::ps2xSafeLog(
+                "[sg2lle] rpc=%llu pkts=%llu libsd=%llu keyOns=%llu xferKB=%.2f statusNonZero=%u "
+                "calls(Init=%llu SetParam=%llu GetParam=%llu SetSwitch=%llu SetAddr=%llu GetAddr=%llu "
+                "SetCoreAttr=%llu VoiceTrans=%llu BlockTrans=%llu VoiceTransStat=%llu BlockTransStat=%llu "
+                "SetEffectAttr=%llu SetTransIntr=%llu)\n",
+                static_cast<unsigned long long>(s_rpcCalls),
+                static_cast<unsigned long long>(s_packets),
+                static_cast<unsigned long long>(snap.totalCalls),
+                static_cast<unsigned long long>(snap.keyOns),
+                xferKB,
+                s_lastStatusNonZero,
+                static_cast<unsigned long long>(snap.ordinalCounts[4]),
+                static_cast<unsigned long long>(snap.ordinalCounts[5]),
+                static_cast<unsigned long long>(snap.ordinalCounts[6]),
+                static_cast<unsigned long long>(snap.ordinalCounts[7]),
+                static_cast<unsigned long long>(snap.ordinalCounts[9]),
+                static_cast<unsigned long long>(snap.ordinalCounts[10]),
+                static_cast<unsigned long long>(snap.ordinalCounts[11]),
+                static_cast<unsigned long long>(snap.ordinalCounts[17]),
+                static_cast<unsigned long long>(snap.ordinalCounts[18]),
+                static_cast<unsigned long long>(snap.ordinalCounts[19]),
+                static_cast<unsigned long long>(snap.ordinalCounts[20]),
+                static_cast<unsigned long long>(snap.ordinalCounts[23]),
+                static_cast<unsigned long long>(snap.ordinalCounts[26]));
+        }
+    }
+}
 // PROBE-KY: ring of recent CID1 writes into EE RAM (for heap-corruption forensics)
 struct Cid1WrNote { uint32_t dst, len, op; long long ms; };
 static Cid1WrNote g_cid1WrRing[24]; static unsigned g_cid1WrIdx = 0;
@@ -485,7 +569,8 @@ static std::vector<Cid1StreamJob> s_cid1StreamJobs;
                 }
             };
 
-            // 0x11223344u: SG2 Audio Server
+            // 0x11223344u: SG2 Audio Server (PERF-AU1: skipped when PS2X_SG2_LLE=1 so IOP handles it)
+            if (!isSg2LleEnabled())
             s_rpcHleServices[0x11223344u] = {
                 0x11223344u,
                 "SG2_AUDIO",
@@ -982,6 +1067,21 @@ uint64_t vblDiff = 0;
         client->hdr.mode = mode;
 
         initRpcHleServices();
+
+        // PERF-AU1: When PS2X_SG2_LLE=1, ensure sg2iopm1.irx is loaded into the IOP emulator before binding 0x11223344.
+        if (isSg2LleEnabled() && rpcId == 0x11223344u && runtime)
+        {
+            static bool s_sg2FallbackAttempted = false;
+            if (!PS2IopTransport::canBindRpc(runtime, 0x11223344u) && !s_sg2FallbackAttempted)
+            {
+                s_sg2FallbackAttempted = true;
+                const auto loaded = runtime->loadIopModule("tools/iop/sg2iopm1.irx");
+                ::ps2xSafeLog("[sg2lle] loaded tools/iop/sg2iopm1.irx handled=%d id=%d start=%d\n",
+                              loaded.handled ? 1 : 0, loaded.moduleId, loaded.startResult);
+            }
+            flushSg2LleDiagnostics(0u, 0u, false);
+        }
+
         uint32_t serverPtr = 0;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
@@ -1294,6 +1394,24 @@ uint64_t vblDiff = 0;
             request.endParameter = endParameter;
 
             iopResult = PS2IopTransport::handleRpc(runtime, rdram, ctx, request);
+
+            // PERF-AU1: Diagnostics for LLE sg2iopm1.irx RPC calls.
+            if (isSg2LleEnabled() && sid == 0x11223344u)
+            {
+                uint32_t nonZero = 0u;
+                if (receiveBuffer != 0u && receiveSize != 0u)
+                {
+                    if (const uint8_t *recvPtr = getConstMemPtr(rdram, receiveBuffer))
+                    {
+                        for (uint32_t i = 0u; i < receiveSize; ++i)
+                        {
+                            if (recvPtr[i] != 0u)
+                                ++nonZero;
+                        }
+                    }
+                }
+                flushSg2LleDiagnostics(sendSize / 16u, nonZero, true);
+            }
 
             if (iopResult.signalNowaitCompletion &&
                 (mode & kSifRpcModeNowait) != 0u)

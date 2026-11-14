@@ -6,6 +6,7 @@
 #include "imports/iop_imports.h"
 #include "imports/iop_intrman.h"
 #include "imports/iop_ioman.h"
+#include "imports/iop_libsd.h" // PERF-AU1
 #include "core/iop_kernel.h"
 #include "imports/iop_loadcore.h"
 #include "core/iop_memory.h"
@@ -16,6 +17,7 @@
 #include "imports/iop_sysmem.h"
 #include "imports/iop_timrman.h"
 #include "imports/iop_vblank.h"
+#include "spu2/spu2_state.h" // PERF-AU1
 #include "iop_emulator_const.h"
 
 #include <algorithm>
@@ -136,6 +138,7 @@ namespace ps2x::iop::detail
             uint32_t function = 0u;
             uint32_t gp = 0u;
             uint32_t argument = 0u;
+            uint32_t argument1 = 0u; // PERF-AU1
         };
 
         explicit Impl(IopHost &hostRef)
@@ -151,6 +154,7 @@ namespace ps2x::iop::detail
               intrman(memory),
               timrman(),
               ioman(memory),
+              libsd(memory, spu2), // PERF-AU1
               cpuCore(memory),
               imports(memory),
               loadcore(memory, imports)
@@ -169,6 +173,7 @@ namespace ps2x::iop::detail
             intrman.reset();
             timrman.reset();
             ioman.reset();
+            libsd.reset(); // PERF-AU1
             pendingDmaInterrupts.clear();
             pendingGuestCallbacks.clear();
             idleSkipUntil = 0; // PERF-KE
@@ -387,6 +392,22 @@ namespace ps2x::iop::detail
             }
             if (iequals(call.library, "heaplib") && heaplib.dispatchImport(call.ordinal, cpu))
                 return ImportDisposition::Handled;
+            // PERF-AU1: HLE libsd import dispatch onto Spu2State.
+            if (iequals(call.library, "libsd") && libsd.dispatchImport(call.ordinal, cpu))
+            {
+                if (const auto callback = libsd.takeCompletionCallback())
+                {
+                    pendingGuestCallbacks.emplace(
+                        totalCycles + 64u,
+                        ScheduledGuestCallback{
+                            callback->address,
+                            callback->gp,
+                            callback->channel,
+                            callback->arg,
+                        });
+                }
+                return ImportDisposition::Handled;
+            }
 
             const uint32_t target = imports.resolve(call.library, call.ordinal, call.version);
             if (target != 0u)
@@ -592,7 +613,7 @@ namespace ps2x::iop::detail
                     {
                         (void)callFunction(callback.function,
                                            callback.argument,
-                                           0u,
+                                           callback.argument1,
                                            0u,
                                            0u,
                                            callback.gp,
@@ -763,6 +784,8 @@ namespace ps2x::iop::detail
         IopIntrman intrman;
         IopTimrman timrman;
         IopIoman ioman;
+        Spu2State spu2; // PERF-AU1
+        IopLibsd libsd; // PERF-AU1
         IopCpuCore cpuCore;
         IopImportRegistry imports;
         IopLoadcore loadcore;
