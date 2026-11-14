@@ -361,6 +361,19 @@ inline void fv8ToRows(const Fv8V &v, __m128 rows[8])
     rows[3] = _mm256_castps256_ps128(r3);
     rows[7] = _mm256_extractf128_ps(r3, 1);
 }
+// PERF-V1R: 8-wide clampI (0..255) and ftoiS matching clampI / ftoiS<SCALE>
+inline __m256 fv8ClampI(__m256 x)
+{
+    return _mm256_min_ps(_mm256_max_ps(fv8N(x), _mm256_setzero_ps()), _mm256_set1_ps(255.0f));
+}
+template <int SCALE>
+inline __m256i fv8FtoiS(__m256 a)
+{
+    const __m256 sc = _mm256_mul_ps(fv8N(a), _mm256_set1_ps(static_cast<float>(SCALE)));
+    const __m256i t = _mm256_cvttps_epi32(sc);
+    const __m256 ge = _mm256_cmp_ps(sc, _mm256_set1_ps(2147483648.0f), _CMP_GE_OQ);
+    return _mm256_castps_si256(_mm256_blendv_ps(_mm256_castsi256_ps(t), _mm256_castsi256_ps(_mm256_set1_epi32(INT32_MAX)), ge));
+}
 
 // PERF-SA: semantic scene buffer (PS2X_SCENE=1, default OFF)
 namespace scene
@@ -1050,7 +1063,7 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
         checkDraw(d, f.vertices.data() + v0);
 }
 
-inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, __m128 c2v, const __m128 *rA, uint32_t i4base, uint32_t ubase, uint32_t gifOff, uint32_t gifLen)
+inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, __m128 c2v, uint32_t i4base, uint32_t ubase, uint32_t gifOff, uint32_t gifLen)
 {
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     const SceneDraw &d = pushDraw(f, vi10 ? 0x1EF0u : 0x1EE0u, gifOff, gifLen, static_cast<uint32_t>(N), t_scene.curBoneCount, 1u | (vi10 ? 2u : 0u), c1v, c2v);
@@ -1061,7 +1074,7 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
         SceneVertex &sv = f.vertices[v0 + static_cast<size_t>(v)];
         const uint32_t qOut = ubase + 1u + 4u * static_cast<uint32_t>(v);
         const int32_t idx = static_cast<int16_t>(ilw(vu, (i4base + static_cast<uint32_t>(v)) & 0x3FFu, 0u));
-        _mm_storeu_ps(sv.pos, rA[v]);
+        _mm_storeu_ps(sv.pos, ldq(vu, (636u + static_cast<uint32_t>(idx)) & 0x3FFu));
         _mm_storeu_ps(sv.normal, ldq(vu, (556u + static_cast<uint32_t>(idx)) & 0x3FFu));
         _mm_storeu_ps(sv.stq, ldq(vu, qOut + 1u));
         _mm_storeu_si128(reinterpret_cast<__m128i *>(sv.rgba), ldqi(vu, qOut + 2u));
@@ -1434,44 +1447,118 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
         return fb1EE0(kFbSkinAlias13);
     vi13 = static_cast<uint16_t>(vi13 + 1u);
 
-    const __m128 zero = _mm_setzero_ps();
-    const __m128 vf1 = ldq(vu, 1016), vf2 = ldq(vu, 1014), vf3 = ldq(vu, 1002), vf4 = ldq(vu, 1003), vf16 = ldq(vu, 1013);
-    const __m128 accw = fmacV<4>(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), bc<2>(vf1), zero); // MULAz.w ACC, vf0, vf1
-    struct SkV
-    {
-        __m128 S2Q, prod, R7;
-        float Wraw;
-        int32_t idx;
-    };
-    SkV V[kMaxSkinN];
-    __m128 rA[kMaxSkinN], rB[kMaxSkinN], rS3[kMaxSkinN], rS2[kMaxSkinN];
-    for (int32_t t = 0; t < N; ++t) // gather + aliasing checks (same order of checks as before; any failure returns false before any store)
+    // PERF-V1R: check contiguous input ranges [i4base, i4base+N), [s3base, s3base+N), [s2base, s2base+N) against output [ubase, ubase+span) once per call
+    const uint32_t u0 = ubase, u1 = ubase + span;
+    if ((i4base < u1 && u0 < i4base + static_cast<uint32_t>(N)) ||
+        (s3base < u1 && u0 < s3base + static_cast<uint32_t>(N)) ||
+        (!vi10 && s2base < u1 && u0 < s2base + static_cast<uint32_t>(N)))
+        return fb1EE0(kFbSkinGatherAlias);
+
+    // PERF-V1R: load vertex indices and track [minIdx, maxIdx] for O(1) bounding-box aliasing check
+    int32_t idxs[kMaxSkinN + 8];
+    int32_t minIdx = INT32_MAX, maxIdx = INT32_MIN;
+    for (int32_t t = 0; t < N; ++t)
     {
         const int32_t idx = static_cast<int16_t>(ilw(vu, i4base + static_cast<uint32_t>(t), 0));
-        const uint32_t qa = static_cast<uint32_t>(636 + idx), qb2 = static_cast<uint32_t>(716 + idx);
-        const uint32_t q3 = static_cast<uint16_t>(s3base + static_cast<uint32_t>(t));
-        const uint32_t q2 = vi10 ? static_cast<uint32_t>(796 + idx) : static_cast<uint16_t>(s2base + static_cast<uint32_t>(t));
-        if (hits(i4base + static_cast<uint32_t>(t)) || hits(qa) || hits(qb2) || hits(q3) || hits(q2))
-            return fb1EE0(kFbSkinGatherAlias);
-        rA[t] = ldq(vu, qa);
-        rB[t] = ldq(vu, qb2);
-        rS3[t] = ldq(vu, q3);
-        rS2[t] = ldq(vu, q2);
-        V[t].idx = idx;
+        idxs[t] = idx;
+        if (idx < minIdx) minIdx = idx;
+        if (idx > maxIdx) maxIdx = idx;
     }
-    // PERF-SVF: groups of 8 vertices (short last group padded with copies of its last vertex), AVX2 SoA; guard failure -> scalar chain below for that group
-    const Fv8V k1 = fv8Const(vf1), k2 = fv8Const(vf2), k3 = fv8Const(vf3), k4 = fv8Const(vf4), k16 = fv8Const(vf16), kaccw = fv8Const(accw);
+    const int32_t maxOff = vi10 ? 796 : 716;
+    if (636 + minIdx >= 0 && maxOff + maxIdx < 1024)
+    {
+        const bool aliasA = (static_cast<uint32_t>(636 + minIdx) < u1) && (u0 < static_cast<uint32_t>(636 + maxIdx + 1));
+        const bool aliasB = (static_cast<uint32_t>(716 + minIdx) < u1) && (u0 < static_cast<uint32_t>(716 + maxIdx + 1));
+        const bool alias2 = vi10 && (static_cast<uint32_t>(796 + minIdx) < u1) && (u0 < static_cast<uint32_t>(796 + maxIdx + 1));
+        if (aliasA || aliasB || alias2)
+        {
+            for (int32_t t = 0; t < N; ++t)
+            {
+                const int32_t idx = idxs[t];
+                if (hits(static_cast<uint32_t>(636 + idx)) || hits(static_cast<uint32_t>(716 + idx)) || (vi10 && hits(static_cast<uint32_t>(796 + idx))))
+                    return fb1EE0(kFbSkinGatherAlias);
+            }
+        }
+    }
+    else
+    {
+        for (int32_t t = 0; t < N; ++t)
+        {
+            const int32_t idx = idxs[t];
+            if (hits(static_cast<uint32_t>(636 + idx)) || hits(static_cast<uint32_t>(716 + idx)) || (vi10 && hits(static_cast<uint32_t>(796 + idx))))
+                return fb1EE0(kFbSkinGatherAlias);
+        }
+    }
+
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 vf1 = ldq(vu, 1016), vf2 = ldq(vu, 1014), vf3 = ldq(vu, 1002), vf4 = ldq(vu, 1003), vf16 = ldq(vu, 1013);
+    // PERF-V1R: cache prepared matrix/constant rows across consecutive calls with bit-identical inputs
+    struct alignas(32) SkinMatCache
+    {
+        bool valid = false;
+        __m128i raw1, raw2, raw3, raw4, raw16;
+        __m128 accw;
+        Fv8V k1, k2, k3, k4, k16, kaccw;
+    };
+    static thread_local SkinMatCache s_matCache;
+    const __m128i r1 = _mm_castps_si128(vf1), r2 = _mm_castps_si128(vf2), r3 = _mm_castps_si128(vf3), r4 = _mm_castps_si128(vf4), r16 = _mm_castps_si128(vf16);
+    __m128i diff = _mm_xor_si128(r1, s_matCache.raw1);
+    diff = _mm_or_si128(diff, _mm_xor_si128(r2, s_matCache.raw2));
+    diff = _mm_or_si128(diff, _mm_xor_si128(r3, s_matCache.raw3));
+    diff = _mm_or_si128(diff, _mm_xor_si128(r4, s_matCache.raw4));
+    diff = _mm_or_si128(diff, _mm_xor_si128(r16, s_matCache.raw16));
+    if (!s_matCache.valid || !_mm_testz_si128(diff, diff))
+    {
+        s_matCache.raw1 = r1;
+        s_matCache.raw2 = r2;
+        s_matCache.raw3 = r3;
+        s_matCache.raw4 = r4;
+        s_matCache.raw16 = r16;
+        s_matCache.accw = fmacV<4>(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), bc<2>(vf1), zero); // MULAz.w ACC, vf0, vf1
+        s_matCache.k1 = fv8Const(vf1);
+        s_matCache.k2 = fv8Const(vf2);
+        s_matCache.k3 = fv8Const(vf3);
+        s_matCache.k4 = fv8Const(vf4);
+        s_matCache.k16 = fv8Const(vf16);
+        s_matCache.kaccw = fv8Const(s_matCache.accw);
+        s_matCache.valid = true;
+    }
+    const __m128 accw = s_matCache.accw;
+    const Fv8V &k1 = s_matCache.k1, &k2 = s_matCache.k2, &k3 = s_matCache.k3, &k4 = s_matCache.k4, &k16 = s_matCache.k16, &kaccw = s_matCache.kaccw;
+
+    const uint32_t m1012z = ldw(vu, 1012, 2), m1012w = ldw(vu, 1012, 3);
+    const uint32_t ctlOld = ldw(vu, 1023, 3) & 0xFFFFu;
+    // The whole output span [ubase, ubase + 4N] is logged once (if any block falls back to interpreter, undoLog restores it), then written raw.
+    logRange(vu, ubase, span);
+    stqRaw(vu, ubase, _mm_castsi128_ps(_mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))));
+
+    // PERF-SVF / PERF-V1R: gather 8 vertices directly into Fv8V, compute, convert, and fuse output stores
     for (int32_t t0 = 0; t0 < N; t0 += 8)
     {
         const int32_t n = (N - t0 < 8) ? (N - t0) : 8;
         __m128 gA[8], gB[8], gS3[8], gS2[8];
-        for (int j = 0; j < 8; ++j)
+        if (n == 8)
         {
-            const int32_t s = t0 + (j < n ? j : n - 1);
-            gA[j] = rA[s];
-            gB[j] = rB[s];
-            gS3[j] = rS3[s];
-            gS2[j] = rS2[s];
+            for (int j = 0; j < 8; ++j)
+            {
+                const int32_t idx = idxs[t0 + j];
+                gA[j] = ldq(vu, static_cast<uint32_t>(636 + idx));
+                gB[j] = ldq(vu, static_cast<uint32_t>(716 + idx));
+                gS3[j] = ldq(vu, s3base + static_cast<uint32_t>(t0 + j));
+                gS2[j] = vi10 ? ldq(vu, static_cast<uint32_t>(796 + idx)) : ldq(vu, s2base + static_cast<uint32_t>(t0 + j));
+            }
+        }
+        else
+        {
+            for (int j = 0; j < 8; ++j)
+            {
+                const int32_t s = t0 + (j < n ? j : n - 1);
+                const int32_t idx = idxs[s];
+                gA[j] = ldq(vu, static_cast<uint32_t>(636 + idx));
+                gB[j] = ldq(vu, static_cast<uint32_t>(716 + idx));
+                gS3[j] = ldq(vu, s3base + static_cast<uint32_t>(s));
+                gS2[j] = vi10 ? ldq(vu, static_cast<uint32_t>(796 + idx)) : ldq(vu, s2base + static_cast<uint32_t>(s));
+            }
         }
         Fv8V A = fv8FromRows(gA), B = fv8FromRows(gB), S3 = fv8FromRows(gS3), S2 = fv8FromRows(gS2);
         for (int c = 0; c < 4; ++c)
@@ -1500,59 +1587,60 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
             const Fv8V pr = fv8Op<15, false>(S3, in, z8, bad);
             if (!fv8Any(bad))
             {
-                __m128 oR7[8], oS2Q[8], oPr[8];
-                fv8ToRows(r7, oR7);
+                alignas(32) int32_t wArr[8];
+                _mm256_store_si256(reinterpret_cast<__m256i *>(wArr), fv8FtoiS<16>(fv8ClampI(w.c[3])));
+                Fv8V prOut;
+                for (int c = 0; c < 4; ++c)
+                    prOut.c[c] = _mm256_castsi256_ps(fv8FtoiS<1>(fv8ClampI(pr.c[c])));
+                Fv8V r7Out;
+                r7Out.c[0] = _mm256_castsi256_ps(fv8FtoiS<16>(r7.c[0]));
+                r7Out.c[1] = _mm256_castsi256_ps(fv8FtoiS<16>(r7.c[1]));
+                r7Out.c[2] = _mm256_castsi256_ps(fv8FtoiS<16>(r7.c[2]));
+                r7Out.c[3] = _mm256_castsi256_ps(_mm256_and_si256(_mm256_loadu_si256(reinterpret_cast<const __m256i *>(idxs + t0)), _mm256_set1_epi32(0xFFFF)));
+                __m128 oS2Q[8], oPr[8], oR7[8];
                 fv8ToRows(os2q, oS2Q);
-                fv8ToRows(pr, oPr);
-                alignas(32) float wf[8];
-                _mm256_store_ps(wf, w.c[3]);
+                fv8ToRows(prOut, oPr);
+                fv8ToRows(r7Out, oR7);
                 for (int j = 0; j < n; ++j)
                 {
-                    V[t0 + j].R7 = oR7[j];
-                    V[t0 + j].S2Q = oS2Q[j];
-                    V[t0 + j].prod = oPr[j];
-                    V[t0 + j].Wraw = wf[j];
+                    const uint32_t q0 = ubase + 1u + 4u * static_cast<uint32_t>(t0 + j);
+                    std::memcpy(vu + ((q0 & 0x3FFu) << 4) + 12u, &wArr[j], 4);
+                    stqRaw(vu, q0 + 1u, _mm_blend_ps(ldq(vu, q0 + 1u), oS2Q[j], 0x7));
+                    stqRaw(vu, q0 + 2u, oPr[j]);
+                    stqRaw(vu, q0 + 3u, oR7[j]);
                 }
                 continue;
             }
         }
-        for (int32_t t = t0; t < t0 + n; ++t) // scalar fallback (the original chain)
+        for (int j = 0; j < n; ++j) // scalar fallback (the original chain)
         {
-        const __m128 sA = rA[t], B = rB[t], S3 = rS3[t], S2 = rS2[t];
-        const __m128 mula = fmacV<4>(vf3, sA, zero);
-        const __m128 T5 = fmacV<2>(vf4, bc<3>(sA), mula);
-        const float den = nrm1(_mm_cvtss_f32(bc<3>(T5)));
-        if (den == 0.0f)
-            return fb1EE0(kFbSkinDivZero); // lbFull declines (di != 0)
-        const float Q = normRes(normRes(1.0f / den));
-        const __m128 qb = _mm_set1_ps(Q);
-        V[t].R7 = fmacV<4>(T5, qb, zero);
-        V[t].S2Q = fmacV<4>(S2, qb, zero);
-        V[t].Wraw = _mm_cvtss_f32(bc<3>(fmacV<2>(vf1, qb, accw)));
-        const __m128 bv = fmacV<4>(B, vf16, zero);
-        const __m128 in = fmacV<2>(vf2, vf16, bv);
-        V[t].prod = fmacV<4>(S3, in, zero);
+            const __m128 sA = gA[j], B = gB[j], S3 = gS3[j], S2 = gS2[j];
+            const __m128 mula = fmacV<4>(vf3, sA, zero);
+            const __m128 T5 = fmacV<2>(vf4, bc<3>(sA), mula);
+            const float den = nrm1(_mm_cvtss_f32(bc<3>(T5)));
+            if (den == 0.0f)
+                return fb1EE0(kFbSkinDivZero); // lbFull declines (di != 0)
+            const float Q = normRes(normRes(1.0f / den));
+            const __m128 qb = _mm_set1_ps(Q);
+            const __m128 R7 = fmacV<4>(T5, qb, zero);
+            const __m128 S2Q = fmacV<4>(S2, qb, zero);
+            const float Wraw = _mm_cvtss_f32(bc<3>(fmacV<2>(vf1, qb, accw)));
+            const __m128 bv = fmacV<4>(B, vf16, zero);
+            const __m128 in = fmacV<2>(vf2, vf16, bv);
+            const __m128 prod = fmacV<4>(S3, in, zero);
+            const uint32_t q0 = ubase + 1u + 4u * static_cast<uint32_t>(t0 + j);
+            const int32_t w0 = _mm_cvtsi128_si32(ftoiS<16>(clampI(_mm_set1_ps(Wraw))));
+            stqRaw(vu, q0, _mm_castsi128_ps(_mm_insert_epi32(ldqi(vu, q0), w0, 3)));
+            stqRaw(vu, q0 + 1u, _mm_blend_ps(ldq(vu, q0 + 1u), S2Q, 0x7));
+            stqRaw(vu, q0 + 2u, _mm_castsi128_ps(ftoiS<1>(clampI(prod))));
+            stqRaw(vu, q0 + 3u, _mm_castsi128_ps(_mm_insert_epi32(ftoiS<16>(R7), static_cast<int32_t>(static_cast<uint32_t>(idxs[t0 + j]) & 0xFFFFu), 3)));
         }
-    }
-    const uint32_t m1012z = ldw(vu, 1012, 2), m1012w = ldw(vu, 1012, 3);
-    const uint32_t ctlOld = ldw(vu, 1023, 3) & 0xFFFFu;
-    // The whole output span [ubase, ubase + 4N] is logged once (the rest of the program may still fall back, so the log cannot be dropped), then written raw.
-    logRange(vu, ubase, 4u * static_cast<uint32_t>(N) + 1u);
-    stqRaw(vu, ubase, _mm_castsi128_ps(_mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))));
-    for (int32_t v = 0; v < N; ++v)
-    {
-        const uint32_t q0 = ubase + 1u + 4u * static_cast<uint32_t>(v);
-        const int32_t w0 = _mm_cvtsi128_si32(ftoiS<16>(clampI(_mm_set1_ps(V[v].Wraw))));
-        stqRaw(vu, q0, _mm_castsi128_ps(_mm_insert_epi32(ldqi(vu, q0), w0, 3)));
-        stqRaw(vu, q0 + 1u, _mm_blend_ps(ldq(vu, q0 + 1u), V[v].S2Q, 0x7));
-        stqRaw(vu, q0 + 2u, _mm_castsi128_ps(ftoiS<1>(clampI(V[v].prod))));
-        stqRaw(vu, q0 + 3u, _mm_castsi128_ps(_mm_insert_epi32(ftoiS<16>(V[v].R7), static_cast<int32_t>(static_cast<uint32_t>(V[v].idx) & 0xFFFFu), 3)));
     }
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3)); // ISW.z / ISW.w toggle
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
         return fb1EE0(kFbSkinKick);
     if (scene::on()) // PERF-SA
-        scene::recordSkinned(vu, N, vi10, vf3, vf4, rA, i4base, ubase, kicks.back().first, kicks.back().second);
+        scene::recordSkinned(vu, N, vi10, vf3, vf4, i4base, ubase, kicks.back().first, kicks.back().second);
     R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0)); // ILW.x vi12, 1(vi4) (read from VU mem: V[1] does not exist for N==1)
     return true;
 }
