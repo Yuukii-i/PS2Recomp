@@ -4001,7 +4001,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             if (std::memcmp(file.data() + kv.second, vuCode, codeSize) == 0)
                 imageLoaded = true;
         const char *const rpFuzzEnv = std::getenv("PS2X_VU1_FUZZ"); // PERF-V1M
-        if (rpFuzzEnv && rpFuzzEnv[0] != '\0')
+        const char *const rpFuzzSeqEnv = std::getenv("PS2X_VU1_FUZZ_SEQ"); // PERF-V1P
+        if ((rpFuzzEnv && rpFuzzEnv[0] != '\0') || (rpFuzzSeqEnv && rpFuzzSeqEnv[0] != '\0'))
         {
             for (const auto &kv : codeOff)
             {
@@ -4015,9 +4016,10 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         FILE *out = imageLoaded ? std::fopen("logs/vu1replay.txt", "w") : nullptr;
         if (out)
         {
-            if (rpFuzzEnv && rpFuzzEnv[0] != '\0') // PERF-V1M: PS2X_VU1_FUZZ=<hex pc>[,<hex pc>...]
+            if ((rpFuzzEnv && rpFuzzEnv[0] != '\0') || (rpFuzzSeqEnv && rpFuzzSeqEnv[0] != '\0')) // PERF-V1M / PERF-V1P
             {
                 std::vector<uint32_t> fuzzPcs;
+                if (rpFuzzEnv && rpFuzzEnv[0] != '\0')
                 {
                     const char *s = rpFuzzEnv;
                     while (*s)
@@ -4134,25 +4136,36 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                             wr32(top, 0u, (pc >> 3) & 0x7FFu);
                             wr32(1011u, 0u, base);
                             wr32(1011u, 3u, nVert);
-                            const uint16_t matBase = static_cast<uint16_t>((top >= 80u && top < 160u) ? 200u : 80u); // PERF-V1O: 1CD8/1910 0(vi2)..3(vi2)
-                            if (pc == 0x1CD8u || pc == 0x1910u)
+                            const uint16_t matBase = static_cast<uint16_t>((top >= 80u && top < 160u) ? 200u : 80u); // PERF-V1O: 1CD8/1910/1CC0 0(vi2)..3(vi2)
+                            if (pc == 0x1CD8u || pc == 0x1910u || pc == 0x1CC0u) // PERF-V1P
                                 wr32(top, 1u, matBase);
-                            const uint16_t stripBase = (top >= 200u && top < 470u) ? 10u : 200u; // PERF-V1O: 0B38 index strip
+                            const uint16_t stripBase = (top >= 200u && top < 470u) ? 10u : 200u; // PERF-V1O: 0B38/0560/0C38 strip
                             if (pc == 0x0B38u)
                             {
                                 wr32(1018u, 2u, static_cast<uint16_t>(stripBase - top));
                                 wr32(1018u, 3u, nVert);
                             }
+                            if (pc == 0x0560u) // PERF-V1P
+                            {
+                                const uint16_t cnt560 = (nVert < 2u) ? 2u : nVert;
+                                wr32(1018u, 1u, static_cast<uint16_t>(stripBase - top));
+                                wr32(1018u, 3u, cnt560);
+                            }
+                            if (pc == 0x0C38u) // PERF-V1P
+                            {
+                                wr32(top, 2u, stripBase);
+                                wr32(top, 1u, static_cast<uint16_t>(stripBase + nVert));
+                            }
 
                             if ((ti % 5u) != 0u) // 80% randomized floats; 20% raw corpus floats
                             {
-                                const uint32_t cmdWords = (pc == 0x02E0u || pc == 0x0198u) ? 7u : (pc == 0x1720u) ? 3u : (pc == 0x0840u || pc == 0x0628u || pc == 0x1A68u) ? 2u : (pc == 0x32A0u) ? 1u : (pc == 0x0B38u || pc == 0x1CD8u || pc == 0x1910u) ? 0u : 4u; // PERF-V1O
+                                const uint32_t cmdWords = (pc == 0x02E0u || pc == 0x0198u) ? 7u : (pc == 0x1720u) ? 3u : (pc == 0x0840u || pc == 0x0628u || pc == 0x1A68u || pc == 0x0560u) ? 2u : (pc == 0x32A0u || pc == 0x1E50u) ? 1u : (pc == 0x0C38u) ? nVert : (pc == 0x0B38u || pc == 0x1CD8u || pc == 0x1910u || pc == 0x1CC0u || pc == 0x0AE0u || pc == 0x2E20u || pc == 0x2E88u) ? 0u : 4u; // PERF-V1P
                                 for (uint32_t cw = 1u; cw <= cmdWords; ++cw)
                                     fuzzQword(rng, fuzzMem.data(), top + cw);
                                 static const uint32_t kConsts[] = {978u, 979u, 980u, 981u, 982u, 983u, 984u, 985u, 986u, 987u, 988u, 989u, 990u, 991u, 1010u, 1015u, 1017u}; // PERF-V1O
                                 for (uint32_t cq : kConsts)
                                     fuzzQword(rng, fuzzMem.data(), cq);
-                                if (pc == 0x1CD8u || pc == 0x1910u)
+                                if (pc == 0x1CD8u || pc == 0x1910u || pc == 0x1CC0u) // PERF-V1P
                                 {
                                     for (uint32_t mw = 0u; mw < 4u; ++mw)
                                         fuzzQword(rng, fuzzMem.data(), matBase + mw);
@@ -4161,11 +4174,16 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                                     fuzzQword(rng, fuzzMem.data(), 476u + base + j);
                                 for (uint32_t j = 0; j < static_cast<uint32_t>(nVert) + 4u; ++j) // PERF-V1N: 02E0 reads N[0..n+3]
                                     fuzzQword(rng, fuzzMem.data(), 556u + base + j);
-                                for (uint32_t j = 0; j < nVert; ++j)
+                                for (uint32_t j = 0; j < static_cast<uint32_t>(nVert) + 1u; ++j) // PERF-V1P: 0AE0 writes 716+base+0..n
                                 {
                                     fuzzQword(rng, fuzzMem.data(), 716u + base + j);
-                                    if (pc == 0x1A68u || pc == 0x1CD8u) // PERF-V1O: 1A68/1CD8 write .xyz to 796+base+j, preserve .w
+                                    if (pc == 0x1A68u || pc == 0x1CD8u || pc == 0x1CC0u) // PERF-V1P: 1A68/1CD8/1CC0 write .xyz to 796+base+j, preserve .w
                                         fuzzQword(rng, fuzzMem.data(), 796u + base + j);
+                                }
+                                if (pc == 0x0560u) // PERF-V1P
+                                {
+                                    for (uint32_t k = 0u; k < static_cast<uint32_t>(std::max<uint16_t>(nVert, 2u)); ++k)
+                                        fuzzQword(rng, fuzzMem.data(), stripBase + k);
                                 }
                                 if (pc == 0x0B38u) // PERF-V1O: 0B38 winding sign (top.y), index strip, 636+idx vertices
                                 {
@@ -4255,6 +4273,208 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                                  pc, fuzzN, exactEnded, stepLimit, funcFb, funcTaken, mismatches, firstMsg);
                     std::printf("[fuzz] pc=%04X tests=%u exactEnded=%u stepLimit=%u fb=%u taken=%u mismatches=%u first: %s\n",
                                 pc, fuzzN, exactEnded, stepLimit, funcFb, funcTaken, mismatches, firstMsg);
+                }
+                if (rpFuzzSeqEnv && rpFuzzSeqEnv[0] != '\0') // PERF-V1P: PS2X_VU1_FUZZ_SEQ="1900+1910,0AF0+0198+0628,..."
+                {
+                    std::vector<std::pair<std::string, std::vector<uint32_t>>> fuzzSeqs;
+                    {
+                        const char *s = rpFuzzSeqEnv;
+                        while (*s)
+                        {
+                            while (*s == ',' || *s == ' ' || *s == '\t') ++s;
+                            if (!*s) break;
+                            const char *tokStart = s;
+                            std::vector<uint32_t> seq;
+                            while (*s && *s != ',')
+                            {
+                                while (*s == '+' || *s == ' ' || *s == '\t') ++s;
+                                if (!*s || *s == ',') break;
+                                char *end = nullptr;
+                                const unsigned long v = std::strtoul(s, &end, 16);
+                                if (end != s)
+                                    seq.push_back(static_cast<uint32_t>(v & 0x3FFFu));
+                                s = (end != s) ? end : s + 1;
+                            }
+                            if (!seq.empty())
+                                fuzzSeqs.emplace_back(std::string(tokStart, static_cast<size_t>(s - tokStart)), std::move(seq));
+                        }
+                    }
+                    auto seqCmdWords = [](uint32_t h) -> uint32_t {
+                        switch (h)
+                        {
+                        case 0x02E0u:
+                        case 0x0198u: return 7u;
+                        case 0x0CC0u:
+                        case 0x1090u:
+                        case 0x1C48u: return 4u;
+                        case 0x15E0u:
+                        case 0x1720u: return 3u;
+                        case 0x0560u:
+                        case 0x0628u:
+                        case 0x0840u:
+                        case 0x1A68u: return 2u;
+                        case 0x32A0u: return 1u;
+                        default: return 0u;
+                        }
+                    };
+                    for (const auto &seqEnt : fuzzSeqs)
+                    {
+                        const std::string &seqName = seqEnt.first;
+                        const std::vector<uint32_t> &seq = seqEnt.second;
+                        uint32_t exactEnded = 0, stepLimit = 0, funcFb = 0, funcTaken = 0, mismatches = 0;
+                        char firstMsg[256] = "none";
+                        uint64_t rng = 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(seq.front());
+                        if (!fuzzRecs.empty())
+                        {
+                            for (uint32_t ti = 0; ti < fuzzN; ++ti)
+                            {
+                                const size_t ri = fuzzRecs[ti % fuzzRecs.size()];
+                                const uint8_t *p = file.data() + runsIdx[ri].off;
+                                (void)rpGet<uint32_t>(p); // rStart
+                                const uint32_t rTop = rpGet<uint32_t>(p);
+                                const uint32_t rItop = rpGet<uint32_t>(p);
+                                const uint32_t rMax = rpGet<uint32_t>(p);
+                                const uint32_t wc0 = rpGet<uint32_t>(p);
+                                (void)rpGet<uint32_t>(p); // wcA
+                                const uint64_t cyc0 = rpGet<uint64_t>(p);
+                                (void)rpGet<uint64_t>(p); // cycA
+                                (void)rpGet<uint64_t>(p); // gen
+                                const uint32_t dsz = rpGet<uint32_t>(p);
+                                VU1State s0;
+                                std::memcpy(&s0, p, sizeof(VU1State)); p += sizeof(VU1State);
+                                p += sizeof(VU1State); // sA
+                                std::memcpy(fuzzMem.data(), p, dsz);
+
+                                const uint32_t top = (rTop < 380u) ? rTop : 0u;
+                                const uint16_t base = static_cast<uint16_t>(rngNext(rng) % 32u);
+                                const uint16_t nVert = static_cast<uint16_t>(1u + (rngNext(rng) % 40u));
+                                const uint16_t matBase = 440u;
+                                const uint16_t stripBase = 880u;
+                                auto wr32 = [&](uint32_t q, uint32_t lane, uint32_t val) {
+                                    std::memcpy(fuzzMem.data() + ((q & 0x3FFu) << 4) + lane * 4u, &val, 4);
+                                };
+                                wr32(1011u, 0u, base);
+                                wr32(1011u, 3u, nVert);
+                                wr32(1018u, 2u, static_cast<uint16_t>(stripBase - top));
+                                wr32(1018u, 3u, std::max<uint16_t>(nVert, 2u));
+
+                                const bool doRand = (ti % 5u) != 0u;
+                                uint32_t cursor = top;
+                                for (uint32_t hpc : seq)
+                                {
+                                    if (doRand && (hpc == 0x0B38u || hpc == 0x0B40u))
+                                        fuzzQword(rng, fuzzMem.data(), cursor);
+                                    wr32(cursor, 0u, (hpc >> 3) & 0x7FFu);
+                                    if (hpc == 0x1900u || hpc == 0x1910u || hpc == 0x1CC0u || hpc == 0x1CD8u)
+                                        wr32(cursor, 1u, matBase);
+                                    ++cursor;
+                                    const uint32_t cwN = seqCmdWords(hpc);
+                                    if (doRand)
+                                    {
+                                        for (uint32_t cw = 0u; cw < cwN; ++cw)
+                                            fuzzQword(rng, fuzzMem.data(), cursor + cw);
+                                        if (hpc == 0x0CC0u && (ti & 1u) == 0u)
+                                            wr32(cursor + 3u, 2u, 0u);
+                                    }
+                                    cursor += cwN;
+                                }
+                                wr32(cursor, 0u, 0u); // end command (0000)
+
+                                if (doRand)
+                                {
+                                    static const uint32_t kConsts[] = {978u, 979u, 980u, 981u, 982u, 983u, 984u, 985u, 986u, 987u, 988u, 989u, 990u, 991u, 1010u, 1015u, 1017u};
+                                    for (uint32_t cq : kConsts)
+                                        fuzzQword(rng, fuzzMem.data(), cq);
+                                    for (uint32_t mw = 0u; mw < 4u; ++mw)
+                                        fuzzQword(rng, fuzzMem.data(), matBase + mw);
+                                    for (uint32_t j = 0u; j < static_cast<uint32_t>(nVert) + 3u; ++j)
+                                        fuzzQword(rng, fuzzMem.data(), 476u + base + j);
+                                    for (uint32_t j = 0u; j < static_cast<uint32_t>(nVert) + 4u; ++j)
+                                        fuzzQword(rng, fuzzMem.data(), 556u + base + j);
+                                    for (uint32_t j = 0u; j < 48u; ++j)
+                                        fuzzQword(rng, fuzzMem.data(), 636u + j);
+                                    for (uint32_t j = 0u; j < static_cast<uint32_t>(nVert) + 1u; ++j)
+                                    {
+                                        fuzzQword(rng, fuzzMem.data(), 716u + base + j);
+                                        fuzzQword(rng, fuzzMem.data(), 796u + base + j);
+                                    }
+                                    for (uint32_t k = 0u; k < static_cast<uint32_t>(nVert) + 3u; ++k)
+                                    {
+                                        wr32(stripBase + k, 0u, static_cast<uint32_t>(rngNext(rng) % 48u));
+                                        wr32(stripBase + k, 1u, static_cast<uint32_t>(rngNext(rng) & 0xFFFFu));
+                                    }
+                                }
+
+                                m_state = s0;
+                                m_state.pc = 0x0008u;
+                                m_state.top = top;
+                                m_state.ebit = false;
+                                m_state.haltAfterDelaySlot = false;
+                                m_state.stoppedByD = false;
+                                m_state.stoppedByT = false;
+                                m_state.branchPending = false;
+                                m_state.branchDelay = false;
+                                m_workingClip = wc0;
+                                m_cycle = cyc0;
+                                std::memcpy(vuData, fuzzMem.data(), dataSize);
+                                resetScheduler();
+                                capExact.clear();
+                                s_vfyCapture = &capExact;
+                                const uint32_t maxCyc = rMax ? std::max(rMax, 100000u) : 100000u;
+                                run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCyc);
+                                s_vfyCapture = nullptr;
+                                if (m_state.ebit || m_state.stoppedByD || m_state.stoppedByT)
+                                {
+                                    ++stepLimit;
+                                    continue;
+                                }
+                                ++exactEnded;
+                                std::memcpy(exactMem.data(), vuData, dataSize);
+
+                                std::memcpy(vuData, fuzzMem.data(), dataSize);
+                                capFunc.clear();
+                                const uint32_t fuzzCsr = _mm_getcsr();
+                                _mm_setcsr(fuzzCsr | 0x6000u);
+                                const bool fuzzTook = vu1func::vu1FuncExec(vuData, dataSize, 0x0008u, top, rItop, gs, memory, &capFunc, false);
+                                _mm_setcsr((_mm_getcsr() & ~0x6000u) | (fuzzCsr & 0x6000u));
+                                if (!fuzzTook)
+                                {
+                                    ++funcFb;
+                                    continue;
+                                }
+                                ++funcTaken;
+                                int badQ = -1;
+                                for (uint32_t q = 0; q < dataSize / 16u; ++q)
+                                {
+                                    if (std::memcmp(exactMem.data() + q * 16u, vuData + q * 16u, 16) != 0)
+                                    {
+                                        badQ = static_cast<int>(q);
+                                        break;
+                                    }
+                                }
+                                const bool badGif = capExact.size() != capFunc.size() || (!capExact.empty() && std::memcmp(capExact.data(), capFunc.data(), capExact.size()) != 0);
+                                if (badQ >= 0 || badGif)
+                                {
+                                    ++mismatches;
+                                    if (mismatches <= 6u && badQ >= 0)
+                                    {
+                                        uint32_t ew[4], fw[4], ow[4];
+                                        std::memcpy(ew, exactMem.data() + badQ * 16u, 16);
+                                        std::memcpy(fw, vuData + badQ * 16u, 16);
+                                        std::memcpy(ow, fuzzMem.data() + badQ * 16u, 16);
+                                        std::printf("[fuzz-seq-detail] seq=%s t=%u q=%d exact=%08X %08X %08X %08X func=%08X %08X %08X %08X orig=%08X %08X %08X %08X\n",
+                                                    seqName.c_str(), ti, badQ, ew[0], ew[1], ew[2], ew[3], fw[0], fw[1], fw[2], fw[3], ow[0], ow[1], ow[2], ow[3]);
+                                    }
+                                    if (mismatches == 1u)
+                                        std::snprintf(firstMsg, sizeof(firstMsg), "test=%u base=%u n=%u q=%d gif=%d(%zu/%zu)", ti, base, nVert, badQ, badGif ? 1 : 0, capExact.size(), capFunc.size());
+                                }
+                            }
+                        }
+                        std::fprintf(out, "[fuzz-seq] seq=%s tests=%u exactEnded=%u stepLimit=%u fb=%u taken=%u mismatches=%u first: %s\n",
+                                     seqName.c_str(), fuzzN, exactEnded, stepLimit, funcFb, funcTaken, mismatches, firstMsg);
+                        std::printf("[fuzz-seq] seq=%s tests=%u exactEnded=%u stepLimit=%u fb=%u taken=%u mismatches=%u first: %s\n",
+                                    seqName.c_str(), fuzzN, exactEnded, stepLimit, funcFb, funcTaken, mismatches, firstMsg);
+                    }
                 }
                 std::fclose(out);
                 s_rpDone = true;

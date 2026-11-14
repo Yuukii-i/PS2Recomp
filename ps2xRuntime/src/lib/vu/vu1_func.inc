@@ -187,6 +187,8 @@ struct Regs
     __m128 vf[32];
     __m128 acc;
     uint16_t vi[16];
+    uint32_t vfValid = 0u; // PERF-V1P: bit i = R.vf[i] is exact
+    uint16_t viValid = 0u; // PERF-V1P: bit i = R.vi[i] is exact
 };
 
 inline __m128 ldq(const uint8_t *vu, uint32_t q) { return _mm_loadu_ps(reinterpret_cast<const float *>(vu + ((q & 0x3FFu) << 4))); }
@@ -1150,6 +1152,8 @@ static bool handler0AF0(Regs &R, uint8_t *vu, uint16_t vi13)
     R.vi[2] = vi2;
     R.vi[3] = vi3;
     R.vi[4] = static_cast<uint16_t>(base + vi2);
+    R.vfValid = (R.vfValid & ~0x00000002u) | (1u << 1); // PERF-V1P
+    R.viValid = (R.viValid & ~0x001Eu) | (1u << 2) | (1u << 3) | (1u << 4);
     return true;
 }
 
@@ -1211,6 +1215,8 @@ static bool handler0B40(Regs &R, uint8_t *vu, uint16_t vi13)
     R.vf[1] = vf1; R.vf[2] = vf2; R.vf[3] = vf3; R.vf[4] = vf4; R.vf[5] = vf5; R.vf[11] = vf11; R.vf[12] = vf12;
     R.acc = acc;
     R.vi[2] = vi2; R.vi[3] = 128u; R.vi[4] = 0x8000u; R.vi[5] = vi5; R.vi[6] = vi6; R.vi[7] = vi7; R.vi[8] = vi8; R.vi[9] = vi9;
+    R.vfValid = (R.vfValid & ~0x00020000u) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 11) | (1u << 12); // PERF-V1P
+    R.viValid = (R.viValid & ~0x0002u) | 0x03FCu;
     return true;
 }
 
@@ -1246,6 +1252,8 @@ static bool handler15E0(Regs &R, uint8_t *vu, uint16_t &vi13)
         stqRaw(vu, static_cast<uint32_t>(base2) + k, out);
     }
     R.vf[1] = vf1; R.vf[2] = vf2; R.vf[3] = vf3;
+    R.vfValid = (R.vfValid & ~0x00001FFEu) | (1u << 1) | (1u << 2) | (1u << 3); // PERF-V1P: 15E0 touches vf4..12, vi1..3
+    R.viValid &= ~0x000Eu;
     return true;
 }
 
@@ -1279,7 +1287,10 @@ static bool handler1900(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t vi2)
         const uint32_t qd = static_cast<uint32_t>(baseDst) + k;
         stqRaw(vu, qd, _mm_blend_ps(ldq(vu, qd), res, 0x7));
     }
-    R.vf[2] = r2; R.vf[3] = r3; R.vf[4] = vf12; R.vf[12] = r12;
+    R.vf[2] = r2; R.vf[3] = r3; R.vf[4] = vf12; R.vf[9] = _mm_blend_ps(R.vf[9], vf9, 0x7); R.vf[12] = r12;
+    R.vi[4] = 556u; // PERF-V1P: 19A0 IADDIU vi4, vi0, 556; 1908 LQ.xyz vf9, 0(vi2)
+    R.vfValid = (R.vfValid & ~0x00101C3Eu) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 9) | (1u << 12); // PERF-V1P
+    R.viValid = (R.viValid & ~0x080Eu) | (1u << 4);
     return true;
 }
 
@@ -1311,6 +1322,8 @@ static bool handler1C48(Regs &R, uint8_t *vu, uint16_t &vi13)
     R.vf[1] = vf1; R.vf[2] = vf2; R.vf[3] = vf3; R.vf[4] = vf4; R.vf[6] = vf6;
     R.acc = acc;
     R.vi[2] = static_cast<uint16_t>(base + n + 1u);
+    R.vfValid = (R.vfValid & ~0x0000005Eu) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 6); // PERF-V1P
+    R.viValid = (R.viValid & ~0x000Au) | (1u << 2);
     return true;
 }
 
@@ -1353,6 +1366,8 @@ static bool handler3160(Regs &R, uint8_t *vu, uint16_t vi13)
     }
     R.vf[3] = vf3; R.vf[4] = vf4;
     R.acc = acc;
+    R.vfValid = (R.vfValid & ~0x0000001Eu) | (1u << 3) | (1u << 4); // PERF-V1P
+    R.viValid &= ~0x0006u;
     return true;
 }
 
@@ -1408,7 +1423,8 @@ static bool handler0840(Regs &R, uint8_t *vu, uint16_t &vi13)
         const __m128 contrib = fmacV<4>(cmdCol, bc<0>(atten), zero);
         stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
     }
-    (void)R;
+    R.vfValid &= ~0x0000FFFEu; // PERF-V1P: 0840 touches vf1..15, vi1..2
+    R.viValid &= ~0x0006u;
     return true;
 }
 
@@ -1469,7 +1485,8 @@ static bool handler0CC0(Regs &R, uint8_t *vu, uint16_t &vi13)
         const __m128 contrib = fmacV<4>(cmd1, bc<0>(atten), zero);
         stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
     }
-    (void)R;
+    R.vfValid &= ~0x00001FFEu; // PERF-V1P: 0CC0 touches vf1..12, vi1..5
+    R.viValid &= ~0x003Eu;
     return true;
 }
 
@@ -1520,7 +1537,8 @@ static bool handler1090(Regs &R, uint8_t *vu, uint16_t &vi13)
         const __m128 contrib = fmacV<4>(cmd1, bc<0>(atten), zero);
         stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
     }
-    (void)R;
+    R.vfValid &= ~0x0000FFFEu; // PERF-V1P: 1090 touches vf1..15, vi1..4
+    R.viValid &= ~0x001Eu;
     return true;
 }
 
@@ -1557,18 +1575,52 @@ static bool handler02E0(Regs &R, uint8_t *vu, uint16_t &vi13)
         const __m128 contrib = fmacV<2>(c3, bc<3>(spec), fmacV<2>(c2, bc<2>(spec), fmacV<2>(c1, bc<1>(spec), fmacV<4>(c0, bc<0>(spec), zero))));
         stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
     }
-    (void)R;
+    R.vfValid &= ~0x0007FFFEu; // PERF-V1P: 02E0 touches vf1..18, vi1..3
+    R.viValid &= ~0x000Eu;
     return true;
 }
 
-// PERF-V1N: handler 0628 (0628..0830, 67 pairs) -- point diffuse light (RSQRT 1/d), preceded by 3 live-in stores SQ vf11..13 -> 17/19/21(vi4)
+// PERF-V1P: handler 0628 (0628..0830, 67 pairs) -- point diffuse light (RSQRT 1/d), preceded by 3 live-in stores SQ vf11..13 -> 17/19/21(vi4)
 static bool handler0628(Regs &R, uint8_t *vu, uint16_t &vi13)
 {
-    (void)R;
-    (void)vu;
-    (void)vi13;
-    // 0628..0638 unconditionally store live-in vf11, vf12, vf13 to 17(vi4), 19(vi4), 21(vi4); vu1FuncExec has no access to entry vi4/vf11..13.
-    return false;
+    if ((R.viValid & (1u << 4)) == 0u || (R.vfValid & ((1u << 11) | (1u << 12) | (1u << 13))) != ((1u << 11) | (1u << 12) | (1u << 13)))
+        return false;
+    stq(vu, static_cast<uint32_t>(R.vi[4]) + 17u, R.vf[11]);
+    stq(vu, static_cast<uint32_t>(R.vi[4]) + 19u, R.vf[12]);
+    stq(vu, static_cast<uint32_t>(R.vi[4]) + 21u, R.vf[13]);
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 240u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 716u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    const __m128 cmd0 = ldq(vu, vi13);
+    const __m128 cmd1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
+    vi13 = static_cast<uint16_t>(vi13 + 2u);
+    const __m128 m982 = ldq(vu, 982), m983 = ldq(vu, 983), m984 = ldq(vu, 984), v985 = ldq(vu, 985);
+    const __m128 L = fmacV<0>(fmacV<2>(m984, bc<2>(cmd0), fmacV<2>(m983, bc<1>(cmd0), fmacV<4>(m982, bc<0>(cmd0), zero))), v985, zero);
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + 476u + j);
+        const __m128 Nrm = ldq(vu, static_cast<uint32_t>(base) + 556u + j);
+        const __m128 Col = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 dVec = fmacV<1>(L, P, zero);
+        const __m128 d2Vec = fmacV<4>(dVec, dVec, zero);
+        const __m128 d2 = fmacV<2>(one, bc<2>(d2Vec), fmacV<2>(one, bc<1>(d2Vec), fmacV<4>(one, bc<0>(d2Vec), zero)));
+        const __m128 qVec = _mm_set1_ps(rsqrtQ(1.0f, _mm_cvtss_f32(d2)));
+        const __m128 q2 = fmacV<4>(qVec, qVec, zero);
+        const __m128 prod = fmacV<4>(dVec, Nrm, zero);
+        const __m128 dot = fmacV<0>(fmacV<0>(prod, bc<1>(prod), zero), bc<2>(prod), zero);
+        const __m128 dotPos = maxV(dot, zero);
+        const __m128 atten = fmacV<4>(q2, dotPos, zero);
+        const __m128 contrib = fmacV<4>(cmd1, bc<0>(atten), zero);
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
+    }
+    R.vfValid &= ~0x00000FFEu;
+    R.viValid &= ~0x000Eu;
+    return true;
 }
 
 // PERF-V1N: handler 1720 (1720..18E8, 59 pairs) -- point ambient/falloff light (quadratic distance clamp via SQRT)
@@ -1604,7 +1656,8 @@ static bool handler1720(Regs &R, uint8_t *vu, uint16_t &vi13)
         const __m128 contrib = fmacV<4>(cmd1, bc<0>(atten), zero);
         stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
     }
-    (void)R;
+    R.vfValid &= ~0x00000FFEu; // PERF-V1P: 1720 touches vf1..11, vi1..3
+    R.viValid &= ~0x000Eu;
     return true;
 }
 
@@ -1645,7 +1698,8 @@ static bool handler1A68(Regs &R, uint8_t *vu, uint16_t &vi13)
         const __m128 oldQ = ldq(vu, static_cast<uint32_t>(outBase) + j);
         stqRaw(vu, static_cast<uint32_t>(outBase) + j, _mm_blend_ps(uv1, oldQ, 0x8));
     }
-    (void)R;
+    R.vfValid &= ~0x000007FEu; // PERF-V1P: 1A68 touches vf1..10, vi1..2
+    R.viValid &= ~0x0006u;
     return true;
 }
 
@@ -1681,7 +1735,14 @@ static bool handler0198(Regs &R, uint8_t *vu, uint16_t &vi13)
         const __m128 contrib = fmacV<2>(c3, bc<3>(diff), fmacV<2>(c2, bc<2>(diff), fmacV<2>(c1, bc<1>(diff), fmacV<4>(c0, bc<0>(diff), zero))));
         stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
     }
-    (void)R;
+    // PERF-V1P: 0290..02B0 leave vf11 = N[n+1], vf12 = L*N[n], vf13 = Col[n]
+    // (loop exit: vf11 = N[n+2] (prologue loads N0..N2, loop loads N3..N(n+2)); vf12 = L*N[n+1] (iteration i reads vf11 = N(i+1)))
+    const __m128 nrmN = ldq(vu, static_cast<uint32_t>(base) + 556u + n + 1u);
+    R.vf[11] = ldq(vu, static_cast<uint32_t>(base) + 556u + n + 2u);
+    R.vf[12] = fmacV<2>(Lz, bc<2>(nrmN), fmacV<2>(Ly, bc<1>(nrmN), fmacV<4>(Lx, bc<0>(nrmN), zero)));
+    R.vf[13] = ldq(vu, static_cast<uint32_t>(outBase) + n);
+    R.vfValid = (R.vfValid & ~0x000047FEu) | (1u << 11) | (1u << 12) | (1u << 13);
+    R.viValid &= ~0x000Eu;
     return true;
 }
 
@@ -1732,23 +1793,50 @@ static bool handler0B38(Regs &R, uint8_t *vu, uint16_t top)
         vf4 = fmacV<4>(vf5c, vf2, zero);
         vi8 = ilw(vu, static_cast<uint16_t>(vi1_0 + k + 1u), 1);
     }
-    (void)R;
+    R.vfValid &= ~0x0002183Eu; // PERF-V1P: 0B38 touches vf1..5, vf11, vf12, vf17, vi1..9
+    R.viValid &= ~0x03FEu;
     return true;
 }
 
-// PERF-V1O: handler 1910 (1910..1A40, 39 pairs) -- position transform by 978..981 * 0..3(vi2), reads live-in vf9
+// PERF-V1P: handler 1910 (1910..1A40, 39 pairs) -- position transform by 978..981 * 0..3(vi2), reads live-in vf9 (from 1908)
 static bool handler1910(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t vi2)
 {
-    (void)R;
-    (void)vu;
-    (void)vi13;
-    (void)vi2;
-    // 1930/1950/19B0/19D0 read live-in vf9 (loaded at 1908 in 1900's delay slot, not by 1910); vu1FuncExec has no access to entry vf9.
-    return false;
+    if ((R.vfValid & (1u << 9)) == 0u)
+        return false;
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 512u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 796u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    const __m128 T0 = R.vf[9];
+    const __m128 T1 = ldq(vu, static_cast<uint32_t>(vi2) + 1u);
+    const __m128 T2 = ldq(vu, static_cast<uint32_t>(vi2) + 2u);
+    const __m128 T3 = ldq(vu, static_cast<uint32_t>(vi2) + 3u);
+    const auto mulMat = [&](__m128 B) {
+        return fmacV<2>(T3, bc<3>(B), fmacV<2>(T2, bc<2>(B), fmacV<2>(T1, bc<1>(B), fmacV<4>(T0, bc<0>(B), zero))));
+    };
+    const __m128 M0 = mulMat(ldq(vu, 978));
+    const __m128 M1 = mulMat(ldq(vu, 979));
+    const __m128 M2 = mulMat(ldq(vu, 980));
+    const __m128 M3 = mulMat(ldq(vu, 981));
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + 476u + j);
+        const __m128 res = fmacV<2>(M3, one, fmacV<2>(M2, bc<2>(P), fmacV<2>(M1, bc<1>(P), fmacV<4>(M0, bc<0>(P), zero))));
+        const uint32_t qd = static_cast<uint32_t>(outBase) + j;
+        stqRaw(vu, qd, _mm_blend_ps(ldq(vu, qd), res, 0x7));
+    }
+    R.vi[4] = 476u; // 1958 IADDIU vi4, vi0, 476
+    R.vfValid &= ~0x00101C3Eu;
+    R.viValid = (R.viValid & ~0x080Eu) | (1u << 4);
+    return true;
 }
 
-// PERF-V1O: handler 1CD8 (1CD8..1E38, 45 pairs) -- projective UV transform (writes .xyz to 796+base+j, preserves .w)
-static bool handler1CD8(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t vi2)
+// PERF-V1P: shared projective UV transform for 1CD8 (positions, 978..981) and 1CC0 (normals, 986..988 + vf0)
+static bool handler1CC0_1CD8(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t vi2, bool is1CC0)
 {
     const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
     if (n == 0u || n > 236u)
@@ -1762,20 +1850,36 @@ static bool handler1CD8(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t vi2)
     const auto mulMat = [&](__m128 B) {
         return fmacV<2>(T3, bc<3>(B), fmacV<2>(T2, bc<2>(B), fmacV<2>(T1, bc<1>(B), fmacV<4>(T0, bc<0>(B), zero))));
     };
-    const __m128 M0 = mulMat(ldq(vu, 978)), M1 = mulMat(ldq(vu, 979));
-    const __m128 M2 = mulMat(ldq(vu, 980)), M3 = mulMat(ldq(vu, 981));
+    const uint32_t mBase = is1CC0 ? 986u : 978u;
+    const __m128 M0 = mulMat(ldq(vu, mBase)), M1 = mulMat(ldq(vu, mBase + 1u));
+    const __m128 M2 = mulMat(ldq(vu, mBase + 2u)), M3 = mulMat(is1CC0 ? _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f) : ldq(vu, 981));
+    const uint32_t srcOff = is1CC0 ? 556u : 476u;
     logRange(vu, outBase, n);
     for (uint32_t j = 0; j < n; ++j)
     {
-        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + 476u + j);
+        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + srcOff + j);
         const __m128 V = fmacV<2>(M3, one, fmacV<2>(M2, bc<2>(P), fmacV<2>(M1, bc<1>(P), fmacV<4>(M0, bc<0>(P), zero))));
         const __m128 oldUV = ldq(vu, static_cast<uint32_t>(outBase) + j);
         const __m128 acc = _mm_blend_ps(fmacV<4>(oldUV, bc<2>(V), zero), zero, 0x4); // ADDA.z 0 + MULAz.xy
         const __m128 res = fmacV<2>(V, bc<2>(oldUV), acc);
         stqRaw(vu, static_cast<uint32_t>(outBase) + j, _mm_blend_ps(oldUV, res, 0x7));
     }
-    (void)R;
+    R.vi[4] = static_cast<uint16_t>(outBase + n);
+    R.vfValid &= ~0x000001FEu;
+    R.viValid = (R.viValid & ~0x006Eu) | (1u << 4);
     return true;
+}
+
+// PERF-V1O: handler 1CD8 (1CD8..1E38, 45 pairs) -- projective UV transform (writes .xyz to 796+base+j, preserves .w)
+static bool handler1CD8(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t vi2)
+{
+    return handler1CC0_1CD8(R, vu, vi13, vi2, false);
+}
+
+// PERF-V1P: handler 1CC0 (1CC0..1CD0 -> 1CF0..1E38) -- projective UV transform on normals (556+base+j, 986..988 + vf0)
+static bool handler1CC0(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t vi2)
+{
+    return handler1CC0_1CD8(R, vu, vi13, vi2, true);
 }
 
 // PERF-V1O: handler 32A0 (32A0..3450, 44 pairs) -- silhouette shadow-volume extrusion (updates .xyz at 476+base+j, preserves .w)
@@ -1811,15 +1915,128 @@ static bool handler32A0(Regs &R, uint8_t *vu, uint16_t &vi13)
         const __m128 res = fmacV<2>(dir, scale, acc);
         stqRaw(vu, static_cast<uint32_t>(outBase) + j, _mm_blend_ps(P, res, 0x7));
     }
-    (void)R;
+    R.vi[4] = 136u; // PERF-V1P: 3330 IADDIU vi4, vi0, 136
+    R.vfValid &= ~0x000007FEu;
+    R.viValid = (R.viValid & ~0x000Eu) | (1u << 4);
     return true;
+}
+
+// PERF-V1P: handler 0560 (0560..0620, 25 pairs) -- linear scale+bias on 1018.y+top..+1018.w, preceded by live-in stores SQ vf15..18 -> 18/20/22/24(vi4)
+static bool handler0560(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    if ((R.viValid & (1u << 4)) == 0u || (R.vfValid & 0x00078000u) != 0x00078000u)
+        return false;
+    stq(vu, static_cast<uint32_t>(R.vi[4]) + 18u, R.vf[15]);
+    stq(vu, static_cast<uint32_t>(R.vi[4]) + 20u, R.vf[16]);
+    stq(vu, static_cast<uint32_t>(R.vi[4]) + 22u, R.vf[17]);
+    stq(vu, static_cast<uint32_t>(R.vi[4]) + 24u, R.vf[18]);
+    const uint16_t off = ilw(vu, 1018, 1), count = ilw(vu, 1018, 3);
+    if (count < 2u || count > 512u)
+        return false;
+    const uint16_t base = static_cast<uint16_t>(off + R.vi[12]);
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 vf1 = ldq(vu, vi13);
+    const __m128 vf3 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
+    vi13 = static_cast<uint16_t>(vi13 + 2u);
+    if (((vi13 - base) & 0x3FFu) < count)
+        return false;
+    const __m128 acc = fmacV<0>(vf3, zero, zero);
+    logRange(vu, base, count);
+    for (uint32_t k = 0; k < count; ++k)
+        stqRaw(vu, static_cast<uint32_t>(base) + k, fmacV<2>(ldq(vu, static_cast<uint32_t>(base) + k), vf1, acc));
+    R.vfValid &= ~0x0000787Eu;
+    R.viValid &= ~0x000Eu;
+    return true;
+}
+
+// PERF-V1P: handler 0AE0 (0AE0..0B30, 11 pairs) -- zero-fill 716+base..716+base+n (n+1 qwords; entry before 0AF0)
+static bool handler0AE0(Regs &R, uint8_t *vu, uint16_t vi13)
+{
+    const uint16_t vi3 = ilw(vu, 1011, 0), vi2 = ilw(vu, 1011, 3);
+    const uint32_t count = static_cast<uint32_t>(vi2) + 1u;
+    if (count > 512u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(vi3 + 716u);
+    if (((vi13 - outBase) & 0x3FFu) < count)
+        return false;
+    const __m128 zero = _mm_setzero_ps();
+    logRange(vu, outBase, count);
+    for (uint32_t i = 0; i < count; ++i)
+        stqRaw(vu, static_cast<uint32_t>(outBase) + i, zero);
+    R.vf[1] = zero;
+    R.vi[2] = vi2;
+    R.vi[3] = vi3;
+    R.vi[4] = static_cast<uint16_t>(outBase + vi2);
+    R.vfValid = (R.vfValid & ~0x00008002u) | (1u << 1);
+    R.viValid = (R.viValid & ~0x001Eu) | (1u << 2) | (1u << 3) | (1u << 4);
+    return true;
+}
+
+// PERF-V1P: handler 0C38 (0C38..0CB8, 17 pairs) -- stores live-in vf11/vf12 -> 9/11(vi4) using live-in vi3/vf13..14/I, then 0C80 copy loop
+static bool handler0C38(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t vi2)
+{
+    (void)R;
+    (void)vu;
+    (void)vi13;
+    (void)vi2;
+    // 0C38..0C78 depend on live-in I, vi3, vi4, vf11..14; I is not tracked in R -> fall back to exact interpreter.
+    return false;
+}
+
+// PERF-V1P: handler 1E50 (1E50..1EC8, 16 pairs) -- normal-extrude positions: P[j].xyz += N[j].xyz * cmd.yzw for j in [0..n]
+static bool handler1E50(Regs &R, uint8_t *vu, uint16_t vi13)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 256u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 476u);
+    const uint32_t count = static_cast<uint32_t>(n) + 1u;
+    if (((vi13 - outBase) & 0x3FFu) < count)
+        return false;
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 cmd = norm4(ldq(vu, vi13)); // 1E50 LQ.yzw vf2, 0(vi13); 1E60..1E70 ADDy/z/w vf1, vf0, vf2
+    const __m128 scale = _mm_shuffle_ps(cmd, cmd, _MM_SHUFFLE(3, 3, 2, 1));
+    logRange(vu, outBase, count);
+    for (uint32_t j = 0; j < count; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 Nrm = ldq(vu, static_cast<uint32_t>(base) + 556u + j);
+        const __m128 acc = fmacV<0>(P, zero, zero);
+        const __m128 res = fmacV<2>(Nrm, scale, acc);
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, _mm_blend_ps(P, res, 0x7));
+    }
+    R.vfValid &= ~0x0000001Eu;
+    R.viValid &= ~0x0006u;
+    return true;
+}
+
+// PERF-V1P: handler 2E20 (2E20..2E80, 13 pairs) -- clipPolygon vertex-emit subroutine (live-in vi8/9/11/14, vf17..27)
+static bool handler2E20(Regs &R, uint8_t *vu, uint16_t vi13)
+{
+    (void)R;
+    (void)vu;
+    (void)vi13;
+    return false;
+}
+
+// PERF-V1P: handler 2E88 (2E88..2F68, 29 pairs) -- clipPolygon edge-clip subroutine (live-in vi7/9/11/12/14, vf1/2/17..27)
+static bool handler2E88(Regs &R, uint8_t *vu, uint16_t vi13)
+{
+    (void)R;
+    (void)vu;
+    (void)vi13;
+    return false;
 }
 
 static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool oneShot, bool vxA)
 {
     static const bool funcNewOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_NEW"); return e && e[0] == '1'; }(); // PERF-V1M
-    Regs R; // PERF-V1G: skip 560-byte memset; only R.vi[12] is live across handlers
+    Regs R; // PERF-V1G: skip 560-byte memset; vfValid/viValid track exact live-in registers across handlers
+    R.vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    R.vi[0] = 0u;
     R.vi[12] = static_cast<uint16_t>(top);
+    R.vfValid = 1u;
+    R.viValid = 1u | (1u << 12);
     uint16_t vi13 = R.vi[12];
     uint16_t vi1 = ilw(vu, vi13, 0);
     vx::HScope vxHs; // PROBE-VX
@@ -1867,6 +2084,8 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             } while (vi3 != vi2);
             R.vf[1] = vf1;
             R.vi[3] = vi3;
+            R.vfValid |= (1u << 1); // PERF-V1P
+            R.viValid |= (1u << 3);
             break;
         }
         case 0x0AF0u:
@@ -1910,6 +2129,8 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
                 s_fbPc = 0x1EE0u;
                 return false;
             }
+            R.vfValid = 1u; // PERF-V1P
+            R.viValid = 1u | (1u << 12);
             break;
         case 0x1EF0u: // Task F3: mesh transform (vi10 = 1 entry, reads S from 796+idx)
             if (!handler1EE0(R, vu, vi13, static_cast<uint16_t>(top), true, kicks, gif))
@@ -1917,6 +2138,8 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
                 s_fbPc = 0x1EF0u;
                 return false;
             }
+            R.vfValid = 1u; // PERF-V1P
+            R.viValid = 1u | (1u << 12);
             break;
         case 0x3160u:
             if (!handler3160(R, vu, vi13))
@@ -1931,6 +2154,8 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
                 s_fbPc = 0x00A8u;
                 return false;
             }
+            R.vfValid &= ~0x8200017Eu; // PERF-V1P: 00A8 touches vf1..6, vf8, vf25, vf31, vi1..3, vi5..7
+            R.viValid &= ~0x00EEu;
             break;
         case 0x0840u: // PERF-V1M
             if (!funcNewOn || !handler0840(R, vu, vi13))
@@ -2013,6 +2238,55 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             if (!funcNewOn || !handler32A0(R, vu, vi13))
             {
                 s_fbPc = 0x32A0u;
+                return false;
+            }
+            break;
+        case 0x0560u: // PERF-V1P
+            if (!funcNewOn || !handler0560(R, vu, vi13))
+            {
+                s_fbPc = 0x0560u;
+                return false;
+            }
+            break;
+        case 0x0AE0u: // PERF-V1P
+            if (!funcNewOn || !handler0AE0(R, vu, vi13))
+            {
+                s_fbPc = 0x0AE0u;
+                return false;
+            }
+            break;
+        case 0x0C38u: // PERF-V1P
+            if (!funcNewOn || !handler0C38(R, vu, vi13, vi2))
+            {
+                s_fbPc = 0x0C38u;
+                return false;
+            }
+            break;
+        case 0x1CC0u: // PERF-V1P
+            if (!funcNewOn || !handler1CC0(R, vu, vi13, vi2))
+            {
+                s_fbPc = 0x1CC0u;
+                return false;
+            }
+            break;
+        case 0x1E50u: // PERF-V1P
+            if (!funcNewOn || !handler1E50(R, vu, vi13))
+            {
+                s_fbPc = 0x1E50u;
+                return false;
+            }
+            break;
+        case 0x2E20u: // PERF-V1P
+            if (!funcNewOn || !handler2E20(R, vu, vi13))
+            {
+                s_fbPc = 0x2E20u;
+                return false;
+            }
+            break;
+        case 0x2E88u: // PERF-V1P
+            if (!funcNewOn || !handler2E88(R, vu, vi13))
+            {
+                s_fbPc = 0x2E88u;
                 return false;
             }
             break;
