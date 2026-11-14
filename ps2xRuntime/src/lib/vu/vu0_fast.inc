@@ -1106,7 +1106,7 @@ inline bool classifyProgram(const uint8_t *vu0Code, uint32_t startPC, FastProg &
     return classifyResolved(vu0Code, startPC, outProg); // PERF-V0D
 }
 
-inline const FastProg *lookupOrClassify(const uint8_t *vu0Code, uint64_t generation, uint32_t startPC)
+inline ClassifierCache &getClassifierCache(const uint8_t *vu0Code, uint64_t generation) // PERF-V0G
 {
     static thread_local ClassifierCache s_cache;
     if (!s_cache.initialized || s_cache.generation != generation || s_cache.codePtr != vu0Code)
@@ -1122,6 +1122,17 @@ inline const FastProg *lookupOrClassify(const uint8_t *vu0Code, uint64_t generat
             s_cache.numProgs = 0;
         }
     }
+    return s_cache;
+}
+
+inline uint64_t getCachedImageHash(const uint8_t *vu0Code, uint64_t generation) // PERF-V0G
+{
+    return getClassifierCache(vu0Code, generation).imageHash;
+}
+
+inline const FastProg *lookupOrClassify(const uint8_t *vu0Code, uint64_t generation, uint32_t startPC)
+{
+    ClassifierCache &s_cache = getClassifierCache(vu0Code, generation); // PERF-V0G
 
     const uint32_t slot = (startPC >> 3) & (kNumSlots - 1u);
     const uint8_t st = s_cache.state[slot];

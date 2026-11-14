@@ -4470,6 +4470,7 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
 }
 
 #include "vu/vu0_fast.inc"
+#include "vu/vu0_func.inc" // PERF-V0G
 
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
@@ -4555,14 +4556,52 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     else
     {
         const bool fastAllow = ctx && !probeOn && !vu0fast::isAnyVerifyOrProfEnabled();
+        const bool funcCheckOn = fastAllow && vu0func::isFuncCheckEnabled(); // PERF-V0G
+        const bool funcOn = fastAllow && vu0func::isFuncEnabled();           // PERF-V0G
+        const vu0func::FuncHandler funcHandler =                             // PERF-V0G
+            (funcOn || funcCheckOn)
+                ? vu0func::lookupHandler(vu0Code, m_memory.getVU0CodeGeneration(), startPC)
+                : nullptr;
         const bool checkOn = fastAllow && vu0fast::isCheckEnabled();
         const bool fastOn = fastAllow && vu0fast::isFastEnabled();
         const vu0fast::FastProg *fastProg =
-            (fastOn || checkOn)
+            (!funcOn && (fastOn || checkOn || (funcCheckOn && funcHandler)))
                 ? vu0fast::lookupOrClassify(vu0Code, m_memory.getVU0CodeGeneration(), startPC)
                 : nullptr;
 
-        if (checkOn && fastProg)
+        if (funcCheckOn && funcHandler) // PERF-V0G
+        {
+            R5900Context funcCtx = *ctx;
+            funcHandler(&funcCtx);
+
+            if (fastProg)
+            {
+                vu0fast::executeFast(*fastProg, ctx);
+            }
+            else
+            {
+                m_vu0.reset();
+                copyVu0ContextToState(ctx, m_vu0.state());
+                m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
+                              vu0Data, PS2_VU0_DATA_SIZE,
+                              m_gs, &m_memory,
+                              startPC, 0u, ctx->vu0_itop, 4096);
+                copyVu0StateToContext(m_vu0.state(), ctx);
+            }
+
+            vu0func::compareAndRecord(startPC, funcCtx, *ctx);
+            vu0func::maybePrintCheckStats();
+        }
+        else if (funcOn && funcHandler) // PERF-V0G
+        {
+            extern bool ps2xV0ProfOn();
+            extern void ps2xV0ProfRecordFunc(uint32_t, uint64_t);
+            const bool v0pFunc = ps2xV0ProfOn();
+            const uint64_t v0pFuncT0 = v0pFunc ? __rdtsc() : 0u;
+            funcHandler(ctx);
+            if (v0pFunc) ps2xV0ProfRecordFunc(startPC, __rdtsc() - v0pFuncT0);
+        }
+        else if (checkOn && fastProg)
         {
             R5900Context fastCtx = *ctx;
             vu0fast::executeFast(*fastProg, &fastCtx);
