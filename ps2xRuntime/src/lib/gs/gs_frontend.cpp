@@ -31,7 +31,7 @@ namespace gwimpl // PROBE-GW
 enum { cOther, cIdle, cRegs, cKick, cImage, cPrim, cState, cVkrec, cSubmit, cSync, cPresent, cN };
 static thread_local bool t_mark = false;
 static int s_cur = cOther;
-static uint64_t s_last = 0, s_T[cN] = {}, s_prims = 0, s_imgBytes = 0, s_runs = 0, s_brk = 0, s_f0 = 0, s_p0 = 0, s_tsc0 = 0;
+static uint64_t s_last = 0, s_T[cN] = {}, s_prims = 0, s_imgBytes = 0, s_runs = 0, s_brk = 0, s_redund = 0, s_f0 = 0, s_p0 = 0, s_tsc0 = 0; // PERF-GB
 static std::chrono::steady_clock::time_point s_t0{};
 } // namespace gwimpl
 extern "C" void ps2_gw_mark() // PROBE-GW: call once on the GsWorker thread
@@ -54,12 +54,12 @@ extern "C" int ps2_gw_sw(int cat) // PROBE-GW: returns previous category, -1 if 
     s_cur = cat;
     return prev;
 }
-extern "C" void ps2_gw_count(int what, uint64_t n) // PROBE-GW: 0 prims, 1 image bytes, 2 runs, 3 state-serial breaks
+extern "C" void ps2_gw_count(int what, uint64_t n) // PROBE-GW: 0 prims, 1 image bytes, 2 runs, 3 state-serial breaks, 4 redundant state breaks
 {
     using namespace gwimpl;
     if (!t_mark)
         return;
-    switch (what) { case 0: s_prims += n; break; case 1: s_imgBytes += n; break; case 2: s_runs += n; break; default: s_brk += n; break; }
+    switch (what) { case 0: s_prims += n; break; case 1: s_imgBytes += n; break; case 2: s_runs += n; break; case 3: s_brk += n; break; default: s_redund += n; break; } // PERF-GB
 }
 extern "C" void ps2_gw_tick() // PROBE-GW: call from the GsWorker loop (outside the idle wait); prints about every 5 s
 {
@@ -84,13 +84,13 @@ extern "C" void ps2_gw_tick() // PROBE-GW: call from the GsWorker loop (outside 
         tot += s_T[i];
     const double presentPf = static_cast<double>(pt - s_p0) / tpm / f; // present latch wall time on whatever thread ran it
     ::ps2xSafeLog(
-                 "[gw] frames=%llu ms/frame: busy=%.2f idle=%.2f | regs=%.2f kicks=%.2f(%.0f prims/frame) image=%.2f(%.1f KB/frame) primbuild=%.2f statechg=%.2f(%.0f runs/frame brk=%.0f) vkrec=%.2f submit=%.2f sync=%.2f present=%.2f(latch %.2f) other=%.2f\n",
+                 "[gw] frames=%llu ms/frame: busy=%.2f idle=%.2f | regs=%.2f kicks=%.2f(%.0f prims/frame) image=%.2f(%.1f KB/frame) primbuild=%.2f statechg=%.2f(%.0f runs/frame brk=%.0f redund=%.0f) vkrec=%.2f submit=%.2f sync=%.2f present=%.2f(latch %.2f) other=%.2f\n",
                  static_cast<unsigned long long>(frames), pf(tot - idle), pf(idle), pf(s_T[cRegs]), pf(s_T[cKick]), static_cast<double>(s_prims) / f,
                  pf(s_T[cImage]), static_cast<double>(s_imgBytes) / 1024.0 / f, pf(s_T[cPrim]), pf(s_T[cState]), static_cast<double>(s_runs) / f,
-                 static_cast<double>(s_brk) / f, pf(s_T[cVkrec]), pf(s_T[cSubmit]), pf(s_T[cSync]), pf(s_T[cPresent]), presentPf, pf(s_T[cOther]));
+                 static_cast<double>(s_brk) / f, static_cast<double>(s_redund) / f, pf(s_T[cVkrec]), pf(s_T[cSubmit]), pf(s_T[cSync]), pf(s_T[cPresent]), presentPf, pf(s_T[cOther]));
     for (int i = 0; i < cN; ++i)
         s_T[i] = 0;
-    s_prims = s_imgBytes = s_runs = s_brk = 0;
+    s_prims = s_imgBytes = s_runs = s_brk = s_redund = 0;
     s_f0 = fr;
     s_p0 = pt;
     s_t0 = nowT;
@@ -2512,6 +2512,12 @@ void GS::vertexKick(bool drawing)
         if (!lean || (m_hasPreferredDisplaySource && batch.state.context.frame.fbp == m_preferredDisplayDestFbp) ||
             (batch.state.prim.type == GS_PRIM_SPRITE && batch.vertexCount >= 2u))
         {
+            if (batch.state.prim.type == GS_PRIM_SPRITE && batch.vertexCount >= 2u) // PERF-GB: populate batch.vertices only when needed
+            {
+                batch.vertices[0] = m_vtxQueue[0];
+                batch.vertices[1] = m_vtxQueue[1];
+                batch.vertices[2] = GSVertex{};
+            }
             updatePreferredDisplaySourceForDraw(batch);
         }
         if (!lean)
@@ -2528,6 +2534,11 @@ void GS::vertexKick(bool drawing)
                 s_deferredDisplayCopyBatch.state.context.frame.fbp != batch.state.context.frame.fbp)
             {
                 flushDeferredOrdered();
+            }
+            if (batch.vertexCount < 2u) // PERF-GB: ensure deferred display copy batch has vertices
+            {
+                for (int i = 0; i < 3; ++i)
+                    batch.vertices[static_cast<size_t>(i)] = (i < batch.vertexCount) ? m_vtxQueue[i] : GSVertex{};
             }
             s_deferredDisplayCopyBatch = batch;
             s_hasDeferredDisplayCopy = true;
@@ -2569,7 +2580,7 @@ void GS::vertexKick(bool drawing)
                              static_cast<unsigned>(m_prim.type), static_cast<unsigned>(batch.state.prim.tme),
                              static_cast<unsigned>(batch.state.context.tex0.tbp0), static_cast<unsigned>(batch.state.context.frame.fbp), static_cast<unsigned>(needed));
                 for (int vi = 0; vi < needed && vi < 3; ++vi)
-                    std::fprintf(s_ip, " %.2f %.2f %.0f", batch.vertices[vi].x, batch.vertices[vi].y, batch.vertices[vi].z);
+                    std::fprintf(s_ip, " %.2f %.2f %.0f", m_vtxQueue[vi].x, m_vtxQueue[vi].y, m_vtxQueue[vi].z); // PERF-GB
                 std::fputc('\n', s_ip);
                 if ((s_ipLines & 0x3FFFu) == 0)
                     std::fflush(s_ip);
@@ -2674,6 +2685,82 @@ void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_
         (flushPendingDraws(), m_backend.get())->WriteVram(psm, base, bw, x, y, value);
 }
 
+namespace // PERF-GB
+{
+bool isGsRedundOptEnabled()
+{
+    static const bool s_enabled = []() {
+        const char *e = std::getenv("PS2X_GS_REDUND");
+        return !e || e[0] != '0';
+    }();
+    return s_enabled;
+}
+
+bool drawStateEqual(const GSDrawState &a, const GSDrawState &b)
+{
+    const GSContext &ca = a.context;
+    const GSContext &cb = b.context;
+    return a.prim.type == b.prim.type &&
+           a.prim.iip == b.prim.iip &&
+           a.prim.tme == b.prim.tme &&
+           a.prim.fge == b.prim.fge &&
+           a.prim.abe == b.prim.abe &&
+           a.prim.aa1 == b.prim.aa1 &&
+           a.prim.fst == b.prim.fst &&
+           a.prim.ctxt == b.prim.ctxt &&
+           a.prim.fix == b.prim.fix &&
+           ca.frame.fbp == cb.frame.fbp &&
+           ca.frame.fbw == cb.frame.fbw &&
+           ca.frame.psm == cb.frame.psm &&
+           ca.frame.fbmsk == cb.frame.fbmsk &&
+           ca.zbuf.zbp == cb.zbuf.zbp &&
+           ca.zbuf.psm == cb.zbuf.psm &&
+           ca.zbuf.zmask == cb.zbuf.zmask &&
+           ca.scissor.x0 == cb.scissor.x0 &&
+           ca.scissor.x1 == cb.scissor.x1 &&
+           ca.scissor.y0 == cb.scissor.y0 &&
+           ca.scissor.y1 == cb.scissor.y1 &&
+           ca.xyoffset.ofx == cb.xyoffset.ofx &&
+           ca.xyoffset.ofy == cb.xyoffset.ofy &&
+           ca.tex0.tbp0 == cb.tex0.tbp0 &&
+           ca.tex0.tbw == cb.tex0.tbw &&
+           ca.tex0.psm == cb.tex0.psm &&
+           ca.tex0.tw == cb.tex0.tw &&
+           ca.tex0.th == cb.tex0.th &&
+           ca.tex0.tcc == cb.tex0.tcc &&
+           ca.tex0.tfx == cb.tex0.tfx &&
+           ca.tex0.cbp == cb.tex0.cbp &&
+           ca.tex0.cpsm == cb.tex0.cpsm &&
+           ca.tex0.csm == cb.tex0.csm &&
+           ca.tex0.csa == cb.tex0.csa &&
+           ca.tex0.cld == cb.tex0.cld &&
+           ca.tex1 == cb.tex1 &&
+           ca.miptbp1 == cb.miptbp1 &&
+           ca.miptbp2 == cb.miptbp2 &&
+           ca.clamp == cb.clamp &&
+           ca.alpha == cb.alpha &&
+           ca.test == cb.test &&
+           ca.fba == cb.fba &&
+           a.texa.ta0 == b.texa.ta0 &&
+           a.texa.aem == b.texa.aem &&
+           a.texa.ta1 == b.texa.ta1 &&
+           a.texclut.cbw == b.texclut.cbw &&
+           a.texclut.cou == b.texclut.cou &&
+           a.texclut.cov == b.texclut.cov &&
+           a.pabe == b.pabe &&
+           a.scanmsk == b.scanmsk &&
+           a.dimx == b.dimx &&
+           a.dthe == b.dthe &&
+           a.colclamp == b.colclamp &&
+           a.fogR == b.fogR &&
+           a.fogG == b.fogG &&
+           a.fogB == b.fogB &&
+           a.textureWidth == b.textureWidth &&
+           a.textureHeight == b.textureHeight &&
+           a.linearFilter == b.linearFilter;
+}
+} // namespace
+
 // PERF-GR: the draw state is rebuilt only after a state register write; per prim only the vertices change
 void GS::refreshDrawBatch(int vertexCount)
 {
@@ -2682,30 +2769,37 @@ void GS::refreshDrawBatch(int vertexCount)
     if (m_stateDirty)
     {
         m_stateDirty = false;
-        ++m_stateSerial;
-        GSDrawState &s = batch.state;
-        s.context = m_ctx[m_prim.ctxt ? 1 : 0];
-        s.prim = m_prim;
-        s.texa = m_texa;
-        s.texclut = m_texclut;
-        s.pabe = m_pabe;
-        s.scanmsk = m_scanmsk;
-        s.dimx = m_dimx;
-        s.dthe = m_dthe;
-        s.colclamp = m_colclamp;
-        s.fogR = m_fogR;
-        s.fogG = m_fogG;
-        s.fogB = m_fogB;
-        s.textureWidth = static_cast<uint16_t>(1u << std::min<uint32_t>(s.context.tex0.tw, 10u));
-        s.textureHeight = static_cast<uint16_t>(1u << std::min<uint32_t>(s.context.tex0.th, 10u));
-        const uint64_t tex1 = s.context.tex1;
+        GSDrawState nextState{}; // PERF-GB: compare before bumping m_stateSerial
+        nextState.context = m_ctx[m_prim.ctxt ? 1 : 0];
+        nextState.prim = m_prim;
+        nextState.texa = m_texa;
+        nextState.texclut = m_texclut;
+        nextState.pabe = m_pabe;
+        nextState.scanmsk = m_scanmsk;
+        nextState.dimx = m_dimx;
+        nextState.dthe = m_dthe;
+        nextState.colclamp = m_colclamp;
+        nextState.fogR = m_fogR;
+        nextState.fogG = m_fogG;
+        nextState.fogB = m_fogB;
+        nextState.textureWidth = static_cast<uint16_t>(1u << std::min<uint32_t>(nextState.context.tex0.tw, 10u));
+        nextState.textureHeight = static_cast<uint16_t>(1u << std::min<uint32_t>(nextState.context.tex0.th, 10u));
+        const uint64_t tex1 = nextState.context.tex1;
         const uint8_t mmag = static_cast<uint8_t>((tex1 >> 5u) & 0x1u);
         const uint8_t mmin = static_cast<uint8_t>((tex1 >> 6u) & 0x7u);
-        s.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
+        nextState.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
+        if (isGsRedundOptEnabled() && drawStateEqual(batch.state, nextState))
+        {
+            if (g_gwOn && !m_runPrims.empty())
+                ps2_gw_count(4, 1); // PROBE-GW redundant state break skipped
+        }
+        else
+        {
+            ++m_stateSerial;
+            batch.state = nextState;
+        }
     }
     batch.vertexCount = static_cast<uint8_t>(std::min(vertexCount, 3));
-    for (int i = 0; i < 3; ++i)
-        batch.vertices[static_cast<size_t>(i)] = (i < batch.vertexCount) ? m_vtxQueue[i] : GSVertex{};
 }
 
 void GS::queueDraw(const GSPrimitiveBatch &batch)
@@ -2724,10 +2818,12 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
         if (m_runPrims.capacity() < 512u)
             m_runPrims.reserve(512u);
     }
-    GSRunPrim rp;
-    rp.vertices = batch.vertices;
-    rp.vertexCount = batch.vertexCount;
-    m_runPrims.push_back(rp);
+    m_runPrims.emplace_back(); // PERF-GB: single-copy vertices straight into GSRunPrim slot
+    GSRunPrim &rp = m_runPrims.back();
+    const uint8_t vc = batch.vertexCount;
+    rp.vertexCount = vc;
+    for (uint8_t i = 0; i < vc; ++i)
+        rp.vertices[static_cast<size_t>(i)] = m_vtxQueue[i];
     if (m_runPrims.size() >= 512u)
         flushPendingDraws();
 }
