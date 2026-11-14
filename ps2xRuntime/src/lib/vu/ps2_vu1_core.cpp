@@ -4137,18 +4137,21 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
 
                             if ((ti % 5u) != 0u) // 80% randomized floats; 20% raw corpus floats
                             {
-                                const uint32_t cmdWords = (pc == 0x0840u) ? 2u : 4u;
+                                const uint32_t cmdWords = (pc == 0x02E0u) ? 7u : (pc == 0x1720u) ? 3u : (pc == 0x0840u || pc == 0x0628u || pc == 0x1A68u) ? 2u : 4u; // PERF-V1N
                                 for (uint32_t cw = 1u; cw <= cmdWords; ++cw)
                                     fuzzQword(rng, fuzzMem.data(), top + cw);
-                                static const uint32_t kConsts[] = {982u, 983u, 984u, 985u, 989u, 990u, 991u, 1010u, 1015u, 1017u};
+                                static const uint32_t kConsts[] = {982u, 983u, 984u, 985u, 986u, 987u, 988u, 989u, 990u, 991u, 1010u, 1015u, 1017u}; // PERF-V1N
                                 for (uint32_t cq : kConsts)
                                     fuzzQword(rng, fuzzMem.data(), cq);
                                 for (uint32_t j = 0; j < static_cast<uint32_t>(nVert) + 3u; ++j)
                                     fuzzQword(rng, fuzzMem.data(), 476u + base + j);
+                                for (uint32_t j = 0; j < static_cast<uint32_t>(nVert) + 4u; ++j) // PERF-V1N: 02E0 reads N[0..n+3]
+                                    fuzzQword(rng, fuzzMem.data(), 556u + base + j);
                                 for (uint32_t j = 0; j < nVert; ++j)
                                 {
-                                    fuzzQword(rng, fuzzMem.data(), 556u + base + j);
                                     fuzzQword(rng, fuzzMem.data(), 716u + base + j);
+                                    if (pc == 0x1A68u) // PERF-V1N: 1A68 writes .xyz to 796+base+j, preserves .w
+                                        fuzzQword(rng, fuzzMem.data(), 796u + base + j);
                                 }
                                 if (pc == 0x0CC0u && (ti & 1u) == 0u)
                                 {

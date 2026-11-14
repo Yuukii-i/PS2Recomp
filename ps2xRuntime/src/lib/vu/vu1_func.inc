@@ -630,6 +630,10 @@ inline float rsqrtQ(float numRaw, float radRaw) // PERF-V1M: mirrors VU1Interpre
         q = std::signbit(num) ? -FLT_MAX : FLT_MAX;
     return normRes(q);
 }
+inline float sqrtQ(float radRaw) // PERF-V1N: mirrors VU1Interpreter::execLower case 0x39 (SQRT)
+{
+    return normRes(std::sqrt(std::fabs(nrm1(radRaw))));
+}
 inline float erlenP(__m128 v) // PERF-V1M: mirrors VU1Interpreter::execLower case 0x73 (ERLENG) + queueP
 {
     alignas(16) float f[4];
@@ -1520,6 +1524,131 @@ static bool handler1090(Regs &R, uint8_t *vu, uint16_t &vi13)
     return true;
 }
 
+// PERF-V1N: handler 02E0 (02E0..0550, 80 pairs) -- 4-directional specular light (4x4 color matrix * poly4Spec)
+static bool handler02E0(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 156u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 716u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 d0 = ldq(vu, vi13);
+    const __m128 d1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
+    const __m128 d2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
+    const __m128 c0 = ldq(vu, static_cast<uint32_t>(vi13) + 3u);
+    const __m128 c1 = ldq(vu, static_cast<uint32_t>(vi13) + 4u);
+    const __m128 c2 = ldq(vu, static_cast<uint32_t>(vi13) + 5u);
+    const __m128 c3 = ldq(vu, static_cast<uint32_t>(vi13) + 6u);
+    vi13 = static_cast<uint16_t>(vi13 + 7u);
+    const __m128 m986 = ldq(vu, 986), m987 = ldq(vu, 987), m988 = ldq(vu, 988);
+    const __m128 Lx = fmacV<2>(d2, bc<2>(m986), fmacV<2>(d1, bc<1>(m986), fmacV<4>(d0, bc<0>(m986), zero)));
+    const __m128 Ly = fmacV<2>(d2, bc<2>(m987), fmacV<2>(d1, bc<1>(m987), fmacV<4>(d0, bc<0>(m987), zero)));
+    const __m128 Lz = fmacV<2>(d2, bc<2>(m988), fmacV<2>(d1, bc<1>(m988), fmacV<4>(d0, bc<0>(m988), zero)));
+    const __m128 coeffs = ldq(vu, 1015);
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 Nrm = ldq(vu, static_cast<uint32_t>(base) + 556u + j);
+        const __m128 Col = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 dot = fmacV<2>(Lz, bc<2>(Nrm), fmacV<2>(Ly, bc<1>(Nrm), fmacV<4>(Lx, bc<0>(Nrm), zero)));
+        const __m128 spec = maxV(poly4Spec(dot, coeffs), zero);
+        const __m128 contrib = fmacV<2>(c3, bc<3>(spec), fmacV<2>(c2, bc<2>(spec), fmacV<2>(c1, bc<1>(spec), fmacV<4>(c0, bc<0>(spec), zero))));
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
+    }
+    (void)R;
+    return true;
+}
+
+// PERF-V1N: handler 0628 (0628..0830, 67 pairs) -- point diffuse light (RSQRT 1/d), preceded by 3 live-in stores SQ vf11..13 -> 17/19/21(vi4)
+static bool handler0628(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    (void)R;
+    (void)vu;
+    (void)vi13;
+    // 0628..0638 unconditionally store live-in vf11, vf12, vf13 to 17(vi4), 19(vi4), 21(vi4); vu1FuncExec has no access to entry vi4/vf11..13.
+    return false;
+}
+
+// PERF-V1N: handler 1720 (1720..18E8, 59 pairs) -- point ambient/falloff light (quadratic distance clamp via SQRT)
+static bool handler1720(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 240u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 716u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    const __m128 cmd0 = ldq(vu, vi13);
+    const __m128 cmd1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
+    const __m128 cmd2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
+    vi13 = static_cast<uint16_t>(vi13 + 3u);
+    const __m128 m982 = ldq(vu, 982), m983 = ldq(vu, 983), m984 = ldq(vu, 984), v985 = ldq(vu, 985);
+    const __m128 L = fmacV<0>(fmacV<2>(m984, bc<2>(cmd0), fmacV<2>(m983, bc<1>(cmd0), fmacV<4>(m982, bc<0>(cmd0), zero))), v985, zero);
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + 476u + j);
+        const __m128 Col = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 dVec = fmacV<1>(L, P, zero);
+        const __m128 dSq = fmacV<4>(dVec, dVec, zero);
+        const __m128 d2 = fmacV<2>(one, bc<2>(dSq), fmacV<0>(dSq, bc<1>(dSq), zero));
+        const __m128 qVec = _mm_set1_ps(sqrtQ(_mm_cvtss_f32(d2)));
+        const __m128 t0 = fmacV<4>(d2, cmd2, zero);
+        const __m128 t1 = fmacV<4>(cmd2, qVec, zero);
+        const __m128 t2 = fmacV<0>(t0, bc<1>(t1), zero);
+        const __m128 t3 = fmacV<0>(t2, bc<2>(cmd2), zero);
+        const __m128 atten = miniV(maxV(t3, zero), bc<3>(cmd2));
+        const __m128 contrib = fmacV<4>(cmd1, bc<0>(atten), zero);
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
+    }
+    (void)R;
+    return true;
+}
+
+// PERF-V1N: handler 1A68 (1A68..1C18, 56 pairs) -- spherical/hemispherical UV generator (writes .xyz to 796+base+j, preserves .w)
+static bool handler1A68(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 236u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 796u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f), half = _mm_set1_ps(0.5f);
+    const __m128 cmd0 = ldq(vu, vi13);
+    const __m128 cmd1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
+    vi13 = static_cast<uint16_t>(vi13 + 2u);
+    const __m128 m982 = ldq(vu, 982), m983 = ldq(vu, 983), m984 = ldq(vu, 984), v985 = ldq(vu, 985);
+    const __m128 L = fmacV<2>(v985, one, fmacV<2>(m984, bc<2>(cmd0), fmacV<2>(m983, bc<1>(cmd0), fmacV<4>(m982, bc<0>(cmd0), zero))));
+    const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991);
+    const __m128 V = fmacV<2>(m991, bc<2>(cmd1), fmacV<2>(m990, bc<1>(cmd1), fmacV<4>(m989, bc<0>(cmd1), zero)));
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + 476u + j);
+        const __m128 Nrm = ldq(vu, static_cast<uint32_t>(base) + 556u + j);
+        const __m128 dVec = fmacV<1>(L, P, zero);
+        const __m128 dSq = fmacV<4>(dVec, dVec, zero);
+        const __m128 d2 = fmacV<2>(one, bc<2>(dSq), fmacV<2>(one, bc<1>(dSq), fmacV<4>(one, bc<0>(dSq), zero)));
+        const __m128 qVec = _mm_set1_ps(rsqrtQ(1.0f, _mm_cvtss_f32(d2)));
+        const __m128 dir = fmacV<4>(dVec, qVec, zero);
+        const __m128 vProd = fmacV<4>(V, Nrm, zero);
+        const __m128 dProd = fmacV<4>(dir, Nrm, zero);
+        const __m128 uDot = fmacV<0>(fmacV<0>(vProd, bc<1>(vProd), zero), bc<2>(vProd), zero);
+        const __m128 vDot = fmacV<0>(fmacV<0>(dProd, bc<1>(dProd), zero), bc<2>(dProd), zero);
+        const __m128 dots = _mm_unpacklo_ps(uDot, vDot); // lane 0 = uDot, lane 1 = vDot
+        const __m128 uv = fmacV<2>(dots, half, half);
+        const __m128 uv1 = _mm_movelh_ps(uv, _mm_set_ss(1.0f)); // (u, v, 1.0f, 0.0f)
+        const __m128 oldQ = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, _mm_blend_ps(uv1, oldQ, 0x8));
+    }
+    (void)R;
+    return true;
+}
+
 static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool oneShot, bool vxA)
 {
     static const bool funcNewOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_NEW"); return e && e[0] == '1'; }(); // PERF-V1M
@@ -1655,6 +1784,34 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             if (!funcNewOn || !handler1090(R, vu, vi13))
             {
                 s_fbPc = 0x1090u;
+                return false;
+            }
+            break;
+        case 0x02E0u: // PERF-V1N
+            if (!funcNewOn || !handler02E0(R, vu, vi13))
+            {
+                s_fbPc = 0x02E0u;
+                return false;
+            }
+            break;
+        case 0x0628u: // PERF-V1N
+            if (!funcNewOn || !handler0628(R, vu, vi13))
+            {
+                s_fbPc = 0x0628u;
+                return false;
+            }
+            break;
+        case 0x1720u: // PERF-V1N
+            if (!funcNewOn || !handler1720(R, vu, vi13))
+            {
+                s_fbPc = 0x1720u;
+                return false;
+            }
+            break;
+        case 0x1A68u: // PERF-V1N
+            if (!funcNewOn || !handler1A68(R, vu, vi13))
+            {
+                s_fbPc = 0x1A68u;
                 return false;
             }
             break;
