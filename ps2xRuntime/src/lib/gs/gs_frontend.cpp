@@ -3,6 +3,7 @@
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
 #include "probe_ae.h"
+void ps2xSafeLog(const char *fmt, ...); // stderr is routed to NUL unless PS2X_VERBOSE_LOG=1
 namespace probe_ae {
     void bhLog(const char *fmt, ...);
 }
@@ -21,6 +22,89 @@ namespace probe_ae {
 #include <atomic>
 std::atomic<uint64_t> g_gqBuild{0}, g_gqSubmit{0}, g_gqDraws{0}; // PROBE-GQ2
 extern "C" void ps2_gs_front_stats(uint64_t *out) { out[0] = g_gqBuild.exchange(0); out[1] = g_gqSubmit.exchange(0); out[2] = g_gqDraws.exchange(0); }
+
+// PROBE-GW: GsWorker CPU-time split (PS2X_GW=1). Exclusive time per category via a category switch; only the thread that called ps2_gw_mark() accounts.
+bool g_gwOn = []() { const char *e = std::getenv("PS2X_GW"); return e && e[0] == '1'; }(); // PROBE-GW
+std::atomic<uint64_t> g_gwFrames{0}, g_gwPresentT{0}; // PROBE-GW: presents (any thread), present latch ticks (any thread)
+namespace gwimpl // PROBE-GW
+{
+enum { cOther, cIdle, cRegs, cKick, cImage, cPrim, cState, cVkrec, cSubmit, cSync, cPresent, cN };
+static thread_local bool t_mark = false;
+static int s_cur = cOther;
+static uint64_t s_last = 0, s_T[cN] = {}, s_prims = 0, s_imgBytes = 0, s_runs = 0, s_brk = 0, s_f0 = 0, s_p0 = 0, s_tsc0 = 0;
+static std::chrono::steady_clock::time_point s_t0{};
+} // namespace gwimpl
+extern "C" void ps2_gw_mark() // PROBE-GW: call once on the GsWorker thread
+{
+    using namespace gwimpl;
+    t_mark = true;
+    s_last = s_tsc0 = __rdtsc();
+    s_t0 = std::chrono::steady_clock::now();
+    s_cur = cOther;
+}
+extern "C" int ps2_gw_sw(int cat) // PROBE-GW: returns previous category, -1 if not the GsWorker thread
+{
+    using namespace gwimpl;
+    if (!t_mark)
+        return -1;
+    const uint64_t now = __rdtsc();
+    s_T[s_cur] += now - s_last;
+    s_last = now;
+    const int prev = s_cur;
+    s_cur = cat;
+    return prev;
+}
+extern "C" void ps2_gw_count(int what, uint64_t n) // PROBE-GW: 0 prims, 1 image bytes, 2 runs, 3 state-serial breaks
+{
+    using namespace gwimpl;
+    if (!t_mark)
+        return;
+    switch (what) { case 0: s_prims += n; break; case 1: s_imgBytes += n; break; case 2: s_runs += n; break; default: s_brk += n; break; }
+}
+extern "C" void ps2_gw_tick() // PROBE-GW: call from the GsWorker loop (outside the idle wait); prints about every 5 s
+{
+    using namespace gwimpl;
+    if (!t_mark)
+        return;
+    const auto nowT = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(nowT - s_t0).count();
+    if (ms < 5000.0)
+        return;
+    const uint64_t now = __rdtsc();
+    s_T[s_cur] += now - s_last;
+    s_last = now;
+    const double tpm = static_cast<double>(now - s_tsc0) / ms; // ticks per ms
+    const uint64_t fr = g_gwFrames.load(std::memory_order_relaxed), pt = g_gwPresentT.load(std::memory_order_relaxed);
+    const uint64_t frames = fr - s_f0;
+    const double f = frames ? static_cast<double>(frames) : 1.0;
+    auto pf = [&](uint64_t t) { return static_cast<double>(t) / tpm / f; };
+    const uint64_t idle = s_T[cIdle];
+    uint64_t tot = 0;
+    for (int i = 0; i < cN; ++i)
+        tot += s_T[i];
+    const double presentPf = static_cast<double>(pt - s_p0) / tpm / f; // present latch wall time on whatever thread ran it
+    ::ps2xSafeLog(
+                 "[gw] frames=%llu ms/frame: busy=%.2f idle=%.2f | regs=%.2f kicks=%.2f(%.0f prims/frame) image=%.2f(%.1f KB/frame) primbuild=%.2f statechg=%.2f(%.0f runs/frame brk=%.0f) vkrec=%.2f submit=%.2f sync=%.2f present=%.2f(latch %.2f) other=%.2f\n",
+                 static_cast<unsigned long long>(frames), pf(tot - idle), pf(idle), pf(s_T[cRegs]), pf(s_T[cKick]), static_cast<double>(s_prims) / f,
+                 pf(s_T[cImage]), static_cast<double>(s_imgBytes) / 1024.0 / f, pf(s_T[cPrim]), pf(s_T[cState]), static_cast<double>(s_runs) / f,
+                 static_cast<double>(s_brk) / f, pf(s_T[cVkrec]), pf(s_T[cSubmit]), pf(s_T[cSync]), pf(s_T[cPresent]), presentPf, pf(s_T[cOther]));
+    for (int i = 0; i < cN; ++i)
+        s_T[i] = 0;
+    s_prims = s_imgBytes = s_runs = s_brk = 0;
+    s_f0 = fr;
+    s_p0 = pt;
+    s_t0 = nowT;
+    s_tsc0 = now;
+}
+namespace
+{
+struct GwScope // PROBE-GW
+{
+    int p;
+    explicit GwScope(int c) : p(g_gwOn ? ps2_gw_sw(c) : -1) {}
+    ~GwScope() { if (p >= 0) ps2_gw_sw(p); }
+};
+} // namespace
 
 std::atomic<uint64_t> g_hostPresentSeq{0};
 // PERF-JD: rdtsc ticks per stage of the vblank present latch: 0 total, 1 Flush+Sync, 2 backend Present, 3 Vk syncPages (in Present), 4 VRAM snapshot, 5 CPU de-swizzle, 7 count
@@ -953,6 +1037,7 @@ void GS::latchHostPresentationFrame()
 
     PresentationFrame frame{};
     const uint64_t pjStart = __rdtsc(); // PERF-JD
+    struct GwPres { uint64_t t0; ~GwPres() { if (g_gwOn) { g_gwPresentT.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); g_gwFrames.fetch_add(1, std::memory_order_relaxed); } } } gwPres{pjStart}; // PROBE-GW
     {
         std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
         if (m_backend)
@@ -1650,6 +1735,7 @@ bool GS::tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeByt
 
 void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 {
+    GwScope gwS(2); // PROBE-GW regs
     if (s_gifStatOn)
     {
         switch (regDesc)
@@ -1868,6 +1954,7 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
 {
+    GwScope gwS(2); // PROBE-GW regs
     if (s_gifStatOn)
     {
         s_gifStatRegCounts[regAddr]++;
@@ -2369,6 +2456,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
 
 void GS::vertexKick(bool drawing)
 {
+    GwScope gwS(3); // PROBE-GW kicks
     ++m_vtxCount;
     ++m_vtxIndex;
 
@@ -2518,6 +2606,8 @@ void GS::vertexKick(bool drawing)
 
 void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 {
+    GwScope gwS(4); // PROBE-GW image
+    if (g_gwOn) ps2_gw_count(1, sizeBytes); // PROBE-GW
     if (m_backend)
         (flushPendingDraws(), m_backend.get())->UploadImage(data, sizeBytes);
 }
@@ -2587,6 +2677,7 @@ void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_
 // PERF-GR: the draw state is rebuilt only after a state register write; per prim only the vertices change
 void GS::refreshDrawBatch(int vertexCount)
 {
+    GwScope gwS(5); // PROBE-GW primbuild
     GSPrimitiveBatch &batch = m_drawBatch;
     if (m_stateDirty)
     {
@@ -2619,8 +2710,13 @@ void GS::refreshDrawBatch(int vertexCount)
 
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
+    GwScope gwS(5); // PROBE-GW primbuild
+    if (g_gwOn) ps2_gw_count(0, 1); // PROBE-GW prims
     if (!m_runPrims.empty() && m_runSerial != m_stateSerial)
+    {
+        if (g_gwOn) ps2_gw_count(3, 1); // PROBE-GW state-serial break
         flushPendingDraws();
+    }
     if (m_runPrims.empty())
     {
         m_runState = batch.state;
@@ -2640,6 +2736,8 @@ void GS::flushPendingDraws() const
 {
     if (m_runPrims.empty())
         return;
+    GwScope gwS(6); // PROBE-GW statechg (run flush); backend SubmitRun re-scopes to vkrec
+    if (g_gwOn) ps2_gw_count(2, 1); // PROBE-GW
     if (m_backend)
     {
         const uint64_t gqS0 = __rdtsc(); // PROBE-GQ2

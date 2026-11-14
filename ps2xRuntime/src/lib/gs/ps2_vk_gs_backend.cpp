@@ -49,6 +49,8 @@ static std::atomic<uint64_t> g_gqLockWait{0}, g_gqLockWaits{0}, g_gqPresentHold{
 extern "C" uint64_t ps2x_ft2_presentHold() { return g_gqPresentHold.load(std::memory_order_relaxed); } // PERF-LN
 extern "C" void ps2_gs_vk_stats(uint64_t *out) { out[0] = g_gqLockWait.exchange(0); out[1] = g_gqLockWaits.exchange(0); out[2] = g_gqPresentHold.exchange(0); out[3] = g_gqPresents.exchange(0); }
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
+extern bool g_gwOn; extern "C" int ps2_gw_sw(int cat); // PROBE-GW, defined in gs_frontend.cpp (cats: 6 statechg, 7 vkrec, 8 submit, 9 sync, 10 present)
+namespace { struct GwScope { int p; explicit GwScope(int c) : p(g_gwOn ? ps2_gw_sw(c) : -1) {} ~GwScope() { if (p >= 0) ps2_gw_sw(p); } }; } // PROBE-GW
 
 namespace
 {
@@ -637,6 +639,7 @@ namespace
 
         void SubmitRun(const GSDrawState &state, const GSRunPrim *prims, size_t count) override // PERF-GR
         {
+            GwScope gwS(7); // PROBE-GW vkrec (SubmitRun incl. lock wait + gpuDraw recording; flush() inside re-scopes submit/sync)
             const uint64_t gqL0 = __rdtsc(); // PROBE-GQ2
             std::lock_guard<std::mutex> lk(m_);
             g_gqLockWait.fetch_add(__rdtsc() - gqL0, std::memory_order_relaxed);
@@ -665,6 +668,7 @@ namespace
 
         void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override
         {
+            GwScope gwS(6); // PROBE-GW statechg
             const uint64_t gqL0 = __rdtsc(); // PROBE-GQ2
             std::lock_guard<std::mutex> lk(m_);
             g_gqLockWait.fetch_add(__rdtsc() - gqL0, std::memory_order_relaxed);
@@ -723,6 +727,7 @@ namespace
 
         void BeginTransfer(const GSTransferCommand &command) override
         {
+            GwScope gwS(6); // PROBE-GW statechg (transfer setup; its flush/sync re-scope)
             std::lock_guard<std::mutex> lk(m_);
             if (ref_)
                 ref_->BeginTransfer(command);
@@ -760,6 +765,7 @@ namespace
 
         void Flush() override
         {
+            GwScope gwS(6); // PROBE-GW
             std::lock_guard<std::mutex> lk(m_);
             if (ref_)
                 ref_->Flush();
@@ -768,6 +774,7 @@ namespace
 
         void TextureFlush() override
         {
+            GwScope gwS(6); // PROBE-GW
             std::lock_guard<std::mutex> lk(m_);
             if (ref_)
                 ref_->TextureFlush();
@@ -776,6 +783,7 @@ namespace
 
         void Sync(GSSyncReason reason) override
         {
+            GwScope gwS(9); // PROBE-GW
             std::lock_guard<std::mutex> lk(m_);
             // PERF-HX: Finish/Presentation/LocalToHost need no download here (Present and BeginTransfer sync the pages they read)
             if (vkReady_ && (reason == GSSyncReason::DebugReadback || reason == GSSyncReason::Reset))
@@ -819,6 +827,7 @@ namespace
         {
             if (!asyncPending_)
                 return false;
+            GwScope gwS(9); // PROBE-GW sync (present fence wait)
             // PERF-PG: PS2X_FENCE_POLL=1 sleeps between status checks instead of blocking in vkWaitForFences (drivers may spin there and bill the CPU)
             static const bool s_poll = []() { const char *e = std::getenv("PS2X_FENCE_POLL"); return e && e[0] == '1'; }();
             const uint64_t fw0 = __rdtsc();
@@ -894,6 +903,7 @@ namespace
             VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             si.commandBufferCount = 1;
             si.pCommandBuffers = &cb_;
+            GwScope gwSub(8); // PROBE-GW submit (async present copy)
             if (vkQueueSubmit(g_vk.queue, 1, &si, fence_) == VK_SUCCESS)
             {
                 asyncPending_ = true;
@@ -918,6 +928,7 @@ namespace
 
         PresentationFrame Present(const GSPresentationRequest &request) override
         {
+            GwScope gwS(10); // PROBE-GW present
             if (asyncOk_ && asyncPresentWanted() && !compare_ && !ref_)
             {
                 const uint64_t lk0 = __rdtsc();
@@ -1638,9 +1649,16 @@ namespace
             si.commandBufferCount = 1;
             si.pCommandBuffers = &cb_;
             const auto t0 = std::chrono::steady_clock::now();
-            VkResult r = vkQueueSubmit(g_vk.queue, 1, &si, fence_);
-            if (r == VK_SUCCESS)
-                r = vkWaitForFences(g_vk.dev, 1, &fence_, VK_TRUE, ~0ull);
+            VkResult r;
+            {
+                GwScope gwSub(8); // PROBE-GW submit
+                r = vkQueueSubmit(g_vk.queue, 1, &si, fence_);
+            }
+            {
+                GwScope gwSy(9); // PROBE-GW sync (fence wait)
+                if (r == VK_SUCCESS)
+                    r = vkWaitForFences(g_vk.dev, 1, &fence_, VK_TRUE, ~0ull);
+            }
             vkResetFences(g_vk.dev, 1, &fence_);
             if (r != VK_SUCCESS)
             {

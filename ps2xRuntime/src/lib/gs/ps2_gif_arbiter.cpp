@@ -18,6 +18,7 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 extern void ps2xSafeLog(const char *fmt, ...);
 extern "C" void ps2x_sched_apply(int flags); // PERF-LU: probe_prof.cpp
 extern std::atomic<uint64_t> g_waitTicks[8]; // PROBE-KF, defined in ps2_memory.cpp
+extern bool g_gwOn; extern "C" int ps2_gw_sw(int cat); extern "C" void ps2_gw_mark(); extern "C" void ps2_gw_tick(); // PROBE-GW, defined in gs_frontend.cpp
 
 // PERF-GK: optional asynchronous GS (PS2X_GS_ASYNC=1). drain() hands the sorted packets to a worker thread that runs the
 // process function (GS rasterization) so the EE/VU1 thread no longer pays for drawing. File-static state only (no header change).
@@ -287,6 +288,7 @@ void gsAsyncWorker()
     // PROBE-GP: PS2X_PROF_GSWORKER=1 (with PS2X_PROF_SAMPLE=1) points the sampler's line/owner/budget output at this thread
     if (const char *pe = std::getenv("PS2X_PROF_GSWORKER"); pe && pe[0] == '1')
         probe_ae::recordMainGuestThread();
+    if (g_gwOn) ps2_gw_mark(); // PROBE-GW
     GsAsyncState &st = gsAsync();
     std::unique_lock<std::mutex> lock(st.m);
 
@@ -296,7 +298,9 @@ void gsAsyncWorker()
         {
             st.workerWaiting = true;
             const uint64_t gqI0 = __rdtsc(); // PROBE-GQ
+            if (g_gwOn) { ps2_gw_tick(); ps2_gw_sw(1); } // PROBE-GW idle
             st.cvWork.wait(lock, [&] { return !st.q.empty(); });
+            if (g_gwOn) ps2_gw_sw(0); // PROBE-GW
             g_gsqIdle.fetch_add(__rdtsc() - gqI0, std::memory_order_relaxed);
             st.workerWaiting = false;
             std::vector<uint8_t> pkt = std::move(st.q.front());
@@ -339,7 +343,9 @@ void gsAsyncWorker()
         {
             flushRecycleStash();
         }
+        if (g_gwOn) { ps2_gw_tick(); ps2_gw_sw(1); } // PROBE-GW idle
         st.cvWork.wait(lock, [&] { return !st.q.empty(); });
+        if (g_gwOn) ps2_gw_sw(0); // PROBE-GW
         const uint64_t idleTicks = __rdtsc() - gqI0;
         st.workerWaiting = false;
 
