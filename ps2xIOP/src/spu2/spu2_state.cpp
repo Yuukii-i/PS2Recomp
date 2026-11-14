@@ -46,6 +46,19 @@ namespace ps2x::iop::detail
             m_keyOnCount = 0u;
         }
         m_transChannels = {};
+        {
+            std::lock_guard<std::mutex> lock(m_regMutex);
+            m_irqPending = {};
+        }
+        {
+            std::lock_guard<std::mutex> admaLock(m_autoDmaMutex);
+            for (auto &ring : m_autoDmaRings)
+            {
+                ring.active = false;
+                ring.buffer.clear();
+                ring.readBytePos = 0u;
+            }
+        }
         if (clearRam)
         {
             std::lock_guard<std::mutex> ramLock(m_ramMutex);
@@ -347,6 +360,8 @@ namespace ps2x::iop::detail
         for (uint32_t ci = 0u; ci < kNumCores; ++ci)
         {
             Core &c = m_cores[ci];
+            if (feedback.irqTriggered[ci] && c.irqEnable != 0u)
+                m_irqPending[ci] = true;
             const uint32_t retriggered = m_pendingKon[ci];
             c.endx |= (feedback.newlyEndedMask[ci] & ~retriggered);
             for (uint32_t vi = 0u; vi < kNumVoices; ++vi)
@@ -361,5 +376,79 @@ namespace ps2x::iop::detail
                     v.lsax = u.lsax;
             }
         }
+    }
+
+    // PERF-AU3: AutoDMA (sceSdBlockTrans) ring buffer + IRQ helpers.
+    void Spu2State::startBlockTrans(uint32_t ch, const void *initialData, uint32_t size)
+    {
+        std::lock_guard<std::mutex> lock(m_autoDmaMutex);
+        auto &ring = m_autoDmaRings[ch & 1u];
+        ring.active = (size >= 4u);
+        ring.readBytePos = 0u;
+        if (ring.active)
+        {
+            ring.buffer.resize(size);
+            if (initialData)
+                std::memcpy(ring.buffer.data(), initialData, size);
+            else
+                std::fill(ring.buffer.begin(), ring.buffer.end(), 0u);
+        }
+        else
+        {
+            ring.buffer.clear();
+        }
+    }
+
+    void Spu2State::updateBlockTransHalf(uint32_t ch, uint32_t halfOffset, const void *data, uint32_t halfSize)
+    {
+        if (!data || halfSize == 0u)
+            return;
+        std::lock_guard<std::mutex> lock(m_autoDmaMutex);
+        auto &ring = m_autoDmaRings[ch & 1u];
+        if (!ring.active || halfOffset + halfSize > ring.buffer.size())
+            return;
+        std::memcpy(ring.buffer.data() + halfOffset, data, halfSize);
+    }
+
+    void Spu2State::stopBlockTrans(uint32_t ch)
+    {
+        std::lock_guard<std::mutex> lock(m_autoDmaMutex);
+        auto &ring = m_autoDmaRings[ch & 1u];
+        ring.active = false;
+        ring.readBytePos = 0u;
+    }
+
+    bool Spu2State::readAutoDmaFrames(uint32_t ch, int16_t *outStereo, uint32_t frameCount)
+    {
+        if (!outStereo || frameCount == 0u)
+            return false;
+        std::lock_guard<std::mutex> lock(m_autoDmaMutex);
+        auto &ring = m_autoDmaRings[ch & 1u];
+        if (!ring.active || ring.buffer.size() < 4u)
+            return false;
+        const uint32_t ringSize = static_cast<uint32_t>(ring.buffer.size()) & ~3u;
+        if (ringSize < 4u)
+            return false;
+        for (uint32_t f = 0u; f < frameCount; ++f)
+        {
+            const uint32_t pos = ring.readBytePos % ringSize;
+            int16_t l = 0;
+            int16_t r = 0;
+            std::memcpy(&l, ring.buffer.data() + pos, sizeof(int16_t));
+            std::memcpy(&r, ring.buffer.data() + pos + 2u, sizeof(int16_t));
+            outStereo[f * 2u + 0u] = l;
+            outStereo[f * 2u + 1u] = r;
+            ring.readBytePos = (pos + 4u) % ringSize;
+        }
+        return true;
+    }
+
+    bool Spu2State::consumeIrqPending(uint32_t core) noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_regMutex);
+        bool &pending = m_irqPending[core & 1u];
+        const bool was = pending;
+        pending = false;
+        return was;
     }
 }

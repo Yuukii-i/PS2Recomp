@@ -30,7 +30,7 @@ extern std::atomic<uint32_t> g_trackedCurScene;
 #include <array>
 #include "probe_ae.h"
 
-// PERF-AU1: Local declaration for ps2xIOP libsd diagnostics (header rule safe).
+// PERF-AU1 / PERF-AU3B: Local declarations for ps2xIOP diagnostics (header rule safe).
 namespace ps2x::iop
 {
     struct LibsdDiagSnapshot
@@ -39,9 +39,26 @@ namespace ps2x::iop
         uint64_t keyOns = 0u;
         uint64_t transferBytes = 0u;
         std::array<uint64_t, 28> ordinalCounts{};
+        uint64_t naxCalls = 0u;
+        uint64_t naxChanged = 0u;
+        uint64_t envxCalls = 0u;
+        uint64_t envxChanged = 0u;
+    };
+
+    struct Sg2DiagSnapshot
+    {
+        uint32_t sg2Base = 0u;
+        uint64_t heartbeatCount = 0u;
+        uint64_t tickCount = 0u;
+        uint64_t naxPollCount = 0u;
+        uint32_t lastReturnPointer = 0u;
+        uint32_t lastIopStatusNonZero = 0u;
+        uint32_t vblankHandlers = 0u;
+        uint64_t vblankDelivered = 0u;
     };
 
     void getLibsdDiagnostics(LibsdDiagSnapshot &outSnapshot, std::vector<std::string> &outPendingLogs);
+    void getSg2DiagSnapshot(Sg2DiagSnapshot &outSnapshot);
 }
 
 namespace
@@ -55,17 +72,43 @@ namespace
         return enabled;
     }
 
+    // PERF-AU3: Stream byte counter + SG2 opcode histogram for [sg2lle] diagnostics.
+    std::atomic<uint64_t> g_sg2LleStreamBytes{0u};
+    std::mutex g_sg2LleHistMutex;
+    std::array<uint64_t, 36> g_sg2LleOpHist{};
+    uint64_t g_sg2LleOpOther = 0u;
+
+    void recordSg2LlePackets(const uint8_t *sendBuf, uint32_t sendSize)
+    {
+        if (!sendBuf || sendSize < 16u)
+            return;
+        const uint32_t count = sendSize / 16u;
+        std::lock_guard<std::mutex> lock(g_sg2LleHistMutex);
+        for (uint32_t i = 0u; i < count; ++i)
+        {
+            uint32_t op = 0u;
+            std::memcpy(&op, sendBuf + i * 16u, sizeof(op));
+            if (op < g_sg2LleOpHist.size())
+                ++g_sg2LleOpHist[op];
+            else
+                ++g_sg2LleOpOther;
+        }
+    }
+
     void flushSg2LleDiagnostics(uint32_t packetCount, uint32_t statusNonZeroBytes, bool countRpc)
     {
         static std::mutex s_diagMutex;
         static uint64_t s_rpcCalls = 0u;
         static uint64_t s_packets = 0u;
         static uint32_t s_lastStatusNonZero = 0u;
+        static uint64_t s_lastStreamBytes = 0u;
         static auto s_lastReport = std::chrono::steady_clock::now();
 
         ps2x::iop::LibsdDiagSnapshot snap{};
         std::vector<std::string> pendingLogs;
         ps2x::iop::getLibsdDiagnostics(snap, pendingLogs);
+        ps2x::iop::Sg2DiagSnapshot sg2Snap{}; // PERF-AU3B
+        ps2x::iop::getSg2DiagSnapshot(sg2Snap);
 
         for (const std::string &line : pendingLogs)
         {
@@ -81,13 +124,45 @@ namespace
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastReport).count() >= 5)
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastReport).count();
+        if (elapsedMs >= 5000)
         {
             s_lastReport = now;
+            const uint64_t totalStreamBytes = g_sg2LleStreamBytes.load(std::memory_order_relaxed);
+            const uint64_t deltaStreamBytes = totalStreamBytes - s_lastStreamBytes;
+            s_lastStreamBytes = totalStreamBytes;
+            const double streamKBps = (elapsedMs > 0)
+                                          ? (static_cast<double>(deltaStreamBytes) / 1024.0) / (static_cast<double>(elapsedMs) / 1000.0)
+                                          : 0.0;
+
+            std::string opHistStr;
+            {
+                std::lock_guard<std::mutex> hlock(g_sg2LleHistMutex);
+                for (size_t i = 0u; i < g_sg2LleOpHist.size(); ++i)
+                {
+                    if (g_sg2LleOpHist[i] == 0u)
+                        continue;
+                    char entry[32];
+                    std::snprintf(entry, sizeof(entry), "%s%02zx:%llu",
+                                  opHistStr.empty() ? "" : ",", i,
+                                  static_cast<unsigned long long>(g_sg2LleOpHist[i]));
+                    opHistStr += entry;
+                }
+                if (g_sg2LleOpOther != 0u)
+                {
+                    char entry[32];
+                    std::snprintf(entry, sizeof(entry), "%sother:%llu",
+                                  opHistStr.empty() ? "" : ",",
+                                  static_cast<unsigned long long>(g_sg2LleOpOther));
+                    opHistStr += entry;
+                }
+            }
+
             const double xferKB = static_cast<double>(snap.transferBytes) / 1024.0;
             ::ps2xSafeLog(
-                "[sg2lle] rpc=%llu pkts=%llu libsd=%llu keyOns=%llu xferKB=%.2f statusNonZero=%u "
-                "calls(Init=%llu SetParam=%llu GetParam=%llu SetSwitch=%llu SetAddr=%llu GetAddr=%llu "
+                "[sg2lle] rpc=%llu pkts=%llu libsd=%llu keyOns=%llu xferKB=%.2f streamKB/s=%.2f statusNonZero=%u "
+                "hb=%llu tick=%llu naxPoll=%llu base=0x%08x ret=0x%08x iopNZ=%u nax=%llu/%llu envx=%llu/%llu vb=%u/%llu "
+                "ops=[%s] calls(Init=%llu SetParam=%llu GetParam=%llu SetSwitch=%llu SetAddr=%llu GetAddr=%llu "
                 "SetCoreAttr=%llu VoiceTrans=%llu BlockTrans=%llu VoiceTransStat=%llu BlockTransStat=%llu "
                 "SetEffectAttr=%llu SetTransIntr=%llu)\n",
                 static_cast<unsigned long long>(s_rpcCalls),
@@ -95,7 +170,21 @@ namespace
                 static_cast<unsigned long long>(snap.totalCalls),
                 static_cast<unsigned long long>(snap.keyOns),
                 xferKB,
+                streamKBps,
                 s_lastStatusNonZero,
+                static_cast<unsigned long long>(sg2Snap.heartbeatCount),
+                static_cast<unsigned long long>(sg2Snap.tickCount),
+                static_cast<unsigned long long>(sg2Snap.naxPollCount),
+                sg2Snap.sg2Base,
+                sg2Snap.lastReturnPointer,
+                sg2Snap.lastIopStatusNonZero,
+                static_cast<unsigned long long>(snap.naxCalls),
+                static_cast<unsigned long long>(snap.naxChanged),
+                static_cast<unsigned long long>(snap.envxCalls),
+                static_cast<unsigned long long>(snap.envxChanged),
+                sg2Snap.vblankHandlers,
+                static_cast<unsigned long long>(sg2Snap.vblankDelivered),
+                opHistStr.c_str(),
                 static_cast<unsigned long long>(snap.ordinalCounts[4]),
                 static_cast<unsigned long long>(snap.ordinalCounts[5]),
                 static_cast<unsigned long long>(snap.ordinalCounts[6]),
@@ -1395,9 +1484,13 @@ uint64_t vblDiff = 0;
 
             iopResult = PS2IopTransport::handleRpc(runtime, rdram, ctx, request);
 
-            // PERF-AU1: Diagnostics for LLE sg2iopm1.irx RPC calls.
+            // PERF-AU1 / PERF-AU3: Diagnostics for LLE sg2iopm1.irx RPC calls.
             if (isSg2LleEnabled() && sid == 0x11223344u)
             {
+                if (sendBuf != 0u && sendSize != 0u)
+                {
+                    recordSg2LlePackets(getConstMemPtr(rdram, sendBuf), sendSize);
+                }
                 uint32_t nonZero = 0u;
                 if (receiveBuffer != 0u && receiveSize != 0u)
                 {
@@ -2295,7 +2388,20 @@ uint64_t vblDiff = 0;
                         }
                     }
                     uint64_t startFileOff = slot.offset;
-                    if (toRead > 0 && dstAddr != 0u && dstAddr < 0x02000000u && (dstAddr + toRead) <= 0x02000000u)
+                    // PERF-AU3: In file3.irx (0x0C94/0x1E60), flags & 1 means dstAddr is an IOP RAM address (direct memcpy on IOP, no EE DMA).
+                    if (isSg2LleEnabled() && (flags & 1u) != 0u)
+                    {
+                        if (toRead > 0 && dstAddr != 0u && runtime && runtime->isIopMemoryRange(dstAddr, toRead))
+                        {
+                            std::vector<uint8_t> iopBuf(static_cast<size_t>(toRead));
+                            if (ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, iopBuf.data()))
+                            {
+                                (void)runtime->writeIopMemory(dstAddr, iopBuf.data(), iopBuf.size());
+                                g_sg2LleStreamBytes.fetch_add(toRead, std::memory_order_relaxed);
+                            }
+                        }
+                    }
+                    else if (toRead > 0 && dstAddr != 0u && dstAddr < 0x02000000u && (dstAddr + toRead) <= 0x02000000u)
                     {
                         ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + dstAddr); ps2xProbeCid1Note(dstAddr, (uint32_t)toRead, opcode);
                     }

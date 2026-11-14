@@ -55,6 +55,11 @@ namespace ps2x::iop::detail
         [[nodiscard]] bool hasServer(uint32_t sid) const noexcept;
         [[nodiscard]] size_t serverCount() const noexcept { return m_servers.size(); }
 
+        // PERF-AU3B: SG2 RPC diagnostics.
+        [[nodiscard]] uint32_t sg2Base() const noexcept { return m_sg2Base; }
+        [[nodiscard]] uint32_t lastSg2ReturnPointer() const noexcept { return m_lastSg2ReturnPointer; }
+        [[nodiscard]] uint32_t lastSg2IopStatusNonZero() const noexcept { return m_lastSg2IopStatusNonZero; }
+
     private:
         struct RpcServer
         {
@@ -74,5 +79,8 @@ namespace ps2x::iop::detail
         std::unordered_map<uint32_t, RpcServer> m_servers;
         uint32_t m_nextDmaId = 1u;
         bool m_sifInitialized = false;
+        uint32_t m_sg2Base = 0u;
+        uint32_t m_lastSg2ReturnPointer = 0u;
+        uint32_t m_lastSg2IopStatusNonZero = 0u;
     };
 }

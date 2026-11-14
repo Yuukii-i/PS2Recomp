@@ -6,6 +6,7 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 #include <io.h>
 #endif
 #include "ps2_runtime.h"
+extern void ps2xPadMarker(); // PROBE-MK
 #include "probe_ae.h"
 #include "probe_ae.cpp"
 #include "diag/DiagSampler.h"
@@ -6151,6 +6152,7 @@ void PS2Runtime::run()
             }
         }
         // C312: F9 dumps all EE RAM (32 MB) to logs/ram_f9.bin for diffing against a PCSX2 save state
+        if (IsKeyPressed(KEY_F7)) ps2xPadMarker(); // PROBE-MK
         if (IsKeyPressed(KEY_F9))
         {
             FILE *rf = std::fopen("logs/ram_f9.bin", "wb");

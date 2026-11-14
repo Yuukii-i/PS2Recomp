@@ -234,6 +234,15 @@ namespace ps2x::iop::detail
             }
         }
 
+        // PERF-AU3: Snapshot active AutoDMA PCM frames for each core before the sample loop.
+        std::array<std::vector<int16_t>, Spu2State::kNumCores> autoDmaFrames{};
+        std::array<bool, Spu2State::kNumCores> hasAutoDma{};
+        for (uint32_t ci = 0u; ci < Spu2State::kNumCores; ++ci)
+        {
+            autoDmaFrames[ci].resize(static_cast<size_t>(frameCount) * 2u);
+            hasAutoDma[ci] = state.readAutoDmaFrames(ci, autoDmaFrames[ci].data(), frameCount);
+        }
+
         int32_t peak = 0;
 
         for (uint32_t f = 0u; f < frameCount; ++f)
@@ -246,6 +255,7 @@ namespace ps2x::iop::detail
                 const Spu2State::Core &coreReg = m_snapshot.cores[ci];
                 int64_t coreL = 0;
                 int64_t coreR = 0;
+                const uint32_t irqaAddr = coreReg.irqa & ~0xFu & (Spu2State::kRamSize - 1u);
 
                 for (uint32_t vi = 0u; vi < Spu2State::kNumVoices; ++vi)
                 {
@@ -262,6 +272,8 @@ namespace ps2x::iop::detail
                     {
                         if (!advanceBlock(v, state, 1u << vi, m_feedback.newlyEndedMask[ci]))
                             continue;
+                        if (coreReg.irqEnable != 0u && v.currentAddr == irqaAddr) // PERF-AU3
+                            m_feedback.irqTriggered[ci] = true;
                     }
 
                     // Linear interpolation with 12-bit fractional phase (0x1000 = 48 kHz).
@@ -291,8 +303,18 @@ namespace ps2x::iop::detail
                         {
                             if (!advanceBlock(v, state, bit, m_feedback.newlyEndedMask[ci]))
                                 break;
+                            if (coreReg.irqEnable != 0u && v.currentAddr == irqaAddr) // PERF-AU3
+                                m_feedback.irqTriggered[ci] = true;
                         }
                     }
+                }
+
+                if (hasAutoDma[ci]) // PERF-AU3: Mix AutoDMA PCM stream
+                {
+                    const int32_t admaL = autoDmaFrames[ci][f * 2u + 0u];
+                    const int32_t admaR = autoDmaFrames[ci][f * 2u + 1u];
+                    coreL += (static_cast<int64_t>(admaL) * decodeFixedVol(coreReg.bvoll)) >> 14;
+                    coreR += (static_cast<int64_t>(admaR) * decodeFixedVol(coreReg.bvolr)) >> 14;
                 }
 
                 if (coreReg.muteEnable == 0u)

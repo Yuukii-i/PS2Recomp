@@ -12,13 +12,17 @@
 
 namespace ps2x::iop
 {
-    // PERF-AU1: Diagnostics bridge declared locally in RPC.cpp (header rule safe).
+    // PERF-AU1 / PERF-AU3B: Diagnostics bridge declared locally in RPC.cpp (header rule safe).
     struct LibsdDiagSnapshot
     {
         uint64_t totalCalls = 0u;
         uint64_t keyOns = 0u;
         uint64_t transferBytes = 0u;
         std::array<uint64_t, 28> ordinalCounts{};
+        uint64_t naxCalls = 0u;
+        uint64_t naxChanged = 0u;
+        uint64_t envxCalls = 0u;
+        uint64_t envxChanged = 0u;
     };
 
     void getLibsdDiagnostics(LibsdDiagSnapshot &outSnapshot, std::vector<std::string> &outPendingLogs);
@@ -35,6 +39,10 @@ namespace ps2x::iop::detail
         constexpr uint32_t kMaxVerbatimLogs = 50u;
         bool g_loggedSweepVol = false;
         bool g_loggedEffectBypass = false;
+        std::array<std::array<uint32_t, 24>, 2> g_prevNax{};
+        std::array<std::array<bool, 24>, 2> g_hasPrevNax{};
+        std::array<std::array<uint16_t, 24>, 2> g_prevEnvx{};
+        std::array<std::array<bool, 24>, 2> g_hasPrevEnvx{};
 
         void recordSpu2NoticeOnce(bool &flag, const char *msg)
         {
@@ -120,6 +128,10 @@ namespace ps2x::iop::detail
         g_libsdLoggedCount = 0u;
         g_loggedSweepVol = false;
         g_loggedEffectBypass = false;
+        g_prevNax = {};
+        g_hasPrevNax = {};
+        g_prevEnvx = {};
+        g_hasPrevEnvx = {};
     }
 
     std::optional<IopLibsd::CompletionCallback> IopLibsd::takeCompletionCallback() noexcept
@@ -160,8 +172,25 @@ namespace ps2x::iop::detail
         }
 
         case 6: // sceSdGetParam(u16 entry)
-            ret = m_spu2.getParam(static_cast<uint16_t>(a0 & 0xFFFFu));
+        {
+            const uint16_t entry = static_cast<uint16_t>(a0 & 0xFFFFu);
+            ret = m_spu2.getParam(entry);
+            if ((entry & 0xFF00u) == 0x0500u) // PERF-AU3B: SD_VP_ENVX
+            {
+                const uint32_t core = entry & 1u;
+                const uint32_t voice = (entry >> 1u) & 0x1Fu;
+                if (voice < 24u)
+                {
+                    std::lock_guard<std::mutex> lock(g_libsdDiagMutex);
+                    ++g_libsdDiag.envxCalls;
+                    if (g_hasPrevEnvx[core][voice] && g_prevEnvx[core][voice] != static_cast<uint16_t>(ret))
+                        ++g_libsdDiag.envxChanged;
+                    g_prevEnvx[core][voice] = static_cast<uint16_t>(ret);
+                    g_hasPrevEnvx[core][voice] = true;
+                }
+            }
             break;
+        }
 
         case 7: // sceSdSetSwitch(u16 entry, u32 value)
             m_spu2.setSwitch(static_cast<uint16_t>(a0 & 0xFFFFu), a1);
@@ -180,8 +209,25 @@ namespace ps2x::iop::detail
             break;
 
         case 10: // sceSdGetAddr(u16 entry)
-            ret = m_spu2.getAddr(static_cast<uint16_t>(a0 & 0xFFFFu));
+        {
+            const uint16_t entry = static_cast<uint16_t>(a0 & 0xFFFFu);
+            ret = m_spu2.getAddr(entry);
+            if ((entry & 0xFF00u) == 0x2200u) // PERF-AU3B: SD_VA_NAX
+            {
+                const uint32_t core = entry & 1u;
+                const uint32_t voice = (entry >> 1u) & 0x1Fu;
+                if (voice < 24u)
+                {
+                    std::lock_guard<std::mutex> lock(g_libsdDiagMutex);
+                    ++g_libsdDiag.naxCalls;
+                    if (g_hasPrevNax[core][voice] && g_prevNax[core][voice] != ret)
+                        ++g_libsdDiag.naxChanged;
+                    g_prevNax[core][voice] = ret;
+                    g_hasPrevNax[core][voice] = true;
+                }
+            }
             break;
+        }
 
         case 11: // sceSdSetCoreAttr(u16 entry, u16 value)
         {
@@ -244,6 +290,9 @@ namespace ps2x::iop::detail
             {
                 tc.blockTransActive = false;
                 tc.blockTransMode = mode;
+                tc.blockTransHalf = 0u;
+                tc.blockTransNextCycle = 0u;
+                m_spu2.stopBlockTrans(ch); // PERF-AU3
             }
             else
             {
@@ -251,6 +300,15 @@ namespace ps2x::iop::detail
                 tc.blockTransMode = mode;
                 tc.blockTransAddr = mAddr;
                 tc.blockTransSize = size;
+                tc.blockTransHalf = 0u;
+                tc.blockTransNextCycle = 0u;
+                std::vector<uint8_t> initBuf;
+                if (size > 0u && m_memory.ownsRamRange(mAddr, size))
+                {
+                    initBuf.resize(size);
+                    (void)m_memory.readRam(mAddr, initBuf.data(), size);
+                }
+                m_spu2.startBlockTrans(ch, initBuf.empty() ? nullptr : initBuf.data(), size); // PERF-AU3
                 xferBytes = size;
             }
             ret = 0u;
@@ -264,7 +322,9 @@ namespace ps2x::iop::detail
         case 20: // sceSdBlockTransStatus(s16 channel, s16 flag)
         {
             const auto &tc = m_spu2.transChannel(a0 & 1u);
-            ret = (tc.blockTransActive ? 0x01000000u : 0u) | (tc.blockTransAddr & 0x00FFFFFFu);
+            const uint32_t half = tc.blockTransActive ? (tc.blockTransHalf & 1u) : 0u; // PERF-AU3
+            const uint32_t halfOffset = half * (tc.blockTransSize / 2u);
+            ret = (half << 24u) | ((tc.blockTransAddr + halfOffset) & 0x00FFFFFFu);
             break;
         }
 

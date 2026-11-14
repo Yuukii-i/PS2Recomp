@@ -85,6 +85,8 @@ namespace ps2x::iop::detail
             uint32_t blockTransMode = 0u;
             uint32_t blockTransAddr = 0u;
             uint32_t blockTransSize = 0u;
+            uint32_t blockTransHalf = 0u;      // PERF-AU3: active half-buffer (0 or 1)
+            uint64_t blockTransNextCycle = 0u; // PERF-AU3: next IOP cycle for half-buffer interrupt
             uint32_t intrHandler = 0u;
             uint32_t intrArg = 0u;
             uint32_t intrGp = 0u;
@@ -138,21 +140,38 @@ namespace ps2x::iop::detail
 
             std::array<std::array<VoiceUpdate, kNumVoices>, kNumCores> voices{};
             std::array<uint32_t, kNumCores> newlyEndedMask{};
+            std::array<bool, kNumCores> irqTriggered{}; // PERF-AU3
         };
 
         void snapshotForMixer(MixerSnapshot &outSnapshot);
         void commitMixerFeedback(const MixerFeedback &feedback);
         void readRamBlock16(uint32_t spuAddr, uint8_t outBlock[16]) const;
 
+        // PERF-AU3: AutoDMA (sceSdBlockTrans) ring buffer + IRQ state.
+        void startBlockTrans(uint32_t ch, const void *initialData, uint32_t size);
+        void updateBlockTransHalf(uint32_t ch, uint32_t halfOffset, const void *data, uint32_t halfSize);
+        void stopBlockTrans(uint32_t ch);
+        bool readAutoDmaFrames(uint32_t ch, int16_t *outStereo, uint32_t frameCount);
+        [[nodiscard]] bool consumeIrqPending(uint32_t core) noexcept;
+
     private:
         mutable std::mutex m_regMutex;
         mutable std::mutex m_ramMutex;
+        mutable std::mutex m_autoDmaMutex; // PERF-AU3
         std::array<Core, kNumCores> m_cores{};
         std::array<uint32_t, kNumCores> m_pendingKon{};
         std::array<uint32_t, kNumCores> m_pendingKoff{};
         bool m_pendingReset = false;
         uint64_t m_keyOnCount = 0u;
         std::array<TransChannel, 2> m_transChannels{};
+        std::array<bool, kNumCores> m_irqPending{}; // PERF-AU3
+        struct AutoDmaRing
+        {
+            bool active = false;
+            std::vector<uint8_t> buffer;
+            uint32_t readBytePos = 0u;
+        };
+        std::array<AutoDmaRing, 2> m_autoDmaRings{}; // PERF-AU3
         std::vector<uint8_t> m_ram;
     };
 }

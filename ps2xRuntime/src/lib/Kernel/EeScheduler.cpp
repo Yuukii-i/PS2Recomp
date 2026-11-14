@@ -38,6 +38,120 @@ namespace ps2_syscalls {
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <chrono>
+#ifdef _WIN32 // PROBE-EX
+extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
+#endif
+
+// PROBE-EX: EeDispatcherTransfer exception cost & stack depth probe (PS2X_EX=1)
+static const bool s_probeExOn = []() {
+    const char *v = std::getenv("PS2X_EX");
+    return v && v[0] == '1';
+}();
+
+struct ProbeExSiteStats
+{
+    uint64_t count = 0;
+    uint64_t qpcTicks = 0;
+    uint64_t depthSum = 0;
+    uint32_t depthMax = 0;
+};
+
+struct ProbeExState
+{
+    ProbeExSiteStats sites[5]{};
+    int64_t lastReportQpc = 0;
+    int64_t qpcFreq = 0;
+};
+
+static ProbeExState s_probeEx;
+static thread_local int t_probeExSite = -1;
+static thread_local int64_t t_probeExStamp = 0;
+
+static inline int64_t probeExQpcNow()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+static inline int64_t probeExQpcFreq()
+{
+    return 1000000000LL;
+}
+
+static inline void probeExBeforeThrow(int site)
+{
+    if (!s_probeExOn) return;
+    ++s_probeEx.sites[site].count;
+    void *frames[62];
+#ifdef _WIN32
+    uint32_t depth = static_cast<uint32_t>(RtlCaptureStackBackTrace(0, 62, frames, nullptr));
+#else
+    uint32_t depth = 0;
+#endif
+    s_probeEx.sites[site].depthSum += depth;
+    if (depth > s_probeEx.sites[site].depthMax)
+        s_probeEx.sites[site].depthMax = depth;
+    t_probeExSite = site;
+    t_probeExStamp = probeExQpcNow();
+}
+
+static inline void probeExOnCatch()
+{
+    if (!s_probeExOn) return;
+    const int64_t now = probeExQpcNow();
+    const int site = t_probeExSite;
+    if (site >= 0 && site < 5)
+    {
+        const int64_t dt = now - t_probeExStamp;
+        if (dt > 0)
+            s_probeEx.sites[site].qpcTicks += static_cast<uint64_t>(dt);
+        t_probeExSite = -1;
+    }
+    if (s_probeEx.qpcFreq == 0)
+        s_probeEx.qpcFreq = probeExQpcFreq();
+    if (s_probeEx.lastReportQpc == 0)
+    {
+        s_probeEx.lastReportQpc = now;
+        return;
+    }
+    const int64_t elapsedQpc = now - s_probeEx.lastReportQpc;
+    if (elapsedQpc >= s_probeEx.qpcFreq * 5)
+    {
+        const double dtSec = static_cast<double>(elapsedQpc) / static_cast<double>(s_probeEx.qpcFreq);
+        const double usPerTick = 1000000.0 / static_cast<double>(s_probeEx.qpcFreq);
+        uint64_t totalTicks = 0;
+        for (int i = 0; i < 5; ++i)
+            totalTicks += s_probeEx.sites[i].qpcTicks;
+        const double totalMsPerS = (static_cast<double>(totalTicks) * usPerTick / 1000.0) / dtSec;
+        auto siteUs = [&](int i) -> double {
+            return static_cast<double>(s_probeEx.sites[i].qpcTicks) * usPerTick;
+        };
+        auto siteAvgDepth = [&](int i) -> double {
+            return s_probeEx.sites[i].count > 0
+                       ? static_cast<double>(s_probeEx.sites[i].depthSum) / static_cast<double>(s_probeEx.sites[i].count)
+                       : 0.0;
+        };
+        ::ps2xSafeLog(
+            "[exc] dt=%.1fs site0=start n=%llu us=%.0f depth=%.1f/%u "
+            "site1=transfer n=%llu us=%.0f depth=%.1f/%u "
+            "site2=inv1 n=%llu us=%.0f depth=%.1f/%u "
+            "site3=inv2 n=%llu us=%.0f depth=%.1f/%u "
+            "site4=block n=%llu us=%.0f depth=%.1f/%u "
+            "total_ms_per_s=%.3f\n",
+            dtSec,
+            (unsigned long long)s_probeEx.sites[0].count, siteUs(0), siteAvgDepth(0), s_probeEx.sites[0].depthMax,
+            (unsigned long long)s_probeEx.sites[1].count, siteUs(1), siteAvgDepth(1), s_probeEx.sites[1].depthMax,
+            (unsigned long long)s_probeEx.sites[2].count, siteUs(2), siteAvgDepth(2), s_probeEx.sites[2].depthMax,
+            (unsigned long long)s_probeEx.sites[3].count, siteUs(3), siteAvgDepth(3), s_probeEx.sites[3].depthMax,
+            (unsigned long long)s_probeEx.sites[4].count, siteUs(4), siteAvgDepth(4), s_probeEx.sites[4].depthMax,
+            totalMsPerS);
+        for (int i = 0; i < 5; ++i)
+            s_probeEx.sites[i] = {};
+        s_probeEx.lastReportQpc = now;
+    }
+}
 
 // PERF-KM: bumped whenever an element of EeScheduler::m_threads is erased, so checkpointDue() can cache the running thread's record pointer
 // (unordered_map nodes are stable across inserts/rehash; only erase/clear invalidate them).
@@ -318,6 +432,7 @@ void EeScheduler::run()
             }
             catch (const EeDispatcherTransfer &)
             {
+                probeExOnCatch(); // PROBE-EX
             }
             if (m_currentThreadId == 0)
             {
@@ -352,6 +467,7 @@ void EeScheduler::run()
                     }
                     catch (const EeDispatcherTransfer &)
                     {
+                        probeExOnCatch(); // PROBE-EX
                     }
                 }
                 continue;
@@ -474,6 +590,7 @@ void EeScheduler::run()
         }
         catch (const EeDispatcherTransfer &)
         {
+            probeExOnCatch(); // PROBE-EX
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
@@ -801,6 +918,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
         m_runtime.guestFree(ownedStack);
     }
     publishSnapshot();
+    probeExBeforeThrow(0); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 
@@ -1149,6 +1267,7 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     publishSnapshot();
+    probeExBeforeThrow(1); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 
@@ -1471,6 +1590,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     invocation.sequence = ++m_invocationSequence;
     owner->invocations.push_back(std::move(invocation));
     publishSnapshot();
+    probeExBeforeThrow(2); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 
@@ -1490,6 +1610,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
         owner->invocations.push_back(std::move(*it));
     }
     publishSnapshot();
+    probeExBeforeThrow(3); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 
@@ -2087,6 +2208,7 @@ void EeScheduler::blockCurrent(EeWaitState wait)
     self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
     m_currentThreadId = 0;
     publishSnapshot();
+    probeExBeforeThrow(4); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 

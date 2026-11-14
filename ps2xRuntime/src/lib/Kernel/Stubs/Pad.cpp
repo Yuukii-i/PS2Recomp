@@ -1,5 +1,8 @@
 #include "Common.h"
 #include "Pad.h"
+#include <chrono> // PROBE-MK
+#include <utility> // PROBE-MK
+#include <cstdlib> // PROBE-MK
 
 extern void ps2xSafeLog(const char *fmt, ...);
 namespace ps2_stubs
@@ -285,6 +288,16 @@ namespace ps2_stubs
         size_t s_playPollIndex = 0;
         bool s_playEndReported = false;
 
+        // PROBE-MK
+        std::chrono::steady_clock::time_point s_mkStart = std::chrono::steady_clock::now();
+        unsigned s_mkCounter = 0;
+        std::vector<std::pair<unsigned, size_t>> s_playMarks;
+        unsigned s_playStopMark = 0;
+        double mkSecondsSinceStart()
+        {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - s_mkStart).count();
+        }
+
         void flushRecordFileLocked()
         {
             if (s_recFilename.empty())
@@ -351,6 +364,7 @@ namespace ps2_stubs
                 return;
             }
             s_padHookInitialized = true;
+            s_mkStart = std::chrono::steady_clock::now(); // PROBE-MK
 
             const char *playEnv = std::getenv("PS2X_PAD_PLAY");
             const char *recEnv = std::getenv("PS2X_PAD_REC");
@@ -421,6 +435,27 @@ namespace ps2_stubs
 
                 ::ps2xSafeLog("[padplay] loaded %zu polls from %s\n", s_playRecords.size(), s_playFilename.c_str());
                 std::fflush(stderr);
+
+                // PROBE-MK
+                {
+                    std::ifstream mf(s_playFilename + ".marks");
+                    if (mf.is_open())
+                    {
+                        unsigned mn = 0;
+                        size_t mp = 0;
+                        while (mf >> mn >> mp)
+                        {
+                            s_playMarks.emplace_back(mn, mp);
+                        }
+                        ::ps2xSafeLog("[padplay] loaded %zu marks\n", s_playMarks.size());
+                        std::fflush(stderr);
+                    }
+                    const char *stopEnv = std::getenv("PS2X_PAD_STOP_MARK");
+                    if (stopEnv && stopEnv[0] != '\0')
+                    {
+                        s_playStopMark = static_cast<unsigned>(std::strtoul(stopEnv, nullptr, 10));
+                    }
+                }
             }
             else if (hasRec)
             {
@@ -447,6 +482,23 @@ namespace ps2_stubs
             {
                 const size_t N = s_playRecords.size();
                 const size_t n = s_playPollIndex++;
+
+                // PROBE-MK
+                for (const auto &mk : s_playMarks)
+                {
+                    if (mk.second == n)
+                    {
+                        ::ps2xSafeLog("[padplay] mark %u reached poll=%zu t=%.1fs\n", mk.first, n, mkSecondsSinceStart());
+                        std::fflush(stderr);
+                        if (s_playStopMark != 0 && mk.first == s_playStopMark)
+                        {
+                            ::ps2xSafeLog("[padplay] stop at mark %u\n", mk.first);
+                            std::fflush(stdout);
+                            std::fflush(stderr);
+                            std::_Exit(0);
+                        }
+                    }
+                }
 
                 if (n < N)
                 {
@@ -1230,5 +1282,31 @@ namespace ps2_stubs
         }
 
         return state;
+    }
+}
+
+// PROBE-MK: F7 zone marker. Appends "n poll" to <rec>.marks and flushes the .padrec.
+void ps2xPadMarker()
+{
+    using namespace ps2_stubs;
+    std::lock_guard<std::mutex> lock(s_padHookMutex);
+    initPadRecordReplayLocked();
+    const unsigned n = ++s_mkCounter;
+    size_t poll = 0;
+    if (s_recActive)
+        poll = s_recPolls;
+    else if (s_playActive)
+        poll = s_playPollIndex;
+    ::ps2xSafeLog("[mark] n=%u poll=%zu t=%.1fs\n", n, poll, mkSecondsSinceStart());
+    std::fflush(stderr);
+    if (s_recActive)
+    {
+        std::ofstream mf(s_recFilename + ".marks", std::ios::app);
+        if (mf.is_open())
+        {
+            mf << n << " " << poll << "\n";
+            mf.close();
+        }
+        flushRecordFileLocked();
     }
 }

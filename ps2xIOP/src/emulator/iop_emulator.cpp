@@ -22,6 +22,7 @@
 #include "iop_emulator_const.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <map>
 #include <optional>
@@ -34,10 +35,40 @@
 #include <unordered_map>
 #include <vector>
 
+namespace ps2x::iop
+{
+    // PERF-AU3B: SG2 interpreter/RPC/vblank diagnostics bridge (declared locally in RPC.cpp).
+    struct Sg2DiagSnapshot
+    {
+        uint32_t sg2Base = 0u;
+        uint64_t heartbeatCount = 0u;
+        uint64_t tickCount = 0u;
+        uint64_t naxPollCount = 0u;
+        uint32_t lastReturnPointer = 0u;
+        uint32_t lastIopStatusNonZero = 0u;
+        uint32_t vblankHandlers = 0u;
+        uint64_t vblankDelivered = 0u;
+    };
+
+    void getSg2DiagSnapshot(Sg2DiagSnapshot &outSnapshot);
+}
+
 namespace ps2x::iop::detail
 {
     namespace
     {
+        // PERF-AU3B: Atomic counters for SG2 diagnostics.
+        struct Sg2DiagCounters
+        {
+            std::atomic<uint32_t> sg2Base{0u};
+            std::atomic<uint64_t> heartbeatCount{0u};
+            std::atomic<uint64_t> tickCount{0u};
+            std::atomic<uint64_t> naxPollCount{0u};
+            std::atomic<uint32_t> lastReturnPointer{0u};
+            std::atomic<uint32_t> lastIopStatusNonZero{0u};
+            std::atomic<uint32_t> vblankHandlers{0u};
+            std::atomic<uint64_t> vblankDelivered{0u};
+        } g_sg2Diag;
         // PROBE-KC: IOP time budget, reported about once per second on stdout ("[iop] ...")
         struct KcStats
         {
@@ -175,12 +206,21 @@ namespace ps2x::iop::detail
             kernel.reset();
             modules.clear();
             imports.reset();
+            vblank.reset(); // PERF-AU3B
             rpc.reset();
             cdvd.reset();
             intrman.reset();
             timrman.reset();
             ioman.reset();
             libsd.reset(); // PERF-AU1
+            g_sg2Diag.sg2Base.store(0u, std::memory_order_relaxed);
+            g_sg2Diag.heartbeatCount.store(0u, std::memory_order_relaxed);
+            g_sg2Diag.tickCount.store(0u, std::memory_order_relaxed);
+            g_sg2Diag.naxPollCount.store(0u, std::memory_order_relaxed);
+            g_sg2Diag.lastReturnPointer.store(0u, std::memory_order_relaxed);
+            g_sg2Diag.lastIopStatusNonZero.store(0u, std::memory_order_relaxed);
+            g_sg2Diag.vblankHandlers.store(0u, std::memory_order_relaxed);
+            g_sg2Diag.vblankDelivered.store(0u, std::memory_order_relaxed);
             pendingDmaInterrupts.clear();
             pendingGuestCallbacks.clear();
             idleSkipUntil = 0; // PERF-KE
@@ -452,6 +492,18 @@ namespace ps2x::iop::detail
             if (checkInterrupt(cpu))
                 return true;
 
+            // PERF-AU3B: Count SG2 heartbeat (0x3BB4), tick (0x3CB8), and NAX poll (0x20B8) entries.
+            if (const uint32_t sg2Base = rpc.sg2Base(); sg2Base != 0u)
+            {
+                const uint32_t relPc = cpu.pc - sg2Base;
+                if (relPc == 0x3BB4u)
+                    g_sg2Diag.heartbeatCount.fetch_add(1u, std::memory_order_relaxed);
+                else if (relPc == 0x3CB8u)
+                    g_sg2Diag.tickCount.fetch_add(1u, std::memory_order_relaxed);
+                else if (relPc == 0x20B8u)
+                    g_sg2Diag.naxPollCount.fetch_add(1u, std::memory_order_relaxed);
+            }
+
             if (const auto import = imports.decode(cpu.pc))
             {
                 const ImportDisposition disposition = dispatchImport(*import, cpu);
@@ -636,6 +688,43 @@ namespace ps2x::iop::detail
             servicingGuestCallbacks = false;
         }
 
+        // PERF-AU3: Advance AutoDMA (sceSdBlockTrans) half-buffers and schedule sceSdSetTransIntrHandler callbacks.
+        void serviceBlockTrans()
+        {
+            for (uint32_t ch = 0u; ch < 2u; ++ch)
+            {
+                auto &tc = spu2.transChannel(ch);
+                if (!tc.blockTransActive || tc.blockTransSize < 4u)
+                    continue;
+                const uint32_t halfBytes = tc.blockTransSize / 2u;
+                const uint64_t halfCycles = std::max<uint64_t>(768u, (static_cast<uint64_t>(halfBytes) / 4u) * 768u);
+                if (tc.blockTransNextCycle == 0u)
+                {
+                    tc.blockTransNextCycle = totalCycles + halfCycles;
+                    continue;
+                }
+                while (totalCycles >= tc.blockTransNextCycle)
+                {
+                    const uint32_t finishedHalf = tc.blockTransHalf & 1u;
+                    const uint32_t halfOffset = finishedHalf * halfBytes;
+                    if (memory.ownsRamRange(tc.blockTransAddr + halfOffset, halfBytes))
+                    {
+                        std::vector<uint8_t> buf(halfBytes);
+                        if (memory.readRam(tc.blockTransAddr + halfOffset, buf.data(), halfBytes))
+                            spu2.updateBlockTransHalf(ch, halfOffset, buf.data(), halfBytes);
+                    }
+                    tc.blockTransHalf ^= 1u;
+                    tc.blockTransNextCycle += halfCycles;
+                    if (tc.intrHandler != 0u)
+                    {
+                        pendingGuestCallbacks.emplace(
+                            totalCycles,
+                            ScheduledGuestCallback{tc.intrHandler, tc.intrGp, ch, tc.intrArg});
+                    }
+                }
+            }
+        }
+
         void runCycles(uint64_t cycles) noexcept
         {
             // PERF-KE: the EE calls this ~4.5M times per second and every call used to run one full idle iteration (DMA/callback/timer service, ready-queue
@@ -656,6 +745,18 @@ namespace ps2x::iop::detail
                 {
                     ++g_kc.loopIters; // PROBE-KC
                     servicePendingDmaInterrupts();
+                    serviceBlockTrans(); // PERF-AU3
+                    {
+                        // PERF-AU3B: Deliver due IOP vblank callbacks at 59.94 Hz.
+                        std::vector<IopVblank::DueCallback> dueVb;
+                        vblank.serviceDue(totalCycles, dueVb);
+                        for (const auto &cb : dueVb)
+                        {
+                            pendingGuestCallbacks.emplace(
+                                totalCycles,
+                                ScheduledGuestCallback{cb.function, cb.gp, cb.common, 0u});
+                        }
+                    }
                     servicePendingGuestCallbacks();
                     timrman.serviceDue(totalCycles, *this);
                     IopThread *next = kernel.beginNextReady(totalCycles);
@@ -667,6 +768,13 @@ namespace ps2x::iop::detail
                             horizon = std::min(horizon, completionCycle);
                         if (!pendingGuestCallbacks.empty())
                             horizon = std::min(horizon, pendingGuestCallbacks.begin()->first);
+                        for (uint32_t ch = 0u; ch < 2u; ++ch) // PERF-AU3
+                        {
+                            const auto &tc = spu2.transChannel(ch);
+                            if (tc.blockTransActive && tc.blockTransNextCycle != 0u)
+                                horizon = std::min(horizon, tc.blockTransNextCycle);
+                        }
+                        horizon = vblank.nextEventCycle(horizon); // PERF-AU3B
                         horizon = timrman.nextEventCycle(horizon);
                         idleSkipUntil = horizon; // PERF-KE
                         totalCycles = std::max(totalCycles + 1u, std::min(target, horizon));
@@ -870,7 +978,17 @@ namespace ps2x::iop::detail
     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
     {
         m_impl->idleSkipUntil = 0; // PERF-KE
-        return m_impl->rpc.handleRpc(request, *m_impl);
+        const RpcResult result = m_impl->rpc.handleRpc(request, *m_impl);
+        // PERF-AU3B: Refresh SG2 RPC & vblank diagnostic snapshot.
+        if (request.sid == 0x11223344u)
+        {
+            detail::g_sg2Diag.sg2Base.store(m_impl->rpc.sg2Base(), std::memory_order_relaxed);
+            detail::g_sg2Diag.lastReturnPointer.store(m_impl->rpc.lastSg2ReturnPointer(), std::memory_order_relaxed);
+            detail::g_sg2Diag.lastIopStatusNonZero.store(m_impl->rpc.lastSg2IopStatusNonZero(), std::memory_order_relaxed);
+            detail::g_sg2Diag.vblankHandlers.store(m_impl->vblank.handlerCount(), std::memory_order_relaxed);
+            detail::g_sg2Diag.vblankDelivered.store(m_impl->vblank.deliveredCount(), std::memory_order_relaxed);
+        }
+        return result;
     }
 
     bool IopEmulator::hasRpcServer(uint32_t sid) const noexcept
@@ -946,6 +1064,23 @@ namespace ps2x::iop::detail
     uint32_t IopEmulator::rpcServerCount() const noexcept
     {
         return static_cast<uint32_t>(m_impl->rpc.serverCount());
+    }
+
+}
+
+namespace ps2x::iop
+{
+    // PERF-AU3B: Export SG2 diagnostics snapshot to RPC.cpp (header rule safe).
+    void getSg2DiagSnapshot(Sg2DiagSnapshot &outSnapshot)
+    {
+        outSnapshot.sg2Base = detail::g_sg2Diag.sg2Base.load(std::memory_order_relaxed);
+        outSnapshot.heartbeatCount = detail::g_sg2Diag.heartbeatCount.load(std::memory_order_relaxed);
+        outSnapshot.tickCount = detail::g_sg2Diag.tickCount.load(std::memory_order_relaxed);
+        outSnapshot.naxPollCount = detail::g_sg2Diag.naxPollCount.load(std::memory_order_relaxed);
+        outSnapshot.lastReturnPointer = detail::g_sg2Diag.lastReturnPointer.load(std::memory_order_relaxed);
+        outSnapshot.lastIopStatusNonZero = detail::g_sg2Diag.lastIopStatusNonZero.load(std::memory_order_relaxed);
+        outSnapshot.vblankHandlers = detail::g_sg2Diag.vblankHandlers.load(std::memory_order_relaxed);
+        outSnapshot.vblankDelivered = detail::g_sg2Diag.vblankDelivered.load(std::memory_order_relaxed);
     }
 
 }
