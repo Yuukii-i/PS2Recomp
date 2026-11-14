@@ -4380,7 +4380,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                                 fuzzSeqs.emplace_back(std::string(tokStart, static_cast<size_t>(s - tokStart)), std::move(seq));
                         }
                     }
-                    auto seqCmdWords = [](uint32_t h) -> uint32_t {
+                    auto seqCmdWords = [](uint32_t h, uint16_t nV) -> uint32_t {
                         switch (h)
                         {
                         case 0x02E0u:
@@ -4394,7 +4394,9 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                         case 0x0628u:
                         case 0x0840u:
                         case 0x1A68u: return 2u;
-                        case 0x32A0u: return 1u;
+                        case 0x32A0u:
+                        case 0x1E50u: return 1u;
+                        case 0x0C38u: return static_cast<uint32_t>(nV); // PERF-V1Q
                         default: return 0u;
                         }
                     };
@@ -4436,6 +4438,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                                 };
                                 wr32(1011u, 0u, base);
                                 wr32(1011u, 3u, nVert);
+                                wr32(1018u, 1u, static_cast<uint16_t>(stripBase - top)); // PERF-V1Q: 0560 1018.y
                                 wr32(1018u, 2u, static_cast<uint16_t>(stripBase - top));
                                 wr32(1018u, 3u, std::max<uint16_t>(nVert, 2u));
 
@@ -4448,8 +4451,13 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                                     wr32(cursor, 0u, (hpc >> 3) & 0x7FFu);
                                     if (hpc == 0x1900u || hpc == 0x1910u || hpc == 0x1CC0u || hpc == 0x1CD8u)
                                         wr32(cursor, 1u, matBase);
+                                    if (hpc == 0x0C38u) // PERF-V1Q
+                                    {
+                                        wr32(cursor, 2u, stripBase);
+                                        wr32(cursor, 1u, static_cast<uint16_t>(stripBase + nVert));
+                                    }
                                     ++cursor;
-                                    const uint32_t cwN = seqCmdWords(hpc);
+                                    const uint32_t cwN = seqCmdWords(hpc, nVert);
                                     if (doRand)
                                     {
                                         for (uint32_t cw = 0u; cw < cwN; ++cw)
