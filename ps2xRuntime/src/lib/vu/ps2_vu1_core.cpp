@@ -3434,7 +3434,9 @@ uint32_t vu1CoverageCount(); // PROBE-CAPTURE (generated/vu1_native_dispatch.cpp
 
 // PROBE-CAPTURE: VU1 run corpus for the native-VU1 work (PS2X_VU1_CAPTURE=1 -> logs/vu1corpus.bin). Chunks: u32 tag, u32 bytes, payload.
 // 'HDR ' {u32 sizeof(VU1State)}, 'CODE' {u64 generation, code bytes}, 'RUN ' {see svCaptureRecord}. Kept: runs that reach a new dispatch pc, plus 1 in 400.
-static const char *corpusPath() { const char *e = std::getenv("PS2X_VU1_CORPUS"); return (e && e[0]) ? e : "logs/vu1corpus.bin"; } // PERF-VAR
+void ps2xSafeLog(const char *fmt, ...); // PROBE-FB
+static bool fbCapOn() { static const bool on = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE_FB"); return e && e[0] == '1'; }(); return on; } // PROBE-FB
+static const char *corpusPath() { const char *e = std::getenv("PS2X_VU1_CORPUS"); return (e && e[0]) ? e : (fbCapOn() ? "logs/vu1corpus_fb.bin" : "logs/vu1corpus.bin"); } // PERF-VAR; PROBE-FB default
 static bool capOn() { static const bool on = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE"); return e && e[0] == '1'; }(); return on; }
 static uint32_t capEvery() { static const uint32_t n = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE_EVERY"); const unsigned long v = e ? std::strtoul(e, nullptr, 10) : 200ul; return static_cast<uint32_t>(v ? v : 200ul); }(); return n; } // PERF-VAR
 static bool capImageOk() { static const char *e = std::getenv("PS2X_VU1_CAPTURE_IMAGE"); if (!e) return true; return std::strstr(e, [] { static char b[17]; std::snprintf(b, sizeof(b), "%016llx", (unsigned long long)s_hcCurHash); return b; }()) != nullptr; } // PERF-VAR: comma-separated list of 16-digit hashes
@@ -3525,6 +3527,30 @@ static void svCaptureRecord(const VU1State &s0, uint32_t wc0, uint64_t cyc0, con
         std::printf("[probe] capture kept=%u of runs=%llu (cap %u)\n", s_capKept, (unsigned long long)s_capRuns, capMaxRecords());
 }
 
+// PROBE-FB (PS2X_VU1_CAPTURE_FB=1): records only runs where the functional engine fell back, in the same RUN format, keyed by fallback handler pc.
+// Only the fallback path pays (pre-state copy + exact run with GIF capture); non-fallback programs take the normal fast path untouched.
+static std::unordered_map<uint32_t, uint32_t> s_fbCapN; // PROBE-FB
+static uint32_t s_fbCapTotal = 0; // PROBE-FB
+static bool fbCapWant(uint32_t key) // PROBE-FB
+{
+    static const uint32_t per = []() { const char *e = std::getenv("PS2X_VU1_CAPTURE_FB_PER"); const unsigned long v = e ? std::strtoul(e, nullptr, 10) : 0ul; return static_cast<uint32_t>(v ? v : 300ul); }();
+    if (s_fbCapTotal >= 30000u)
+        return false;
+    const auto it = s_fbCapN.find(key);
+    return it == s_fbCapN.end() || it->second < per;
+}
+static void fbCapTick() // PROBE-FB: ~10 s summary, called from the fallback path only
+{
+    static std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count() < 10)
+        return;
+    last = now;
+    for (const auto &kv : s_fbCapN)
+        ::ps2xSafeLog("[vu1fb] key=0x%04X: %u\n", kv.first, kv.second);
+    ::ps2xSafeLog("[vu1fb] total=%u\n", s_fbCapTotal);
+}
+
 // PROBE-REPLAY (PS2X_VU1_REPLAY=1 / PS2X_VU1_REPLAY_PAIR=1): replays logs/vu1corpus.bin through the current VU1 code once the main image is loaded, compares state / VU memory /
 // GIF bytes with the recording, writes logs/vu1replay.txt and exits. Proves the corpus is complete before it is used to check a new implementation.
 static bool rpOn() { static const bool on = []() { const char *e = std::getenv("PS2X_VU1_REPLAY"); const char *p = std::getenv("PS2X_VU1_REPLAY_PAIR"); return (e && e[0] == '1') || (p && p[0] == '1'); }(); return on; }
@@ -3553,9 +3579,10 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     // the same four conditions, so skip the whole block when none of them is enabled.
     static const bool s_vuAnyProbe = []() { return isVu3dProbeEnabled() || probe_ae::isEnabled() || probe_ae::isDcProbeEnabled() || probe_ae::isMovieHleVerify(); }();
     static const bool s_vu1FuncCfgOk = vu1func::funcOn() && !s_vuAnyProbe && (vu1VerifyMode() & 1) == 0 && !rpOn() && !capOn() && !svOn(); // PERF-V1G
+    uint32_t fbKey = 0xFFFFFFFFu; // PROBE-FB: set only when the functional run fell back (vuData is restored by the undo log)
     // PERF-V1G: fast functional engine entry before per-run atomic/probe/movie-HLE/decode-cache overhead; generation check is cached inline.
     if (m_unit == Unit::VU1 && s_vu1FuncCfgOk && !s_vfyRef && !s_kickRec && memory != nullptr &&
-        codeSize == 16384u && dataSize == 16384u && (startPC & 0xFFFFu) == 8u && vuCode == memory->getVU1Code())
+        codeSize == 16384u && dataSize == 16384u && ((startPC & 0xFFFFu) == 8u || (startPC & 0xFFFFu) == 0x40u) && vuCode == memory->getVU1Code()) // PERF-V40
     {
         const uint64_t generation = memory->getVU1CodeGeneration();
         if (!m_decodedCodeCacheValid || m_cachedVuCode != vuCode || m_cachedMemory != memory ||
@@ -3585,6 +3612,11 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             m_xgkick.active = false;
             m_stopRequested = false;
             return;
+        }
+        if (fbCapOn()) // PROBE-FB
+        {
+            fbKey = vu1func::s_fbPc == 0xF001u ? (startPC & 0xFFFFu) : vu1func::s_fbPc;
+            fbCapTick();
         }
     }
 
@@ -4546,6 +4578,28 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             s_capCov = cov;
             svCaptureRecord(s0, wc0, cyc0, mem0, m_state, m_workingClip, m_cycle, vuData, dataSize, capA, startPC, top, itop, maxCycles,
                             vuCode, codeSize, memory->getVU1CodeGeneration());
+        }
+        if (!capA.empty())
+            memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));
+        return;
+    }
+    if (fbKey != 0xFFFFFFFFu && fbCapWant(fbKey) && capDelayPassed()) // PROBE-FB: same record as PROBE-CAPTURE, only for functional fallbacks
+    {
+        const VU1State s0 = m_state;
+        const uint32_t wc0 = m_workingClip;
+        const uint64_t cyc0 = m_cycle;
+        const std::vector<uint8_t> mem0(vuData, vuData + dataSize);
+        std::vector<uint8_t> capA;
+        s_vfyCapture = &capA;
+        run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+        s_vfyCapture = nullptr;
+        const uint32_t keptBefore = s_capKept;
+        svCaptureRecord(s0, wc0, cyc0, mem0, m_state, m_workingClip, m_cycle, vuData, dataSize, capA, startPC, top, itop, maxCycles,
+                        vuCode, codeSize, memory->getVU1CodeGeneration());
+        if (s_capKept != keptBefore) // record actually written
+        {
+            ++s_fbCapN[fbKey];
+            ++s_fbCapTotal;
         }
         if (!capA.empty())
             memory->submitGifPacket(GifPathId::Path1, capA.data(), static_cast<uint32_t>(capA.size()));

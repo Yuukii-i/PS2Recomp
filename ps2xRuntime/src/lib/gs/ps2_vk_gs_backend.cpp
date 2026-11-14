@@ -49,6 +49,7 @@ static std::atomic<uint64_t> g_gqLockWait{0}, g_gqLockWaits{0}, g_gqPresentHold{
 extern "C" uint64_t ps2x_ft2_presentHold() { return g_gqPresentHold.load(std::memory_order_relaxed); } // PERF-LN
 extern "C" void ps2_gs_vk_stats(uint64_t *out) { out[0] = g_gqLockWait.exchange(0); out[1] = g_gqLockWaits.exchange(0); out[2] = g_gqPresentHold.exchange(0); out[3] = g_gqPresents.exchange(0); }
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
+extern "C" void ps2_iu_gpu(uint64_t bytes, uint64_t ticks); // PROBE-IU, defined in gs_frontend.cpp
 extern bool g_gwOn; extern "C" int ps2_gw_sw(int cat); // PROBE-GW, defined in gs_frontend.cpp (cats: 6 statechg, 7 vkrec, 8 submit, 9 sync, 10 present)
 namespace { struct GwScope { int p; explicit GwScope(int c) : p(g_gwOn ? ps2_gw_sw(c) : -1) {} ~GwScope() { if (p >= 0) ps2_gw_sw(p); } }; } // PROBE-GW
 
@@ -1851,6 +1852,7 @@ namespace
                 return false;
             beginRecording();
             endPass();
+            const uint64_t iuT0 = g_gwOn ? __rdtsc() : 0; // PROBE-IU
             std::vector<VkBufferCopy> regions;
             regions.reserve(runs.size());
             uint32_t off = stagingOff_;
@@ -1865,6 +1867,7 @@ namespace
             bufBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
             stagingOff_ = off;
+            if (g_gwOn) ps2_iu_gpu(total, __rdtsc() - iuT0); // PROBE-IU
             uploadBytes_ += total;
             presDirty_.orWith(hostNewer_);
             hostNewer_.clear();

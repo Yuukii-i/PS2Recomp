@@ -4369,6 +4369,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 namespace GSMem { bool ReadRow(int kind, uint8_t *data, uint32_t bp, uint32_t bw, uint32_t x0, uint32_t y, uint32_t count, uint32_t *out); } // PERF-GR
 namespace GSMem { bool UploadStream(int kind, uint8_t *data, uint32_t bp, uint32_t bw, uint32_t &x, uint32_t &y, uint32_t xBegin, uint32_t xEnd, uint32_t count, const uint8_t *src); } // PERF-GU
 
+extern bool g_gwOn; extern "C" void ps2_iu_rec(int kind, uint64_t bytes, uint64_t ticks); // PROBE-IU, defined in gs_frontend.cpp
 void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -4484,7 +4485,9 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
                 if (n == 0u)
                     break;
                 uint32_t sx = m_transferState.x, sy = m_transferState.y;
+                const uint64_t iuT0 = g_gwOn ? __rdtsc() : 0; // PROBE-IU
                 GSMem::UploadStream(kind, m_vram, dbp, dbw, sx, sy, dsax, dsax + rrw, n, data + offset);
+                if (g_gwOn) ps2_iu_rec(kind, bytesPerPixel != 0u ? n * bytesPerPixel : (n + 1u) / 2u, __rdtsc() - iuT0); // PROBE-IU
                 offset += bytesPerPixel != 0u ? n * bytesPerPixel : (n + 1u) / 2u;
                 advancePixel(n);
             }

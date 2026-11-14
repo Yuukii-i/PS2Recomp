@@ -61,6 +61,26 @@ extern "C" void ps2_gw_count(int what, uint64_t n) // PROBE-GW: 0 prims, 1 image
         return;
     switch (what) { case 0: s_prims += n; break; case 1: s_imgBytes += n; break; case 2: s_runs += n; break; case 3: s_brk += n; break; default: s_redund += n; break; } // PERF-GB
 }
+namespace gwimpl { static uint64_t s_iuT[14] = {}, s_iuB[14] = {}, s_iuX = 0, s_iuXB = 0, s_iuGT = 0, s_iuGB = 0; } // PROBE-IU
+extern "C" void ps2_iu_rec(int kind, uint64_t bytes, uint64_t ticks) // PROBE-IU: kind 0 CT32 1 CT24 2 CT16 3 CT16S 4 T8 5 T8H 6 T4 7 T4HL 8 T4HH 9-12 Z 13 other
+{
+    using namespace gwimpl;
+    if (!t_mark) return;
+    if (kind < 0 || kind > 13) kind = 13;
+    s_iuT[kind] += ticks; s_iuB[kind] += bytes;
+}
+extern "C" void ps2_iu_gpu(uint64_t bytes, uint64_t ticks) // PROBE-IU: GPU page upload (ensureUpload)
+{
+    using namespace gwimpl;
+    if (!t_mark) return;
+    s_iuGT += ticks; s_iuGB += bytes;
+}
+extern "C" void ps2_iu_xfer(uint64_t bytes) // PROBE-IU
+{
+    using namespace gwimpl;
+    if (!t_mark) return;
+    ++s_iuX; s_iuXB += bytes;
+}
 extern "C" void ps2_gw_tick() // PROBE-GW: call from the GsWorker loop (outside the idle wait); prints about every 5 s
 {
     using namespace gwimpl;
@@ -88,9 +108,20 @@ extern "C" void ps2_gw_tick() // PROBE-GW: call from the GsWorker loop (outside 
                  static_cast<unsigned long long>(frames), pf(tot - idle), pf(idle), pf(s_T[cRegs]), pf(s_T[cKick]), static_cast<double>(s_prims) / f,
                  pf(s_T[cImage]), static_cast<double>(s_imgBytes) / 1024.0 / f, pf(s_T[cPrim]), pf(s_T[cState]), static_cast<double>(s_runs) / f,
                  static_cast<double>(s_brk) / f, static_cast<double>(s_redund) / f, pf(s_T[cVkrec]), pf(s_T[cSubmit]), pf(s_T[cSync]), pf(s_T[cPresent]), presentPf, pf(s_T[cOther]));
+    { // PROBE-IU
+        auto ms1 = [&](int k) { return pf(s_iuT[k]); };
+        auto kb = [&](int k) { return static_cast<double>(s_iuB[k]) / 1024.0 / f; };
+        const double zT = pf(s_iuT[9] + s_iuT[10] + s_iuT[11] + s_iuT[12]), zB = (static_cast<double>(s_iuB[9] + s_iuB[10] + s_iuB[11] + s_iuB[12])) / 1024.0 / f;
+        ::ps2xSafeLog("[iu] ms/frame: swz CT32=%.2f(%.0fKB) CT24=%.2f(%.0fKB) CT16=%.2f(%.0fKB) CT16S=%.2f(%.0fKB) T8=%.2f(%.0fKB) T4=%.2f(%.0fKB) T8H=%.2f(%.0fKB) T4HL/HH=%.2f(%.0fKB) Z=%.2f(%.0fKB) other=%.2f(%.0fKB) | xfers/frame=%.1f avg=%lluB | gpuup=%.2fms (%.0fKB/frame)\n",
+                      ms1(0), kb(0), ms1(1), kb(1), ms1(2), kb(2), ms1(3), kb(3), ms1(4), kb(4), ms1(6), kb(6), ms1(5), kb(5),
+                      ms1(7) + ms1(8), kb(7) + kb(8), zT, zB, ms1(13), kb(13), static_cast<double>(s_iuX) / f,
+                      static_cast<unsigned long long>(s_iuX ? s_iuXB / s_iuX : 0ull), pf(s_iuGT), static_cast<double>(s_iuGB) / 1024.0 / f);
+        for (int i = 0; i < 14; ++i) s_iuT[i] = s_iuB[i] = 0;
+        s_iuX = s_iuXB = s_iuGT = s_iuGB = 0;
+    }
     for (int i = 0; i < cN; ++i)
         s_T[i] = 0;
-    s_prims = s_imgBytes = s_runs = s_brk = s_redund = 0;
+    s_prims =s_imgBytes = s_runs = s_brk = s_redund = 0;
     s_f0 = fr;
     s_p0 = pt;
     s_t0 = nowT;
@@ -2618,7 +2649,7 @@ void GS::vertexKick(bool drawing)
 void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 {
     GwScope gwS(4); // PROBE-GW image
-    if (g_gwOn) ps2_gw_count(1, sizeBytes); // PROBE-GW
+    if (g_gwOn) { ps2_gw_count(1, sizeBytes); ps2_iu_xfer(sizeBytes); } // PROBE-GW PROBE-IU
     if (m_backend)
         (flushPendingDraws(), m_backend.get())->UploadImage(data, sizeBytes);
 }
