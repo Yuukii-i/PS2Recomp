@@ -3591,7 +3591,88 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             probe_ae::flushMovieBatch(&gs, memory);
             rebuildDecodedCodeCache(vuCode, codeSize, memory, generation);
         }
-        if (s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, nullptr, true))
+        // PERF-VNC: sampled self-check of programs that ran NEW handlers (see vu1_func.inc vncNote). Not-due path: one extra predictable branch (t_newN).
+        static const uint32_t s_vncEvery = []() { const char *e = std::getenv("PS2X_VU1_NEWCHECK_EVERY"); return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 128u; }();
+        static thread_local uint32_t s_vncCount = 0, s_vncChecked = 0, s_vncMis = 0, s_vncNPcs = 0;
+        static thread_local uint16_t s_vncPcs[32];
+        static thread_local bool s_vncDue = false;
+        static thread_local std::vector<uint8_t> s_vncSnap, s_vncCapF, s_vncCapE;
+        static thread_local std::chrono::steady_clock::time_point s_vncLast = std::chrono::steady_clock::now();
+        bool vncOk;
+        if (s_vncDue) // PERF-VNC: this program is verified if it uses a new handler
+        {
+            s_vncSnap.assign(vuData, vuData + dataSize);
+            s_vncCapF.clear();
+            vncOk = s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, &s_vncCapF, true);
+            if (vncOk)
+            {
+                if (!s_vncCapF.empty())
+                    vu1func::submitPath1Batched(memory, s_vncCapF.data(), static_cast<uint32_t>(s_vncCapF.size()));
+                if (vu1func::t_newN != 0u)
+                {
+                    uint16_t pcsNow[32];
+                    const uint32_t nNow = vu1func::t_newN;
+                    std::memcpy(pcsNow, vu1func::t_newPcs, nNow * sizeof(uint16_t));
+                    const VU1State vs0 = m_state;
+                    const uint32_t vwc0 = m_workingClip;
+                    const uint64_t vcyc0 = m_cycle;
+                    resetScheduler();
+                    m_state.pc = startPC & microAddressMask();
+                    m_state.ebit = false;
+                    m_state.haltAfterDelaySlot = false;
+                    m_state.stoppedByD = false;
+                    m_state.stoppedByT = false;
+                    m_state.top = top;
+                    m_state.itop = itop;
+                    m_state.branchPending = false;
+                    m_state.branchTarget = 0;
+                    m_state.branchDelay = 0;
+                    m_state.vf[0][0] = 0.0f; m_state.vf[0][1] = 0.0f; m_state.vf[0][2] = 0.0f; m_state.vf[0][3] = 1.0f;
+                    s_vncCapE.clear();
+                    s_vfyCapture = &s_vncCapE;
+                    run(vuCode, codeSize, s_vncSnap.data(), dataSize, gs, memory, maxCycles); // exact interpreter on the pre-run snapshot, GIF captured not submitted
+                    s_vfyCapture = nullptr;
+                    m_state = vs0;
+                    m_workingClip = vwc0;
+                    m_cycle = vcyc0;
+                    ++s_vncChecked;
+                    if (std::memcmp(s_vncSnap.data(), vuData, dataSize) != 0 || s_vncCapE != s_vncCapF)
+                    {
+                        ++s_vncMis;
+                        for (uint32_t i = 0; i < nNow; ++i)
+                        {
+                            bool have = false;
+                            for (uint32_t j = 0; j < s_vncNPcs; ++j)
+                                have |= s_vncPcs[j] == pcsNow[i];
+                            if (!have && s_vncNPcs < 32u)
+                                s_vncPcs[s_vncNPcs++] = pcsNow[i];
+                        }
+                    }
+                    s_vncDue = false;
+                    s_vncCount = 0;
+                    const auto vnow = std::chrono::steady_clock::now();
+                    if (vnow - s_vncLast >= std::chrono::seconds(10))
+                    {
+                        s_vncLast = vnow;
+                        char pb[32 * 6 + 8];
+                        size_t o = 0;
+                        pb[0] = 0;
+                        for (uint32_t j = 0; j < s_vncNPcs; ++j)
+                            o += static_cast<size_t>(std::snprintf(pb + o, sizeof(pb) - o, "%s%04X", j ? "," : "", s_vncPcs[j]));
+                        ::ps2xSafeLog("[vnc] checked=%u mismatches=%u pcs=%s\n", s_vncChecked, s_vncMis, pb);
+                    }
+                }
+            }
+            else
+                vu1func::flushPath1Pending(true); // same as vu1FuncExec's fallback flush (skipped because capture was set)
+        }
+        else
+        {
+            vncOk = s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, nullptr, true);
+            if (vncOk && vu1func::t_newN != 0u && s_vncEvery != 0u && ++s_vncCount >= s_vncEvery)
+                s_vncDue = true;
+        }
+        if (vncOk)
         {
             m_activeVuData = vuData;
             m_activeVuDataSize = dataSize;

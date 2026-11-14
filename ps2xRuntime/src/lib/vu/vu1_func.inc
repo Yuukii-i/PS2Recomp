@@ -2028,9 +2028,22 @@ static bool handler2E88(Regs &R, uint8_t *vu, uint16_t vi13)
     return false;
 }
 
+// PERF-VNC: new-handler usage tracking (reset per program in vu1FuncRunInner)
+static thread_local uint32_t t_newN = 0;
+static thread_local uint16_t t_newPcs[32];
+static inline void vncNote(uint16_t pc)
+{
+    for (uint32_t i = 0; i < t_newN; ++i)
+        if (t_newPcs[i] == pc)
+            return;
+    if (t_newN < 32u)
+        t_newPcs[t_newN++] = pc;
+}
+
 static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool oneShot, bool vxA)
 {
-    static const bool funcNewOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_NEW"); return e && e[0] == '1'; }(); // PERF-V1M
+    static const bool funcNewOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_NEW"); return !(e && e[0] == '0'); }(); // PERF-V1M: default ON (PERF-VNC); PS2X_VU1_FUNC_NEW=0 disables
+    t_newN = 0; // PERF-VNC
     Regs R; // PERF-V1G: skip 560-byte memset; vfValid/viValid track exact live-in registers across handlers
     R.vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
     R.vi[0] = 0u;
@@ -2158,6 +2171,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             R.viValid &= ~0x00EEu;
             break;
         case 0x0840u: // PERF-V1M
+            vncNote(0x0840u); // PERF-VNC
             if (!funcNewOn || !handler0840(R, vu, vi13))
             {
                 s_fbPc = 0x0840u;
@@ -2165,6 +2179,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x0CC0u: // PERF-V1M
+            vncNote(0x0CC0u); // PERF-VNC
             if (!funcNewOn || !handler0CC0(R, vu, vi13))
             {
                 s_fbPc = 0x0CC0u;
@@ -2172,6 +2187,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x1090u: // PERF-V1M
+            vncNote(0x1090u); // PERF-VNC
             if (!funcNewOn || !handler1090(R, vu, vi13))
             {
                 s_fbPc = 0x1090u;
@@ -2179,6 +2195,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x02E0u: // PERF-V1N
+            vncNote(0x02E0u); // PERF-VNC
             if (!funcNewOn || !handler02E0(R, vu, vi13))
             {
                 s_fbPc = 0x02E0u;
@@ -2186,6 +2203,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x0628u: // PERF-V1N
+            vncNote(0x0628u); // PERF-VNC
             if (!funcNewOn || !handler0628(R, vu, vi13))
             {
                 s_fbPc = 0x0628u;
@@ -2193,6 +2211,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x1720u: // PERF-V1N
+            vncNote(0x1720u); // PERF-VNC
             if (!funcNewOn || !handler1720(R, vu, vi13))
             {
                 s_fbPc = 0x1720u;
@@ -2200,6 +2219,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x1A68u: // PERF-V1N
+            vncNote(0x1A68u); // PERF-VNC
             if (!funcNewOn || !handler1A68(R, vu, vi13))
             {
                 s_fbPc = 0x1A68u;
@@ -2207,6 +2227,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x0198u: // PERF-V1O
+            vncNote(0x0198u); // PERF-VNC
             if (!funcNewOn || !handler0198(R, vu, vi13))
             {
                 s_fbPc = 0x0198u;
@@ -2214,6 +2235,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x0B38u: // PERF-V1O
+            vncNote(0x0B38u); // PERF-VNC
             if (!funcNewOn || !handler0B38(R, vu, R.vi[12]))
             {
                 s_fbPc = 0x0B38u;
@@ -2221,6 +2243,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x1910u: // PERF-V1O
+            vncNote(0x1910u); // PERF-VNC
             if (!funcNewOn || !handler1910(R, vu, vi13, vi2))
             {
                 s_fbPc = 0x1910u;
@@ -2228,6 +2251,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x1CD8u: // PERF-V1O
+            vncNote(0x1CD8u); // PERF-VNC
             if (!funcNewOn || !handler1CD8(R, vu, vi13, vi2))
             {
                 s_fbPc = 0x1CD8u;
@@ -2235,6 +2259,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x32A0u: // PERF-V1O
+            vncNote(0x32A0u); // PERF-VNC
             if (!funcNewOn || !handler32A0(R, vu, vi13))
             {
                 s_fbPc = 0x32A0u;
@@ -2242,6 +2267,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x0560u: // PERF-V1P
+            vncNote(0x0560u); // PERF-VNC
             if (!funcNewOn || !handler0560(R, vu, vi13))
             {
                 s_fbPc = 0x0560u;
@@ -2249,6 +2275,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x0AE0u: // PERF-V1P
+            vncNote(0x0AE0u); // PERF-VNC
             if (!funcNewOn || !handler0AE0(R, vu, vi13))
             {
                 s_fbPc = 0x0AE0u;
@@ -2256,6 +2283,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x0C38u: // PERF-V1P
+            vncNote(0x0C38u); // PERF-VNC
             if (!funcNewOn || !handler0C38(R, vu, vi13, vi2))
             {
                 s_fbPc = 0x0C38u;
@@ -2263,6 +2291,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x1CC0u: // PERF-V1P
+            vncNote(0x1CC0u); // PERF-VNC
             if (!funcNewOn || !handler1CC0(R, vu, vi13, vi2))
             {
                 s_fbPc = 0x1CC0u;
@@ -2270,6 +2299,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x1E50u: // PERF-V1P
+            vncNote(0x1E50u); // PERF-VNC
             if (!funcNewOn || !handler1E50(R, vu, vi13))
             {
                 s_fbPc = 0x1E50u;
@@ -2277,6 +2307,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x2E20u: // PERF-V1P
+            vncNote(0x2E20u); // PERF-VNC
             if (!funcNewOn || !handler2E20(R, vu, vi13))
             {
                 s_fbPc = 0x2E20u;
@@ -2284,6 +2315,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             }
             break;
         case 0x2E88u: // PERF-V1P
+            vncNote(0x2E88u); // PERF-VNC
             if (!funcNewOn || !handler2E88(R, vu, vi13))
             {
                 s_fbPc = 0x2E88u;
