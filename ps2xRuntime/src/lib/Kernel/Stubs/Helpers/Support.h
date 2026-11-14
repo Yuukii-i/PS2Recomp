@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cctype>
 #include "../IsoDisc.h"
+#include <cstdlib>
+extern void ps2xSafeLog(const char *fmt, ...); // PERF-GH
 
 namespace
 {
@@ -1417,7 +1419,21 @@ namespace
         mem.processPendingTransfers();
 
         std::vector<uint32_t> completedCauses = mem.consumeCompletedDmacCauses();
-        if (completedCauses.empty() && (mem.readIORegister(channelBase + 0x00u) & 0x100u) == 0u)
+        // PERF-GH: optionally skip the blocking post-kick CHCR poll on VIF1 chain sends.
+        static const bool s_ghNoPoll = []() {
+            const char *e = std::getenv("PS2X_DMASEND_NOPOLL");
+            return !(e && e[0] == '0');
+        }();
+        static uint64_t s_ghSkips = 0;
+        const bool ghSkip = s_ghNoPoll && channelBase == 0x10009000u && !preferNormalCount;
+        if (ghSkip)
+        {
+            if ((++s_ghSkips % 600u) == 0u)
+            {
+                ::ps2xSafeLog("[gh] skips=%llu\n", static_cast<unsigned long long>(s_ghSkips));
+            }
+        }
+        if (!ghSkip && completedCauses.empty() && (mem.readIORegister(channelBase + 0x00u) & 0x100u) == 0u)
         {
             if (channelBase == 0x10008000u)
             {

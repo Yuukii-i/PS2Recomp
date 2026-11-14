@@ -439,6 +439,8 @@ namespace
         uint32_t asr0 = 0u;
         uint32_t asr1 = 0u;
         uint32_t chcr = 0u;
+        uint32_t tags = 0u;  // PERF-GG
+        uint32_t spans = 0u; // PERF-GG
     };
     struct Vif1Job
     {
@@ -476,6 +478,13 @@ namespace
         uint32_t pubAsr1 = 0u;                    // PERF-GC
         std::atomic<bool> pubSyncPending{false};  // PERF-GC
         std::atomic<bool> pubDStatPending{false}; // PERF-GC
+        std::deque<Vif1Job> copierQ;              // PERF-GF
+        std::condition_variable cvCopierWork;     // PERF-GF
+        bool copierBusy = false;                  // PERF-GF
+        bool copierStarted = false;               // PERF-GF
+        std::atomic<uint64_t> copierEeWaitTicks{0}; // PERF-GF
+        std::atomic<uint64_t> copierPrescanTicks{0};  // PERF-GG
+        std::atomic<uint64_t> copierPrescanChains{0}; // PERF-GG
     };
     Vif1AsyncState &vifAsync()
     {
@@ -492,9 +501,28 @@ namespace
         static const bool on = []() { const char *e = std::getenv("PS2X_DMA1_WORKER_COPY"); return !(e && e[0] == '0'); }();
         return on;
     }
+    bool dma1CopierEnabled() // PERF-GF
+    {
+        static const bool on = []() { const char *e = std::getenv("PS2X_DMA1_COPIER"); return e && e[0] == '1'; }();
+        return on;
+    }
+    bool dma1CopierActive() // PERF-GF
+    {
+        return dma1CopierEnabled() && dma1WorkerCopyEnabled() && vif1AsyncEnabled();
+    }
     bool markNoFenceEnabled() // PERF-V1K
     {
         static const bool on = []() { const char *e = std::getenv("PS2X_MARK_NOFENCE"); return !(e && e[0] == '0'); }();
+        return on;
+    }
+    bool ggWalkEnabled() // PERF-GG
+    {
+        static const bool on = []() { const char *e = std::getenv("PS2X_GG"); return !(e && e[0] == '0'); }();
+        return on;
+    }
+    bool ggCheckEnabled() // PERF-GG
+    {
+        static const bool on = []() { const char *e = std::getenv("PS2X_GG_CHECK"); return e && e[0] == '1'; }();
         return on;
     }
     constexpr uint32_t kVif1StcClearMask = (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13); // PERF-V1K
@@ -540,6 +568,8 @@ static std::function<DmaChainWalkResult(uint32_t, uint32_t, uint32_t, uint32_t, 
 static std::function<void(uint32_t)> s_vif1QueueDmacCause; // PERF-GC
 static thread_local bool t_vif1ScanOnly = false;   // PERF-GC tag-only pre-scan mode for s_vif1WalkChain
 static thread_local bool t_vif1ScanHitSpr = false; // PERF-GC set when scan sees a scratchpad tag/payload
+static std::atomic<uint64_t> g_ggMismatches{0};    // PERF-GG
+static thread_local uint64_t t_ggLastWalkTicks = 0; // PERF-GG
 static void waitDma1CopyDone() // PERF-GC
 {
     if (t_onVif1Worker)
@@ -548,14 +578,20 @@ static void waitDma1CopyDone() // PERF-GC
     const uint64_t want = st.copyEnqueuedSeq.load(std::memory_order_acquire);
     if (st.copyDoneSeq.load(std::memory_order_acquire) >= want)
         return;
+    const bool trackWait = dma1CopierActive(); // PERF-GF
+    const uint64_t wT0 = trackWait ? __rdtsc() : 0ull; // PERF-GF
     for (int i = 0; i < 64; ++i)
     {
         if (st.copyDoneSeq.load(std::memory_order_acquire) >= want)
+        {
+            if (trackWait) st.copierEeWaitTicks.fetch_add(__rdtsc() - wT0, std::memory_order_relaxed); // PERF-GF
             return;
+        }
         _mm_pause();
     }
     std::unique_lock<std::mutex> lock(st.copyDoneMtx);
     st.copyDoneCv.wait(lock, [&] { return st.copyDoneSeq.load(std::memory_order_acquire) >= want; });
+    if (trackWait) st.copierEeWaitTicks.fetch_add(__rdtsc() - wT0, std::memory_order_relaxed); // PERF-GF
 }
 static void syncDma1PublishedToIoRegs(std::unordered_map<uint32_t, uint32_t> &ioRegs) // PERF-GC
 {
@@ -789,7 +825,7 @@ static void vif1Worker()
             st.busy = false;
             ++st.doneJobs; // PERF-SL
             if (g_ps2Ft2On) ps2_ft2_ev(5, st.doneJobs); // PROBE-FT2: JOB_DONE
-            if (st.q.empty())
+            if (st.q.empty() && st.copierQ.empty() && !st.copierBusy) // PERF-GF
             {
                 st.pending.store(false, std::memory_order_release);
                 st.cvIdle.notify_all();
@@ -800,15 +836,141 @@ static void vif1Worker()
         if (vwOn) ps2xVwJob(vwIdle, (vwP0 - vwW1) + (__rdtsc() - vwP1), vwP1 - vwP0); // PROBE-VW
     }
 }
-static void vif1PushJobLocked(Vif1AsyncState &st, Vif1Job &&job) // PERF-GC
+static void vif1PushJobLocked(Vif1AsyncState &st, Vif1Job &&job, bool fromCopier = false, bool wasSourceChain = false) // PERF-GC // PERF-GF
 {
     if (!st.started)
     {
         st.started = true;
         std::thread(vif1Worker).detach();
     }
-    st.queuedBytes += job.data.size();
+    if (!fromCopier || wasSourceChain) // PERF-GF: non-chain jobs routed via copier were already counted on submit
+        st.queuedBytes += job.data.size();
     st.q.push_back(std::move(job));
+    if (!fromCopier) // PERF-GF: EE already recorded enqueue seq/tl/ft2 on submit
+    {
+        if (g_tlOn) // PROBE-TL
+        {
+            const uint64_t t = __rdtsc();
+            g_tlEnq[st.enqueuedJobs & 1023u].store(t, std::memory_order_relaxed);
+            g_tlNewest.store(t, std::memory_order_relaxed);
+        }
+        ++st.enqueuedJobs; // PERF-SL
+        if (g_ps2Ft2On) ps2_ft2_ev(1, st.enqueuedJobs); // PROBE-FT2: DMA1_KICK
+    }
+    st.pending.store(true, std::memory_order_release);
+    st.cvWork.notify_one();
+}
+static void dma1CopierWorker() // PERF-GF
+{
+    t_onVif1Worker = true;
+    t_vif1ScanOnly = false;
+    t_vif1ScanHitSpr = false;
+    ThreadNaming::SetCurrentThreadName("Dma1Copier");
+    Vif1AsyncState &st = vifAsync();
+    uint64_t winJobs = 0, winChain = 0, winCopyTicks = 0, winMaxCopyTicks = 0;
+    uint64_t winTags = 0, winBytes = 0, winSpans = 0, winWalkTicks = 0; // PERF-GG
+    auto winT0 = std::chrono::steady_clock::now();
+    uint64_t winTsc0 = __rdtsc();
+    for (;;)
+    {
+        Vif1Job job;
+        {
+            std::unique_lock<std::mutex> lock(st.m);
+            st.cvCopierWork.wait(lock, [&] { return !st.copierQ.empty(); });
+            job = std::move(st.copierQ.front());
+            st.copierQ.pop_front();
+            st.copierBusy = true;
+        }
+        const bool wasSourceChain = job.isSourceChain;
+        if (wasSourceChain)
+        {
+            std::vector<uint8_t> workBuf = takeVifBuf();
+            const uint64_t cT0 = __rdtsc();
+            const DmaChainWalkResult res = s_vif1WalkChain(0x10009000u, job.initialChcr, job.initialTadr, job.initialAsr0, job.initialAsr1, workBuf);
+            const uint64_t cTicks = __rdtsc() - cT0;
+            ++winChain;
+            winCopyTicks += cTicks;
+            winWalkTicks += t_ggLastWalkTicks; // PERF-GG
+            winTags += res.tags;              // PERF-GG
+            winBytes += workBuf.size();       // PERF-GG
+            winSpans += res.spans;            // PERF-GG
+            if (cTicks > winMaxCopyTicks)
+                winMaxCopyTicks = cTicks;
+            {
+                std::lock_guard<std::mutex> cLock(st.copyDoneMtx);
+                st.pubTadr = res.tagAddr;
+                st.pubMadr = job.initialMadr;
+                st.pubQwc = workBuf.empty() ? job.initialQwc : 0u;
+                st.pubChcr = res.chcr & ~0x100u;
+                st.pubAsr0 = res.asr0;
+                st.pubAsr1 = res.asr1;
+                st.pubDStatPending.store(true, std::memory_order_release);
+                st.pubSyncPending.store(true, std::memory_order_release);
+            }
+            if (s_vif1QueueDmacCause)
+                s_vif1QueueDmacCause(1u);
+            {
+                std::lock_guard<std::mutex> cLock(st.copyDoneMtx);
+                st.copyDoneSeq.store(job.copySeq, std::memory_order_release);
+            }
+            st.copyDoneCv.notify_all();
+            if (g_ps2Ft2On) ps2_ft2_ev(15, job.copySeq); // PROBE-FT2: COPY_DONE
+
+            Vif1Job outJob;
+            outJob.fbrst = job.fbrst;
+            outJob.data = std::move(workBuf);
+            job = std::move(outJob);
+        }
+        ++winJobs;
+        {
+            std::lock_guard<std::mutex> lock(st.m);
+            st.copierBusy = false;
+            vif1PushJobLocked(st, std::move(job), true, wasSourceChain);
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - winT0).count();
+        if (ms >= 5000.0)
+        {
+            const uint64_t tsc = __rdtsc();
+            const double tpm = static_cast<double>(tsc - winTsc0) / ms;
+            const double tpu = tpm / 1000.0;
+            const uint64_t eeTicks = st.copierEeWaitTicks.exchange(0, std::memory_order_relaxed);
+            const uint64_t prescanTicks = st.copierPrescanTicks.exchange(0, std::memory_order_relaxed);   // PERF-GG
+            const uint64_t prescanChains = st.copierPrescanChains.exchange(0, std::memory_order_relaxed); // PERF-GG
+            const double avgUs = (winChain > 0 && tpu > 0.0) ? (static_cast<double>(winCopyTicks) / static_cast<double>(winChain) / tpu) : 0.0;
+            const double maxUs = (tpu > 0.0) ? (static_cast<double>(winMaxCopyTicks) / tpu) : 0.0;
+            const double eeWaitMs = (tpm > 0.0) ? (static_cast<double>(eeTicks) / tpm) : 0.0;
+            const double tagsAvg = (winChain > 0) ? (static_cast<double>(winTags) / static_cast<double>(winChain)) : 0.0; // PERF-GG
+            const double bytesAvg = (winChain > 0) ? (static_cast<double>(winBytes) / static_cast<double>(winChain)) : 0.0; // PERF-GG
+            const double spansAvg = (winChain > 0) ? (static_cast<double>(winSpans) / static_cast<double>(winChain)) : 0.0; // PERF-GG
+            const double prescanUs = (prescanChains > 0 && tpu > 0.0) ? (static_cast<double>(prescanTicks) / static_cast<double>(prescanChains) / tpu) : 0.0; // PERF-GG
+            const double walkUs = (winChain > 0 && tpu > 0.0) ? (static_cast<double>(winWalkTicks) / static_cast<double>(winChain) / tpu) : 0.0; // PERF-GG
+            ps2xSafeLog("[copier] jobs=%llu chain=%llu copy_us_avg=%.1f max=%.1f ee_wait_ms=%.2f tags=%.1f bytes=%.0f spans=%.1f prescan_us=%.1f walk_us=%.1f gg_mismatch=%llu\n",
+                        (unsigned long long)winJobs, (unsigned long long)winChain, avgUs, maxUs, eeWaitMs,
+                        tagsAvg, bytesAvg, spansAvg, prescanUs, walkUs,
+                        (unsigned long long)g_ggMismatches.load(std::memory_order_relaxed));
+            winJobs = 0;
+            winChain = 0;
+            winCopyTicks = 0;
+            winMaxCopyTicks = 0;
+            winTags = 0;
+            winBytes = 0;
+            winSpans = 0;
+            winWalkTicks = 0;
+            winT0 = now;
+            winTsc0 = tsc;
+        }
+    }
+}
+static void vif1PushCopierJobLocked(Vif1AsyncState &st, Vif1Job &&job) // PERF-GF
+{
+    if (!st.copierStarted)
+    {
+        st.copierStarted = true;
+        std::thread(dma1CopierWorker).detach();
+    }
+    st.queuedBytes += job.data.size();
+    st.copierQ.push_back(std::move(job));
     if (g_tlOn) // PROBE-TL
     {
         const uint64_t t = __rdtsc();
@@ -818,7 +980,7 @@ static void vif1PushJobLocked(Vif1AsyncState &st, Vif1Job &&job) // PERF-GC
     ++st.enqueuedJobs; // PERF-SL
     if (g_ps2Ft2On) ps2_ft2_ev(1, st.enqueuedJobs); // PROBE-FT2: DMA1_KICK
     st.pending.store(true, std::memory_order_release);
-    st.cvWork.notify_one();
+    st.cvCopierWork.notify_one();
 }
 static void vif1EnqueueJob(std::vector<uint8_t> &&data)
 {
@@ -826,22 +988,33 @@ static void vif1EnqueueJob(std::vector<uint8_t> &&data)
         return;
     Vif1AsyncState &st = vifAsync();
     const uint32_t fbrst = g_vif1FbrstProvider ? g_vif1FbrstProvider() : 0u;
+    const bool useCopier = dma1CopierActive(); // PERF-GF
     std::unique_lock<std::mutex> lock(st.m);
     const uint64_t eqT0 = __rdtsc(); // PROBE-KF
-    st.cvSpace.wait(lock, [&] { return st.q.empty() || st.queuedBytes + data.size() <= kVif1AsyncMaxBytes; });
+    if (useCopier) // PERF-GF
+        st.cvSpace.wait(lock, [&] { return (st.q.empty() && st.copierQ.empty()) || st.queuedBytes + data.size() <= kVif1AsyncMaxBytes; });
+    else
+        st.cvSpace.wait(lock, [&] { return st.q.empty() || st.queuedBytes + data.size() <= kVif1AsyncMaxBytes; });
     g_waitTicks[1].fetch_add(__rdtsc() - eqT0, std::memory_order_relaxed);
     Vif1Job job;
     job.fbrst = fbrst;
     job.data = std::move(data);
-    vif1PushJobLocked(st, std::move(job));
+    if (useCopier) // PERF-GF
+        vif1PushCopierJobLocked(st, std::move(job));
+    else
+        vif1PushJobLocked(st, std::move(job));
 }
 static void vif1EnqueueSourceChainJob(uint32_t tadr, uint32_t chcr, uint32_t asr0, uint32_t asr1, uint32_t madr, uint32_t qwc) // PERF-GC
 {
     Vif1AsyncState &st = vifAsync();
     const uint32_t fbrst = g_vif1FbrstProvider ? g_vif1FbrstProvider() : 0u;
+    const bool useCopier = dma1CopierActive(); // PERF-GF
     std::unique_lock<std::mutex> lock(st.m);
     const uint64_t eqT0 = __rdtsc(); // PROBE-KF
-    st.cvSpace.wait(lock, [&] { return st.q.empty() || st.queuedBytes <= kVif1AsyncMaxBytes; });
+    if (useCopier) // PERF-GF
+        st.cvSpace.wait(lock, [&] { return (st.q.empty() && st.copierQ.empty()) || st.queuedBytes <= kVif1AsyncMaxBytes; });
+    else
+        st.cvSpace.wait(lock, [&] { return st.q.empty() || st.queuedBytes <= kVif1AsyncMaxBytes; });
     g_waitTicks[1].fetch_add(__rdtsc() - eqT0, std::memory_order_relaxed);
     Vif1Job job;
     job.fbrst = fbrst;
@@ -853,7 +1026,10 @@ static void vif1EnqueueSourceChainJob(uint32_t tadr, uint32_t chcr, uint32_t asr
     job.initialMadr = madr;
     job.initialQwc = qwc;
     job.copySeq = st.copyEnqueuedSeq.fetch_add(1, std::memory_order_acq_rel) + 1u;
-    vif1PushJobLocked(st, std::move(job));
+    if (useCopier) // PERF-GF
+        vif1PushCopierJobLocked(st, std::move(job));
+    else
+        vif1PushJobLocked(st, std::move(job));
 }
 static void vif1EnqueueCopy(const uint8_t *p, uint32_t n)
 {
@@ -912,7 +1088,7 @@ extern "C" void ps2_vif1_fence()
         const uint64_t fT0 = __rdtsc(); // PROBE-KF
         std::unique_lock<std::mutex> lock(st.m);
         if (g_ps2Ft2On) ps2_ft2_ev(6, reinterpret_cast<uintptr_t>(_ReturnAddress())); // PROBE-FT2: FENCE_IN
-        st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
+        st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy && st.copierQ.empty() && !st.copierBusy; }); // PERF-GF
         if (g_ps2Ft2On) ps2_ft2_ev(7, reinterpret_cast<uintptr_t>(_ReturnAddress())); // PROBE-FT2: FENCE_OUT
         g_waitTicks[0].fetch_add(__rdtsc() - fT0, std::memory_order_relaxed);
         g_waitTicks[5].fetch_add(1, std::memory_order_relaxed);
@@ -2045,324 +2221,713 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     }
                     if (!s_vif1WalkChain) // PERF-GC
                     {
-                        s_vif1WalkChain = [this](uint32_t channelBase, uint32_t chcr, uint32_t tagAddr, uint32_t asr0, uint32_t asr1, std::vector<uint8_t> &chainBuf) -> DmaChainWalkResult
+                        s_vif1WalkChain = [this](uint32_t channelBase, uint32_t chcrIn, uint32_t tagAddrIn, uint32_t asr0In, uint32_t asr1In, std::vector<uint8_t> &chainBuf) -> DmaChainWalkResult
                         {
-                    const uint32_t initialTagAddr = tagAddr;
-                    const bool scanOnly = t_vif1ScanOnly; // PERF-GC
-                    if (channelBase == 0x10009000u && !scanOnly) {
+                            auto walkOld = [this, channelBase](bool suppressProbes, uint32_t chcr, uint32_t tagAddr, uint32_t asr0, uint32_t asr1, std::vector<uint8_t> &chainBuf) -> DmaChainWalkResult
+                            {
+                                const uint32_t initialTagAddr = tagAddr;
+                                const bool scanOnly = t_vif1ScanOnly; // PERF-GC
+                                if (!suppressProbes && channelBase == 0x10009000u && !scanOnly) {
 #if defined(PS2X_PROBE_AE) || 1
-                        if (probe_ae::isEnabled()) {
-                            probe_ae::onAwDma1KickStart(tagAddr, chcr);
-                        }
+                                    if (probe_ae::isEnabled()) {
+                                        probe_ae::onAwDma1KickStart(tagAddr, chcr);
+                                    }
 #endif
-                    }
-                    uint32_t asp = (chcr >> 4) & 0x3u;
-                    const bool tieEnabled = (chcr & (1u << 7)) != 0u;
-                    const int kMaxChainTags = 1 << 20;
-                    std::vector<probe_ae::AySpan> aySpans;
-                    auto tChainStart = std::chrono::steady_clock::now();
-
-                    auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
-                    {
-                        if (scanOnly) // PERF-GC
-                        {
-                            if (isScratchpad(srcAddr))
-                                t_vif1ScanHitSpr = true;
-                            return;
-                        }
-                        const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
-                        uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
-                        if (channelBase == 0x10009000u) {
-                            aySpans.push_back({ (uint32_t)chainBuf.size(), bytes, srcAddr });
-                        }
-                        const bool scratch = isScratchpad(srcAddr);
-                        uint32_t src = 0;
-                        src = translateAddress(srcAddr);
-                        const uint8_t *base2;
-                        uint32_t maxSz2;
-                        if (scratch)
-                        {
-                            base2 = m_scratchpad;
-                            maxSz2 = PS2_SCRATCHPAD_SIZE;
-                        }
-                        else
-                        {
-                            base2 = m_rdram;
-                            maxSz2 = PS2_RAM_SIZE;
-                        }
-
-                        while (bytes > 0)
-                        {
-                            if (src >= maxSz2)
-                                src = 0;
-                            uint32_t chunk = bytes;
-                            if (src + chunk > maxSz2)
-                                chunk = maxSz2 - src;
-                            if (chunk == 0)
-                                break;
-                            chainBuf.insert(chainBuf.end(), base2 + src, base2 + src + chunk);
-                            bytes -= chunk;
-                            src += chunk;
-                        }
-                    };
-
-                    auto appendVifTagData = [&](uint32_t localTagAddr)
-                    {
-                        uint32_t tagPhys = 0u;
-                        const bool tagScratch = isScratchpad(localTagAddr);
-                        tagPhys = translateAddress(localTagAddr);
-
-                        const uint8_t *localBase = tagScratch ? m_scratchpad : m_rdram;
-                        const uint32_t localMax = tagScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
-                        if (tagPhys + 16u > localMax)
-                            return;
-
-                        if (channelBase == 0x10009000u) {
-                            aySpans.push_back({ (uint32_t)chainBuf.size(), 8u, localTagAddr + 8u });
-                        }
-
-                        // CHCR.TTE sends the DMAtag's upper 64 bits to the channel before
-                        // the tag payload. VIF chains use those bytes for two VIFcodes.
-                        chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
-                    };
-
-                    const bool isVifChannel =
-                        channelBase == 0x10009000u || channelBase == 0x10008000u;
-                    const bool transferTagData = isVifChannel && (chcr & 0x40u) != 0u;
-
-                    int tagsProcessed = 0;
-                    uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
-                    uint32_t lastTagId = 0;
-
-                    while (tagsProcessed < kMaxChainTags)
-                    {
-                        const uint32_t currentTagAddr = tagAddr;
-                        const bool tagInSPR = isScratchpad(tagAddr);
-                        if (scanOnly && tagInSPR) // PERF-GC
-                        {
-                            t_vif1ScanHitSpr = true;
-                            break;
-                        }
-                        uint32_t physTag = 0;
-                        try
-                        {
-                            physTag = translateAddress(tagAddr);
-                        }
-                        catch (...)
-                        {
-                            break;
-                        }
-                        const uint8_t *tagBase;
-                        uint32_t tagMax;
-                        if (tagInSPR)
-                        {
-                            tagBase = m_scratchpad;
-                            tagMax = PS2_SCRATCHPAD_SIZE;
-                        }
-                        else
-                        {
-                            tagBase = m_rdram;
-                            tagMax = PS2_RAM_SIZE;
-                        }
-                        if (physTag + 16 > tagMax)
-                            break;
-
-                        const uint8_t *tp = tagBase + physTag;
-                        uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "dma chain tag", tagAddr);
-                        uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
-                        uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
-                        lastTagId = id;
-                        const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
-                        uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
-                        lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
-                        ++tagsProcessed;
-
-                        uint32_t dataAddr = 0;
-                        bool hasPayload = (tagQwc > 0);
-                        bool endChain = false;
-
-                        switch (id)
-                        {
-                        case 0:
-                            dataAddr = addr;
-                            tagAddr = tagAddr + 16;
-                            endChain = true;
-                            break;
-                        case 1:
-                            dataAddr = tagAddr + 16;
-                            tagAddr = dataAddr + static_cast<uint32_t>(tagQwc) * 16u;
-                            break;
-                        case 2:
-                            dataAddr = tagAddr + 16;
-                            tagAddr = addr;
-                            break;
-                        case 3:
-                        case 4:
-                            dataAddr = addr;
-                            tagAddr = tagAddr + 16;
-                            break;
-                        case 5:
-                            dataAddr = tagAddr + 16;
-                            {
-                                const uint32_t retAddr = dataAddr + static_cast<uint32_t>(tagQwc) * 16u;
-                                if (asp == 0u)
-                                {
-                                    asr0 = retAddr;
-                                    asp = 1u;
                                 }
-                                else if (asp == 1u)
+                                uint32_t asp = (chcr >> 4) & 0x3u;
+                                const bool tieEnabled = (chcr & (1u << 7)) != 0u;
+                                const int kMaxChainTags = 1 << 20;
+                                std::vector<probe_ae::AySpan> aySpans;
+                                auto tChainStart = std::chrono::steady_clock::now();
+                                uint32_t spanCount = 0u;
+
+                                auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                                 {
-                                    asr1 = retAddr;
-                                    asp = 2u;
-                                }
-                            }
-                            tagAddr = addr;
-                            break;
-                        case 6:
-                            dataAddr = tagAddr + 16;
-                            if (asp == 2u)
-                            {
-                                tagAddr = asr1;
-                                asp = 1u;
-                            }
-                            else if (asp == 1u)
-                            {
-                                tagAddr = asr0;
-                                asp = 0u;
-                            }
-                            else
-                            {
-                                endChain = true;
-                            }
-                            break;
-                        case 7:
-                            dataAddr = tagAddr + 16;
-                            endChain = true;
-                            break;
-                        default:
-                            hasPayload = false;
-                            endChain = true;
-                            break;
-                        }
+                                    if (scanOnly) // PERF-GC
+                                    {
+                                        if (isScratchpad(srcAddr))
+                                            t_vif1ScanHitSpr = true;
+                                        return;
+                                    }
+                                    const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
+                                    uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                                    if (!suppressProbes && channelBase == 0x10009000u) {
+                                        aySpans.push_back({ (uint32_t)chainBuf.size(), bytes, srcAddr });
+                                    }
+                                    const bool scratch = isScratchpad(srcAddr);
+                                    uint32_t src = 0;
+                                    src = translateAddress(srcAddr);
+                                    const uint8_t *base2;
+                                    uint32_t maxSz2;
+                                    if (scratch)
+                                    {
+                                        base2 = m_scratchpad;
+                                        maxSz2 = PS2_SCRATCHPAD_SIZE;
+                                    }
+                                    else
+                                    {
+                                        base2 = m_rdram;
+                                        maxSz2 = PS2_RAM_SIZE;
+                                    }
 
-                        if (scanOnly) // PERF-GC: tag-only scan, no copy / probes
-                        {
-                            if (hasPayload)
-                                appendData(dataAddr, tagQwc);
-                            if (t_vif1ScanHitSpr || endChain || (irq && tieEnabled))
-                                break;
-                            continue;
-                        }
+                                    while (bytes > 0)
+                                    {
+                                        if (src >= maxSz2)
+                                            src = 0;
+                                        uint32_t chunk = bytes;
+                                        if (src + chunk > maxSz2)
+                                            chunk = maxSz2 - src;
+                                        if (chunk == 0)
+                                            break;
+                                        chainBuf.insert(chainBuf.end(), base2 + src, base2 + src + chunk);
+                                        ++spanCount;
+                                        bytes -= chunk;
+                                        src += chunk;
+                                    }
+                                };
 
-                        if (transferTagData)
-                            appendVifTagData(currentTagAddr);
+                                auto appendVifTagData = [&](uint32_t localTagAddr)
+                                {
+                                    uint32_t tagPhys = 0u;
+                                    const bool tagScratch = isScratchpad(localTagAddr);
+                                    tagPhys = translateAddress(localTagAddr);
 
-                        if (hasPayload)
-                            appendData(dataAddr, tagQwc);
+                                    const uint8_t *localBase = tagScratch ? m_scratchpad : m_rdram;
+                                    const uint32_t localMax = tagScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                    if (tagPhys + 16u > localMax)
+                                        return;
 
-                        if (channelBase == 0x10009000u)
-                        {
+                                    if (!suppressProbes && channelBase == 0x10009000u) {
+                                        aySpans.push_back({ (uint32_t)chainBuf.size(), 8u, localTagAddr + 8u });
+                                    }
+
+                                    // CHCR.TTE sends the DMAtag's upper 64 bits to the channel before
+                                    // the tag payload. VIF chains use those bytes for two VIFcodes.
+                                    chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
+                                    ++spanCount;
+                                };
+
+                                const bool isVifChannel =
+                                    channelBase == 0x10009000u || channelBase == 0x10008000u;
+                                const bool transferTagData = isVifChannel && (chcr & 0x40u) != 0u;
+
+                                int tagsProcessed = 0;
+                                uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
+                                uint32_t lastTagId = 0;
+
+                                while (tagsProcessed < kMaxChainTags)
+                                {
+                                    const uint32_t currentTagAddr = tagAddr;
+                                    const bool tagInSPR = isScratchpad(tagAddr);
+                                    if (scanOnly && tagInSPR) // PERF-GC
+                                    {
+                                        t_vif1ScanHitSpr = true;
+                                        break;
+                                    }
+                                    uint32_t physTag = 0;
+                                    try
+                                    {
+                                        physTag = translateAddress(tagAddr);
+                                    }
+                                    catch (...)
+                                    {
+                                        break;
+                                    }
+                                    const uint8_t *tagBase;
+                                    uint32_t tagMax;
+                                    if (tagInSPR)
+                                    {
+                                        tagBase = m_scratchpad;
+                                        tagMax = PS2_SCRATCHPAD_SIZE;
+                                    }
+                                    else
+                                    {
+                                        tagBase = m_rdram;
+                                        tagMax = PS2_RAM_SIZE;
+                                    }
+                                    if (physTag + 16 > tagMax)
+                                        break;
+
+                                    const uint8_t *tp = tagBase + physTag;
+                                    uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "dma chain tag", tagAddr);
+                                    uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
+                                    uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
+                                    lastTagId = id;
+                                    const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
+                                    uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
+                                    lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
+                                    ++tagsProcessed;
+
+                                    uint32_t dataAddr = 0;
+                                    bool hasPayload = (tagQwc > 0);
+                                    bool endChain = false;
+
+                                    switch (id)
+                                    {
+                                    case 0:
+                                        dataAddr = addr;
+                                        tagAddr = tagAddr + 16;
+                                        endChain = true;
+                                        break;
+                                    case 1:
+                                        dataAddr = tagAddr + 16;
+                                        tagAddr = dataAddr + static_cast<uint32_t>(tagQwc) * 16u;
+                                        break;
+                                    case 2:
+                                        dataAddr = tagAddr + 16;
+                                        tagAddr = addr;
+                                        break;
+                                    case 3:
+                                    case 4:
+                                        dataAddr = addr;
+                                        tagAddr = tagAddr + 16;
+                                        break;
+                                    case 5:
+                                        dataAddr = tagAddr + 16;
+                                        {
+                                            const uint32_t retAddr = dataAddr + static_cast<uint32_t>(tagQwc) * 16u;
+                                            if (asp == 0u)
+                                            {
+                                                asr0 = retAddr;
+                                                asp = 1u;
+                                            }
+                                            else if (asp == 1u)
+                                            {
+                                                asr1 = retAddr;
+                                                asp = 2u;
+                                            }
+                                        }
+                                        tagAddr = addr;
+                                        break;
+                                    case 6:
+                                        dataAddr = tagAddr + 16;
+                                        if (asp == 2u)
+                                        {
+                                            tagAddr = asr1;
+                                            asp = 1u;
+                                        }
+                                        else if (asp == 1u)
+                                        {
+                                            tagAddr = asr0;
+                                            asp = 0u;
+                                        }
+                                        else
+                                        {
+                                            endChain = true;
+                                        }
+                                        break;
+                                    case 7:
+                                        dataAddr = tagAddr + 16;
+                                        endChain = true;
+                                        break;
+                                    default:
+                                        hasPayload = false;
+                                        endChain = true;
+                                        break;
+                                    }
+
+                                    if (scanOnly) // PERF-GC: tag-only scan, no copy / probes
+                                    {
+                                        if (hasPayload)
+                                            appendData(dataAddr, tagQwc);
+                                        if (t_vif1ScanHitSpr || endChain || (irq && tieEnabled))
+                                            break;
+                                        continue;
+                                    }
+
+                                    if (transferTagData)
+                                        appendVifTagData(currentTagAddr);
+
+                                    if (hasPayload)
+                                        appendData(dataAddr, tagQwc);
+
+                                    if (!suppressProbes && channelBase == 0x10009000u)
+                                    {
 #if defined(PS2X_PROBE_AE) || 1
-                            if (probe_ae::isEnabled()) {
-                                uint32_t sampleWords[8] = {0};
-                                uint32_t numWords = 0;
-                                if (hasPayload && tagQwc > 0) {
-                                    uint32_t dp = 0;
-                                    try { dp = translateAddress(dataAddr); } catch(...) {}
-                                    const uint8_t *db = isScratchpad(dataAddr) ? m_scratchpad : m_rdram;
-                                    const uint32_t dm = isScratchpad(dataAddr) ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
-                                    uint32_t maxBytes = std::min<uint32_t>(32u, static_cast<uint32_t>(tagQwc) * 16u);
-                                    if (dp + maxBytes <= dm) {
-                                        std::memcpy(sampleWords, db + dp, maxBytes);
-                                        numWords = maxBytes / 4;
+                                        if (probe_ae::isEnabled()) {
+                                            uint32_t sampleWords[8] = {0};
+                                            uint32_t numWords = 0;
+                                            if (hasPayload && tagQwc > 0) {
+                                                uint32_t dp = 0;
+                                                try { dp = translateAddress(dataAddr); } catch(...) {}
+                                                const uint8_t *db = isScratchpad(dataAddr) ? m_scratchpad : m_rdram;
+                                                const uint32_t dm = isScratchpad(dataAddr) ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                                uint32_t maxBytes = std::min<uint32_t>(32u, static_cast<uint32_t>(tagQwc) * 16u);
+                                                if (dp + maxBytes <= dm) {
+                                                    std::memcpy(sampleWords, db + dp, maxBytes);
+                                                    numWords = maxBytes / 4;
+                                                }
+                                            }
+                                            probe_ae::onAwDma1Tag(currentTagAddr, id, tagQwc, tagAddr, dataAddr, sampleWords, numWords);
+                                        }
+#endif
+                                    }
+
+                                    if (!suppressProbes && channelBase == 0x10009000u && (tagQwc == 512 || tagQwc == 64 || (tagQwc > 0 && tagsProcessed <= 6)))
+                                    {
+                                        uint32_t w2 = 0, w3 = 0;
+                                        if (physTag + 16 <= tagMax) {
+                                            std::memcpy(&w2, tp + 8, 4);
+                                            std::memcpy(&w3, tp + 12, 4);
+                                        }
+                                        uint8_t sample[16] = {};
+                                        if (hasPayload) {
+                                            uint32_t dp = 0;
+                                            try { dp = translateAddress(dataAddr); } catch(...) {}
+                                            const uint8_t *db = isScratchpad(dataAddr) ? m_scratchpad : m_rdram;
+                                            const uint32_t dm = isScratchpad(dataAddr) ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                            if (dp + 16 <= dm) std::memcpy(sample, db + dp, 16);
+                                        }
+                                        static int s_tagLogCount = 0;
+                                        static int s_vifTagVerbose = -1;
+                                        if (s_vifTagVerbose == -1) {
+                                            const char *v = std::getenv("PS2X_VERBOSE_LOG");
+                                            s_vifTagVerbose = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+                                        }
+                                        if (s_vifTagVerbose && s_tagLogCount++ < 50) {
+                                            std::fprintf(stderr, "[DMA:VIF1_TAG] tagAddr=0x%08X id=%u qwc=%u dataAddr=0x%08X w2=0x%08X w3=0x%08X TTE=%d payload0..7=[%u,%u,%u,%u,%u,%u,%u,%u]\n",
+                                                         currentTagAddr, id, tagQwc, dataAddr, w2, w3, transferTagData ? 1 : 0,
+                                                         sample[0], sample[1], sample[2], sample[3], sample[4], sample[5], sample[6], sample[7]);
+                                            std::fflush(stderr);
+                                        }
+                                    }
+                                    if (irq && tieEnabled)
+                                        endChain = true;
+                                    if (endChain)
+                                        break;
+                                }
+
+                                if (scanOnly) // PERF-GC
+                                    return DmaChainWalkResult{tagAddr, asr0, asr1, chcr, static_cast<uint32_t>(tagsProcessed), 0u};
+
+                                if (!suppressProbes && tagsProcessed >= kMaxChainTags)
+                                {
+                                    static bool s_capHitReported = false;
+                                    if (!s_capHitReported)
+                                    {
+                                        s_capHitReported = true;
+                                        std::fprintf(stderr, "[DMA] chain truncated at kMaxChainTags ch=0x%X tag=0x%08X\n", channelBase, tagAddr);
+                                        std::fflush(stderr);
+                                        std::printf("[probe] ax cap_hit ch=0x%X tag=0x%08X\n", channelBase, tagAddr);
+                                        std::fflush(stdout);
                                     }
                                 }
-                                probe_ae::onAwDma1Tag(currentTagAddr, id, tagQwc, tagAddr, dataAddr, sampleWords, numWords);
-                            }
-#endif
-                        }
 
-                        if (channelBase == 0x10009000u && (tagQwc == 512 || tagQwc == 64 || (tagQwc > 0 && tagsProcessed <= 6)))
-                        {
-                            uint32_t w2 = 0, w3 = 0;
-                            if (physTag + 16 <= tagMax) {
-                                std::memcpy(&w2, tp + 8, 4);
-                                std::memcpy(&w3, tp + 12, 4);
-                            }
-                            uint8_t sample[16] = {};
-                            if (hasPayload) {
-                                uint32_t dp = 0;
-                                try { dp = translateAddress(dataAddr); } catch(...) {}
-                                const uint8_t *db = isScratchpad(dataAddr) ? m_scratchpad : m_rdram;
-                                const uint32_t dm = isScratchpad(dataAddr) ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
-                                if (dp + 16 <= dm) std::memcpy(sample, db + dp, 16);
-                            }
-                            static int s_tagLogCount = 0;
-                            static int s_vifTagVerbose = -1;
-                            if (s_vifTagVerbose == -1) {
-                                const char *v = std::getenv("PS2X_VERBOSE_LOG");
-                                s_vifTagVerbose = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
-                            }
-                            if (s_vifTagVerbose && s_tagLogCount++ < 50) {
-                                std::fprintf(stderr, "[DMA:VIF1_TAG] tagAddr=0x%08X id=%u qwc=%u dataAddr=0x%08X w2=0x%08X w3=0x%08X TTE=%d payload0..7=[%u,%u,%u,%u,%u,%u,%u,%u]\n",
-                                             currentTagAddr, id, tagQwc, dataAddr, w2, w3, transferTagData ? 1 : 0,
-                                             sample[0], sample[1], sample[2], sample[3], sample[4], sample[5], sample[6], sample[7]);
-                                std::fflush(stderr);
-                            }
-                        }
-                        if (irq && tieEnabled)
-                            endChain = true;
-                        if (endChain)
-                            break;
-                    }
-
-                    if (scanOnly) // PERF-GC
-                        return DmaChainWalkResult{tagAddr, asr0, asr1, chcr};
-
-                    if (tagsProcessed >= kMaxChainTags)
-                    {
-                        static bool s_capHitReported = false;
-                        if (!s_capHitReported)
-                        {
-                            s_capHitReported = true;
-                            std::fprintf(stderr, "[DMA] chain truncated at kMaxChainTags ch=0x%X tag=0x%08X\n", channelBase, tagAddr);
-                            std::fflush(stderr);
-                            std::printf("[probe] ax cap_hit ch=0x%X tag=0x%08X\n", channelBase, tagAddr);
-                            std::fflush(stdout);
-                        }
-                    }
-
+                                if (!suppressProbes)
+                                {
 #if defined(PS2X_PROBE_AE) || 1
-                    if ((probe_ae::isEnabled() || probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify()) && channelBase == 0x10009000u)
-                    {
-                        if (probe_ae::isEnabled())
-                        {
-                            static int s_over2kCount = 0;
-                            if ((tagsProcessed > 2000 && s_over2kCount++ < 5) || (tagsProcessed > 4096))
-                            {
-                                std::printf("[probe] ax chain tags=%d bytes=%zu end=%u\n", tagsProcessed, chainBuf.size(), lastTagId);
-                                std::fflush(stdout);
-                            }
-                            auto tChainEnd = std::chrono::steady_clock::now();
-                            probe_ae::onAyTimeChain(std::chrono::duration_cast<std::chrono::microseconds>(tChainEnd - tChainStart).count());
-                            probe_ae::onAyKick();
-                            probe_ae::setRdram(m_rdram);
-                            probe_ae::onAyChainStart(tagsProcessed, aySpans);
-                        }
-                        probe_ae::setRdram(m_rdram);
-                        probe_ae::onBbChainStart(initialTagAddr, tagsProcessed, aySpans);
-                    }
+                                    if ((probe_ae::isEnabled() || probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify()) && channelBase == 0x10009000u)
+                                    {
+                                        if (probe_ae::isEnabled())
+                                        {
+                                            static int s_over2kCount = 0;
+                                            if ((tagsProcessed > 2000 && s_over2kCount++ < 5) || (tagsProcessed > 4096))
+                                            {
+                                                std::printf("[probe] ax chain tags=%d bytes=%zu end=%u\n", tagsProcessed, chainBuf.size(), lastTagId);
+                                                std::fflush(stdout);
+                                            }
+                                            auto tChainEnd = std::chrono::steady_clock::now();
+                                            probe_ae::onAyTimeChain(std::chrono::duration_cast<std::chrono::microseconds>(tChainEnd - tChainStart).count());
+                                            probe_ae::onAyKick();
+                                            probe_ae::setRdram(m_rdram);
+                                            probe_ae::onAyChainStart(tagsProcessed, aySpans);
+                                        }
+                                        probe_ae::setRdram(m_rdram);
+                                        probe_ae::onBbChainStart(initialTagAddr, tagsProcessed, aySpans);
+                                    }
 #endif
 
-                    if (channelBase == 0x10009000u && !chainBuf.empty())
-                    {
-                        static const bool s_fkOn = []() { const char *v = std::getenv("PS2X_PROBE_VU3D"); return v && v[0] == '1'; }();
-                        if (s_fkOn)
-                            ps2_fk_setSpans(static_cast<uint32_t>(chainBuf.size()), aySpans);
-                    }
-                        chcr = (chcr & ~(0x3u << 4)) | ((asp & 0x3u) << 4);
-                        chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
-                        return DmaChainWalkResult{tagAddr, asr0, asr1, chcr};
+                                    if (channelBase == 0x10009000u && !chainBuf.empty())
+                                    {
+                                        static const bool s_fkOn = []() { const char *v = std::getenv("PS2X_PROBE_VU3D"); return v && v[0] == '1'; }();
+                                        if (s_fkOn)
+                                            ps2_fk_setSpans(static_cast<uint32_t>(chainBuf.size()), aySpans);
+                                    }
+                                }
+                                chcr = (chcr & ~(0x3u << 4)) | ((asp & 0x3u) << 4);
+                                chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
+                                return DmaChainWalkResult{tagAddr, asr0, asr1, chcr, static_cast<uint32_t>(tagsProcessed), spanCount};
+                            };
+
+                            auto walkNew = [this, channelBase](uint32_t chcr, uint32_t tagAddr, uint32_t asr0, uint32_t asr1, std::vector<uint8_t> &chainBuf) -> DmaChainWalkResult // PERF-GG
+                            {
+                                const uint32_t initialTagAddr = tagAddr;
+                                const bool scanOnly = t_vif1ScanOnly;
+                                const bool probeEnabled = !scanOnly && probe_ae::isEnabled();
+                                static const bool s_fkOn = []() { const char *v = std::getenv("PS2X_PROBE_VU3D"); return v && v[0] == '1'; }();
+                                const bool isVif1 = (channelBase == 0x10009000u);
+                                const bool needSpans = !scanOnly && isVif1 && (probeEnabled || probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify() || s_fkOn);
+
+                                if (isVif1 && probeEnabled)
+                                    probe_ae::onAwDma1KickStart(tagAddr, chcr);
+
+                                uint32_t asp = (chcr >> 4) & 0x3u;
+                                const bool tieEnabled = (chcr & (1u << 7)) != 0u;
+                                constexpr int kMaxChainTags = 1 << 20;
+                                std::vector<probe_ae::AySpan> aySpans;
+                                std::chrono::steady_clock::time_point tChainStart;
+                                if (isVif1 && probeEnabled)
+                                    tChainStart = std::chrono::steady_clock::now();
+
+                                static std::atomic<size_t> s_lastChainSize{65536u};
+                                if (!scanOnly)
+                                {
+                                    const size_t hint = s_lastChainSize.load(std::memory_order_relaxed);
+                                    if (chainBuf.capacity() < hint)
+                                        chainBuf.reserve(hint);
+                                }
+
+                                const uint8_t *pendingSrc = nullptr;
+                                uint32_t pendingBytes = 0u;
+                                uint32_t spanCount = 0u;
+
+                                auto flushPending = [&]()
+                                {
+                                    if (pendingBytes == 0u)
+                                        return;
+                                    const size_t cur = chainBuf.size();
+                                    const size_t need = cur + pendingBytes;
+                                    if (need > chainBuf.capacity())
+                                    {
+                                        size_t newCap = chainBuf.capacity() ? chainBuf.capacity() * 2u : 4096u;
+                                        if (newCap < need)
+                                            newCap = need;
+                                        chainBuf.reserve(newCap);
+                                    }
+                                    chainBuf.insert(chainBuf.end(), pendingSrc, pendingSrc + pendingBytes);
+                                    pendingSrc = nullptr;
+                                    pendingBytes = 0u;
+                                    ++spanCount;
+                                };
+
+                                auto emitSpan = [&](const uint8_t *srcPtr, uint32_t chunk)
+                                {
+                                    if (pendingBytes > 0u && pendingSrc + pendingBytes == srcPtr && pendingBytes <= 0xFFFFFFFFu - chunk)
+                                    {
+                                        pendingBytes += chunk;
+                                        return;
+                                    }
+                                    flushPending();
+                                    pendingSrc = srcPtr;
+                                    pendingBytes = chunk;
+                                };
+
+                                const bool isVifChannel = isVif1 || (channelBase == 0x10008000u);
+                                const bool transferTagData = isVifChannel && (chcr & 0x40u) != 0u;
+
+                                int tagsProcessed = 0;
+                                uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
+                                uint32_t lastTagId = 0u;
+
+                                while (tagsProcessed < kMaxChainTags)
+                                {
+                                    const uint32_t currentTagAddr = tagAddr;
+                                    const uint8_t *tp = nullptr;
+                                    uint32_t physTag = 0u;
+                                    uint32_t tagMax = PS2_RAM_SIZE;
+
+                                    if (tagAddr <= PS2_RAM_SIZE - 16u)
+                                    {
+                                        physTag = tagAddr;
+                                        tp = m_rdram + physTag;
+                                    }
+                                    else
+                                    {
+                                        const bool tagInSPR = isScratchpad(tagAddr);
+                                        if (scanOnly && tagInSPR)
+                                        {
+                                            t_vif1ScanHitSpr = true;
+                                            break;
+                                        }
+                                        try
+                                        {
+                                            physTag = translateAddress(tagAddr);
+                                        }
+                                        catch (...)
+                                        {
+                                            break;
+                                        }
+                                        const uint8_t *tagBase = tagInSPR ? m_scratchpad : m_rdram;
+                                        tagMax = tagInSPR ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                        if (physTag + 16u > tagMax)
+                                            break;
+                                        tp = tagBase + physTag;
+                                    }
+
+                                    uint64_t tag = 0ull;
+                                    std::memcpy(&tag, tp, sizeof(tag));
+                                    const uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFFu);
+                                    const uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7u);
+                                    lastTagId = id;
+                                    const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
+                                    const uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFFull);
+                                    lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
+                                    ++tagsProcessed;
+
+                                    uint32_t dataAddr = 0u;
+                                    bool hasPayload = (tagQwc > 0u);
+                                    bool endChain = false;
+
+                                    switch (id)
+                                    {
+                                    case 0:
+                                        dataAddr = addr;
+                                        tagAddr = tagAddr + 16u;
+                                        endChain = true;
+                                        break;
+                                    case 1:
+                                        dataAddr = tagAddr + 16u;
+                                        tagAddr = dataAddr + static_cast<uint32_t>(tagQwc) * 16u;
+                                        break;
+                                    case 2:
+                                        dataAddr = tagAddr + 16u;
+                                        tagAddr = addr;
+                                        break;
+                                    case 3:
+                                    case 4:
+                                        dataAddr = addr;
+                                        tagAddr = tagAddr + 16u;
+                                        break;
+                                    case 5:
+                                        dataAddr = tagAddr + 16u;
+                                        {
+                                            const uint32_t retAddr = dataAddr + static_cast<uint32_t>(tagQwc) * 16u;
+                                            if (asp == 0u)
+                                            {
+                                                asr0 = retAddr;
+                                                asp = 1u;
+                                            }
+                                            else if (asp == 1u)
+                                            {
+                                                asr1 = retAddr;
+                                                asp = 2u;
+                                            }
+                                        }
+                                        tagAddr = addr;
+                                        break;
+                                    case 6:
+                                        dataAddr = tagAddr + 16u;
+                                        if (asp == 2u)
+                                        {
+                                            tagAddr = asr1;
+                                            asp = 1u;
+                                        }
+                                        else if (asp == 1u)
+                                        {
+                                            tagAddr = asr0;
+                                            asp = 0u;
+                                        }
+                                        else
+                                        {
+                                            endChain = true;
+                                        }
+                                        break;
+                                    case 7:
+                                        dataAddr = tagAddr + 16u;
+                                        endChain = true;
+                                        break;
+                                    default:
+                                        hasPayload = false;
+                                        endChain = true;
+                                        break;
+                                    }
+
+                                    if (scanOnly)
+                                    {
+                                        if (hasPayload && dataAddr >= PS2_RAM_SIZE && isScratchpad(dataAddr))
+                                            t_vif1ScanHitSpr = true;
+                                        if (t_vif1ScanHitSpr || endChain || (irq && tieEnabled))
+                                            break;
+                                        continue;
+                                    }
+
+                                    if (transferTagData)
+                                    {
+                                        if (needSpans)
+                                            aySpans.push_back({ static_cast<uint32_t>(chainBuf.size() + pendingBytes), 8u, currentTagAddr + 8u });
+                                        emitSpan(tp + 8u, 8u);
+                                    }
+
+                                    if (hasPayload)
+                                    {
+                                        const uint64_t bytes64 = static_cast<uint64_t>(tagQwc) * 16ull;
+                                        uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                                        if (needSpans)
+                                            aySpans.push_back({ static_cast<uint32_t>(chainBuf.size() + pendingBytes), bytes, dataAddr });
+
+                                        const uint8_t *base2;
+                                        uint32_t maxSz2;
+                                        uint32_t src;
+                                        if (dataAddr < PS2_RAM_SIZE)
+                                        {
+                                            base2 = m_rdram;
+                                            maxSz2 = PS2_RAM_SIZE;
+                                            src = dataAddr;
+                                        }
+                                        else if ((dataAddr & 0xE0000000u) == 0x20000000u)
+                                        {
+                                            base2 = m_rdram;
+                                            maxSz2 = PS2_RAM_SIZE;
+                                            src = dataAddr & PS2_RAM_MASK;
+                                        }
+                                        else
+                                        {
+                                            const bool scratch = isScratchpad(dataAddr);
+                                            src = translateAddress(dataAddr);
+                                            base2 = scratch ? m_scratchpad : m_rdram;
+                                            maxSz2 = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                        }
+
+                                        if (src < maxSz2 && bytes <= maxSz2 - src)
+                                        {
+                                            emitSpan(base2 + src, bytes);
+                                        }
+                                        else
+                                        {
+                                            while (bytes > 0u)
+                                            {
+                                                if (src >= maxSz2)
+                                                    src = 0u;
+                                                uint32_t chunk = bytes;
+                                                if (src + chunk > maxSz2)
+                                                    chunk = maxSz2 - src;
+                                                if (chunk == 0u)
+                                                    break;
+                                                emitSpan(base2 + src, chunk);
+                                                bytes -= chunk;
+                                                src += chunk;
+                                            }
+                                        }
+                                    }
+
+                                    if (probeEnabled && isVif1)
+                                    {
+                                        uint32_t sampleWords[8] = {0};
+                                        uint32_t numWords = 0;
+                                        if (hasPayload && tagQwc > 0) {
+                                            uint32_t dp = 0;
+                                            try { dp = translateAddress(dataAddr); } catch(...) {}
+                                            const uint8_t *db = isScratchpad(dataAddr) ? m_scratchpad : m_rdram;
+                                            const uint32_t dm = isScratchpad(dataAddr) ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                            uint32_t maxBytes = std::min<uint32_t>(32u, static_cast<uint32_t>(tagQwc) * 16u);
+                                            if (dp + maxBytes <= dm) {
+                                                std::memcpy(sampleWords, db + dp, maxBytes);
+                                                numWords = maxBytes / 4;
+                                            }
+                                        }
+                                        probe_ae::onAwDma1Tag(currentTagAddr, id, tagQwc, tagAddr, dataAddr, sampleWords, numWords);
+                                    }
+
+                                    static int s_vifTagVerbose = -1;
+                                    if (s_vifTagVerbose == -1) {
+                                        const char *v = std::getenv("PS2X_VERBOSE_LOG");
+                                        s_vifTagVerbose = (v && (v[0] == '1' || v[0] == 't')) ? 1 : 0;
+                                    }
+                                    if (s_vifTagVerbose && isVif1 && (tagQwc == 512 || tagQwc == 64 || (tagQwc > 0 && tagsProcessed <= 6)))
+                                    {
+                                        uint32_t w2 = 0, w3 = 0;
+                                        if (physTag + 16 <= tagMax) {
+                                            std::memcpy(&w2, tp + 8, 4);
+                                            std::memcpy(&w3, tp + 12, 4);
+                                        }
+                                        uint8_t sample[16] = {};
+                                        if (hasPayload) {
+                                            uint32_t dp = 0;
+                                            try { dp = translateAddress(dataAddr); } catch(...) {}
+                                            const uint8_t *db = isScratchpad(dataAddr) ? m_scratchpad : m_rdram;
+                                            const uint32_t dm = isScratchpad(dataAddr) ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                            if (dp + 16 <= dm) std::memcpy(sample, db + dp, 16);
+                                        }
+                                        static int s_tagLogCount = 0;
+                                        if (s_tagLogCount++ < 50) {
+                                            std::fprintf(stderr, "[DMA:VIF1_TAG] tagAddr=0x%08X id=%u qwc=%u dataAddr=0x%08X w2=0x%08X w3=0x%08X TTE=%d payload0..7=[%u,%u,%u,%u,%u,%u,%u,%u]\n",
+                                                         currentTagAddr, id, tagQwc, dataAddr, w2, w3, transferTagData ? 1 : 0,
+                                                         sample[0], sample[1], sample[2], sample[3], sample[4], sample[5], sample[6], sample[7]);
+                                            std::fflush(stderr);
+                                        }
+                                    }
+                                    if (irq && tieEnabled)
+                                        endChain = true;
+                                    if (endChain)
+                                        break;
+                                }
+
+                                if (scanOnly)
+                                    return DmaChainWalkResult{tagAddr, asr0, asr1, chcr, static_cast<uint32_t>(tagsProcessed), 0u};
+
+                                flushPending();
+                                if (!chainBuf.empty())
+                                    s_lastChainSize.store(chainBuf.size(), std::memory_order_relaxed);
+
+                                if (tagsProcessed >= kMaxChainTags)
+                                {
+                                    static bool s_capHitReported = false;
+                                    if (!s_capHitReported)
+                                    {
+                                        s_capHitReported = true;
+                                        std::fprintf(stderr, "[DMA] chain truncated at kMaxChainTags ch=0x%X tag=0x%08X\n", channelBase, tagAddr);
+                                        std::fflush(stderr);
+                                        std::printf("[probe] ax cap_hit ch=0x%X tag=0x%08X\n", channelBase, tagAddr);
+                                        std::fflush(stdout);
+                                    }
+                                }
+
+                                if (isVif1 && (probeEnabled || probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify()))
+                                {
+                                    if (probeEnabled)
+                                    {
+                                        static int s_over2kCount = 0;
+                                        if ((tagsProcessed > 2000 && s_over2kCount++ < 5) || (tagsProcessed > 4096))
+                                        {
+                                            std::printf("[probe] ax chain tags=%d bytes=%zu end=%u\n", tagsProcessed, chainBuf.size(), lastTagId);
+                                            std::fflush(stdout);
+                                        }
+                                        auto tChainEnd = std::chrono::steady_clock::now();
+                                        probe_ae::onAyTimeChain(std::chrono::duration_cast<std::chrono::microseconds>(tChainEnd - tChainStart).count());
+                                        probe_ae::onAyKick();
+                                        probe_ae::setRdram(m_rdram);
+                                        probe_ae::onAyChainStart(tagsProcessed, aySpans);
+                                    }
+                                    probe_ae::setRdram(m_rdram);
+                                    probe_ae::onBbChainStart(initialTagAddr, tagsProcessed, aySpans);
+                                }
+
+                                if (isVif1 && s_fkOn && !chainBuf.empty())
+                                    ps2_fk_setSpans(static_cast<uint32_t>(chainBuf.size()), aySpans);
+
+                                chcr = (chcr & ~(0x3u << 4)) | ((asp & 0x3u) << 4);
+                                chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
+                                return DmaChainWalkResult{tagAddr, asr0, asr1, chcr, static_cast<uint32_t>(tagsProcessed), spanCount};
+                            };
+
+                            if (!ggWalkEnabled())
+                            {
+                                const uint64_t wT0 = __rdtsc();
+                                const DmaChainWalkResult r = walkOld(false, chcrIn, tagAddrIn, asr0In, asr1In, chainBuf);
+                                t_ggLastWalkTicks = __rdtsc() - wT0;
+                                return r;
+                            }
+                            if (ggCheckEnabled() && !t_vif1ScanOnly)
+                            {
+                                std::vector<uint8_t> oldBuf;
+                                const DmaChainWalkResult oldRes = walkOld(true, chcrIn, tagAddrIn, asr0In, asr1In, oldBuf);
+                                const uint64_t wT0 = __rdtsc();
+                                const DmaChainWalkResult newRes = walkNew(chcrIn, tagAddrIn, asr0In, asr1In, chainBuf);
+                                t_ggLastWalkTicks = __rdtsc() - wT0;
+                                const bool match = (oldBuf.size() == chainBuf.size()) &&
+                                                   (oldBuf.empty() || std::memcmp(oldBuf.data(), chainBuf.data(), oldBuf.size()) == 0) &&
+                                                   oldRes.tagAddr == newRes.tagAddr &&
+                                                   oldRes.asr0 == newRes.asr0 &&
+                                                   oldRes.asr1 == newRes.asr1 &&
+                                                   oldRes.chcr == newRes.chcr;
+                                if (!match)
+                                    g_ggMismatches.fetch_add(1, std::memory_order_relaxed);
+                                return newRes;
+                            }
+                            const uint64_t wT0 = __rdtsc();
+                            const DmaChainWalkResult r = walkNew(chcrIn, tagAddrIn, asr0In, asr1In, chainBuf);
+                            t_ggLastWalkTicks = __rdtsc() - wT0;
+                            return r;
                         };
                     }
 
@@ -2382,8 +2947,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             t_vif1ScanOnly = true;
                             t_vif1ScanHitSpr = false;
                             std::vector<uint8_t> scanDummy;
+                            const uint64_t pT0 = __rdtsc(); // PERF-GG
                             s_vif1WalkChain(channelBase, chcr, tagAddr, asr0, asr1, scanDummy);
+                            const uint64_t pTicks = __rdtsc() - pT0; // PERF-GG
                             t_vif1ScanOnly = false;
+                            if (dma1CopierActive()) // PERF-GG
+                            {
+                                Vif1AsyncState &st = vifAsync();
+                                st.copierPrescanTicks.fetch_add(pTicks, std::memory_order_relaxed);
+                                st.copierPrescanChains.fetch_add(1, std::memory_order_relaxed);
+                            }
                             if (t_vif1ScanHitSpr)
                             {
                                 useWorker = false;
