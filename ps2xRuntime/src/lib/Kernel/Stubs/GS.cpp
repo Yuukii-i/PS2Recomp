@@ -7,6 +7,7 @@
 #include "probe_ae.h"
 #include <cstdio>
 #include <vector>
+extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 
 void ps2xSafeLog(const char *fmt, ...); // PROBE-LH (global, defined elsewhere)
 
@@ -1223,6 +1224,8 @@ namespace ps2_stubs
     void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (probe_ae::isDcProbeEnabled()) probe_ae::onDcSyncPath();
+        struct Ft2Sp { uint32_t ra; ~Ft2Sp() { if (g_ps2Ft2On) ps2_ft2_ev(9, ra); } } ft2Sp{getRegU32(ctx, 31)}; // PROBE-FT2: SYNCPATH_OUT on every return
+        if (g_ps2Ft2On) ps2_ft2_ev(8, ft2Sp.ra); // PROBE-FT2: SYNCPATH_IN
         int32_t mode = static_cast<int32_t>(getRegU32(ctx, 4));
         auto &mem = runtime->memory();
 

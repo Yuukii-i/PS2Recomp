@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cstdlib>
 void ps2xSafeLog(const char *fmt, ...);
+extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 static inline bool isVerboseLog()
 {
     static int s_verbose = -1;
@@ -2239,6 +2240,7 @@ void EeScheduler::processDueDeadlines()
                 const auto now = std::chrono::steady_clock::now();
                 const double lateMs = std::chrono::duration<double, std::milli>(now - scheduled.hostDeadline).count();
                 probe_ae::onDc2VBlankStart(lateMs);
+                if (g_ps2Ft2On) ps2_ft2_ev(0, m_vsyncTick); // PROBE-FT2: VBLANK
                 auto nextHost = scheduled.hostDeadline + kVBlankPeriod;
                 if (nextHost < now || nextHost > now + kVBlankPeriod * 2)
                 {

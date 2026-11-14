@@ -499,6 +499,7 @@ namespace
 static std::function<void(const uint8_t *, uint32_t)> s_vif1Process; // bound by a PS2Memory member (private access)
 static std::function<void()> s_vif1DrainArbiter;
 extern "C" void ps2_gs_async_batch(bool on); // PERF-GB: gs/ps2_gif_arbiter.cpp
+extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 // PROBE-TL: job timeline (PS2X_TL=1). Ring indexed by job sequence (enqueue order == worker pop order).
 static const bool g_tlOn = []() { const char *e = std::getenv("PS2X_TL"); return e && e[0] == '1'; }(); // PROBE-TL
 static std::atomic<uint64_t> g_tlEnq[1024]{};                                                           // PROBE-TL
@@ -513,9 +514,84 @@ static void tlFence(uint64_t fT0, uint64_t fT1)                                 
     if (nw && fT0 > nw)
         g_tlLead.fetch_add(fT0 - nw, std::memory_order_relaxed);
 }
+// PROBE-FT2: PS2X_FT2=1 per-frame event timeline. Starts 20 s after first VBLANK, fills 4096 events, dumps logs\ft2.txt once.
+#include <chrono>   // PROBE-FT2
+#include <cstdio>   // PROBE-FT2
+bool g_ps2Ft2On = []() { const char *e = std::getenv("PS2X_FT2"); return e && e[0] == '1'; }(); // PROBE-FT2
+namespace ft2rec // PROBE-FT2
+{
+constexpr uint32_t kMax = 262144; // PROBE-FT2
+static uint32_t kN = []() { const char *e = std::getenv("PS2X_FT2_N"); long v = e ? std::atol(e) : 4096; if (v < 1) v = 4096; if (v > (long)kMax) v = kMax; return (uint32_t)v; }(); // PROBE-FT2
+static const double kStartS = []() { const char *e = std::getenv("PS2X_FT2_START_S"); double v = e ? std::atof(e) : 20.0; return v < 0 ? 20.0 : v; }(); // PROBE-FT2
+struct Ev { std::atomic<uint64_t> tsc{0}; uint64_t arg = 0; uint32_t type = 0, tid = 0; };
+static Ev g_ev[kMax]; // PROBE-FT2
+static std::atomic<uint32_t> g_idx{0};
+static std::atomic<bool> g_active{false}, g_dumped{false};
+static std::atomic<uint32_t> g_tidGen{0};
+static uint64_t g_firstTsc = 0;
+static std::chrono::steady_clock::time_point g_firstT;
+static bool g_haveFirst = false; // touched only by the VBLANK (EE scheduler) thread
+static const char *const kNames[] = {"VBLANK", "DMA1_KICK", "JOB_START", "JOB_PARSE_END", "EXEC_LAST", "JOB_DONE", "FENCE_IN", "FENCE_OUT",
+                                     "SYNCPATH_IN", "SYNCPATH_OUT", "GIF_SUBMIT_BLOCK_IN", "GIF_SUBMIT_BLOCK_OUT", "GS_FRAME_DONE", "PRESENT", "EEFN"}; // PROBE-FT2
+static void dump()
+{
+    if (g_dumped.exchange(true))
+        return;
+    const uint64_t t1 = __rdtsc();
+    const auto s1 = std::chrono::steady_clock::now();
+    const double us = std::chrono::duration<double, std::micro>(s1 - g_firstT).count();
+    const double tpu = us > 0.0 ? static_cast<double>(t1 - g_firstTsc) / us : 1.0; // tsc ticks per microsecond over the recording
+    uint64_t base = ~0ull;
+    for (uint32_t i = 0; i < kN; ++i)
+    {
+        const uint64_t t = g_ev[i].tsc.load(std::memory_order_acquire);
+        if (t && t < base) base = t;
+    }
+    FILE *f = std::fopen("logs\\ft2.txt", "w");
+    if (!f) return;
+    for (uint32_t i = 0; i < kN; ++i)
+    {
+        const uint64_t t = g_ev[i].tsc.load(std::memory_order_acquire);
+        if (!t) continue;
+        std::fprintf(f, "%.1f %s %llu T%u\n", static_cast<double>(t - base) / tpu, kNames[g_ev[i].type], static_cast<unsigned long long>(g_ev[i].arg), g_ev[i].tid);
+    }
+    std::fclose(f);
+    g_active.store(false);
+}
+} // namespace ft2rec
+extern "C" uint32_t probe_getNewestDistinctFn(); // PROBE-FT2
+extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg) // PROBE-FT2
+{
+    using namespace ft2rec;
+    if (type == 0) // VBLANK: arms the 20 s delay
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (!g_haveFirst) { g_haveFirst = true; g_firstT = now; }
+        else if (!g_active.load(std::memory_order_relaxed) && !g_dumped.load(std::memory_order_relaxed) &&
+                 now - g_firstT >= std::chrono::duration<double>(kStartS))
+        {
+            g_firstT = now; g_firstTsc = __rdtsc();
+            g_active.store(true, std::memory_order_release);
+        }
+    }
+    if (!g_active.load(std::memory_order_acquire))
+    {
+        if (g_idx.load(std::memory_order_relaxed) >= kN && (type == 0 || type == 13)) dump();
+        return;
+    }
+    const uint32_t i = g_idx.fetch_add(1, std::memory_order_relaxed);
+    if (i >= kN) { g_active.store(false); return; }
+    static thread_local uint32_t t_tid = ~0u;
+    if (t_tid == ~0u) t_tid = g_tidGen.fetch_add(1, std::memory_order_relaxed);
+    Ev &e = g_ev[i];
+    e.type = type; e.arg = arg; e.tid = t_tid;
+    e.tsc.store(__rdtsc(), std::memory_order_release);
+    if (type == 0) ps2_ft2_ev(14, probe_getNewestDistinctFn()); // PROBE-FT2: EEFN sampled at every VBLANK
+}
 static void vif1Worker()
 {
     t_onVif1Worker = true;
+    uint64_t ft2Seq = 0; // PROBE-FT2
     uint64_t tlSeq = 0; // PROBE-TL
     ThreadNaming::SetCurrentThreadName("Vif1Worker");
     { // PERF-LU
@@ -548,8 +624,10 @@ static void vif1Worker()
         g_vif1JobFbrst = job.fbrst;
         const uint64_t tlStart = g_tlOn ? __rdtsc() : 0; // PROBE-TL
         const uint64_t wkT0 = __rdtsc(); // PROBE-KF
+        if (g_ps2Ft2On) ps2_ft2_ev(2, ft2Seq); // PROBE-FT2: JOB_START
         ps2_gs_async_batch(true); // PERF-GB
         s_vif1Process(job.data.data(), static_cast<uint32_t>(job.data.size()));
+        if (g_ps2Ft2On) ps2_ft2_ev(3, ft2Seq++); // PROBE-FT2: JOB_PARSE_END
         ps2_gs_async_batch(false); // PERF-GB: hand the job's GIF packets to the GS queue under one lock
         g_waitTicks[4].fetch_add(__rdtsc() - wkT0, std::memory_order_relaxed);
         if (s_vif1DrainArbiter)
@@ -572,6 +650,7 @@ static void vif1Worker()
             std::lock_guard<std::mutex> lock(st.m);
             st.busy = false;
             ++st.doneJobs; // PERF-SL
+            if (g_ps2Ft2On) ps2_ft2_ev(5, st.doneJobs); // PROBE-FT2: JOB_DONE
             if (st.q.empty())
             {
                 st.pending.store(false, std::memory_order_release);
@@ -609,6 +688,7 @@ static void vif1EnqueueJob(std::vector<uint8_t> &&data)
         g_tlNewest.store(t, std::memory_order_relaxed);
     }
     ++st.enqueuedJobs; // PERF-SL
+    if (g_ps2Ft2On) ps2_ft2_ev(1, st.enqueuedJobs); // PROBE-FT2: DMA1_KICK
     st.pending.store(true, std::memory_order_release);
     st.cvWork.notify_one();
 }
@@ -638,7 +718,9 @@ extern "C" void ps2_vif1_sync_lag(uint32_t lag)
         {
             const uint64_t fT0 = __rdtsc();
             ++st.lagWaiters;
+            if (g_ps2Ft2On) ps2_ft2_ev(6, want | (1ull << 62)); // PROBE-FT2: FENCE_IN (lag)
             st.cvIdle.wait(lock, [&] { return st.doneJobs >= want; });
+            if (g_ps2Ft2On) ps2_ft2_ev(7, want | (1ull << 62)); // PROBE-FT2: FENCE_OUT (lag)
             --st.lagWaiters;
             g_waitTicks[0].fetch_add(__rdtsc() - fT0, std::memory_order_relaxed);
             g_waitTicks[5].fetch_add(1, std::memory_order_relaxed);
@@ -662,7 +744,9 @@ extern "C" void ps2_vif1_fence()
     {
         const uint64_t fT0 = __rdtsc(); // PROBE-KF
         std::unique_lock<std::mutex> lock(st.m);
+        if (g_ps2Ft2On) ps2_ft2_ev(6, reinterpret_cast<uintptr_t>(_ReturnAddress())); // PROBE-FT2: FENCE_IN
         st.cvIdle.wait(lock, [&] { return st.q.empty() && !st.busy; });
+        if (g_ps2Ft2On) ps2_ft2_ev(7, reinterpret_cast<uintptr_t>(_ReturnAddress())); // PROBE-FT2: FENCE_OUT
         g_waitTicks[0].fetch_add(__rdtsc() - fT0, std::memory_order_relaxed);
         g_waitTicks[5].fetch_add(1, std::memory_order_relaxed);
         if (g_tlOn) tlFence(fT0, __rdtsc()); // PROBE-TL

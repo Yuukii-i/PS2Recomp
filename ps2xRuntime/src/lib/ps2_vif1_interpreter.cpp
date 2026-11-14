@@ -3,6 +3,7 @@
 extern "C" bool ps2_vif1_on_worker(); // PERF-HN (ps2_memory.cpp)
 extern "C" void ps2_vif1_mark_worker_thread();
 extern "C" void ps2_gs_async_batch(bool on);
+extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 extern "C" bool ps2_fk_lookup(uint32_t chainSize, uint32_t pos, uint32_t *outSrc, uint32_t *outBytes, uint32_t *outBufOff);
 extern "C" void ps2_scanCameraRegion(const char *caller, uint64_t callIndex, uint32_t ra);
 extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint16_t dest, uint16_t num,
@@ -2171,6 +2172,7 @@ namespace
                 }
                 ps2_gs_async_batch(false);
                 ps2_gs_async_batch(true);
+                if (g_ps2Ft2On) ps2_ft2_ev(4, ev.a); // PROBE-FT2: EXEC_LAST (Vu1Exec reached the drain flush)
                 vpIdleSeq.store(ev.a, std::memory_order_release);
                 {
                     std::lock_guard<std::mutex> lock(vpFlushMutex);

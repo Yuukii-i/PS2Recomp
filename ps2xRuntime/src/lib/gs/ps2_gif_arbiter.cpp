@@ -10,6 +10,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 #include <atomic>
 #include <cstdio>
 #include "ThreadNaming.h" // PERF-MB
@@ -253,7 +254,10 @@ void gsFlushPending()
     {
         const uint64_t kfT1 = __rdtsc(); // PROBE-KF
         ++st.idleWaiters;
+        const bool ft2Blk = g_ps2Ft2On && st.queuedBytes >= kGsAsyncMaxBytes; // PROBE-FT2
+        if (ft2Blk) ps2_ft2_ev(10, st.queuedBytes); // PROBE-FT2: GIF_SUBMIT_BLOCK_IN
         st.cvIdle.wait(lock, [&] { return st.queuedBytes < kGsAsyncMaxBytes; }); // backpressure
+        if (ft2Blk) ps2_ft2_ev(11, st.queuedBytes); // PROBE-FT2: GIF_SUBMIT_BLOCK_OUT
         --st.idleWaiters;
         if (__rdtsc() - kfT1 > 20000ull) g_gsqBlocked.fetch_add(1, std::memory_order_relaxed); // PROBE-GQ: blocked for more than ~5 us
         g_waitTicks[3].fetch_add(__rdtsc() - kfT1, std::memory_order_relaxed);
@@ -552,7 +556,10 @@ void GifArbiter::drain()
                 continue;
             const uint64_t kfT1 = __rdtsc(); // PROBE-KF
             ++st.idleWaiters;
+            const bool ft2Blk = g_ps2Ft2On && st.queuedBytes >= kGsAsyncMaxBytes; // PROBE-FT2
+            if (ft2Blk) ps2_ft2_ev(10, st.queuedBytes); // PROBE-FT2: GIF_SUBMIT_BLOCK_IN
             st.cvIdle.wait(lock, [&] { return st.queuedBytes < kGsAsyncMaxBytes; }); // backpressure
+            if (ft2Blk) ps2_ft2_ev(11, st.queuedBytes); // PROBE-FT2: GIF_SUBMIT_BLOCK_OUT
             --st.idleWaiters;
             g_waitTicks[3].fetch_add(__rdtsc() - kfT1, std::memory_order_relaxed);
             st.queuedBytes += pkt.data.size();

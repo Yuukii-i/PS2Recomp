@@ -1,6 +1,7 @@
 #include <functional>
 #include <atomic>
 std::atomic<uint16_t> g_hostPadButtons{0};
+extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 #ifdef _WIN32
 #include <io.h>
 #endif
@@ -6232,6 +6233,7 @@ void PS2Runtime::run()
                 static auto s_ftLog = now;
                 static uint32_t s_ftOver17 = 0, s_ftOver20 = 0, s_ftOver34 = 0;
                 const float ms = std::chrono::duration<float, std::milli>(now - s_ftPrev).count();
+                if (g_ps2Ft2On) ps2_ft2_ev(13, currentPresentSeq); // PROBE-FT2: PRESENT
                 s_ftPrev = now;
                 if (ms < 1000.0f)
                 {

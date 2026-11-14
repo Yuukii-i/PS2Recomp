@@ -27,6 +27,7 @@ std::atomic<uint64_t> g_hostPresentSeq{0};
 std::atomic<uint64_t> g_presTicks[8]{};
 
 // PERF-LN (PS2X_FT2=1): frame-time metric measured where the frame is produced + hitch dump of what the late frame waited for.
+extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 extern "C" uint64_t ps2x_ft2_waitTicks(int idx); // ps2_memory.cpp (g_waitTicks[idx], non-resetting)
 extern "C" uint64_t ps2x_ft2_gsBusy();           // gs/ps2_gif_arbiter.cpp (g_gsqBusy, non-resetting)
 extern "C" uint64_t ps2x_ft2_presentHold();      // gs/ps2_vk_gs_backend.cpp (g_gqPresentHold, non-resetting)
@@ -988,6 +989,7 @@ void GS::latchHostPresentationFrame()
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
         g_hostPresentSeq.fetch_add(1, std::memory_order_release);
         ft2OnPresent(); // PERF-LN
+        if (g_ps2Ft2On) ps2_ft2_ev(12, g_hostPresentSeq.load(std::memory_order_relaxed)); // PROBE-FT2: GS_FRAME_DONE
     }
 
     // PERF-JD: every 128 latches print the average ms per latch for each stage
