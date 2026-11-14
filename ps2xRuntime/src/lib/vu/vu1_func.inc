@@ -619,6 +619,24 @@ inline float divQ2(float numRaw, float denRaw) // mirrors VU1Interpreter::execLo
         q = num / den;
     return normRes(q);
 }
+inline float rsqrtQ(float numRaw, float radRaw) // PERF-V1M: mirrors VU1Interpreter::execLower case 0x3A (RSQRT)
+{
+    const float num = nrm1(numRaw), rad = nrm1(radRaw);
+    const float den = std::sqrt(std::fabs(rad));
+    float q;
+    if (den != 0.0f)
+        q = num / den;
+    else
+        q = std::signbit(num) ? -FLT_MAX : FLT_MAX;
+    return normRes(q);
+}
+inline float erlenP(__m128 v) // PERF-V1M: mirrors VU1Interpreter::execLower case 0x73 (ERLENG) + queueP
+{
+    alignas(16) float f[4];
+    _mm_store_ps(f, norm4(v));
+    const float len = std::sqrt(std::fma(f[2], f[2], std::fma(f[1], f[1], f[0] * f[0]))); // contraction as the interpreter TU compiles it
+    return normRes(len != 0.0f ? 1.0f / len : len);
+}
 inline __m128 maxV(__m128 a, __m128 b) // mirrors VU1Interpreter::execUpper MAX/MAXbc/MAXi
 {
     const __m128 a4 = norm4(a), b4 = norm4(b);
@@ -1334,8 +1352,177 @@ static bool handler3160(Regs &R, uint8_t *vu, uint16_t vi13)
     return true;
 }
 
+// PERF-V1M: 4-term specular polynomial c0*d + c1*d^2 + c2*d^4 + c3*d^8 (shared by 0840 and 1090)
+inline __m128 poly4Spec(__m128 d1, __m128 coeffs)
+{
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 d2 = fmacV<4>(d1, d1, zero);
+    const __m128 d4 = fmacV<4>(d2, d2, zero);
+    const __m128 d8 = fmacV<4>(d4, d4, zero);
+    const __m128 a0 = fmacV<4>(d1, bc<0>(coeffs), zero);
+    const __m128 a1 = fmacV<2>(d2, bc<1>(coeffs), a0);
+    const __m128 a2 = fmacV<2>(d4, bc<2>(coeffs), a1);
+    return fmacV<2>(d8, bc<3>(coeffs), a2);
+}
+
+// PERF-V1M: handler 0840 (0840..0AD8, 84 pairs) -- point specular light (Blinn-Phong half-vector + 4-term polynomial, 1/d attenuation)
+static bool handler0840(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 256u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 716u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    const __m128 cmdPos = ldq(vu, vi13);
+    const __m128 cmdCol = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
+    vi13 = static_cast<uint16_t>(vi13 + 2u);
+    const __m128 m982 = ldq(vu, 982), m983 = ldq(vu, 983), m984 = ldq(vu, 984), m985 = ldq(vu, 985);
+    const __m128 L = fmacV<2>(m985, one, fmacV<2>(m984, bc<2>(cmdPos), fmacV<2>(m983, bc<1>(cmdPos), fmacV<4>(m982, bc<0>(cmdPos), zero))));
+    const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v1017 = ldq(vu, 1017);
+    const __m128 hOff = fmacV<2>(m991, bc<2>(v1017), fmacV<2>(m990, bc<1>(v1017), fmacV<4>(m989, bc<0>(v1017), zero)));
+    const __m128 coeffs = ldq(vu, 1015);
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + 476u + j);
+        const __m128 Nrm = ldq(vu, static_cast<uint32_t>(base) + 556u + j);
+        const __m128 Col = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 dVec = fmacV<1>(L, P, zero);
+        const __m128 pVec = _mm_set1_ps(erlenP(dVec));
+        const __m128 dir = fmacV<4>(dVec, pVec, zero);
+        const __m128 H = fmacV<0>(hOff, dir, zero);
+        const __m128 H2 = fmacV<4>(H, H, zero);
+        const __m128 hLen2 = fmacV<2>(one, bc<2>(H2), fmacV<2>(one, bc<1>(H2), fmacV<4>(one, bc<0>(H2), zero)));
+        const __m128 qVec = _mm_set1_ps(rsqrtQ(1.0f, _mm_cvtss_f32(hLen2)));
+        const __m128 hNorm = fmacV<4>(H, qVec, zero);
+        const __m128 prod = fmacV<4>(Nrm, hNorm, zero);
+        const __m128 dotNH = fmacV<0>(fmacV<0>(prod, bc<1>(prod), zero), bc<2>(prod), zero);
+        const __m128 spec = maxV(poly4Spec(dotNH, coeffs), zero);
+        const __m128 atten = fmacV<4>(spec, pVec, zero);
+        const __m128 contrib = fmacV<4>(cmdCol, bc<0>(atten), zero);
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
+    }
+    (void)R;
+    return true;
+}
+
+// PERF-V1M: handler 0CC0 (0CC0..1058, 116 pairs) -- diffuse spotlight with two cone-cull early-outs (FMAND Sx)
+static bool handler0CC0(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 256u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 716u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    const __m128 cmd0 = ldq(vu, vi13);
+    const __m128 cmd1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
+    const __m128 cmd2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
+    const __m128 cmd3 = ldq(vu, static_cast<uint32_t>(vi13) + 3u);
+    vi13 = static_cast<uint16_t>(vi13 + 4u);
+    const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v985 = ldq(vu, 985), v1010 = ldq(vu, 1010);
+    const __m128 vf9 = fmacV<2>(m991, bc<2>(cmd0), fmacV<2>(m990, bc<1>(cmd0), fmacV<4>(m989, bc<0>(cmd0), zero)));
+    const __m128 negCmd2 = fmacV<1>(zero, cmd2, zero);
+    const __m128 vf5w = fmacV<4>(v1010, cmd3, zero);
+    const __m128 D = fmacV<2>(m991, bc<2>(negCmd2), fmacV<2>(m990, bc<1>(negCmd2), fmacV<4>(m989, bc<0>(negCmd2), zero)));
+    const __m128 vf7a = fmacV<4>(D, bc<3>(vf5w), zero);
+    const __m128 L = fmacV<0>(vf9, v985, zero);
+    const __m128 vf1 = fmacV<1>(v1010, vf7a, zero);
+    const __m128 vf7b = fmacV<1>(L, vf1, zero);
+    const __m128 vf6sq = fmacV<4>(vf7b, vf7b, zero);
+    const __m128 vf7dot = fmacV<4>(vf7b, D, zero);
+    const __m128 distSq = fmacV<2>(one, bc<2>(vf6sq), fmacV<0>(vf6sq, bc<1>(vf6sq), zero));
+    const __m128 dotVal = fmacV<2>(one, bc<2>(vf7dot), fmacV<0>(vf7dot, bc<1>(vf7dot), zero));
+    if ((_mm_movemask_ps(dotVal) & 1) != 0) // 0DB0 FMAND vi5, vi4 (Sx of 0D90 MADDz.x) -> early exit
+        return true;
+    const __m128 dotSq = fmacV<4>(dotVal, dotVal, zero);
+    const __m128 distCosSq = fmacV<4>(distSq, bc<2>(cmd3), zero);
+    const __m128 coneTest = fmacV<1>(dotSq, distCosSq, zero);
+    if ((_mm_movemask_ps(coneTest) & 1) != 0) // 0DE0 FMAND vi4, vi4 (Sx of 0DC0 SUB.x) -> early exit
+        return true;
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + 476u + j);
+        const __m128 Nrm = ldq(vu, static_cast<uint32_t>(base) + 556u + j);
+        const __m128 Col = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 dVec = fmacV<1>(L, P, zero);
+        const __m128 d2Vec = fmacV<4>(dVec, dVec, zero);
+        const __m128 dLen2 = fmacV<2>(one, bc<2>(d2Vec), fmacV<2>(one, bc<1>(d2Vec), fmacV<4>(one, bc<0>(d2Vec), zero)));
+        const __m128 qVec = _mm_set1_ps(rsqrtQ(1.0f, _mm_cvtss_f32(dLen2)));
+        const __m128 dir = fmacV<4>(dVec, qVec, zero);
+        const __m128 spotProd = fmacV<4>(dir, D, zero);
+        const __m128 nrmProd = fmacV<4>(dir, Nrm, zero);
+        const __m128 cosSpot = fmacV<2>(one, bc<2>(spotProd), fmacV<0>(spotProd, bc<1>(spotProd), zero));
+        const __m128 nDotL = fmacV<2>(one, bc<2>(nrmProd), fmacV<0>(nrmProd, bc<1>(nrmProd), zero));
+        const __m128 spotSc = fmacV<4>(fmacV<1>(cosSpot, bc<0>(cmd3), zero), bc<1>(cmd3), zero);
+        const __m128 spotClamp = miniV(maxV(spotSc, zero), one);
+        const __m128 nlClamp = miniV(maxV(nDotL, zero), one);
+        const __m128 atten = fmacV<4>(qVec, fmacV<4>(spotClamp, nlClamp, zero), zero);
+        const __m128 contrib = fmacV<4>(cmd1, bc<0>(atten), zero);
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
+    }
+    (void)R;
+    return true;
+}
+
+// PERF-V1M: handler 1090 (1090..1530, 149 pairs) -- specular spotlight (cone falloff * Blinn-Phong polynomial, 1/d attenuation)
+static bool handler1090(Regs &R, uint8_t *vu, uint16_t &vi13)
+{
+    const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
+    if (n == 0u || n > 256u)
+        return false;
+    const uint16_t outBase = static_cast<uint16_t>(base + 716u);
+    if (((vi13 - outBase) & 0x3FFu) < n)
+        return false;
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f);
+    const __m128 cmd0 = ldq(vu, vi13);
+    const __m128 cmd1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
+    const __m128 cmd2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
+    const __m128 cmd3 = ldq(vu, static_cast<uint32_t>(vi13) + 3u);
+    vi13 = static_cast<uint16_t>(vi13 + 4u);
+    const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v985 = ldq(vu, 985), v1017 = ldq(vu, 1017);
+    const __m128 L = fmacV<2>(v985, one, fmacV<2>(m991, bc<2>(cmd0), fmacV<2>(m990, bc<1>(cmd0), fmacV<4>(m989, bc<0>(cmd0), zero))));
+    const __m128 negCmd2 = fmacV<1>(zero, cmd2, zero);
+    const __m128 D = fmacV<2>(m991, bc<2>(negCmd2), fmacV<2>(m990, bc<1>(negCmd2), fmacV<4>(m989, bc<0>(negCmd2), zero)));
+    const __m128 hOff = fmacV<2>(m991, bc<2>(v1017), fmacV<2>(m990, bc<1>(v1017), fmacV<4>(m989, bc<0>(v1017), zero)));
+    const __m128 coeffs = ldq(vu, 1015);
+    logRange(vu, outBase, n);
+    for (uint32_t j = 0; j < n; ++j)
+    {
+        const __m128 P = ldq(vu, static_cast<uint32_t>(base) + 476u + j);
+        const __m128 Nrm = ldq(vu, static_cast<uint32_t>(base) + 556u + j);
+        const __m128 Col = ldq(vu, static_cast<uint32_t>(outBase) + j);
+        const __m128 dVec = fmacV<1>(L, P, zero);
+        const __m128 pVec = _mm_set1_ps(erlenP(dVec));
+        const __m128 dir = fmacV<4>(dVec, pVec, zero);
+        const __m128 spotProd = fmacV<4>(D, dir, zero);
+        const __m128 cosSpot = fmacV<0>(fmacV<0>(spotProd, bc<1>(spotProd), zero), bc<2>(spotProd), zero);
+        const __m128 spotSub = maxV(fmacV<1>(cosSpot, bc<0>(cmd3), zero), zero);
+        const __m128 spotClamp = miniV(fmacV<4>(spotSub, bc<1>(cmd3), zero), one);
+        const __m128 H = fmacV<0>(hOff, dir, zero);
+        const __m128 H2 = fmacV<4>(H, H, zero);
+        const __m128 hLen2 = fmacV<2>(one, bc<2>(H2), fmacV<2>(one, bc<1>(H2), fmacV<4>(one, bc<0>(H2), zero)));
+        const __m128 qVec = _mm_set1_ps(rsqrtQ(1.0f, _mm_cvtss_f32(hLen2)));
+        const __m128 hNorm = fmacV<4>(H, qVec, zero);
+        const __m128 nrmProd = fmacV<4>(Nrm, hNorm, zero);
+        const __m128 dotNH = fmacV<0>(fmacV<0>(nrmProd, bc<1>(nrmProd), zero), bc<2>(nrmProd), zero);
+        const __m128 x = fmacV<4>(dotNH, spotClamp, zero);
+        const __m128 spec = maxV(poly4Spec(x, coeffs), zero);
+        const __m128 atten = fmacV<4>(pVec, spec, zero);
+        const __m128 contrib = fmacV<4>(cmd1, bc<0>(atten), zero);
+        stqRaw(vu, static_cast<uint32_t>(outBase) + j, fmacV<0>(Col, contrib, zero));
+    }
+    (void)R;
+    return true;
+}
+
 static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool oneShot, bool vxA)
 {
+    static const bool funcNewOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_NEW"); return e && e[0] == '1'; }(); // PERF-V1M
     Regs R; // PERF-V1G: skip 560-byte memset; only R.vi[12] is live across handlers
     R.vi[12] = static_cast<uint16_t>(top);
     uint16_t vi13 = R.vi[12];
@@ -1447,6 +1634,27 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             if (!handler00A8(R, vu))
             {
                 s_fbPc = 0x00A8u;
+                return false;
+            }
+            break;
+        case 0x0840u: // PERF-V1M
+            if (!funcNewOn || !handler0840(R, vu, vi13))
+            {
+                s_fbPc = 0x0840u;
+                return false;
+            }
+            break;
+        case 0x0CC0u: // PERF-V1M
+            if (!funcNewOn || !handler0CC0(R, vu, vi13))
+            {
+                s_fbPc = 0x0CC0u;
+                return false;
+            }
+            break;
+        case 0x1090u: // PERF-V1M
+            if (!funcNewOn || !handler1090(R, vu, vi13))
+            {
+                s_fbPc = 0x1090u;
                 return false;
             }
             break;
