@@ -28,6 +28,7 @@ extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint1
 
 extern void ps2xSafeLog(const char *fmt, ...);
 extern bool ps2xVxOn(); extern void ps2xVxMarkThread(); extern void ps2xVxIdle(uint64_t); extern void ps2xVxEv(uint32_t, uint64_t); // PROBE-VX
+extern void ps2xVu1Path1Batch(bool); extern void ps2xVu1FlushPath1(); // PERF-V1I
 
 // =========================================================================
 // Task DZ: VIF1 UNPACK ring buffer & VIF1 register dump
@@ -2049,6 +2050,7 @@ namespace
         const bool statOn = vpStatOn(); // PERF-V1G
         const bool dualOn = vpDualOn(); // PERF-V1G
         const bool verifyOn = vpVerifyOn(); // PERF-V1G
+        if (!dualOn) ::ps2xVu1Path1Batch(true); // PERF-V1I
         for (;;)
         {
             const uint64_t vxA = vxOn ? __rdtsc() : 0ull; // PROBE-VX
@@ -2074,10 +2076,12 @@ namespace
                 }
                 break;
             case VP_MSCNT:
+                ::ps2xVu1FlushPath1(); // PERF-V1I
                 if (vpMscntCb)
                     vpMscntCb(ev.b, ev.c);
                 break;
             case VP_GIF2:
+                ::ps2xVu1FlushPath1(); // PERF-V1I
                 if (dualOn) // PERF-V1G
                 {
                     if (verifyOn) // PERF-V1G
@@ -2165,6 +2169,7 @@ namespace
                 }
                 break;
             case VP_FLUSH:
+                ::ps2xVu1FlushPath1(); // PERF-V1I
                 if (dualOn) // PERF-V1H
                 {
                     s_tlVifWrites.reset();
@@ -2180,6 +2185,7 @@ namespace
                 }
                 break;
             default:
+                ::ps2xVu1FlushPath1(); // PERF-V1I
                 break;
             }
             if (vxOn) ::ps2xVxEv(static_cast<uint32_t>(ev.kind), __rdtsc() - vxB); // PROBE-VX

@@ -1573,6 +1573,90 @@ static void reportMaybe()
     ps2xSafeLog("%s\n", buf);
 }
 
+// PERF-V1I: per-thread PATH1 GIF batching on Vu1Exec (reduces ~6300 arbiter submits/frame to ~dozens)
+constexpr size_t kPath1BatchCap = 256u * 1024u; // PERF-V1I
+static thread_local bool t_path1BatchOn = false; // PERF-V1I
+static thread_local PS2Memory *t_path1Memory = nullptr; // PERF-V1I
+static thread_local std::vector<uint8_t> t_path1Pending; // PERF-V1I
+
+static inline bool path1PacketBatchable(const uint8_t *d, uint32_t n) // PERF-V1I
+{
+    if (n < 16u || (n & 15u) != 0u)
+        return false;
+    uint32_t off = 0;
+    while (off < n)
+    {
+        if (off + 16u > n)
+            return false;
+        uint64_t lo, hi;
+        std::memcpy(&lo, d + off, 8);
+        std::memcpy(&hi, d + off + 8, 8);
+        const uint32_t nloop = static_cast<uint32_t>(lo & 0x7FFFu);
+        const uint32_t flg = static_cast<uint32_t>((lo >> 58) & 0x3u);
+        uint32_t nreg = static_cast<uint32_t>((lo >> 60) & 0xFu);
+        if (nreg == 0u)
+            nreg = 16u;
+        if (off == 0u && nloop == 4u && flg == 0u && nreg == 1u && (hi & 0xFull) == 0xEull)
+            return false; // native image-upload setup tag (GS::tryProcessNativeImageUploadPacket checks offset 0)
+        uint64_t bytes;
+        if (flg == 0u)
+            bytes = static_cast<uint64_t>(nloop) * nreg * 16u;
+        else if (flg == 1u)
+            bytes = ((static_cast<uint64_t>(nloop) * nreg + 1u) & ~1ull) * 8u;
+        else
+            return false; // IMAGE / disabled: needs per-packet handling
+        if (bytes > n - off - 16u)
+            return false;
+        off += 16u + static_cast<uint32_t>(bytes);
+    }
+    return off == n;
+}
+
+static inline void flushPath1Pending(bool countVx) // PERF-V1I
+{
+    if (t_path1Pending.empty())
+        return;
+    PS2Memory *mem = t_path1Memory;
+    if (mem)
+    {
+        const uint64_t t0 = (countVx && vx::act()) ? __rdtsc() : 0ull;
+        mem->submitGifPacket(GifPathId::Path1, t_path1Pending.data(), static_cast<uint32_t>(t_path1Pending.size()));
+        if (t0)
+            vx::g_vx.gifT += __rdtsc() - t0;
+    }
+    t_path1Pending.clear();
+}
+
+static inline void submitPath1Batched(PS2Memory *memory, const uint8_t *p, uint32_t n) // PERF-V1I
+{
+    if (!t_path1BatchOn)
+    {
+        memory->submitGifPacket(GifPathId::Path1, p, n);
+        return;
+    }
+    if (t_path1Memory != memory)
+    {
+        flushPath1Pending(false);
+        t_path1Memory = memory;
+    }
+    if (!path1PacketBatchable(p, n))
+    {
+        flushPath1Pending(false);
+        memory->submitGifPacket(GifPathId::Path1, p, n);
+        return;
+    }
+    if (!t_path1Pending.empty() && t_path1Pending.size() + n > kPath1BatchCap)
+        flushPath1Pending(false);
+    if (n > kPath1BatchCap)
+    {
+        memory->submitGifPacket(GifPathId::Path1, p, n);
+        return;
+    }
+    if (t_path1Pending.capacity() < kPath1BatchCap)
+        t_path1Pending.reserve(kPath1BatchCap);
+    t_path1Pending.insert(t_path1Pending.end(), p, p + n);
+}
+
 // Engine + GIF submission (same order / destinations as finishXgkick). Returns true when the program was executed functionally.
 static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, uint32_t top, uint32_t itop, GS &gs, PS2Memory *memory, std::vector<uint8_t> *capture, bool stats)
 {
@@ -1605,7 +1689,11 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
             reportMaybe();
     }
     if (!ok)
+    {
+        if (t_path1BatchOn && !capture) // PERF-V1I: flush pending PATH1 before fallback submits directly
+            flushPath1Pending(true);
         return false;
+    }
     {
         // PERF: kicks are normally appended back to back in `gif`; then submit the whole stream once (one arbiter pass instead of one per kick).
         uint32_t expect = 0u;
@@ -1628,7 +1716,7 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
                 if (capture)
                     capture->insert(capture->end(), gif.data(), gif.data() + expect);
                 else if (memory)
-                    memory->submitGifPacket(GifPathId::Path1, gif.data(), expect);
+                    submitPath1Batched(memory, gif.data(), expect); // PERF-V1I
                 else
                     gs.processGIFPacket(gif.data(), expect);
             }
@@ -1643,13 +1731,25 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
         if (capture)
             capture->insert(capture->end(), p, p + k.second);
         else if (memory)
-            memory->submitGifPacket(GifPathId::Path1, p, k.second);
+            submitPath1Batched(memory, p, k.second); // PERF-V1I
         else
             gs.processGIFPacket(p, k.second);
     }
     return true;
 }
 } // namespace vu1func
+
+// PERF-V1I: entry points used by vpExecThreadFunc (ps2_vif1_interpreter.cpp, declared extern there)
+void ps2xVu1Path1Batch(bool on) // PERF-V1I
+{
+    if (!on)
+        vu1func::flushPath1Pending(true);
+    vu1func::t_path1BatchOn = on;
+}
+void ps2xVu1FlushPath1() // PERF-V1I
+{
+    vu1func::flushPath1Pending(true);
+}
 
 // PROBE-VX: entry points used by vpExecThreadFunc (ps2_vif1_interpreter.cpp, declared extern there)
 bool ps2xVxOn() { return vu1func::vx::on(); } // PROBE-VX

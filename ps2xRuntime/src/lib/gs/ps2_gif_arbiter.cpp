@@ -491,6 +491,20 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
         return;
     }
 
+    // PERF-V1I: large pre-batched Path1 packets (> kGifCoalesceChunk) go straight to t_gsPending so m_queue stays empty
+    if (pathId == GifPathId::Path1 && sizeBytes > kGifCoalesceChunk && t_gsBatch && m_queue.empty() && gsAsyncEnabled() &&
+        s_gsAsyncStarted.load(std::memory_order_acquire))
+    {
+        gsCoalesceSeal();
+        std::vector<uint8_t> buf = takePacketBuf(sizeBytes);
+        buf.assign(data, data + sizeBytes);
+        t_gsPendingBytes += sizeBytes;
+        t_gsPending.push_back(std::move(buf));
+        if (t_gsPendingBytes >= (1u << 20))
+            gsFlushPending();
+        return;
+    }
+
     GifArbiterPacket pkt;
     pkt.pathId = pathId;
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
@@ -549,6 +563,7 @@ void GifArbiter::drain()
             std::thread(gsAsyncWorker).detach();
             s_gsAsyncStarted.store(true, std::memory_order_release); // PERF-GB
         }
+        bool pushed = false; // PERF-V1I
         for (size_t i = 0; i < m_queue.size(); ++i)
         {
             auto &pkt = m_queue[i];
@@ -565,9 +580,10 @@ void GifArbiter::drain()
             st.queuedBytes += pkt.data.size();
             ++st.enqueuedPkts;
             st.q.push_back(std::move(pkt.data));
-            if (st.workerWaiting)
-                st.cvWork.notify_one();
+            pushed = true;
         }
+        if (pushed && st.workerWaiting) // PERF-V1I: notify GS consumer once per batch
+            st.cvWork.notify_one();
         m_queue.clear();
         return;
     }
