@@ -213,6 +213,55 @@ namespace
             out.set(pg);
     }
 
+    struct PrimBbox // PERF-GA
+    {
+        int x0, x1, y0, y1;
+    };
+
+    void pagesForRects(PageSet &out, uint32_t baseBlock, uint32_t bw, uint32_t psm, const std::vector<PrimBbox> &bboxes) // PERF-GA
+    {
+        uint32_t pw, ph;
+        pageDims(psm, pw, ph);
+        const uint32_t pagesPerRow = std::max(1u, (std::max(bw, 1u) * 64u) / pw);
+        const uint32_t basePage = baseBlock / 32u;
+        uint32_t prevR0 = ~0u, prevR1 = ~0u, prevC0 = ~0u, prevC1 = ~0u;
+        for (const PrimBbox &bb : bboxes)
+        {
+            const uint32_t r0 = static_cast<uint32_t>(bb.y0) / ph;
+            const uint32_t r1 = static_cast<uint32_t>(bb.y1) / ph;
+            const uint32_t c0 = static_cast<uint32_t>(bb.x0) / pw;
+            const uint32_t c1 = static_cast<uint32_t>(bb.x1) / pw;
+            if (r0 == prevR0 && r1 == prevR1 && c0 == prevC0 && c1 == prevC1)
+                continue;
+            prevR0 = r0;
+            prevR1 = r1;
+            prevC0 = c0;
+            prevC1 = c1;
+            if (r1 < r0 || c1 < c0 || static_cast<uint64_t>(r1 - r0 + 1u) * (c1 - c0 + 1u) > 4096u)
+            {
+                out.setAll();
+                return;
+            }
+            for (uint32_t rr = r0; rr <= r1; ++rr)
+                for (uint32_t cc = c0; cc <= c1; ++cc)
+                    out.set((basePage + rr * pagesPerRow + cc) & 511u);
+        }
+    }
+
+    uint32_t popcountPageSet(const PageSet &s) // PERF-GA
+    {
+        uint32_t c = 0;
+        for (uint64_t x : s.w)
+        {
+            while (x)
+            {
+                x &= x - 1ull;
+                ++c;
+            }
+        }
+        return c;
+    }
+
     bool isFramePsm(uint32_t p) { return p == 0 || p == 1 || p == 2 || p == 10; }
     bool isZPsm(uint32_t p) { return p == 48 || p == 49 || p == 50 || p == 58; }
     bool isTexPsm(uint32_t p)
@@ -565,6 +614,9 @@ namespace
             maxPrimPerFrame_ = o ? static_cast<uint32_t>(std::strtoul(o, nullptr, 10)) : 0u;
             const char *stg = std::getenv("PS2X_VK_PRIMSTAGE");
             primStage_ = !(stg && stg[0] == '0');
+            const char *ga = std::getenv("PS2X_GA_CHECK"); // PERF-GA
+            gaCheck_ = ga && ga[0] == '1';
+            gaLastPrint_ = std::chrono::steady_clock::now();
             if (compare_)
                 ref_ = std::make_unique<GSCpuBackend>();
 
@@ -637,13 +689,8 @@ namespace
             }
         }
 
-        void SubmitRun(const GSDrawState &state, const GSRunPrim *prims, size_t count) override // PERF-GR
+        void submitRunPerPrim(const GSDrawState &state, const GSRunPrim *prims, size_t count) // PERF-GA
         {
-            GwScope gwS(7); // PROBE-GW vkrec (SubmitRun incl. lock wait + gpuDraw recording; flush() inside re-scopes submit/sync)
-            const uint64_t gqL0 = __rdtsc(); // PROBE-GQ2
-            std::lock_guard<std::mutex> lk(m_);
-            g_gqLockWait.fetch_add(__rdtsc() - gqL0, std::memory_order_relaxed);
-            g_gqLockWaits.fetch_add(1, std::memory_order_relaxed);
             GSPrimitiveBatch batch;
             batch.state = state;
             for (size_t i = 0; i < count; ++i)
@@ -664,6 +711,80 @@ namespace
                     cpuDraw(batch);
                 }
             }
+        }
+
+        void SubmitRun(const GSDrawState &state, const GSRunPrim *prims, size_t count) override // PERF-GR
+        {
+            GwScope gwS(7); // PROBE-GW vkrec (SubmitRun incl. lock wait + gpuDraw recording; flush() inside re-scopes submit/sync)
+            const uint64_t gqL0 = __rdtsc(); // PROBE-GQ2
+            std::lock_guard<std::mutex> lk(m_);
+            g_gqLockWait.fetch_add(__rdtsc() - gqL0, std::memory_order_relaxed);
+            g_gqLockWaits.fetch_add(1, std::memory_order_relaxed);
+            if (count == 0u)
+                return;
+            // PERF-GA: fall back to per-prim when Vulkan is not ready, compare/ref is active,
+            // run would cross ring/frame prim limits, or any prim has an invalid vertex count.
+            if (!vkReady_ || compare_ || ref_ != nullptr ||
+                primCount_ + count > maxPrims_ ||
+                (maxPrimPerFrame_ && primsThisFrame_ + count > maxPrimPerFrame_))
+            {
+                submitRunPerPrim(state, prims, count);
+                return;
+            }
+            const uint32_t minVerts = (state.prim.type == GS_PRIM_SPRITE) ? 2u : 3u;
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (prims[i].vertexCount < minVerts)
+                {
+                    submitRunPerPrim(state, prims, count);
+                    return;
+                }
+            }
+
+            alignas(64) uint32_t tmpl[kPrimStride];
+            uint32_t tlo = 0, thi = 0;
+            bool sprite = false;
+            const int reason = runBegin(state, tlo, thi, sprite, tmpl);
+            if (reason > 0)
+            {
+                submitRunPerPrim(state, prims, count);
+                return;
+            }
+
+            runBboxes_.clear();
+            uint32_t runPrims = 0;
+            int uMinX = 0x7FFFFFFF, uMaxX = -0x7FFFFFFF, uMinY = 0x7FFFFFFF, uMaxY = -0x7FFFFFFF;
+            uint64_t sumPrimArea = 0;
+            for (size_t i = 0; i < count; ++i)
+            {
+                uint32_t *dst = primMap_ + static_cast<size_t>(primCount_ + runPrims) * kPrimStride;
+                int bminX, bmaxX, bminY, bmaxY;
+                if (fillPrimFields(state, prims[i].vertices.data(),prims[i].vertexCount, sprite, tmpl, dst, bminX, bmaxX, bminY, bmaxY))
+                {
+                    if (bminX < uMinX) uMinX = bminX;
+                    if (bmaxX > uMaxX) uMaxX = bmaxX;
+                    if (bminY < uMinY) uMinY = bminY;
+                    if (bmaxY > uMaxY) uMaxY = bmaxY;
+                    sumPrimArea += static_cast<uint64_t>(bmaxX - bminX + 1) * static_cast<uint64_t>(bmaxY - bminY + 1);
+                    runBboxes_.push_back({bminX, bmaxX, bminY, bmaxY});
+                    ++runPrims;
+                }
+            }
+            if (runPrims == 0u)
+                return;
+
+            const GSContext &ctx = state.context;
+            uint32_t flo, fhi, zlo, zhi;
+            rowsRange(ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, uMinY, uMaxY, flo, fhi);
+            rowsRange(ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, uMinY, uMaxY, zlo, zhi);
+            // PERF-GA: self-dependency check (sampled texture byte range overlaps run's own frame or Z range)
+            if (runPrims > 1u && state.prim.tme && ((tlo < fhi && thi > flo) || (tlo < zhi && thi > zlo)))
+            {
+                submitRunPerPrim(state, prims, count);
+                return;
+            }
+
+            runEnd(state, prims, count, sprite, tmpl, runPrims, uMinX, uMaxX, uMinY, uMaxY, sumPrimArea, tlo, thi, flo, fhi, zlo, zhi);
         }
 
         void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override
@@ -1768,6 +1889,355 @@ namespace
         }
 
         // ------------------------------------------------------------ GPU path
+        void fillStateTemplate(const GSDrawState &st, int32_t clutSlot, uint32_t *tmpl) // PERF-GA
+        {
+            const GSContext &ctx = st.context;
+            const bool sprite = (st.prim.type == GS_PRIM_SPRITE);
+            std::memset(tmpl, 0, kPrimStride * 4u);
+            uint32_t flags = 0;
+            if (sprite) flags |= F_SPRITE;
+            if (st.prim.iip) flags |= F_IIP;
+            if (st.prim.tme) flags |= F_TME;
+            if (st.prim.fst) flags |= F_FST;
+            if (st.prim.fge) flags |= F_FGE;
+            if (st.prim.abe) flags |= F_ABE;
+            if (st.pabe) flags |= F_PABE;
+            if (st.linearFilter) flags |= F_LINEAR;
+            if (ctx.zbuf.zmask) flags |= F_ZMASK;
+            tmpl[FLAGS] = flags;
+            tmpl[OFX] = static_cast<uint32_t>(ctx.xyoffset.ofx >> 4);
+            tmpl[OFY] = static_cast<uint32_t>(ctx.xyoffset.ofy >> 4);
+            tmpl[SCX0] = ctx.scissor.x0;
+            tmpl[SCX1] = ctx.scissor.x1;
+            tmpl[SCY0] = ctx.scissor.y0;
+            tmpl[SCY1] = ctx.scissor.y1;
+            tmpl[FBP] = ctx.frame.fbp << 5u;
+            tmpl[FBW] = ctx.frame.fbw;
+            tmpl[FPSM] = ctx.frame.psm;
+            tmpl[FBMSK] = ctx.frame.fbmsk;
+            tmpl[ZBP] = ctx.zbuf.zbp << 5u;
+            tmpl[ZPSM] = ctx.zbuf.psm;
+            tmpl[TEST] = static_cast<uint32_t>(ctx.test);
+            tmpl[ALPHA] = static_cast<uint32_t>(ctx.alpha);
+            tmpl[ALPHAFIX] = static_cast<uint32_t>((ctx.alpha >> 32) & 0xFFu);
+            tmpl[FBA] = static_cast<uint32_t>(ctx.fba & 1u);
+            tmpl[TBP0] = ctx.tex0.tbp0;
+            tmpl[TBW] = ctx.tex0.tbw;
+            tmpl[TPSM] = ctx.tex0.psm;
+            tmpl[TCC] = ctx.tex0.tcc;
+            tmpl[TFX] = ctx.tex0.tfx;
+            tmpl[CPSM] = ctx.tex0.cpsm;
+            tmpl[CSM] = ctx.tex0.csm;
+            tmpl[CSA] = ctx.tex0.csa;
+            tmpl[TEXW] = st.textureWidth;
+            tmpl[TEXH] = st.textureHeight;
+            tmpl[CLAMP_LO] = static_cast<uint32_t>(ctx.clamp);
+            tmpl[CLAMP_HI] = static_cast<uint32_t>(ctx.clamp >> 32);
+            tmpl[TA0] = st.texa.ta0;
+            tmpl[AEM] = st.texa.aem ? 1u : 0u;
+            tmpl[TA1] = st.texa.ta1;
+            tmpl[FOGRGB] = static_cast<uint32_t>(st.fogR) | (static_cast<uint32_t>(st.fogG) << 8) | (static_cast<uint32_t>(st.fogB) << 16);
+            tmpl[CLUTSLOT] = static_cast<uint32_t>(clutSlot);
+        }
+
+        bool fillPrimFields(const GSDrawState &st, const GSVertex *verts, uint32_t vertexCount, bool sprite,
+                            const uint32_t *tmpl, uint32_t *dst, int &bminX, int &bmaxX, int &bminY, int &bmaxY) // PERF-GA
+        {
+            const GSContext &ctx = st.context;
+            const int ofx = ctx.xyoffset.ofx >> 4;
+            const int ofy = ctx.xyoffset.ofy >> 4;
+            alignas(64) uint32_t rec[kPrimStride];
+            uint32_t *p = primStage_ ? rec : dst;
+
+            if (sprite)
+            {
+                const GSVertex &v0 = verts[0];
+                const GSVertex &v1 = verts[1];
+                int x0 = static_cast<int>(v0.x) - ofx, y0 = static_cast<int>(v0.y) - ofy;
+                int x1 = static_cast<int>(v1.x) - ofx, y1 = static_cast<int>(v1.y) - ofy;
+                const uint32_t z1 = static_cast<uint32_t>(v1.z);
+                if (x0 > x1)
+                    std::swap(x0, x1);
+                if (y0 > y1)
+                    std::swap(y0, y1);
+                const int spanX = std::max(1, x1 - x0);
+                const int spanY = std::max(1, y1 - y0);
+                const int ux1 = x0 + spanX - 1, uy1 = y0 + spanY - 1;
+                if (ux1 < ctx.scissor.x0 || x0 > ctx.scissor.x1 || uy1 < ctx.scissor.y0 || y0 > ctx.scissor.y1)
+                    return false;
+                bminX = clampInt(x0, ctx.scissor.x0, ctx.scissor.x1);
+                bminY = clampInt(y0, ctx.scissor.y0, ctx.scissor.y1);
+                bmaxX = clampInt(ux1, ctx.scissor.x0, ctx.scissor.x1);
+                bmaxY = clampInt(uy1, ctx.scissor.y0, ctx.scissor.y1);
+                if (bminX > bmaxX || bminY > bmaxY)
+                    return false;
+
+                std::memcpy(p, tmpl, kPrimStride * 4u);
+                p[SPR_UX0] = static_cast<uint32_t>(x0);
+                p[SPR_UY0] = static_cast<uint32_t>(y0);
+                p[SPR_W] = fbits(static_cast<float>(spanX));
+                p[SPR_H] = fbits(static_cast<float>(spanY));
+                p[SPR_Z] = z1;
+                float u0f, v0f, u1f, v1f;
+                if (st.prim.fst)
+                {
+                    u0f = static_cast<float>(v0.u >> 4);
+                    v0f = static_cast<float>(v0.v >> 4);
+                    u1f = static_cast<float>(v1.u >> 4);
+                    v1f = static_cast<float>(v1.v >> 4);
+                }
+                else
+                {
+                    const float q0 = fabsQ(v0.q), q1 = fabsQ(v1.q);
+                    u0f = (v0.s / q0) * static_cast<float>(st.textureWidth);
+                    v0f = (v0.t / q0) * static_cast<float>(st.textureHeight);
+                    u1f = (v1.s / q1) * static_cast<float>(st.textureWidth);
+                    v1f = (v1.t / q1) * static_cast<float>(st.textureHeight);
+                }
+                p[SPR_U0F] = fbits(u0f);
+                p[SPR_V0F] = fbits(v0f);
+                p[SPR_U1F] = fbits(u1f);
+                p[SPR_V1F] = fbits(v1f);
+            }
+            else
+            {
+                const GSVertex &v0 = verts[0];
+                const GSVertex &v1 = verts[1];
+                const GSVertex &v2 = verts[2];
+                const float fx0 = v0.x - static_cast<float>(ofx), fy0 = v0.y - static_cast<float>(ofy);
+                const float fx1 = v1.x - static_cast<float>(ofx), fy1 = v1.y - static_cast<float>(ofy);
+                const float fx2 = v2.x - static_cast<float>(ofx), fy2 = v2.y - static_cast<float>(ofy);
+                // PERF-LO: sequential compare, exactly what std::min/max(initializer_list) does (same result incl. NaN), without the list call
+                float mnX = fx0, mxX = fx0, mnY = fy0, mxY = fy0;
+                if (fx1 < mnX) mnX = fx1;
+                if (fx2 < mnX) mnX = fx2;
+                if (mxX < fx1) mxX = fx1;
+                if (mxX < fx2) mxX = fx2;
+                if (fy1 < mnY) mnY = fy1;
+                if (fy2 < mnY) mnY = fy2;
+                if (mxY < fy1) mxY = fy1;
+                if (mxY < fy2) mxY = fy2;
+                int minX = static_cast<int>(std::floor(mnX));
+                int maxX = static_cast<int>(std::ceil(mxX));
+                int minY = static_cast<int>(std::floor(mnY));
+                int maxY = static_cast<int>(std::ceil(mxY));
+                minX = clampInt(minX, ctx.scissor.x0, ctx.scissor.x1);
+                maxX = clampInt(maxX, ctx.scissor.x0, ctx.scissor.x1);
+                minY = clampInt(minY, ctx.scissor.y0, ctx.scissor.y1);
+                maxY = clampInt(maxY, ctx.scissor.y0, ctx.scissor.y1);
+                const float denom = (fy1 - fy2) * (fx0 - fx2) + (fx2 - fx1) * (fy0 - fy2);
+                if (std::fabs(denom) < 0.001f)
+                    return false;
+                bminX = minX;
+                bmaxX = maxX;
+                bminY = minY;
+                bmaxY = maxY;
+                if (bminX > bmaxX || bminY > bmaxY)
+                    return false;
+
+                std::memcpy(p, tmpl, kPrimStride * 4u);
+                for (int i = 0; i < 3; ++i)
+                {
+                    const GSVertex &v = verts[i];
+                    uint64_t zb;
+                    std::memcpy(&zb, &v.z, 8);
+                    p[Z0 + i * 2] = static_cast<uint32_t>(zb);
+                    p[Z0 + i * 2 + 1] = static_cast<uint32_t>(zb >> 32);
+                }
+            }
+
+            for (int i = 0; i < 3; ++i)
+            {
+                const GSVertex &v = verts[std::min<int>(i, std::max(0, static_cast<int>(vertexCount) - 1))];
+                p[X0 + i] = fbits(v.x);
+                p[Y0 + i] = fbits(v.y);
+                p[Q0 + i] = fbits(v.q);
+                p[S0 + i] = fbits(v.s);
+                p[T0 + i] = fbits(v.t);
+                p[RGBA0 + i] = static_cast<uint32_t>(v.r) | (static_cast<uint32_t>(v.g) << 8) | (static_cast<uint32_t>(v.b) << 16) | (static_cast<uint32_t>(v.a) << 24);
+                p[UV0 + i] = static_cast<uint32_t>(v.u) | (static_cast<uint32_t>(v.v) << 16);
+                p[FOG0 + i] = v.fog;
+            }
+            if (sprite)
+            {
+                // sprite uses vertex 1 colour/fog/z: make sure those slots hold v1 even for 2-vertex batches
+                const GSVertex &v1 = verts[1];
+                p[RGBA0 + 1] = static_cast<uint32_t>(v1.r) | (static_cast<uint32_t>(v1.g) << 8) | (static_cast<uint32_t>(v1.b) << 16) | (static_cast<uint32_t>(v1.a) << 24);
+                p[FOG0 + 1] = v1.fog;
+            }
+            p[BBOX + 0] = static_cast<uint32_t>(bminX);
+            p[BBOX + 1] = static_cast<uint32_t>(bmaxX);
+            p[BBOX + 2] = static_cast<uint32_t>(bminY);
+            p[BBOX + 3] = static_cast<uint32_t>(bmaxY);
+
+            if (primStage_)
+                std::memcpy(dst, rec, kPrimStride * 4u);
+            return true;
+        }
+
+        int runBegin(const GSDrawState &st, uint32_t &outTlo, uint32_t &outThi, bool &outSprite, uint32_t *tmpl) // PERF-GA
+        {
+            const GSContext &ctx = st.context;
+            const GSPrimType type = st.prim.type;
+            outSprite = (type == GS_PRIM_SPRITE);
+            const bool tri = (type == GS_PRIM_TRIANGLE || type == GS_PRIM_TRISTRIP || type == GS_PRIM_TRIFAN);
+            if (!outSprite && !tri)
+                return 1;
+            if (!isFramePsm(ctx.frame.psm))
+                return 2;
+            if (!isZPsm(ctx.zbuf.psm))
+                return 3;
+            if (st.prim.tme)
+            {
+                if (!isTexPsm(ctx.tex0.psm))
+                    return 4;
+                if (isIndexedPsm(ctx.tex0.psm) && !(ctx.tex0.cpsm == 0 || ctx.tex0.cpsm == 1 || ctx.tex0.cpsm == 2 || ctx.tex0.cpsm == 10))
+                    return 5;
+                if (st.textureWidth == 0 || st.textureHeight == 0)
+                    return 5;
+            }
+            if (ctx.scissor.x1 > 2047 || ctx.scissor.y1 > 2047 || ctx.scissor.x0 > ctx.scissor.x1 || ctx.scissor.y0 > ctx.scissor.y1)
+                return 6;
+            if (maxPrimPerFrame_ && primsThisFrame_ >= maxPrimPerFrame_)
+                return 7;
+
+            if (!ensureUpload())
+                return 8;
+            if (clutChanged_ || curClutSlot_ < 0)
+            {
+                if (clutSlots_ >= maxClutSlots_)
+                    flush(nullptr, FLUSH_REASON_CLUT);
+                if (!vkReady_)
+                    return 8;
+                std::memcpy(clutBuf_.map + static_cast<size_t>(clutSlots_) * 1024u, cpu_->m_clut.data(), 1024u);
+                curClutSlot_ = static_cast<int32_t>(clutSlots_++);
+                clutChanged_ = false;
+            }
+            if (!vkReady_)
+                return 8;
+
+            outTlo = 0;
+            outThi = 0;
+            if (st.prim.tme)
+                rowsRange(ctx.tex0.tbp0, ctx.tex0.tbw, ctx.tex0.psm, 0, std::max<uint32_t>(st.textureHeight, 1u) - 1u, outTlo, outThi);
+
+            fillStateTemplate(st, curClutSlot_, tmpl);
+            return 0;
+        }
+
+        void runEnd(const GSDrawState &st, const GSRunPrim *prims, size_t count, bool sprite, const uint32_t *tmpl,
+                    uint32_t runPrims, int uMinX, int uMaxX, int uMinY, int uMaxY, uint64_t sumPrimArea,
+                    uint32_t tlo, uint32_t thi, uint32_t flo, uint32_t fhi, uint32_t zlo, uint32_t zhi) // PERF-GA
+        {
+            const GSContext &ctx = st.context;
+            beginRecording();
+            if (st.prim.tme && unfenced_.overlaps(tlo, thi))
+                fragmentBarrier();
+            beginPass();
+
+            const uint32_t primBase = primCount_;
+            if (pendCount_ != 0u && pendFirst_ + pendCount_ == primCount_)
+                pendCount_ += runPrims;
+            else
+            {
+                flushDraws();
+                pendFirst_ = primCount_;
+                pendCount_ = runPrims;
+            }
+            primCount_ += runPrims;
+            primsThisFrame_ += runPrims;
+            gpuPrims_ += runPrims;
+
+            PageSet drawPg;
+            const uint64_t unionArea = static_cast<uint64_t>(uMaxX - uMinX + 1) * static_cast<uint64_t>(uMaxY - uMinY + 1);
+            const bool exactUnion = (unionArea > 2u * sumPrimArea);
+            if (!exactUnion)
+                pagesForRect(drawPg, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, uMinX, uMaxX, uMinY, uMaxY);
+            else
+                pagesForRects(drawPg, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, runBboxes_);
+            gpuColor_.orWith(drawPg);
+            presDirty_.orWith(drawPg);
+
+            PageSet runZPg;
+            if (!ctx.zbuf.zmask)
+            {
+                if (gaCheck_)
+                {
+                    if (!exactUnion)
+                        pagesForRect(runZPg, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, uMinX, uMaxX, uMinY, uMaxY);
+                    else
+                        pagesForRects(runZPg, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, runBboxes_);
+                    gpuZ_.orWith(runZPg);
+                }
+                else
+                {
+                    if (!exactUnion)
+                        pagesForRect(gpuZ_, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, uMinX, uMaxX, uMinY, uMaxY);
+                    else
+                        pagesForRects(gpuZ_, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, runBboxes_);
+                }
+            }
+            unfenced_.add(flo, fhi);
+            unfenced_.add(zlo, zhi);
+
+            if (gaCheck_)
+            {
+                PageSet refColorPg, refZPg;
+                uint32_t refIdx = 0;
+                alignas(64) uint32_t refRec[kPrimStride];
+                for (size_t i = 0; i < count; ++i)
+                {
+                    int bx0, bx1, by0, by1;
+                    if (fillPrimFields(st, prims[i].vertices.data(),prims[i].vertexCount, sprite, tmpl, refRec, bx0, bx1, by0, by1))
+                    {
+                        if (refIdx < runPrims)
+                        {
+                            const uint32_t *runRec = primMap_ + static_cast<size_t>(primBase + refIdx) * kPrimStride;
+                            if (std::memcmp(runRec, refRec, kPrimStride * 4u) != 0)
+                                ++gaRecMismatch_;
+                        }
+                        pagesForRect(refColorPg, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, bx0, bx1, by0, by1);
+                        if (!ctx.zbuf.zmask)
+                            pagesForRect(refZPg, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, bx0, bx1, by0, by1);
+                        ++refIdx;
+                    }
+                }
+                if (refIdx != runPrims)
+                    ++gaRecMismatch_;
+
+                PageSet missC = refColorPg;
+                missC.andNot(drawPg);
+                PageSet extraC = drawPg;
+                extraC.andNot(refColorPg);
+                gaPageMissing_ += popcountPageSet(missC);
+                gaPageSuperset_ += popcountPageSet(extraC);
+
+                if (!ctx.zbuf.zmask)
+                {
+                    PageSet missZ = refZPg;
+                    missZ.andNot(runZPg);
+                    PageSet extraZ = runZPg;
+                    extraZ.andNot(refZPg);
+                    gaPageMissing_ += popcountPageSet(missZ);
+                    gaPageSuperset_ += popcountPageSet(extraZ);
+                }
+
+                ++gaRuns_;
+                gaPrims_ += runPrims;
+                const auto now = std::chrono::steady_clock::now();
+                if (now - gaLastPrint_ >= std::chrono::seconds(5))
+                {
+                    std::printf("[ga] runs=%llu prims=%llu recMismatch=%llu pageSuperset=%llu pageMissing=%llu\n",
+                                static_cast<unsigned long long>(gaRuns_),
+                                static_cast<unsigned long long>(gaPrims_),
+                                static_cast<unsigned long long>(gaRecMismatch_),
+                                static_cast<unsigned long long>(gaPageSuperset_),
+                                static_cast<unsigned long long>(gaPageMissing_));
+                    gaLastPrint_ = now;
+                }
+            }
+        }
+
         // returns 0 = drawn (or provably nothing to draw), >0 = fallback reason
         int gpuDraw(const GSPrimitiveBatch &b)
         {
@@ -1816,182 +2286,13 @@ namespace
             if (!vkReady_)
                 return 8;
 
-            alignas(64) uint32_t rec[kPrimStride];
-            uint32_t *p;
-            if (primStage_)
-            {
-                std::memset(rec, 0, sizeof rec);
-                p = rec;
-            }
-            else
-            {
-                p = primMap_ + static_cast<size_t>(primCount_) * kPrimStride;
-                std::memset(p, 0, kPrimStride * 4u);
-            }
-            const int ofx = ctx.xyoffset.ofx >> 4;
-            const int ofy = ctx.xyoffset.ofy >> 4;
+            alignas(64) uint32_t tmpl[kPrimStride];
+            fillStateTemplate(st, curClutSlot_, tmpl);
+            uint32_t *dst = primMap_ + static_cast<size_t>(primCount_) * kPrimStride;
             int bminX, bmaxX, bminY, bmaxY;
-
-            if (sprite)
-            {
-                const GSVertex &v0 = b.vertices[0];
-                const GSVertex &v1 = b.vertices[1];
-                int x0 = static_cast<int>(v0.x) - ofx, y0 = static_cast<int>(v0.y) - ofy;
-                int x1 = static_cast<int>(v1.x) - ofx, y1 = static_cast<int>(v1.y) - ofy;
-                const uint32_t z1 = static_cast<uint32_t>(v1.z);
-                if (x0 > x1)
-                    std::swap(x0, x1);
-                if (y0 > y1)
-                    std::swap(y0, y1);
-                const int spanX = std::max(1, x1 - x0);
-                const int spanY = std::max(1, y1 - y0);
-                const int ux1 = x0 + spanX - 1, uy1 = y0 + spanY - 1;
-                if (ux1 < ctx.scissor.x0 || x0 > ctx.scissor.x1 || uy1 < ctx.scissor.y0 || y0 > ctx.scissor.y1)
-                    return 0;
-                bminX = clampInt(x0, ctx.scissor.x0, ctx.scissor.x1);
-                bminY = clampInt(y0, ctx.scissor.y0, ctx.scissor.y1);
-                bmaxX = clampInt(ux1, ctx.scissor.x0, ctx.scissor.x1);
-                bmaxY = clampInt(uy1, ctx.scissor.y0, ctx.scissor.y1);
-                p[SPR_UX0] = static_cast<uint32_t>(x0);
-                p[SPR_UY0] = static_cast<uint32_t>(y0);
-                p[SPR_W] = fbits(static_cast<float>(spanX));
-                p[SPR_H] = fbits(static_cast<float>(spanY));
-                p[SPR_Z] = z1;
-                float u0f, v0f, u1f, v1f;
-                if (st.prim.fst)
-                {
-                    u0f = static_cast<float>(v0.u >> 4);
-                    v0f = static_cast<float>(v0.v >> 4);
-                    u1f = static_cast<float>(v1.u >> 4);
-                    v1f = static_cast<float>(v1.v >> 4);
-                }
-                else
-                {
-                    const float q0 = fabsQ(v0.q), q1 = fabsQ(v1.q);
-                    u0f = (v0.s / q0) * static_cast<float>(st.textureWidth);
-                    v0f = (v0.t / q0) * static_cast<float>(st.textureHeight);
-                    u1f = (v1.s / q1) * static_cast<float>(st.textureWidth);
-                    v1f = (v1.t / q1) * static_cast<float>(st.textureHeight);
-                }
-                p[SPR_U0F] = fbits(u0f);
-                p[SPR_V0F] = fbits(v0f);
-                p[SPR_U1F] = fbits(u1f);
-                p[SPR_V1F] = fbits(v1f);
-            }
-            else
-            {
-                const GSVertex &v0 = b.vertices[0];
-                const GSVertex &v1 = b.vertices[1];
-                const GSVertex &v2 = b.vertices[2];
-                const float fx0 = v0.x - static_cast<float>(ofx), fy0 = v0.y - static_cast<float>(ofy);
-                const float fx1 = v1.x - static_cast<float>(ofx), fy1 = v1.y - static_cast<float>(ofy);
-                const float fx2 = v2.x - static_cast<float>(ofx), fy2 = v2.y - static_cast<float>(ofy);
-                // PERF-LO: sequential compare, exactly what std::min/max(initializer_list) does (same result incl. NaN), without the list call
-                float mnX = fx0, mxX = fx0, mnY = fy0, mxY = fy0;
-                if (fx1 < mnX) mnX = fx1;
-                if (fx2 < mnX) mnX = fx2;
-                if (mxX < fx1) mxX = fx1;
-                if (mxX < fx2) mxX = fx2;
-                if (fy1 < mnY) mnY = fy1;
-                if (fy2 < mnY) mnY = fy2;
-                if (mxY < fy1) mxY = fy1;
-                if (mxY < fy2) mxY = fy2;
-                int minX = static_cast<int>(std::floor(mnX));
-                int maxX = static_cast<int>(std::ceil(mxX));
-                int minY = static_cast<int>(std::floor(mnY));
-                int maxY = static_cast<int>(std::ceil(mxY));
-                minX = clampInt(minX, ctx.scissor.x0, ctx.scissor.x1);
-                maxX = clampInt(maxX, ctx.scissor.x0, ctx.scissor.x1);
-                minY = clampInt(minY, ctx.scissor.y0, ctx.scissor.y1);
-                maxY = clampInt(maxY, ctx.scissor.y0, ctx.scissor.y1);
-                const float denom = (fy1 - fy2) * (fx0 - fx2) + (fx2 - fx1) * (fy0 - fy2);
-                if (std::fabs(denom) < 0.001f)
-                    return 0;
-                bminX = minX;
-                bmaxX = maxX;
-                bminY = minY;
-                bmaxY = maxY;
-                for (int i = 0; i < 3; ++i)
-                {
-                    const GSVertex &v = b.vertices[i];
-                    uint64_t zb;
-                    std::memcpy(&zb, &v.z, 8);
-                    p[Z0 + i * 2] = static_cast<uint32_t>(zb);
-                    p[Z0 + i * 2 + 1] = static_cast<uint32_t>(zb >> 32);
-                }
-            }
-            if (bminX > bmaxX || bminY > bmaxY)
+            if (!fillPrimFields(st, b.vertices.data(),b.vertexCount, sprite, tmpl, dst, bminX, bmaxX, bminY, bmaxY))
                 return 0;
-
-            for (int i = 0; i < 3; ++i)
-            {
-                const GSVertex &v = b.vertices[std::min<int>(i, std::max(0, static_cast<int>(b.vertexCount) - 1))];
-                p[X0 + i] = fbits(v.x);
-                p[Y0 + i] = fbits(v.y);
-                p[Q0 + i] = fbits(v.q);
-                p[S0 + i] = fbits(v.s);
-                p[T0 + i] = fbits(v.t);
-                p[RGBA0 + i] = static_cast<uint32_t>(v.r) | (static_cast<uint32_t>(v.g) << 8) | (static_cast<uint32_t>(v.b) << 16) | (static_cast<uint32_t>(v.a) << 24);
-                p[UV0 + i] = static_cast<uint32_t>(v.u) | (static_cast<uint32_t>(v.v) << 16);
-                p[FOG0 + i] = v.fog;
-            }
-            if (sprite)
-            {
-                // sprite uses vertex 1 colour/fog/z: make sure those slots hold v1 even for 2-vertex batches
-                const GSVertex &v1 = b.vertices[1];
-                p[RGBA0 + 1] = static_cast<uint32_t>(v1.r) | (static_cast<uint32_t>(v1.g) << 8) | (static_cast<uint32_t>(v1.b) << 16) | (static_cast<uint32_t>(v1.a) << 24);
-                p[FOG0 + 1] = v1.fog;
-            }
-
-            uint32_t flags = 0;
-            if (sprite) flags |= F_SPRITE;
-            if (st.prim.iip) flags |= F_IIP;
-            if (st.prim.tme) flags |= F_TME;
-            if (st.prim.fst) flags |= F_FST;
-            if (st.prim.fge) flags |= F_FGE;
-            if (st.prim.abe) flags |= F_ABE;
-            if (st.pabe) flags |= F_PABE;
-            if (st.linearFilter) flags |= F_LINEAR;
-            if (ctx.zbuf.zmask) flags |= F_ZMASK;
-            p[FLAGS] = flags;
-            p[OFX] = static_cast<uint32_t>(ofx);
-            p[OFY] = static_cast<uint32_t>(ofy);
-            p[SCX0] = ctx.scissor.x0;
-            p[SCX1] = ctx.scissor.x1;
-            p[SCY0] = ctx.scissor.y0;
-            p[SCY1] = ctx.scissor.y1;
-            p[FBP] = ctx.frame.fbp << 5u;
-            p[FBW] = ctx.frame.fbw;
-            p[FPSM] = ctx.frame.psm;
-            p[FBMSK] = ctx.frame.fbmsk;
-            p[ZBP] = ctx.zbuf.zbp << 5u;
-            p[ZPSM] = ctx.zbuf.psm;
-            p[TEST] = static_cast<uint32_t>(ctx.test);
-            p[ALPHA] = static_cast<uint32_t>(ctx.alpha);
-            p[ALPHAFIX] = static_cast<uint32_t>((ctx.alpha >> 32) & 0xFFu);
-            p[FBA] = static_cast<uint32_t>(ctx.fba & 1u);
-            p[TBP0] = ctx.tex0.tbp0;
-            p[TBW] = ctx.tex0.tbw;
-            p[TPSM] = ctx.tex0.psm;
-            p[TCC] = ctx.tex0.tcc;
-            p[TFX] = ctx.tex0.tfx;
-            p[CPSM] = ctx.tex0.cpsm;
-            p[CSM] = ctx.tex0.csm;
-            p[CSA] = ctx.tex0.csa;
-            p[TEXW] = st.textureWidth;
-            p[TEXH] = st.textureHeight;
-            p[CLAMP_LO] = static_cast<uint32_t>(ctx.clamp);
-            p[CLAMP_HI] = static_cast<uint32_t>(ctx.clamp >> 32);
-            p[TA0] = st.texa.ta0;
-            p[AEM] = st.texa.aem ? 1u : 0u;
-            p[TA1] = st.texa.ta1;
-            p[FOGRGB] = static_cast<uint32_t>(st.fogR) | (static_cast<uint32_t>(st.fogG) << 8) | (static_cast<uint32_t>(st.fogB) << 16);
-            p[BBOX + 0] = static_cast<uint32_t>(bminX);
-            p[BBOX + 1] = static_cast<uint32_t>(bmaxX);
-            p[BBOX + 2] = static_cast<uint32_t>(bminY);
-            p[BBOX + 3] = static_cast<uint32_t>(bmaxY);
-
-            p[CLUTSLOT] = static_cast<uint32_t>(curClutSlot_);
+            const uint32_t flags = tmpl[FLAGS];
 
             // frame / Z / texture byte ranges
             uint32_t flo, fhi, zlo, zhi;
@@ -2007,8 +2308,6 @@ namespace
             // a draw that reads what an earlier draw wrote as frame/Z must also be ordered; covered by the interlock for same-pixel,
             // and by the texture check above for sampled data.
             beginPass();
-            if (primStage_)
-                std::memcpy(primMap_ + static_cast<size_t>(primCount_) * kPrimStride, rec, kPrimStride * 4u);
             if (pendCount_ != 0u && pendFirst_ + pendCount_ == primCount_)
                 ++pendCount_;
             else
@@ -2232,6 +2531,12 @@ namespace
         uint64_t fallback_[16] = {};
         uint64_t cmpClean_ = 0, cmpDirty_ = 0;
         double syncMs_ = 0.0;
+
+        // PERF-GA
+        std::vector<PrimBbox> runBboxes_;
+        bool gaCheck_ = false;
+        uint64_t gaRuns_ = 0, gaPrims_ = 0, gaRecMismatch_ = 0, gaPageSuperset_ = 0, gaPageMissing_ = 0;
+        std::chrono::steady_clock::time_point gaLastPrint_;
     };
 } // namespace
 
