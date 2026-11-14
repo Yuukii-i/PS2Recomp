@@ -9,10 +9,13 @@
 // touches private VU1Interpreter members and needs `#define private public`.)
 #include <cfloat>
 #include <cstdlib> // PERF-V1G
+#include <filesystem> // PERF-SA
 #include <unordered_map>
 #include <utility>
 
 extern void ps2xSafeLog(const char *fmt, ...);
+#include <atomic>
+extern std::atomic<uint64_t> g_hostPresentSeq; // PERF-SA: per presented frame (gs_frontend.cpp)
 
 namespace vu1func
 {
@@ -359,6 +362,163 @@ inline void fv8ToRows(const Fv8V &v, __m128 rows[8])
     rows[7] = _mm256_extractf128_ps(r3, 1);
 }
 
+// PERF-SA: semantic scene buffer (PS2X_SCENE=1, default OFF)
+namespace scene
+{
+inline bool on()
+{
+    static const bool v = []() { const char *e = std::getenv("PS2X_SCENE"); return e && e[0] == '1'; }();
+    return v;
+}
+inline bool checkOn()
+{
+    static const bool v = []() { const char *e = std::getenv("PS2X_SCENE_CHECK"); return e && e[0] == '1'; }();
+    return v;
+}
+inline int64_t dumpFrame()
+{
+    static const int64_t v = []() -> int64_t {
+        const char *e = std::getenv("PS2X_SCENE_DUMP");
+        if (!e || !e[0])
+            return -1;
+        char *end = nullptr;
+        long long n = std::strtoll(e, &end, 10);
+        return (end != e && n >= 0) ? static_cast<int64_t>(n) : -1;
+    }();
+    return v;
+}
+
+struct SceneVertex // 80 bytes
+{
+    float pos[4];
+    float normal[4];
+    float stq[4];
+    uint32_t rgba[4];
+    int32_t screenXyz[3];
+    uint32_t adc;
+};
+static_assert(sizeof(SceneVertex) == 80u, "SceneVertex size");
+
+struct SceneDraw // 128 bytes
+{
+    uint32_t handlerPc;
+    uint32_t mscalIndex;
+    uint32_t gifOffset;
+    uint32_t gifLength;
+    uint32_t firstVertex;
+    uint32_t vertexCount;
+    uint32_t boneCount;
+    uint32_t flags;
+    float objMatrix[16];
+    float vpScale[4];
+    float vpOffset[4];
+};
+static_assert(sizeof(SceneDraw) == 128u, "SceneDraw size");
+
+struct SceneBinHeader // 32 bytes
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t frameIndex;
+    uint32_t drawCount;
+    uint32_t vertexCount;
+    uint32_t reserved[3];
+};
+static_assert(sizeof(SceneBinHeader) == 32u, "SceneBinHeader size");
+
+struct SceneFrame
+{
+    uint64_t frameIndex = 0;
+    uint32_t mscalCount = 0;
+    uint32_t gifBytes = 0;
+    std::vector<SceneDraw> draws;
+    std::vector<SceneVertex> vertices;
+    void clear()
+    {
+        frameIndex = 0;
+        mscalCount = 0;
+        gifBytes = 0;
+        draws.clear();
+        vertices.clear();
+    }
+};
+
+struct SceneState
+{
+    SceneFrame bufs[2];
+    uint32_t writeIdx = 0;
+    uint64_t frameSeq = 0;
+    uint64_t lastPresentSeq = 0; // PERF-SA
+    uint32_t mscalIndex = 0;
+    uint32_t frameGifBytes = 0;
+    uint32_t curBoneCount = 0;
+    float curObjMatrix[16] = {};
+    uint64_t totalFrames = 0;
+    uint64_t totalDraws = 0;
+    uint64_t totalVerts = 0;
+    uint64_t totalMismatch = 0;
+    uint64_t mismatchByHandler[4] = {}; // 0:1EE0, 1:1EF0, 2:2440, 3:2900
+    std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
+    bool dumped = false;
+};
+
+static thread_local SceneState t_scene;
+
+inline int handlerSlot(uint32_t pc)
+{
+    switch (pc)
+    {
+    case 0x1EE0u: return 0;
+    case 0x1EF0u: return 1;
+    case 0x2440u: return 2;
+    case 0x2900u: return 3;
+    default: return 0;
+    }
+}
+
+inline void setObjMatrix(__m128 r0, __m128 r1, __m128 r2, __m128 r3)
+{
+    _mm_storeu_ps(t_scene.curObjMatrix + 0, r0);
+    _mm_storeu_ps(t_scene.curObjMatrix + 4, r1);
+    _mm_storeu_ps(t_scene.curObjMatrix + 8, r2);
+    _mm_storeu_ps(t_scene.curObjMatrix + 12, r3);
+    ++t_scene.curBoneCount;
+}
+
+inline void beginMscal(const uint8_t *vu, size_t &d0, size_t &v0)
+{
+    const SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    d0 = f.draws.size();
+    v0 = f.vertices.size();
+    t_scene.curBoneCount = 0;
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 m998 = ldq(vu, 998u), m999 = ldq(vu, 999u), m1000 = ldq(vu, 1000u), m1001 = ldq(vu, 1001u);
+    const auto mulRow = [&](__m128 row, bool hasW) {
+        __m128 a = fmacV<4>(m998, bc<0>(row), zero);
+        a = fmacV<2>(m999, bc<1>(row), a);
+        a = fmacV<2>(m1000, bc<2>(row), a);
+        return hasW ? fmacV<2>(m1001, bc<3>(row), a) : a;
+    };
+    _mm_storeu_ps(t_scene.curObjMatrix + 0, mulRow(ldq(vu, 978u), false));
+    _mm_storeu_ps(t_scene.curObjMatrix + 4, mulRow(ldq(vu, 979u), false));
+    _mm_storeu_ps(t_scene.curObjMatrix + 8, mulRow(ldq(vu, 980u), false));
+    _mm_storeu_ps(t_scene.curObjMatrix + 12, mulRow(ldq(vu, 981u), true));
+}
+
+inline void commitMscal(uint32_t gifBytes)
+{
+    ++t_scene.mscalIndex;
+    t_scene.frameGifBytes += gifBytes;
+}
+
+inline void rollbackMscal(size_t d0, size_t v0)
+{
+    SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    f.draws.resize(d0);
+    f.vertices.resize(v0);
+}
+} // namespace scene
+
 // Handler 00A8: matrix setup (00A8..0150) + table transform loop (0158..0180), docs/VU1_HANDLER_FORMS.md sections 1, 2 (verified bit-exact there).
 // Loop memory order inside one pass: SQI vf31 (0158), LQ.xy (0160), SQI vf6 (0168), LQI.zw (0170); the vf5 that pass k multiplies holds the xy/zw
 // loaded by pass k-1 (pass 1: the LQI of 0138), and the vf6 stored by pass k is the MADDw result of pass k-1 (pass 1: the prologue MADDw at 0150).
@@ -383,6 +543,8 @@ static bool handler00A8(Regs &R, uint8_t *vu)
     acc = fmacV<4>(vf1, bc<0>(vf8), zero);
     acc = fmacV<2>(vf5, bc<1>(vf8), acc);
     vf1 = fmacV<2>(vf7, bc<2>(vf8), acc); // R0
+    if (scene::on()) // PERF-SA
+        scene::setObjMatrix(vf1, vf2, vf3, vf4);
     uint16_t vi5 = static_cast<uint16_t>(vi3 + 636u), vi1 = static_cast<uint16_t>(vi3 + 476u);
     const __m128 vf25 = ldq(vu, vi1++);
     vf5 = ldq(vu, vi1++);
@@ -664,6 +826,257 @@ inline __m128 mr32(__m128 v) // mirrors VU1Interpreter::execLower case 0x31 (MR3
     return _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 3, 2, 1));
 }
 
+namespace scene // PERF-SA
+{
+inline void checkDraw(const SceneDraw &d, const SceneVertex *verts)
+{
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 c1 = _mm_loadu_ps(d.vpScale);
+    const __m128 c2 = _mm_loadu_ps(d.vpOffset);
+    const int slot = handlerSlot(d.handlerPc);
+    for (uint32_t i = 0; i < d.vertexCount; ++i)
+    {
+        const SceneVertex &v = verts[i];
+        const __m128 p = _mm_loadu_ps(v.pos);
+        const __m128 mula = fmacV<4>(c1, p, zero);
+        const __m128 tv = fmacV<2>(c2, bc<3>(p), mula);
+        const float q = divQ(tv);
+        const __m128 scr = fmacV<4>(tv, _mm_set1_ps(q), zero);
+        const __m128i xyz = ftoiS<16>(scr);
+        alignas(16) int32_t out[4];
+        _mm_store_si128(reinterpret_cast<__m128i *>(out), xyz);
+        if (out[0] != v.screenXyz[0] || out[1] != v.screenXyz[1] || out[2] != v.screenXyz[2])
+        {
+            ++t_scene.totalMismatch;
+            ++t_scene.mismatchByHandler[slot];
+        }
+    }
+}
+
+inline void dumpSceneFrame(const SceneFrame &f)
+{
+    std::error_code ec;
+    std::filesystem::create_directories("logs", ec);
+    char binPath[128], txtPath[128];
+    std::snprintf(binPath, sizeof(binPath), "logs/scene_%llu.bin", static_cast<unsigned long long>(f.frameIndex));
+    std::snprintf(txtPath, sizeof(txtPath), "logs/scene_%llu.txt", static_cast<unsigned long long>(f.frameIndex));
+
+    if (FILE *fb = std::fopen(binPath, "wb"))
+    {
+        SceneBinHeader hdr{};
+        hdr.magic = 0x314E4353u; // 'SCN1'
+        hdr.version = 1u;
+        hdr.frameIndex = static_cast<uint32_t>(f.frameIndex);
+        hdr.drawCount = static_cast<uint32_t>(f.draws.size());
+        hdr.vertexCount = static_cast<uint32_t>(f.vertices.size());
+        std::fwrite(&hdr, sizeof(hdr), 1u, fb);
+        if (!f.draws.empty())
+            std::fwrite(f.draws.data(), sizeof(SceneDraw), f.draws.size(), fb);
+        if (!f.vertices.empty())
+            std::fwrite(f.vertices.data(), sizeof(SceneVertex), f.vertices.size(), fb);
+        std::fclose(fb);
+    }
+
+    if (FILE *ft = std::fopen(txtPath, "w"))
+    {
+        static const uint32_t kPcs[4] = {0x1EE0u, 0x1EF0u, 0x2440u, 0x2900u};
+        static const char *const kNames[4] = {"1EE0(skin)", "1EF0(skin_uv)", "2440(rigid)", "2900(clip)"};
+        uint64_t hDraws[4] = {}, hVerts[4] = {};
+        float minP[4] = {FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX};
+        float maxP[4] = {-FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX};
+        for (const SceneDraw &d : f.draws)
+        {
+            const int s = handlerSlot(d.handlerPc);
+            ++hDraws[s];
+            hVerts[s] += d.vertexCount;
+        }
+        for (const SceneVertex &v : f.vertices)
+        {
+            for (int c = 0; c < 4; ++c)
+            {
+                if (v.pos[c] < minP[c]) minP[c] = v.pos[c];
+                if (v.pos[c] > maxP[c]) maxP[c] = v.pos[c];
+            }
+        }
+        std::fprintf(ft, "Scene buffer v1 dump: frame=%llu mscals=%u draws=%zu verts=%zu gifBytes=%u checkMismatch=%llu\n",
+                     static_cast<unsigned long long>(f.frameIndex), f.mscalCount, f.draws.size(), f.vertices.size(),
+                     f.gifBytes, static_cast<unsigned long long>(t_scene.totalMismatch));
+        if (f.vertices.empty())
+            std::fprintf(ft, "bbox: (empty)\n");
+        else
+            std::fprintf(ft, "bbox(clip pos): min=(%.3f, %.3f, %.3f, %.3f) max=(%.3f, %.3f, %.3f, %.3f)\n",
+                         minP[0], minP[1], minP[2], minP[3], maxP[0], maxP[1], maxP[2], maxP[3]);
+        std::fprintf(ft, "\nPer-handler counts:\n");
+        for (int s = 0; s < 4; ++s)
+            std::fprintf(ft, "  0x%04X %-14s draws=%llu verts=%llu mismatch=%llu\n",
+                         kPcs[s], kNames[s], static_cast<unsigned long long>(hDraws[s]),
+                         static_cast<unsigned long long>(hVerts[s]), static_cast<unsigned long long>(t_scene.mismatchByHandler[s]));
+        for (int s = 0; s < 4; ++s)
+        {
+            if (hVerts[s] == 0u)
+                continue;
+            std::fprintf(ft, "\nSample vertices for 0x%04X %s:\n", kPcs[s], kNames[s]);
+            int shown = 0;
+            for (const SceneDraw &d : f.draws)
+            {
+                if (handlerSlot(d.handlerPc) != s)
+                    continue;
+                for (uint32_t i = 0; i < d.vertexCount && shown < 5; ++i, ++shown)
+                {
+                    const SceneVertex &v = f.vertices[d.firstVertex + i];
+                    std::fprintf(ft, "  [%d] pos=(%.3f,%.3f,%.3f,%.3f) nrm=(%.3f,%.3f,%.3f) stq=(%.4f,%.4f,%.4f) rgba=(%u,%u,%u,%u) xyz=(%d,%d,%d) adc=0x%X\n",
+                                 shown, v.pos[0], v.pos[1], v.pos[2], v.pos[3],
+                                 v.normal[0], v.normal[1], v.normal[2],
+                                 v.stq[0], v.stq[1], v.stq[2],
+                                 v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3],
+                                 v.screenXyz[0], v.screenXyz[1], v.screenXyz[2], v.adc);
+                }
+                if (shown >= 5)
+                    break;
+            }
+        }
+        std::fclose(ft);
+    }
+}
+
+inline void onFlush()
+{
+    // PERF-SA: advance the double buffer only when a new frame was presented, not on every VIF1 drain
+    const uint64_t pseq = ::g_hostPresentSeq.load(std::memory_order_relaxed);
+    if (pseq == t_scene.lastPresentSeq)
+        return;
+    t_scene.lastPresentSeq = pseq;
+    SceneFrame &cur = t_scene.bufs[t_scene.writeIdx];
+    if (cur.draws.empty() && t_scene.mscalIndex == 0u)
+        return;
+    cur.frameIndex = t_scene.frameSeq++;
+    cur.mscalCount = t_scene.mscalIndex;
+    cur.gifBytes = t_scene.frameGifBytes;
+    ++t_scene.totalFrames;
+    t_scene.totalDraws += cur.draws.size();
+    t_scene.totalVerts += cur.vertices.size();
+
+    const int64_t df = dumpFrame();
+    if (df >= 0 && !t_scene.dumped && cur.frameIndex == static_cast<uint64_t>(df))
+    {
+        dumpSceneFrame(cur);
+        t_scene.dumped = true;
+    }
+
+    t_scene.writeIdx ^= 1u;
+    t_scene.bufs[t_scene.writeIdx].clear();
+    t_scene.mscalIndex = 0u;
+    t_scene.frameGifBytes = 0u;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - t_scene.lastLog).count() >= 5000)
+    {
+        t_scene.lastLog = now;
+        const double fr = t_scene.totalFrames ? static_cast<double>(t_scene.totalFrames) : 1.0;
+        ::ps2xSafeLog("[scene] frames=%llu draws/frame=%.1f verts/frame=%.1f checkMismatch=%llu\n",
+                      static_cast<unsigned long long>(t_scene.totalFrames),
+                      static_cast<double>(t_scene.totalDraws) / fr,
+                      static_cast<double>(t_scene.totalVerts) / fr,
+                      static_cast<unsigned long long>(t_scene.totalMismatch));
+    }
+}
+
+inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t gifLen, uint32_t count, uint32_t boneCount, uint32_t flags, __m128 c1v, __m128 c2v)
+{
+    SceneDraw d{};
+    d.handlerPc = pc;
+    d.mscalIndex = t_scene.mscalIndex;
+    d.gifOffset = t_scene.frameGifBytes + gifOff;
+    d.gifLength = gifLen;
+    d.firstVertex = static_cast<uint32_t>(f.vertices.size());
+    d.vertexCount = count;
+    d.boneCount = boneCount;
+    d.flags = flags;
+    std::memcpy(d.objMatrix, t_scene.curObjMatrix, sizeof(d.objMatrix));
+    _mm_storeu_ps(d.vpScale, c1v);
+    _mm_storeu_ps(d.vpOffset, c2v);
+    f.draws.push_back(d);
+    return f.draws.back();
+}
+
+inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen)
+{
+    SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    const SceneDraw &d = pushDraw(f, 0x2900u, gifOff, gifLen, static_cast<uint32_t>(polyCount), 0u, 4u | (copyS ? 2u : 0u), c1v, c2v);
+    const size_t v0 = f.vertices.size();
+    f.vertices.resize(v0 + static_cast<size_t>(polyCount));
+    for (int32_t k = 0; k < polyCount; ++k)
+    {
+        SceneVertex &sv = f.vertices[v0 + static_cast<size_t>(k)];
+        const uint32_t qOut = 877u + 4u * static_cast<uint32_t>(k);
+        _mm_storeu_ps(sv.pos, ldq(vu, 918u + 3u * static_cast<uint32_t>(k)));
+        sv.normal[0] = sv.normal[1] = sv.normal[2] = sv.normal[3] = 0.0f;
+        _mm_storeu_ps(sv.stq, ldq(vu, qOut + 1u));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(sv.rgba), ldqi(vu, qOut + 2u));
+        alignas(16) int32_t xyzw[4];
+        _mm_store_si128(reinterpret_cast<__m128i *>(xyzw), ldqi(vu, qOut + 3u));
+        sv.screenXyz[0] = xyzw[0];
+        sv.screenXyz[1] = xyzw[1];
+        sv.screenXyz[2] = xyzw[2];
+        sv.adc = ldw(vu, qOut, 3u);
+    }
+    if (checkOn())
+        checkDraw(d, f.vertices.data() + v0);
+}
+
+inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __m128 c2v, const __m128 *Ps, const int32_t *Wd, uint32_t e7, uint32_t gifOff, uint32_t gifLen)
+{
+    SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    const SceneDraw &d = pushDraw(f, 0x2440u, gifOff, gifLen, static_cast<uint32_t>(N), 0u, copyS ? 2u : 0u, c1v, c2v);
+    const size_t v0 = f.vertices.size();
+    f.vertices.resize(v0 + static_cast<size_t>(N));
+    for (int32_t j = 0; j < N; ++j)
+    {
+        SceneVertex &sv = f.vertices[v0 + static_cast<size_t>(j)];
+        const uint32_t qOut = (e7 + 1u + 4u * static_cast<uint32_t>(j)) & 0x3FFu;
+        const uint32_t ix = static_cast<uint32_t>(Wd[j] & 0x7FFF);
+        _mm_storeu_ps(sv.pos, Ps[j]);
+        _mm_storeu_ps(sv.normal, ldq(vu, (556u + ix) & 0x3FFu));
+        _mm_storeu_ps(sv.stq, ldq(vu, (qOut + 1u) & 0x3FFu));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(sv.rgba), ldqi(vu, (qOut + 2u) & 0x3FFu));
+        alignas(16) int32_t xyzw[4];
+        _mm_store_si128(reinterpret_cast<__m128i *>(xyzw), ldqi(vu, (qOut + 3u) & 0x3FFu));
+        sv.screenXyz[0] = xyzw[0];
+        sv.screenXyz[1] = xyzw[1];
+        sv.screenXyz[2] = xyzw[2];
+        sv.adc = static_cast<uint32_t>(xyzw[3]);
+    }
+    if (checkOn())
+        checkDraw(d, f.vertices.data() + v0);
+}
+
+inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, __m128 c2v, const __m128 *rA, uint32_t i4base, uint32_t ubase, uint32_t gifOff, uint32_t gifLen)
+{
+    SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    const SceneDraw &d = pushDraw(f, vi10 ? 0x1EF0u : 0x1EE0u, gifOff, gifLen, static_cast<uint32_t>(N), t_scene.curBoneCount, 1u | (vi10 ? 2u : 0u), c1v, c2v);
+    const size_t v0 = f.vertices.size();
+    f.vertices.resize(v0 + static_cast<size_t>(N));
+    for (int32_t v = 0; v < N; ++v)
+    {
+        SceneVertex &sv = f.vertices[v0 + static_cast<size_t>(v)];
+        const uint32_t qOut = ubase + 1u + 4u * static_cast<uint32_t>(v);
+        const int32_t idx = static_cast<int16_t>(ilw(vu, (i4base + static_cast<uint32_t>(v)) & 0x3FFu, 0u));
+        _mm_storeu_ps(sv.pos, rA[v]);
+        _mm_storeu_ps(sv.normal, ldq(vu, (556u + static_cast<uint32_t>(idx)) & 0x3FFu));
+        _mm_storeu_ps(sv.stq, ldq(vu, qOut + 1u));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(sv.rgba), ldqi(vu, qOut + 2u));
+        alignas(16) int32_t xyzw[4];
+        _mm_store_si128(reinterpret_cast<__m128i *>(xyzw), ldqi(vu, qOut + 3u));
+        sv.screenXyz[0] = xyzw[0];
+        sv.screenXyz[1] = xyzw[1];
+        sv.screenXyz[2] = xyzw[2];
+        sv.adc = ldw(vu, qOut, 3u);
+    }
+    if (checkOn())
+        checkDraw(d, f.vertices.data() + v0);
+}
+} // namespace scene
+
 // Task F4: Sutherland-Hodgman 6-plane frustum clipper (2900..2F68), called from rigid2440 when no trivial-reject FCOR mask matches.
 // Reproduces every context/spill/buffer/GIF store to VU memory (1020..1022, 918..959, 876..) and kicks 1023 + 876; returns to 24F8/2720 via JR vi12.
 static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, int32_t vi7, int32_t vi8, int32_t vi9, int32_t vi10, bool copyS,
@@ -840,7 +1253,11 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
         stqiRaw(vu, outQ + 0u, _mm_insert_epi32(ldqi(vu, outQ + 0u), _mm_extract_epi32(fw, 3), 3));
         outQ += 4u;
     }
-    return kick(vu, 876u, kicks, gif);
+    if (!kick(vu, 876u, kicks, gif))
+        return false;
+    if (scene::on()) // PERF-SA
+        scene::recordClipPolygon(vu, polyCount, copyS, c1v, c2v, kicks.back().first, kicks.back().second);
+    return true;
 }
 
 // Rigid path 2440 (per-vertex transform / trivial-reject / assemble, loop 24C8..25B0): 1:1 value + memory port of lbVert (vu1_native_hand.inc), which is exact on every
@@ -970,6 +1387,8 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(e6), 2), static_cast<int>(e7), 3));
     if (!kick(vu, e7, kicks, gif))
         return fb1EE0(kFbRigidKick);
+    if (scene::on()) // PERF-SA
+        scene::recordRigid(vu, N, copyS, c1v, c2v, Ps, Wd, e7, kicks.back().first, kicks.back().second);
     R.vi[12] = top; // XTOP vi12
     return true;
 }
@@ -1132,6 +1551,8 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3)); // ISW.z / ISW.w toggle
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
         return fb1EE0(kFbSkinKick);
+    if (scene::on()) // PERF-SA
+        scene::recordSkinned(vu, N, vi10, vf3, vf4, rA, i4base, ubase, kicks.back().first, kicks.back().second);
     R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0)); // ILW.x vi12, 1(vi4) (read from VU mem: V[1] does not exist for N==1)
     return true;
 }
@@ -2421,12 +2842,19 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     }
     UndoLog &log = undoLog(); // PERF-V1G
     log.clear();
+    size_t sceneD0 = 0, sceneV0 = 0; // PERF-SA
+    if (scene::on()) // PERF-SA
+        scene::beginMscal(vu, sceneD0, sceneV0);
     if (vu1FuncRunInner(vu, top, kicks, gif, oneShot, vxA))
     {
+        if (scene::on()) // PERF-SA
+            scene::commitMscal(static_cast<uint32_t>(gif.size()));
         if (m)
             m->streak = 0;
         return true;
     }
+    if (scene::on()) // PERF-SA
+        scene::rollbackMscal(sceneD0, sceneV0);
     if (m)
         ++m->streak;
     for (uint32_t i = log.size; i-- > 0;)
@@ -2667,6 +3095,8 @@ void ps2xVu1Path1Batch(bool on) // PERF-V1I
 void ps2xVu1FlushPath1() // PERF-V1I
 {
     vu1func::flushPath1Pending(true);
+    if (vu1func::scene::on()) // PERF-SA
+        vu1func::scene::onFlush();
 }
 
 // PROBE-VX: entry points used by vpExecThreadFunc (ps2_vif1_interpreter.cpp, declared extern there)
