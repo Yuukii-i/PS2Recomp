@@ -184,6 +184,16 @@ inline bool v0hFinalizeFlags(const V0hState &st, __m256d lastDex, uint32_t &mac,
     return true;
 }
 
+inline bool v0hFinalizeSticky(const V0hState &st, uint32_t &stickyFlags) // PERF-V0I
+{
+    if (_mm256_movemask_pd(st.allSafe) != 0xF)
+        return false;
+    const uint32_t stickyZ = (_mm256_movemask_pd(st.stickyZero) != 0) ? 1u : 0u;
+    const uint32_t stickyS = (_mm256_movemask_pd(st.stickySign) != 0) ? 2u : 0u;
+    stickyFlags |= stickyZ | stickyS;
+    return true;
+}
+
 inline __m256d v0hTransformVec(__m256d d4, __m256d d5, __m256d d6, __m256d d7, __m256d dv,
                                __m128 &outVf, __m128 &vacc, V0hState &st) // PERF-V0H
 {
@@ -710,11 +720,33 @@ inline void run_0f0(R5900Context *ctx)
         _mm_setcsr(prevCsr);
 }
 
-// PERF-V0G: shared subroutine 640..6B8 called by 348 and 4B0 (transforms vf11..vf8 by vf4..vf7 into vf15..vf12)
+// PERF-V0G / PERF-V0I: shared subroutine 640..6B8 called by 348 and 4B0 (transforms vf11..vf8 by vf4..vf7 into vf15..vf12)
 inline void run_sub_640(__m128 vf[32], __m128 &vacc, bool &dirtyAcc, uint32_t &stickyFlags,
                         uint32_t &mac, uint32_t &status, __m128 vzero)
 {
     using namespace vu0fast;
+    { // PERF-V0I: vectorized fast path (all 16 ops are execFmacFast<false>, no MAC/status update)
+        const __m256d d4 = _mm256_cvtps_pd(normalizeOperand4(vf[4]));
+        const __m256d d5 = _mm256_cvtps_pd(normalizeOperand4(vf[5]));
+        const __m256d d6 = _mm256_cvtps_pd(normalizeOperand4(vf[6]));
+        const __m256d d7 = _mm256_cvtps_pd(normalizeOperand4(vf[7]));
+        __m128 out15, out14, out13, out12, fastVacc;
+        V0hState st;
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(vf[11])), out15, fastVacc, st);
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(vf[10])), out14, fastVacc, st);
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(vf[9])),  out13, fastVacc, st);
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(vf[8])),  out12, fastVacc, st);
+        if (v0hFinalizeSticky(st, stickyFlags))
+        {
+            vf[15] = out15;
+            vf[14] = out14;
+            vf[13] = out13;
+            vf[12] = out12;
+            vacc = fastVacc;
+            dirtyAcc = true;
+            return;
+        }
+    }
     execFmacFast<false>(mkOp(OP_MUL,  SRC_VT_BC, 0, 1, 0xF, 4, 11,  0), vf, vacc, dirtyAcc, stickyFlags, mac, status, vzero, vzero);
     execFmacFast<false>(mkOp(OP_MADD, SRC_VT_BC, 1, 1, 0xF, 5, 11,  0), vf, vacc, dirtyAcc, stickyFlags, mac, status, vzero, vzero);
     execFmacFast<false>(mkOp(OP_MADD, SRC_VT_BC, 2, 1, 0xF, 6, 11,  0), vf, vacc, dirtyAcc, stickyFlags, mac, status, vzero, vzero);
