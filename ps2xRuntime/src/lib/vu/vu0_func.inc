@@ -13,7 +13,7 @@ inline bool isFuncEnabled() // PERF-V0G
     static const bool s_on = []()
     {
         const char *e = std::getenv("PS2X_VU0_FUNC");
-        return e && e[0] == '1';
+        return !(e && e[0] == '0');
     }();
     return s_on;
 }
@@ -61,7 +61,243 @@ inline void finalizeCommon(R5900Context *ctx, __m128 vf0, uint32_t mac, uint32_t
     ctx->vu0_vpu_stat2 = 0u;
 }
 
-// PERF-V0G: 000..080 (4x4 transform of vf8..vf11 by vf4..vf7)
+// PERF-V0H: State updated per op by vu0fast::execFmacFast<ComputeMac>:
+//   1. Destination register: vf[op.fd] (if !op.toAcc && op.fd != 0) or vacc + dirtyAcc=true (if op.toAcc),
+//      masked by sseDestMask = kBitRev4[op.dest].
+//   2. stickyFlags (bits 0..3: Z=1, S=2, U=4, O=8): ORed across enabled lanes of dex and, for
+//      OP_MADD/OP_MSUB, the intermediate product dprod. Shifted into vu0_status[9:6] at program end.
+//   3. When ComputeMac == true (only needed on the final FMAC op): mac (16-bit Z/S/U/O per lane via
+//      kBitRev4) and status[3:0] (OR of enabled lanes' Z/S/U/O of dex).
+//   Note: execFmacFast does not touch FlgRing, vu0_clip_flags, vu0_q, vu0_r, vi, or cycle counts.
+
+struct V0hState // PERF-V0H
+{
+    __m256d allSafe = _mm256_castsi256_pd(_mm256_set1_epi64x(-1LL));
+    __m256d stickyZero = _mm256_setzero_pd();
+    __m256d stickySign = _mm256_setzero_pd();
+};
+
+template <uint32_t SseMask>
+inline __m256d v0hLaneMaskD() // PERF-V0H
+{
+    return _mm256_castsi256_pd(_mm256_set_epi64x(
+        (SseMask & 8u) ? -1LL : 0LL,
+        (SseMask & 4u) ? -1LL : 0LL,
+        (SseMask & 2u) ? -1LL : 0LL,
+        (SseMask & 1u) ? -1LL : 0LL));
+}
+
+template <uint32_t SseMask>
+inline __m256d v0hInvLaneMaskD() // PERF-V0H
+{
+    return _mm256_castsi256_pd(_mm256_set_epi64x(
+        (SseMask & 8u) ? 0LL : -1LL,
+        (SseMask & 4u) ? 0LL : -1LL,
+        (SseMask & 2u) ? 0LL : -1LL,
+        (SseMask & 1u) ? 0LL : -1LL));
+}
+
+template <uint32_t SseMask = 0xFu>
+inline void v0hTrackNoAcc(__m256d dex, V0hState &st) // PERF-V0H
+{
+    const __m256d absMaskD = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+    const __m256d zeroD = _mm256_setzero_pd();
+    const __m256d fltMinD = _mm256_set1_pd(static_cast<double>(std::numeric_limits<float>::min()));
+    const __m256d fltMaxD = _mm256_set1_pd(static_cast<double>(std::numeric_limits<float>::max()));
+
+    const __m256d absEx = _mm256_and_pd(dex, absMaskD);
+    const __m256d exIsZero = _mm256_cmp_pd(absEx, zeroD, _CMP_EQ_OQ);
+    const __m256d exSafe = _mm256_or_pd(
+        exIsZero,
+        _mm256_and_pd(_mm256_cmp_pd(absEx, fltMinD, _CMP_GE_OQ),
+                      _mm256_cmp_pd(absEx, fltMaxD, _CMP_LE_OQ)));
+    if constexpr (SseMask == 0xFu)
+    {
+        st.allSafe = _mm256_and_pd(st.allSafe, exSafe);
+        st.stickyZero = _mm256_or_pd(st.stickyZero, exIsZero);
+        st.stickySign = _mm256_or_pd(st.stickySign, dex);
+    }
+    else
+    {
+        const __m256d en = v0hLaneMaskD<SseMask>();
+        st.allSafe = _mm256_and_pd(st.allSafe, _mm256_or_pd(exSafe, v0hInvLaneMaskD<SseMask>()));
+        st.stickyZero = _mm256_or_pd(st.stickyZero, _mm256_and_pd(exIsZero, en));
+        st.stickySign = _mm256_or_pd(st.stickySign, _mm256_and_pd(dex, en));
+    }
+}
+
+template <uint32_t SseMask = 0xFu>
+inline void v0hTrackAcc(__m256d dex, __m256d dprod, V0hState &st) // PERF-V0H
+{
+    const __m256d absMaskD = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+    const __m256d zeroD = _mm256_setzero_pd();
+    const __m256d fltMinD = _mm256_set1_pd(static_cast<double>(std::numeric_limits<float>::min()));
+    const __m256d fltMaxD = _mm256_set1_pd(static_cast<double>(std::numeric_limits<float>::max()));
+
+    const __m256d absEx = _mm256_and_pd(dex, absMaskD);
+    const __m256d exIsZero = _mm256_cmp_pd(absEx, zeroD, _CMP_EQ_OQ);
+    const __m256d exSafe = _mm256_or_pd(
+        exIsZero,
+        _mm256_and_pd(_mm256_cmp_pd(absEx, fltMinD, _CMP_GE_OQ),
+                      _mm256_cmp_pd(absEx, fltMaxD, _CMP_LE_OQ)));
+
+    const __m256d absProd = _mm256_and_pd(dprod, absMaskD);
+    const __m256d prodIsZero = _mm256_cmp_pd(absProd, zeroD, _CMP_EQ_OQ);
+    const __m256d prodSafe = _mm256_or_pd(
+        prodIsZero,
+        _mm256_and_pd(_mm256_cmp_pd(absProd, fltMinD, _CMP_GE_OQ),
+                      _mm256_cmp_pd(absProd, fltMaxD, _CMP_LE_OQ)));
+
+    const __m256d safeD = _mm256_and_pd(exSafe, prodSafe);
+    const __m256d zAny = _mm256_or_pd(exIsZero, prodIsZero);
+    const __m256d sAny = _mm256_or_pd(dex, dprod);
+
+    if constexpr (SseMask == 0xFu)
+    {
+        st.allSafe = _mm256_and_pd(st.allSafe, safeD);
+        st.stickyZero = _mm256_or_pd(st.stickyZero, zAny);
+        st.stickySign = _mm256_or_pd(st.stickySign, sAny);
+    }
+    else
+    {
+        const __m256d en = v0hLaneMaskD<SseMask>();
+        st.allSafe = _mm256_and_pd(st.allSafe, _mm256_or_pd(safeD, v0hInvLaneMaskD<SseMask>()));
+        st.stickyZero = _mm256_or_pd(st.stickyZero, _mm256_and_pd(zAny, en));
+        st.stickySign = _mm256_or_pd(st.stickySign, _mm256_and_pd(sAny, en));
+    }
+}
+
+template <uint32_t LastSseMask = 0xFu>
+inline bool v0hFinalizeFlags(const V0hState &st, __m256d lastDex, uint32_t &mac, uint32_t &status) // PERF-V0H
+{
+    if (_mm256_movemask_pd(st.allSafe) != 0xF)
+        return false;
+    const __m256d absMaskD = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+    const __m256d lastExIsZero = _mm256_cmp_pd(_mm256_and_pd(lastDex, absMaskD), _mm256_setzero_pd(), _CMP_EQ_OQ);
+    const uint32_t lastZeroSse = static_cast<uint32_t>(_mm256_movemask_pd(lastExIsZero)) & LastSseMask;
+    const uint32_t lastSignSse = static_cast<uint32_t>(_mm256_movemask_pd(lastDex)) & LastSseMask;
+    mac = vu0fast::kBitRev4[lastZeroSse] | (static_cast<uint32_t>(vu0fast::kBitRev4[lastSignSse]) << 4);
+    const uint32_t current = ((lastZeroSse != 0u) ? 1u : 0u) | ((lastSignSse != 0u) ? 2u : 0u);
+    const uint32_t stickyZ = (_mm256_movemask_pd(st.stickyZero) != 0) ? 1u : 0u;
+    const uint32_t stickyS = (_mm256_movemask_pd(st.stickySign) != 0) ? 2u : 0u;
+    status = (status & 0xFF0u) | current | ((stickyZ | stickyS) << 6);
+    return true;
+}
+
+inline __m256d v0hTransformVec(__m256d d4, __m256d d5, __m256d d6, __m256d d7, __m256d dv,
+                               __m128 &outVf, __m128 &vacc, V0hState &st) // PERF-V0H
+{
+    const __m256d bx = _mm256_permute4x64_pd(dv, _MM_SHUFFLE(0, 0, 0, 0));
+    const __m256d by = _mm256_permute4x64_pd(dv, _MM_SHUFFLE(1, 1, 1, 1));
+    const __m256d bz = _mm256_permute4x64_pd(dv, _MM_SHUFFLE(2, 2, 2, 2));
+    const __m256d bw = _mm256_permute4x64_pd(dv, _MM_SHUFFLE(3, 3, 3, 3));
+
+    __m256d dex = _mm256_mul_pd(d4, bx);
+    v0hTrackNoAcc(dex, st);
+    __m256d dac = _mm256_cvtps_pd(_mm256_cvtpd_ps(dex));
+
+    __m256d dprod = _mm256_mul_pd(d5, by);
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    dac = _mm256_cvtps_pd(_mm256_cvtpd_ps(dex));
+
+    dprod = _mm256_mul_pd(d6, bz);
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    vacc = _mm256_cvtpd_ps(dex);
+    dac = _mm256_cvtps_pd(vacc);
+
+    dprod = _mm256_mul_pd(d7, bw);
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    outVf = _mm256_cvtpd_ps(dex);
+    return dex;
+}
+
+inline __m256d v0hScaleAndMatVec(__m256d da0, __m256d da1, __m256d ds,
+                                  __m256d dt0, __m256d dt1,
+                                  __m256d dm0, __m256d dm1, __m256d dm2, __m256d dm3,
+                                  __m256d dm4, __m256d dm5, __m256d dm6,
+                                  __m128 &outA0, __m128 &outA1, __m128 &outT0, __m128 &outT1,
+                                  __m128 &vacc, V0hState &st) // PERF-V0H
+{
+    const __m256d dsx = _mm256_permute4x64_pd(ds, _MM_SHUFFLE(0, 0, 0, 0));
+    const __m256d dOne = _mm256_set1_pd(1.0);
+
+    __m256d dex = _mm256_mul_pd(da0, dsx);
+    v0hTrackNoAcc(dex, st);
+    outA0 = _mm256_cvtpd_ps(dex);
+    const __m256d sa0 = _mm256_cvtps_pd(outA0);
+
+    dex = _mm256_mul_pd(da1, dsx);
+    v0hTrackNoAcc(dex, st);
+    outA1 = _mm256_cvtpd_ps(dex);
+    const __m256d sa1 = _mm256_cvtps_pd(outA1);
+
+    dex = _mm256_mul_pd(dt0, dOne);
+    v0hTrackNoAcc(dex, st);
+    __m256d dac = _mm256_cvtps_pd(_mm256_cvtpd_ps(dex));
+
+    __m256d dprod = _mm256_mul_pd(dm0, _mm256_permute4x64_pd(sa0, _MM_SHUFFLE(0, 0, 0, 0)));
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    dac = _mm256_cvtps_pd(_mm256_cvtpd_ps(dex));
+
+    dprod = _mm256_mul_pd(dm1, _mm256_permute4x64_pd(sa0, _MM_SHUFFLE(1, 1, 1, 1)));
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    dac = _mm256_cvtps_pd(_mm256_cvtpd_ps(dex));
+
+    dprod = _mm256_mul_pd(dm2, _mm256_permute4x64_pd(sa0, _MM_SHUFFLE(2, 2, 2, 2)));
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    dac = _mm256_cvtps_pd(_mm256_cvtpd_ps(dex));
+
+    dprod = _mm256_mul_pd(dm3, _mm256_permute4x64_pd(sa0, _MM_SHUFFLE(3, 3, 3, 3)));
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    outT0 = _mm256_cvtpd_ps(dex);
+
+    dex = _mm256_mul_pd(dm4, _mm256_permute4x64_pd(sa1, _MM_SHUFFLE(0, 0, 0, 0)));
+    v0hTrackNoAcc(dex, st);
+    dac = _mm256_cvtps_pd(_mm256_cvtpd_ps(dex));
+
+    dprod = _mm256_mul_pd(dm5, _mm256_permute4x64_pd(sa1, _MM_SHUFFLE(1, 1, 1, 1)));
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    dac = _mm256_cvtps_pd(_mm256_cvtpd_ps(dex));
+
+    dprod = _mm256_mul_pd(dm6, _mm256_permute4x64_pd(sa1, _MM_SHUFFLE(2, 2, 2, 2)));
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    vacc = _mm256_cvtpd_ps(dex);
+    dac = _mm256_cvtps_pd(vacc);
+
+    dprod = _mm256_mul_pd(dt1, dOne);
+    dex = _mm256_add_pd(dac, dprod);
+    v0hTrackAcc(dex, dprod, st);
+    outT1 = _mm256_cvtpd_ps(dex);
+    return dex;
+}
+
+inline void v0hLenSq(__m256d dSrc, __m128 &vfDst, V0hState &st) // PERF-V0H
+{
+    __m256d dex = _mm256_mul_pd(dSrc, dSrc);
+    v0hTrackNoAcc<0x7u>(dex, st);
+    vfDst = _mm_blend_ps(vfDst, _mm256_cvtpd_ps(dex), 0x7);
+
+    __m256d da = _mm256_cvtps_pd(vfDst);
+    dex = _mm256_add_pd(da, _mm256_permute4x64_pd(da, _MM_SHUFFLE(1, 1, 1, 1)));
+    v0hTrackNoAcc<0x1u>(dex, st);
+    vfDst = _mm_move_ss(vfDst, _mm256_cvtpd_ps(dex));
+
+    da = _mm256_cvtps_pd(vfDst);
+    dex = _mm256_add_pd(da, _mm256_permute4x64_pd(da, _MM_SHUFFLE(2, 2, 2, 2)));
+    v0hTrackNoAcc<0x1u>(dex, st);
+    vfDst = _mm_move_ss(vfDst, _mm256_cvtpd_ps(dex));
+}
+
+// PERF-V0G / PERF-V0H: 000..080 (4x4 transform of vf8..vf11 by vf4..vf7)
 inline void run_000(R5900Context *ctx)
 {
     const uint32_t prevCsr = _mm_getcsr();
@@ -69,16 +305,45 @@ inline void run_000(R5900Context *ctx)
     if (changeCsr)
         _mm_setcsr(prevCsr | 0x6000u);
 
+    const __m128 vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    uint32_t mac = ctx->vu0_mac_flags;
+    uint32_t status = ctx->vu0_status;
+
+    { // PERF-V0H: vectorized sticky-only fast path
+        using namespace vu0fast;
+        const __m256d d4 = _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[4]));
+        const __m256d d5 = _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[5]));
+        const __m256d d6 = _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[6]));
+        const __m256d d7 = _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[7]));
+        __m128 out8, out9, out10, out11, vacc;
+        V0hState st;
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[8])),  out8,  vacc, st);
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[9])),  out9,  vacc, st);
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[10])), out10, vacc, st);
+        const __m256d lastDex = v0hTransformVec(
+            d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[11])), out11, vacc, st);
+        if (v0hFinalizeFlags(st, lastDex, mac, status))
+        {
+            ctx->vu0_vf[8]  = out8;
+            ctx->vu0_vf[9]  = out9;
+            ctx->vu0_vf[10] = out10;
+            ctx->vu0_vf[11] = out11;
+            ctx->vu0_acc = vacc;
+            finalizeCommon(ctx, vf0, mac, status, 0x088u, ctx->vu0_clip_flags);
+            if (changeCsr)
+                _mm_setcsr(prevCsr);
+            return;
+        }
+    }
+
     __m128 vf[32];
-    vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    vf[0] = vf0;
     for (int i = 4; i <= 11; ++i)
         vf[i] = ctx->vu0_vf[i];
     __m128 vacc = ctx->vu0_acc;
     bool dirtyAcc = false;
 
     uint32_t stickyFlags = 0u;
-    uint32_t mac = ctx->vu0_mac_flags;
-    uint32_t status = ctx->vu0_status;
     const __m128 vzero = _mm_setzero_ps();
 
     using namespace vu0fast;
@@ -113,7 +378,7 @@ inline void run_000(R5900Context *ctx)
         _mm_setcsr(prevCsr);
 }
 
-// PERF-V0G: 088..0E8 (scale vf4,vf6 by vf3.x + matrix-vec multiply into vf5,vf7)
+// PERF-V0G / PERF-V0H: 088..0E8 (scale vf4,vf6 by vf3.x + matrix-vec multiply into vf5,vf7)
 inline void run_088(R5900Context *ctx)
 {
     const uint32_t prevCsr = _mm_getcsr();
@@ -121,16 +386,50 @@ inline void run_088(R5900Context *ctx)
     if (changeCsr)
         _mm_setcsr(prevCsr | 0x6000u);
 
+    const __m128 vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    uint32_t mac = ctx->vu0_mac_flags;
+    uint32_t status = ctx->vu0_status;
+
+    { // PERF-V0H: vectorized sticky-only fast path
+        using namespace vu0fast;
+        __m128 out4, out6, out5, out7, vacc;
+        V0hState st;
+        const __m256d lastDex = v0hScaleAndMatVec(
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[4])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[6])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[3])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[5])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[7])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[8])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[9])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[10])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[11])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[12])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[13])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[14])),
+            out4, out6, out5, out7, vacc, st);
+        if (v0hFinalizeFlags(st, lastDex, mac, status))
+        {
+            ctx->vu0_vf[4] = out4;
+            ctx->vu0_vf[5] = out5;
+            ctx->vu0_vf[6] = out6;
+            ctx->vu0_vf[7] = out7;
+            ctx->vu0_acc = vacc;
+            finalizeCommon(ctx, vf0, mac, status, 0x0F0u, ctx->vu0_clip_flags);
+            if (changeCsr)
+                _mm_setcsr(prevCsr);
+            return;
+        }
+    }
+
     __m128 vf[32];
-    vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    vf[0] = vf0;
     for (int i = 3; i <= 14; ++i)
         vf[i] = ctx->vu0_vf[i];
     __m128 vacc = ctx->vu0_acc;
     bool dirtyAcc = false;
 
     uint32_t stickyFlags = 0u;
-    uint32_t mac = ctx->vu0_mac_flags;
-    uint32_t status = ctx->vu0_status;
     const __m128 vzero = _mm_setzero_ps();
 
     using namespace vu0fast;
@@ -159,7 +458,7 @@ inline void run_088(R5900Context *ctx)
         _mm_setcsr(prevCsr);
 }
 
-// PERF-V0G: CD0..D30 (scale vf1,vf15 by vf3.x + matrix-vec multiply into vf2,vf16)
+// PERF-V0G / PERF-V0H: CD0..D30 (scale vf1,vf15 by vf3.x + matrix-vec multiply into vf2,vf16)
 inline void run_cd0(R5900Context *ctx)
 {
     const uint32_t prevCsr = _mm_getcsr();
@@ -167,8 +466,44 @@ inline void run_cd0(R5900Context *ctx)
     if (changeCsr)
         _mm_setcsr(prevCsr | 0x6000u);
 
+    const __m128 vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    uint32_t mac = ctx->vu0_mac_flags;
+    uint32_t status = ctx->vu0_status;
+
+    { // PERF-V0H: vectorized sticky-only fast path
+        using namespace vu0fast;
+        __m128 out1, out15, out2, out16, vacc;
+        V0hState st;
+        const __m256d lastDex = v0hScaleAndMatVec(
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[1])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[15])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[3])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[2])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[16])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[8])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[9])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[10])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[11])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[12])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[13])),
+            _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[14])),
+            out1, out15, out2, out16, vacc, st);
+        if (v0hFinalizeFlags(st, lastDex, mac, status))
+        {
+            ctx->vu0_vf[1]  = out1;
+            ctx->vu0_vf[2]  = out2;
+            ctx->vu0_vf[15] = out15;
+            ctx->vu0_vf[16] = out16;
+            ctx->vu0_acc = vacc;
+            finalizeCommon(ctx, vf0, mac, status, 0xD38u, ctx->vu0_clip_flags);
+            if (changeCsr)
+                _mm_setcsr(prevCsr);
+            return;
+        }
+    }
+
     __m128 vf[32];
-    vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    vf[0] = vf0;
     vf[1] = ctx->vu0_vf[1];
     vf[2] = ctx->vu0_vf[2];
     vf[3] = ctx->vu0_vf[3];
@@ -178,8 +513,6 @@ inline void run_cd0(R5900Context *ctx)
     bool dirtyAcc = false;
 
     uint32_t stickyFlags = 0u;
-    uint32_t mac = ctx->vu0_mac_flags;
-    uint32_t status = ctx->vu0_status;
     const __m128 vzero = _mm_setzero_ps();
 
     using namespace vu0fast;
@@ -208,7 +541,7 @@ inline void run_cd0(R5900Context *ctx)
         _mm_setcsr(prevCsr);
 }
 
-// PERF-V0G: 0F0..1D8 (4x4 transform + RSQRT normalization of vf8..vf10 into vf12..vf14)
+// PERF-V0G / PERF-V0H: 0F0..1D8 (4x4 transform + RSQRT normalization of vf8..vf10 into vf12..vf14)
 inline void run_0f0(R5900Context *ctx)
 {
     const uint32_t prevCsr = _mm_getcsr();
@@ -216,8 +549,82 @@ inline void run_0f0(R5900Context *ctx)
     if (changeCsr)
         _mm_setcsr(prevCsr | 0x6000u);
 
+    const __m128 vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    uint32_t mac = ctx->vu0_mac_flags;
+    uint32_t status = ctx->vu0_status;
+
+    { // PERF-V0H: vectorized sticky-only fast path
+        using namespace vu0fast;
+        const __m256d d4 = _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[4]));
+        const __m256d d5 = _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[5]));
+        const __m256d d6 = _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[6]));
+        const __m256d d7 = _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[7]));
+        __m128 out8, out9, out10, out11, vacc;
+        V0hState st;
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[8])),  out8,  vacc, st);
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[9])),  out9,  vacc, st);
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[10])), out10, vacc, st);
+        v0hTransformVec(d4, d5, d6, d7, _mm256_cvtps_pd(normalizeOperand4(ctx->vu0_vf[11])), out11, vacc, st);
+
+        __m128 out1 = ctx->vu0_vf[1];
+        __m128 out2 = ctx->vu0_vf[2];
+        __m128 out3 = ctx->vu0_vf[3];
+        const __m256d d8 = _mm256_cvtps_pd(out8);
+        const __m256d d9 = _mm256_cvtps_pd(out9);
+        const __m256d d10 = _mm256_cvtps_pd(out10);
+        v0hLenSq(d8,  out1, st);
+        v0hLenSq(d9,  out3, st);
+        v0hLenSq(d10, out2, st);
+
+        float q = 0.0f;
+        float fdivValue = 0.0f;
+        uint32_t fdivStatusDi = 0u;
+
+        execDivRsqrtStep(mkRsqrt(0, 1, 3, 0), vf0, out1, fdivValue, fdivStatusDi);
+        q = fdivValue;
+        status = (status & 0xFCFu) | fdivStatusDi | (fdivStatusDi << 6);
+        __m256d dex = _mm256_mul_pd(d8, _mm256_set1_pd(static_cast<double>(normalizeOperand(q))));
+        v0hTrackNoAcc<0x7u>(dex, st);
+        const __m128 out12 = _mm_blend_ps(ctx->vu0_vf[12], _mm256_cvtpd_ps(dex), 0x7);
+
+        execDivRsqrtStep(mkRsqrt(0, 3, 3, 0), vf0, out3, fdivValue, fdivStatusDi);
+        q = fdivValue;
+        status = (status & 0xFCFu) | fdivStatusDi | (fdivStatusDi << 6);
+        dex = _mm256_mul_pd(d9, _mm256_set1_pd(static_cast<double>(normalizeOperand(q))));
+        v0hTrackNoAcc<0x7u>(dex, st);
+        const __m128 out13 = _mm_blend_ps(ctx->vu0_vf[13], _mm256_cvtpd_ps(dex), 0x7);
+
+        execDivRsqrtStep(mkRsqrt(0, 2, 3, 0), vf0, out2, fdivValue, fdivStatusDi);
+        q = fdivValue;
+        status = (status & 0xFCFu) | fdivStatusDi | (fdivStatusDi << 6);
+        const __m256d lastDex = _mm256_mul_pd(d10, _mm256_set1_pd(static_cast<double>(normalizeOperand(q))));
+        v0hTrackNoAcc<0x7u>(lastDex, st);
+        const __m128 out14 = _mm_blend_ps(ctx->vu0_vf[14], _mm256_cvtpd_ps(lastDex), 0x7);
+
+        if (v0hFinalizeFlags<0x7u>(st, lastDex, mac, status))
+        {
+            ctx->vu0_vf[1]  = out1;
+            ctx->vu0_vf[2]  = out2;
+            ctx->vu0_vf[3]  = out3;
+            ctx->vu0_vf[8]  = out8;
+            ctx->vu0_vf[9]  = out9;
+            ctx->vu0_vf[10] = out10;
+            ctx->vu0_vf[11] = out11;
+            ctx->vu0_vf[12] = out12;
+            ctx->vu0_vf[13] = out13;
+            ctx->vu0_vf[14] = out14;
+            ctx->vu0_acc = vacc;
+            ctx->vu0_q = q;
+            finalizeCommon(ctx, vf0, mac, status, 0x1E0u, ctx->vu0_clip_flags);
+            if (changeCsr)
+                _mm_setcsr(prevCsr);
+            return;
+        }
+        status = ctx->vu0_status;
+    }
+
     __m128 vf[32];
-    vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    vf[0] = vf0;
     for (int i = 1; i <= 14; ++i)
         vf[i] = ctx->vu0_vf[i];
     __m128 vacc = ctx->vu0_acc;
@@ -227,8 +634,6 @@ inline void run_0f0(R5900Context *ctx)
     __m128 vq = _mm_set1_ps(vu0fast::normalizeOperand(q));
     const __m128 vzero = _mm_setzero_ps();
     uint32_t stickyFlags = 0u;
-    uint32_t mac = ctx->vu0_mac_flags;
-    uint32_t status = ctx->vu0_status;
     float fdivValue = 0.0f;
     uint32_t fdivStatusDi = 0u;
 
