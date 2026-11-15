@@ -68,6 +68,12 @@ namespace ps2x::iop::detail
 
         [[nodiscard]] size_t threadCount() const noexcept { return m_threads.size(); }
 
+        void forEachThreadDiag(void (*cb)(void *, int id, int state, uint32_t pc, uint32_t entry, int wakeup), void *user) const // PROBE-AU3C
+        { // PROBE-AU3C
+            for (const auto &[id, thr] : m_threads) // PROBE-AU3C
+                cb(user, id, static_cast<int>(thr.state), thr.cpu.pc, thr.entry, thr.wakeupCount); // PROBE-AU3C
+        } // PROBE-AU3C
+
     private:
         struct Semaphore
         {

@@ -25,9 +25,11 @@
 #include <atomic>
 #include <cctype>
 #include <map>
+#include <mutex> // PROBE-AU3C
 #include <optional>
 #include <span>
 #include <sstream>
+#include <string> // PROBE-AU3C
 #include <utility>
 #include <chrono>
 #include <intrin.h>
@@ -51,6 +53,7 @@ namespace ps2x::iop
     };
 
     void getSg2DiagSnapshot(Sg2DiagSnapshot &outSnapshot);
+    void getSg2QueueDiag(std::string &out); // PROBE-AU3C
 }
 
 namespace ps2x::iop::detail
@@ -69,6 +72,16 @@ namespace ps2x::iop::detail
             std::atomic<uint32_t> vblankHandlers{0u};
             std::atomic<uint64_t> vblankDelivered{0u};
         } g_sg2Diag;
+        // PROBE-AU3C: Atomic hit counters for sg2 driver queue/thread relPc probes & queue diag string.
+        constexpr uint32_t kSg2ProbePcs[11] = { // PROBE-AU3C
+            0x044Cu, 0x0608u, 0x4100u, 0x413Cu, 0x4154u, 0x24D4u, 0x250Cu, 0x1BECu, 0x1E18u, 0x2A90u, 0x31C0u // PROBE-AU3C
+        }; // PROBE-AU3C
+        constexpr const char *kSg2ProbeNames[11] = { // PROBE-AU3C
+            "044c", "0608", "4100", "413c", "4154", "24d4", "250c", "1bec", "1e18", "2a90", "31c0" // PROBE-AU3C
+        }; // PROBE-AU3C
+        std::atomic<uint64_t> g_sg2ProbeHits[11]{}; // PROBE-AU3C
+        std::mutex g_sg2QueueDiagMutex; // PROBE-AU3C
+        std::string g_sg2QueueDiagStr; // PROBE-AU3C
         // PROBE-KC: IOP time budget, reported about once per second on stdout ("[iop] ...")
         struct KcStats
         {
@@ -502,6 +515,14 @@ namespace ps2x::iop::detail
                     g_sg2Diag.tickCount.fetch_add(1u, std::memory_order_relaxed);
                 else if (relPc == 0x20B8u)
                     g_sg2Diag.naxPollCount.fetch_add(1u, std::memory_order_relaxed);
+                for (size_t i = 0u; i < 11u; ++i) // PROBE-AU3C
+                { // PROBE-AU3C
+                    if (relPc == kSg2ProbePcs[i]) // PROBE-AU3C
+                    { // PROBE-AU3C
+                        g_sg2ProbeHits[i].fetch_add(1u, std::memory_order_relaxed); // PROBE-AU3C
+                        break; // PROBE-AU3C
+                    } // PROBE-AU3C
+                } // PROBE-AU3C
             }
 
             if (const auto import = imports.decode(cpu.pc))
@@ -987,6 +1008,74 @@ namespace ps2x::iop::detail
             detail::g_sg2Diag.lastIopStatusNonZero.store(m_impl->rpc.lastSg2IopStatusNonZero(), std::memory_order_relaxed);
             detail::g_sg2Diag.vblankHandlers.store(m_impl->vblank.handlerCount(), std::memory_order_relaxed);
             detail::g_sg2Diag.vblankDelivered.store(m_impl->vblank.deliveredCount(), std::memory_order_relaxed);
+            static auto s_lastQueueDiag = std::chrono::steady_clock::time_point{}; // PROBE-AU3C
+            const auto now = std::chrono::steady_clock::now(); // PROBE-AU3C
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastQueueDiag).count() >= 5000) // PROBE-AU3C
+            { // PROBE-AU3C
+                s_lastQueueDiag = now; // PROBE-AU3C
+                const uint32_t base = m_impl->rpc.sg2Base(); // PROBE-AU3C
+                std::ostringstream qs; // PROBE-AU3C
+                uint32_t flag = 0u; // PROBE-AU3C
+                uint32_t activeSlots = 0u; // PROBE-AU3C
+                uint32_t nzEnvx = 0u; // PROBE-AU3C
+                uint32_t nzPos = 0u; // PROBE-AU3C
+                std::ostringstream slotsSs; // PROBE-AU3C
+                if (base != 0u) // PROBE-AU3C
+                { // PROBE-AU3C
+                    (void)readMemory(base + 0x490Cu, &flag, sizeof(flag)); // PROBE-AU3C
+                    uint32_t printedSlots = 0u; // PROBE-AU3C
+                    for (uint32_t i = 0u; i < 48u; ++i) // PROBE-AU3C
+                    { // PROBE-AU3C
+                        uint32_t w[9]{}; // PROBE-AU3C
+                        if (!readMemory(base + 0x8EC8u + i * 36u, w, sizeof(w))) // PROBE-AU3C
+                            continue; // PROBE-AU3C
+                        if (w[0] != 0u) // PROBE-AU3C
+                            ++activeSlots; // PROBE-AU3C
+                        if ((w[0] != 0u || w[2] != 0u) && printedSlots < 6u) // PROBE-AU3C
+                        { // PROBE-AU3C
+                            char sbuf[128]; // PROBE-AU3C
+                            std::snprintf(sbuf, sizeof(sbuf), "%s%u:%x/%x/%x/%x/%x/%x/%x/%x", // PROBE-AU3C
+                                          printedSlots == 0u ? "" : " ", i, w[0], w[2], w[3], w[4], w[5], w[6], w[7], w[8]); // PROBE-AU3C
+                            slotsSs << sbuf; // PROBE-AU3C
+                            ++printedSlots; // PROBE-AU3C
+                        } // PROBE-AU3C
+                    } // PROBE-AU3C
+                    uint8_t statusBuf[0x180]{}; // PROBE-AU3C
+                    if (readMemory(base + 0x8D38u, statusBuf, sizeof(statusBuf))) // PROBE-AU3C
+                    { // PROBE-AU3C
+                        for (uint32_t i = 0u; i < 0xC0u; ++i) // PROBE-AU3C
+                            if (statusBuf[i] != 0u) ++nzEnvx; // PROBE-AU3C
+                        for (uint32_t i = 0xC0u; i < 0x180u; ++i) // PROBE-AU3C
+                            if (statusBuf[i] != 0u) ++nzPos; // PROBE-AU3C
+                    } // PROBE-AU3C
+                } // PROBE-AU3C
+                qs << "flag=" << flag << " active=" << activeSlots << " hits=["; // PROBE-AU3C
+                for (size_t i = 0u; i < 11u; ++i) // PROBE-AU3C
+                { // PROBE-AU3C
+                    qs << (i == 0u ? "" : ",") << detail::kSg2ProbeNames[i] << ":" // PROBE-AU3C
+                       << detail::g_sg2ProbeHits[i].load(std::memory_order_relaxed); // PROBE-AU3C
+                } // PROBE-AU3C
+                qs << "] slots=[" << slotsSs.str() << "] nzEnvx=" << nzEnvx << " nzPos=" << nzPos << " thr=["; // PROBE-AU3C
+                struct ThrCtx { std::ostringstream *os; uint32_t base; bool first; } tctx{&qs, base, true}; // PROBE-AU3C
+                m_impl->kernel.forEachThreadDiag([](void *u, int id, int st, uint32_t pc, uint32_t entry, int wk) { // PROBE-AU3C
+                    auto *c = static_cast<ThrCtx *>(u); // PROBE-AU3C
+                    auto fmtAddr = [b = c->base](uint32_t a, char *buf, size_t n) { // PROBE-AU3C
+                        if (b != 0u && a >= b && (a - b) < 0x20000u) // PROBE-AU3C
+                            std::snprintf(buf, n, "+%x", a - b); // PROBE-AU3C
+                        else // PROBE-AU3C
+                            std::snprintf(buf, n, "%x", a); // PROBE-AU3C
+                    }; // PROBE-AU3C
+                    char pbuf[16], ebuf[16], line[64]; // PROBE-AU3C
+                    fmtAddr(pc, pbuf, sizeof(pbuf)); // PROBE-AU3C
+                    fmtAddr(entry, ebuf, sizeof(ebuf)); // PROBE-AU3C
+                    std::snprintf(line, sizeof(line), "%s%d:%d:%s:%s:%d", c->first ? "" : " ", id, st, pbuf, ebuf, wk); // PROBE-AU3C
+                    (*c->os) << line; // PROBE-AU3C
+                    c->first = false; // PROBE-AU3C
+                }, &tctx); // PROBE-AU3C
+                qs << "]"; // PROBE-AU3C
+                std::lock_guard<std::mutex> qlock(detail::g_sg2QueueDiagMutex); // PROBE-AU3C
+                detail::g_sg2QueueDiagStr = qs.str(); // PROBE-AU3C
+            } // PROBE-AU3C
         }
         return result;
     }
@@ -1082,5 +1171,11 @@ namespace ps2x::iop
         outSnapshot.vblankHandlers = detail::g_sg2Diag.vblankHandlers.load(std::memory_order_relaxed);
         outSnapshot.vblankDelivered = detail::g_sg2Diag.vblankDelivered.load(std::memory_order_relaxed);
     }
+
+    void getSg2QueueDiag(std::string &out) // PROBE-AU3C
+    { // PROBE-AU3C
+        std::lock_guard<std::mutex> lock(detail::g_sg2QueueDiagMutex); // PROBE-AU3C
+        out = detail::g_sg2QueueDiagStr; // PROBE-AU3C
+    } // PROBE-AU3C
 
 }

@@ -59,6 +59,7 @@ namespace ps2x::iop
 
     void getLibsdDiagnostics(LibsdDiagSnapshot &outSnapshot, std::vector<std::string> &outPendingLogs);
     void getSg2DiagSnapshot(Sg2DiagSnapshot &outSnapshot);
+    void getSg2QueueDiag(std::string &out); // PROBE-AU3C
 }
 
 namespace
@@ -84,10 +85,19 @@ namespace
             return;
         const uint32_t count = sendSize / 16u;
         std::lock_guard<std::mutex> lock(g_sg2LleHistMutex);
+        static uint32_t s_sg2PktLogCount = 0u; // PROBE-AU3C
         for (uint32_t i = 0u; i < count; ++i)
         {
             uint32_t op = 0u;
             std::memcpy(&op, sendBuf + i * 16u, sizeof(op));
+            if ((op == 0x18u || op == 0x1Cu) && s_sg2PktLogCount < 12u) // PROBE-AU3C
+            { // PROBE-AU3C
+                uint32_t w[4]{}; // PROBE-AU3C
+                std::memcpy(w, sendBuf + i * 16u, sizeof(w)); // PROBE-AU3C
+                ++s_sg2PktLogCount; // PROBE-AU3C
+                ::ps2xSafeLog("[sg2pkt] op=0x%02x w0=0x%08x w1=0x%08x w2=0x%08x w3=0x%08x\n", // PROBE-AU3C
+                              op, w[0], w[1], w[2], w[3]); // PROBE-AU3C
+            } // PROBE-AU3C
             if (op < g_sg2LleOpHist.size())
                 ++g_sg2LleOpHist[op];
             else
@@ -198,6 +208,9 @@ namespace
                 static_cast<unsigned long long>(snap.ordinalCounts[20]),
                 static_cast<unsigned long long>(snap.ordinalCounts[23]),
                 static_cast<unsigned long long>(snap.ordinalCounts[26]));
+            std::string qdiag; // PROBE-AU3C
+            ps2x::iop::getSg2QueueDiag(qdiag); // PROBE-AU3C
+            ::ps2xSafeLog("[sg2q] %s\n", qdiag.c_str()); // PROBE-AU3C
         }
     }
 }
