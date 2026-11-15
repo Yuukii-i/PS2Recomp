@@ -412,6 +412,29 @@ static void initStderrRedirection()
 #endif
 }
 
+// PERF-LG: buffered log target, periodic background flush, flush on exit/crash. PS2X_LOG_SYNC=1 = old per-line fflush.
+extern "C" void ps2xFlushLog();
+static bool s_logSync = false;
+static void ps2xLogSetup(FILE *target) // called under s_logMutex
+{
+    static bool s_done = false;
+    if (s_done) return;
+    s_done = true;
+    const char *e = std::getenv("PS2X_LOG_SYNC");
+    s_logSync = (e && e[0] == '1');
+    if (s_logSync) return;
+    if (target != stderr) // fresh dup'd stream, no I/O yet: setvbuf legal
+        std::setvbuf(target, nullptr, _IOFBF, 256 * 1024);
+    std::atexit([]() { ps2xFlushLog(); });
+    std::thread([]() {
+        for (;;)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            ps2xFlushLog();
+        }
+    }).detach();
+}
+
 void ps2xSafeLog(const char *fmt, ...)
 {
     initStderrRedirection();
@@ -425,9 +448,19 @@ void ps2xSafeLog(const char *fmt, ...)
         size_t writeLen = (len < static_cast<int>(sizeof(buf))) ? static_cast<size_t>(len) : (sizeof(buf) - 1);
         std::lock_guard<std::mutex> lock(s_logMutex);
         FILE *target = s_realStderrFile ? s_realStderrFile : stderr;
+        ps2xLogSetup(target); // PERF-LG
         std::fwrite(buf, 1, writeLen, target);
-        std::fflush(target);
+        if (s_logSync) // PERF-LG
+            std::fflush(target);
     }
+}
+
+extern "C" void ps2xFlushLog() // PERF-LG
+{
+    std::lock_guard<std::mutex> lock(s_logMutex);
+    if (s_realStderrFile)
+        std::fflush(s_realStderrFile);
+    std::fflush(stderr);
 }
 
 #ifdef _WIN32
@@ -3342,7 +3375,7 @@ namespace
         const char *name = (it != s_unimplementedConfigStubs.end()) ? it->second.c_str() : "unknown";
         ps2xSafeLog( "\n[FATAL] Called unimplemented config stub '%s' at 0x%08x (ra=0x%08x)!\n", name, pc, ra);
         fflush(stderr);
-        std::abort();
+        ps2xFlushLog(); std::abort(); // PERF-LG
     }
 }
 
@@ -3383,7 +3416,7 @@ static void registerConfigStubs(PS2Runtime &runtime, const std::string &configPa
     {
         ps2xSafeLog( "\n[config-stubs] FATAL: Could not open %s in any searched location!\n", configPath.c_str());
         fflush(stderr);
-        std::abort();
+        ps2xFlushLog(); std::abort(); // PERF-LG
     }
 
     const auto &available = getAvailableRuntimeStubs();
@@ -3450,7 +3483,7 @@ static void registerConfigStubs(PS2Runtime &runtime, const std::string &configPa
     {
         ps2xSafeLog( "\n[config-stubs] FATAL: 0 stubs matched from %s!\n", resolvedPath.c_str());
         fflush(stderr);
-        std::abort();
+        ps2xFlushLog(); std::abort(); // PERF-LG
     }
 
     ps2xSafeLog( "[config-stubs] Registered %zu stubs from %s into function table (%zu stubs unmatched in runtime)\n",
@@ -4378,7 +4411,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                 (uint32_t)_mm_extract_epi32(ctx->r[29], 0));
         fflush(stderr);
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
-        std::abort();
+        ps2xFlushLog(); std::abort(); // PERF-LG
     }
 
     extern thread_local uint32_t g_currentExecutingFunction;

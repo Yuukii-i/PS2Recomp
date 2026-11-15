@@ -123,9 +123,11 @@ namespace
     extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId();
     extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
 
+    extern "C" void ps2xFlushLog(); // PERF-LG
     long __stdcall ps2xCrashHandler(Ps2xExcPointers *p)
     {
         static std::atomic<int> s_reports{0};
+        ps2xFlushLog(); // PERF-LG
         if (!p || !p->record || p->record->code != 0xC0000005ul || s_reports.fetch_add(1) >= 2)
             return 0; // EXCEPTION_CONTINUE_SEARCH
         void *frames[62];
@@ -151,6 +153,7 @@ namespace
     }
 #endif
 
+    extern "C" void ps2xFlushLog(); // PERF-LG
     void setupTerminateLogger() // to help on release build crashs
     {
         std::set_terminate([]()
@@ -178,7 +181,7 @@ namespace
                                        std::cerr << "[terminate] non-std exception" << std::endl;
                                    }
                                }
-                               std::abort(); });
+                               ps2xFlushLog(); std::abort(); }); // PERF-LG
     }
 
     std::string normalizeGameId(const std::string &folderName)

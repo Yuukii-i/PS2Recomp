@@ -39,6 +39,7 @@ namespace ps2_syscalls {
 #include <limits>
 #include <stdexcept>
 #include <chrono>
+extern "C" void ps2xFlushLog(); // PERF-LG
 #ifdef _WIN32 // PROBE-EX
 extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
 #endif
@@ -513,6 +514,7 @@ void EeScheduler::run()
                 uint32_t p = s_lastDispatchedPc[(s_lastDispatchIdx + i) % 32];
                 if (p) fprintf(stderr, "  [%d] 0x%08x\n", i, p);
             }
+            ps2xFlushLog(); // PERF-LG
             fflush(stderr);
             m_runtime.reportMissingFunction(m_rdram,
                                             &context,
@@ -520,7 +522,7 @@ void EeScheduler::run()
                                             context.pc,
                                             PS2Runtime::GuestBranchKind::DirectJump,
                                             "EE scheduler");
-            std::abort();
+            ps2xFlushLog(); std::abort(); // PERF-LG
         }
         PS2Runtime::RecompiledFunction function = m_runtime.lookupFunction(context.pc);
 
