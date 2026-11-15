@@ -2388,6 +2388,7 @@ void EeScheduler::processDueDeadlines()
 // running is coalesced (the worker re-latches once with the newest ticket).
 extern "C" uint64_t ps2_gs_async_ticket();
 extern "C" void ps2_gs_async_wait_ticket(uint64_t ticket);
+extern "C" void ps2_gt_count(int what, uint64_t n); // PROBE-GT
 namespace
 {
 struct PresentLatchWorker
@@ -2420,6 +2421,7 @@ bool postPresentLatch(GS &gs)
         if (w->pending)
         {
             w->dirty = true;
+            ps2_gt_count(1, 1); // PROBE-GT: coalesce_latch
             return true;
         }
         w->pending = true;
@@ -2506,6 +2508,10 @@ void EeScheduler::processEvent(const EeEvent &event)
                     m_runtime.gs().latchHostPresentationFrame();
                 s_lastLatchKicks = g_gsFrameKicks.load(std::memory_order_relaxed);
                 s_lastLatchTick = m_vsyncTick;
+            }
+            else
+            {
+                ps2_gt_count(0, 1); // PROBE-GT: skip_nokick
             }
         }
 

@@ -53,6 +53,32 @@ extern "C" void ps2_iu_gpu(uint64_t bytes, uint64_t ticks); // PROBE-IU, defined
 extern bool g_gwOn; extern "C" int ps2_gw_sw(int cat); // PROBE-GW, defined in gs_frontend.cpp (cats: 6 statechg, 7 vkrec, 8 submit, 9 sync, 10 present)
 namespace { struct GwScope { int p; explicit GwScope(int c) : p(g_gwOn ? ps2_gw_sw(c) : -1) {} ~GwScope() { if (p >= 0) ps2_gw_sw(p); } }; } // PROBE-GW
 
+// PROBE-GT: GPU timestamp + present-path accounting (PS2X_GT=1)
+static const bool g_gtOn = []() { const char *e = std::getenv("PS2X_GT"); return e && e[0] == '1'; }();
+static std::atomic<uint64_t> g_gtFrameNs{0}, g_gtFrameMaxNs{0}, g_gtFrameSamples{0};
+static std::atomic<uint64_t> g_gtPresNs{0}, g_gtPresMaxNs{0}, g_gtPresSamples{0};
+static std::atomic<uint64_t> g_gtFenceWaitNs{0};
+static std::atomic<bool> g_gtTsOk{false};
+static std::atomic<uint32_t> g_gtTsPeriodX100{0};
+extern "C" bool ps2_gt_enabled() { return g_gtOn; }
+extern "C" void ps2_gt_vk_take(double *outFrameAvg, double *outFrameMax, double *outPresAvg, double *outPresMax, double *outFenceMs, bool *outTsOk, double *outTsPeriodNs)
+{
+    const uint64_t fn = g_gtFrameSamples.exchange(0, std::memory_order_relaxed);
+    const uint64_t fs = g_gtFrameNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t fm = g_gtFrameMaxNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t pn = g_gtPresSamples.exchange(0, std::memory_order_relaxed);
+    const uint64_t ps = g_gtPresNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t pm = g_gtPresMaxNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t fw = g_gtFenceWaitNs.exchange(0, std::memory_order_relaxed);
+    *outFrameAvg = fn ? (static_cast<double>(fs) / static_cast<double>(fn) * 1e-6) : 0.0;
+    *outFrameMax = static_cast<double>(fm) * 1e-6;
+    *outPresAvg = pn ? (static_cast<double>(ps) / static_cast<double>(pn) * 1e-6) : 0.0;
+    *outPresMax = static_cast<double>(pm) * 1e-6;
+    *outFenceMs = static_cast<double>(fw) * 1e-6;
+    *outTsOk = g_gtTsOk.load(std::memory_order_relaxed);
+    *outTsPeriodNs = static_cast<double>(g_gtTsPeriodX100.load(std::memory_order_relaxed)) / 100.0;
+}
+
 namespace
 {
     constexpr uint32_t kVramSize = 4u * 1024u * 1024u;
@@ -290,6 +316,8 @@ namespace
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
         bool qCompute = false; // PERF-PG: the chosen queue family can run compute
+        float timestampPeriod = 0.0f; // PROBE-GT
+        bool timestampOk = false;     // PROBE-GT
         VkBuffer tables = VK_NULL_HANDLE;
         VkDeviceMemory tablesMem = VK_NULL_HANDLE;
         VkDeviceSize tablesSize = 0;
@@ -451,6 +479,10 @@ namespace
                 }
         if (g_vk.qf == ~0u)
             return false;
+        g_vk.timestampPeriod = props.limits.timestampPeriod; // PROBE-GT
+        g_vk.timestampOk = (props.limits.timestampPeriod > 0.0f && qfs[g_vk.qf].timestampValidBits > 0);
+        g_gtTsOk.store(g_vk.timestampOk, std::memory_order_relaxed);
+        g_gtTsPeriodX100.store(static_cast<uint32_t>(g_vk.timestampPeriod * 100.0f + 0.5f), std::memory_order_relaxed);
         float prio = 1.0f;
         VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
         qci.queueFamilyIndex = g_vk.qf;
@@ -635,6 +667,15 @@ namespace
             }
             if (maxPrims_ != kDefaultMaxPrims || maxClutSlots_ != kDefaultMaxClutSlots)
                 std::printf("[vk] capacities prims=%u clut=%u\n", maxPrims_, maxClutSlots_);
+        }
+        ~GSVulkanBackend() override // PROBE-GT
+        {
+            if (gtQueryPool_ != VK_NULL_HANDLE && g_vk.dev != VK_NULL_HANDLE)
+            {
+                vkDeviceWaitIdle(g_vk.dev);
+                vkDestroyQueryPool(g_vk.dev, gtQueryPool_, nullptr);
+                gtQueryPool_ = VK_NULL_HANDLE;
+            }
         }
 
         void Initialize(uint8_t *vram, uint32_t vramSize) override
@@ -953,6 +994,7 @@ namespace
             // PERF-PG: PS2X_FENCE_POLL=1 sleeps between status checks instead of blocking in vkWaitForFences (drivers may spin there and bill the CPU)
             static const bool s_poll = []() { const char *e = std::getenv("PS2X_FENCE_POLL"); return e && e[0] == '1'; }();
             const uint64_t fw0 = __rdtsc();
+            const auto gtF0 = g_gtOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT
             VkResult r;
             if (s_poll)
             {
@@ -961,6 +1003,8 @@ namespace
             }
             else
                 r = vkWaitForFences(g_vk.dev, 1, &alt_.fence, VK_TRUE, ~0ull);
+            if (g_gtOn) // PROBE-GT
+                g_gtFenceWaitNs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - gtF0).count()), std::memory_order_relaxed);
             g_presTicks[4].fetch_add(__rdtsc() - fw0, std::memory_order_relaxed); // shown as "snapshot" in the [present] line: fence wait
             vkResetFences(g_vk.dev, 1, &alt_.fence);
             asyncPending_ = false;
@@ -999,8 +1043,23 @@ namespace
                 presDirty_.clear();
                 pageRuns(need, runs);
             }
+            gtInStartAsync_ = true; // PROBE-GT
             beginRecording();
+            gtInStartAsync_ = false; // PROBE-GT
             endPass();
+            bool gtPresActive = false; // PROBE-GT
+            uint32_t gtPresSlot = 0;   // PROBE-GT
+            if (gtQueryPool_ != VK_NULL_HANDLE) // PROBE-GT
+            {
+                gtHarvestQueries();
+                if ((gtPresWriteIdx_ - gtPresReadIdx_) < kGtRing)
+                {
+                    gtPresSlot = static_cast<uint32_t>(gtPresWriteIdx_ % kGtRing);
+                    vkCmdResetQueryPool(cb_, gtQueryPool_, kGtRing * 2u + gtPresSlot * 2u, 2u);
+                    vkCmdWriteTimestamp(cb_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gtQueryPool_, kGtRing * 2u + gtPresSlot * 2u);
+                    gtPresActive = true;
+                }
+            }
             if (pages)
             {
                 std::vector<VkBufferCopy> regions;
@@ -1020,6 +1079,11 @@ namespace
             }
             if (gp)
                 recordGpuConvert(*gp);
+            if (gtPresActive) // PROBE-GT
+            {
+                vkCmdWriteTimestamp(cb_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gtQueryPool_, kGtRing * 2u + gtPresSlot * 2u + 1u);
+                ++gtPresWriteIdx_;
+            }
             vkEndCommandBuffer(cb_);
             recording_ = false;
             VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1094,6 +1158,7 @@ namespace
                         startAsync(request, useGpu ? &plan : nullptr, !useGpu || gpuVerify_);
                     }
                     g_presTicks[3].fetch_add(__rdtsc() - pj0, std::memory_order_relaxed);
+                    if (gtQueryPool_ != VK_NULL_HANDLE) gtHarvestQueries(); // PROBE-GT
                     ++presents_;
                     maybePrintStats();
                     if (gpuPresOk_ && presents_ % 240u == 0u)
@@ -1303,6 +1368,14 @@ namespace
                 asyncOk_ = createAltSlot(hv);
             if (asyncOk_ && gpuPresentWanted())
                 gpuPresOk_ = createPresentGpu();
+            if (g_gtOn && g_vk.timestampOk) // PROBE-GT
+            {
+                VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                qpi.queryCount = kGtRing * 4u; // [0..15] GS CB, [16..31] present/composite
+                if (vkCreateQueryPool(g_vk.dev, &qpi, nullptr, &gtQueryPool_) != VK_SUCCESS)
+                    gtQueryPool_ = VK_NULL_HANDLE;
+            }
             return true;
         }
 
@@ -1625,6 +1698,17 @@ namespace
             vkCmdBindDescriptorSets(cb_, VK_PIPELINE_BIND_POINT_GRAPHICS, g_vk.pipeLayout, 0, 1, &desc_, 0, nullptr);
             recording_ = true;
             inPass_ = false;
+            if (gtQueryPool_ != VK_NULL_HANDLE && !gtInStartAsync_ && !gtCbActive_) // PROBE-GT
+            {
+                gtHarvestQueries();
+                if ((gtCbWriteIdx_ - gtCbReadIdx_) < kGtRing)
+                {
+                    gtCbSlot_ = static_cast<uint32_t>(gtCbWriteIdx_ % kGtRing);
+                    vkCmdResetQueryPool(cb_, gtQueryPool_, gtCbSlot_ * 2u, 2u);
+                    vkCmdWriteTimestamp(cb_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gtQueryPool_, gtCbSlot_ * 2u);
+                    gtCbActive_ = true;
+                }
+            }
             if (orderAfterAsync_)
             {
                 // a submission that was not waited for (async present) may still be using vram_: order this one after it
@@ -1765,6 +1849,12 @@ namespace
                 hb.size = VK_WHOLE_SIZE;
                 vkCmdPipelineBarrier(cb_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
             }
+            if (gtCbActive_) // PROBE-GT
+            {
+                vkCmdWriteTimestamp(cb_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gtQueryPool_, gtCbSlot_ * 2u + 1u);
+                gtCbActive_ = false;
+                ++gtCbWriteIdx_;
+            }
             vkEndCommandBuffer(cb_);
             recording_ = false;
             VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1778,8 +1868,11 @@ namespace
             }
             {
                 GwScope gwSy(9); // PROBE-GW sync (fence wait)
+                const auto gtF0 = g_gtOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT
                 if (r == VK_SUCCESS)
                     r = vkWaitForFences(g_vk.dev, 1, &fence_, VK_TRUE, ~0ull);
+                if (g_gtOn) // PROBE-GT
+                    g_gtFenceWaitNs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - gtF0).count()), std::memory_order_relaxed);
             }
             vkResetFences(g_vk.dev, 1, &fence_);
             if (r != VK_SUCCESS)
@@ -2540,6 +2633,50 @@ namespace
         bool gaCheck_ = false;
         uint64_t gaRuns_ = 0, gaPrims_ = 0, gaRecMismatch_ = 0, gaPageSuperset_ = 0, gaPageMissing_ = 0;
         std::chrono::steady_clock::time_point gaLastPrint_;
+
+        // PROBE-GT: GPU timestamp query pool (ring of N=8 per category, non-blocking harvest)
+        static constexpr uint32_t kGtRing = 8u;
+        VkQueryPool gtQueryPool_ = VK_NULL_HANDLE;
+        uint64_t gtCbWriteIdx_ = 0, gtCbReadIdx_ = 0;
+        uint64_t gtPresWriteIdx_ = 0, gtPresReadIdx_ = 0;
+        uint32_t gtCbSlot_ = 0;
+        bool gtCbActive_ = false, gtInStartAsync_ = false;
+
+        static void gtUpdateMax(std::atomic<uint64_t> &dst, uint64_t val)
+        {
+            uint64_t cur = dst.load(std::memory_order_relaxed);
+            while (val > cur && !dst.compare_exchange_weak(cur, val, std::memory_order_relaxed)) {}
+        }
+
+        void gtHarvestQueries()
+        {
+            if (gtQueryPool_ == VK_NULL_HANDLE || !g_vk.timestampOk)
+                return;
+            auto harvestRing = [&](uint64_t &readIdx, uint64_t writeIdx, uint32_t baseQuery,
+                                   std::atomic<uint64_t> &sumNs, std::atomic<uint64_t> &maxNs, std::atomic<uint64_t> &samples)
+            {
+                while (readIdx < writeIdx)
+                {
+                    const uint32_t slot = static_cast<uint32_t>(readIdx % kGtRing);
+                    uint64_t ts[2] = {};
+                    const VkResult r = vkGetQueryPoolResults(
+                        g_vk.dev, gtQueryPool_, baseQuery + slot * 2u, 2u,
+                        sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+                    if (r == VK_NOT_READY)
+                        break;
+                    if (r == VK_SUCCESS && ts[1] >= ts[0])
+                    {
+                        const uint64_t ns = static_cast<uint64_t>(static_cast<double>(ts[1] - ts[0]) * static_cast<double>(g_vk.timestampPeriod));
+                        sumNs.fetch_add(ns, std::memory_order_relaxed);
+                        gtUpdateMax(maxNs, ns);
+                        samples.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    ++readIdx;
+                }
+            };
+            harvestRing(gtCbReadIdx_, gtCbWriteIdx_, 0u, g_gtFrameNs, g_gtFrameMaxNs, g_gtFrameSamples);
+            harvestRing(gtPresReadIdx_, gtPresWriteIdx_, kGtRing * 2u, g_gtPresNs, g_gtPresMaxNs, g_gtPresSamples);
+        }
     };
 } // namespace
 

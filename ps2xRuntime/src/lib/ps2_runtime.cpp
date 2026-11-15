@@ -7,6 +7,10 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 #endif
 #include "ps2_runtime.h"
 extern void ps2xPadMarker(); // PROBE-MK
+extern "C" bool ps2_gt_enabled(); // PROBE-GT
+extern "C" void ps2_gt_count(int what, uint64_t n); // PROBE-GT
+extern "C" void ps2_gt_take_counts(uint64_t *out); // PROBE-GT
+extern "C" void ps2_gt_vk_take(double *outFrameAvg, double *outFrameMax, double *outPresAvg, double *outPresMax, double *outFenceMs, bool *outTsOk, double *outTsPeriodNs); // PROBE-GT
 #include "probe_ae.h"
 #include "probe_ae.cpp"
 #include "diag/DiagSampler.h"
@@ -6290,6 +6294,7 @@ void PS2Runtime::run()
 
         extern std::atomic<uint64_t> g_gsFrameKicks;
         extern std::atomic<uint64_t> g_hostPresentSeq;
+        static uint64_t s_gtPresentWaitNs = 0; // PROBE-GT
         static uint64_t s_lastPresentedGsKicks = std::numeric_limits<uint64_t>::max();
         static uint64_t s_lastPresentedSeq = std::numeric_limits<uint64_t>::max();
         static auto s_lastPresentTime = std::chrono::steady_clock::now();
@@ -6311,6 +6316,8 @@ void PS2Runtime::run()
             // PERF-MB: delivered-frame cadence ([ft] line every 5 s). A locked 60 means p99 well under 16.7 ms and no interval over 20 ms.
             if (currentPresentSeq != s_lastPresentedSeq)
             {
+                if (ps2_gt_enabled() && s_lastPresentedSeq != std::numeric_limits<uint64_t>::max() && currentPresentSeq > s_lastPresentedSeq + 1u) // PROBE-GT
+                    ps2_gt_count(3, currentPresentSeq - s_lastPresentedSeq - 1u);
                 static std::vector<float> s_ft;
                 static auto s_ftPrev = now;
                 static auto s_ftLog = now;
@@ -6393,8 +6400,11 @@ void PS2Runtime::run()
             {
                 m_debugUiDrawCallback(*this, m_debugUiUserData);
             }
+            const auto gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT
             EndDrawing();
             const auto presT1 = std::chrono::steady_clock::now();
+            if (ps2_gt_enabled()) // PROBE-GT
+                s_gtPresentWaitNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(presT1 - gtEd0).count());
             s_profPresentUs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(presT1 - presT0).count());
         }
         else
@@ -6433,6 +6443,32 @@ void PS2Runtime::run()
             uint32_t currentFps = static_cast<uint32_t>(s_fpsCounter * 1000.0 / timeSinceLastFpsLog);
             ps2xSafeLog("[fps] FPS: %u (GS frames/sec), kicks=%llu, vsyncTick=%llu\n",
                         currentFps, (unsigned long long)currentGsKicks, (unsigned long long)(m_eeScheduler ? m_eeScheduler->currentVSyncTick() : 0));
+            if (ps2_gt_enabled()) // PROBE-GT
+            {
+                static bool s_gtHeaderPrinted = false;
+                static uint64_t s_gtLastKicks = 0;
+                const uint64_t produced = (currentGsKicks >= s_gtLastKicks) ? (currentGsKicks - s_gtLastKicks) : 0ull;
+                s_gtLastKicks = currentGsKicks;
+                double frameAvg = 0.0, frameMax = 0.0, presAvg = 0.0, presMax = 0.0, fenceMs = 0.0, tsPeriodNs = 0.0;
+                bool tsOk = false;
+                ps2_gt_vk_take(&frameAvg, &frameMax, &presAvg, &presMax, &fenceMs, &tsOk, &tsPeriodNs);
+                uint64_t gtCnt[5]{};
+                ps2_gt_take_counts(gtCnt);
+                const double presentWaitMs = static_cast<double>(s_gtPresentWaitNs) * 1e-6;
+                s_gtPresentWaitNs = 0;
+                if (!s_gtHeaderPrinted)
+                {
+                    s_gtHeaderPrinted = true;
+                    ps2xSafeLog("[gt] swapchain: host_present=raylib_gl (no VkSwapchainKHR, present_mode=n/a, image_count=n/a, target_fps=60); vk_ts=%s period=%.2fns\n",
+                                tsOk ? "on" : "off", tsPeriodNs);
+                }
+                ps2xSafeLog("[gt] gpu_ms avg/max frame=%.2f/%.2f present=%.2f/%.2f | produced=%llu latched=%llu presented=%u | drops: skip_nokick=%llu coalesce_latch=%llu skip_empty=%llu coalesce_main=%llu | wait_ms acquire=0.00 present=%.2f fence=%.2f\n",
+                            frameAvg, frameMax, presAvg, presMax,
+                            (unsigned long long)produced, (unsigned long long)gtCnt[4], s_fpsCounter,
+                            (unsigned long long)gtCnt[0], (unsigned long long)gtCnt[1],
+                            (unsigned long long)gtCnt[2], (unsigned long long)gtCnt[3],
+                            presentWaitMs, fenceMs);
+            }
 
             uint64_t eeUs = g_profEeUs.exchange(0, std::memory_order_relaxed); // PERF-IR: TSC ticks -> us over this window
             {

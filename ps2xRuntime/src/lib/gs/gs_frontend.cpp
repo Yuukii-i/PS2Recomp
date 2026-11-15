@@ -138,6 +138,19 @@ struct GwScope // PROBE-GW
 } // namespace
 
 std::atomic<uint64_t> g_hostPresentSeq{0};
+// PROBE-GT: present-path accounting (0=skip_nokick, 1=coalesce_latch, 2=skip_empty, 3=coalesce_main, 4=latched)
+extern "C" bool ps2_gt_enabled();
+static std::atomic<uint64_t> g_gtCounts[5]{};
+extern "C" void ps2_gt_count(int what, uint64_t n)
+{
+    if (what >= 0 && what < 5 && ps2_gt_enabled())
+        g_gtCounts[what].fetch_add(n, std::memory_order_relaxed);
+}
+extern "C" void ps2_gt_take_counts(uint64_t *out)
+{
+    for (int i = 0; i < 5; ++i)
+        out[i] = g_gtCounts[i].exchange(0, std::memory_order_relaxed);
+}
 // PERF-JD: rdtsc ticks per stage of the vblank present latch: 0 total, 1 Flush+Sync, 2 backend Present, 3 Vk syncPages (in Present), 4 VRAM snapshot, 5 CPU de-swizzle, 7 count
 std::atomic<uint64_t> g_presTicks[8]{};
 
@@ -1061,6 +1074,7 @@ void GS::latchHostPresentationFrame()
             m_hostPresentationFrame.clear();
             m_hasHostPresentationFrame = false;
             m_hostPresentationWidth = m_hostPresentationHeight = 0u;
+            ps2_gt_count(2, 1); // PROBE-GT: skip_empty
             return;
         }
         request = buildPresentationRequestUnlocked();
@@ -1104,8 +1118,13 @@ void GS::latchHostPresentationFrame()
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
         g_hostPresentSeq.fetch_add(1, std::memory_order_release);
+        ps2_gt_count(4, 1); // PROBE-GT: latched
         ft2OnPresent(); // PERF-LN
         if (g_ps2Ft2On) ps2_ft2_ev(12, g_hostPresentSeq.load(std::memory_order_relaxed)); // PROBE-FT2: GS_FRAME_DONE
+    }
+    else
+    {
+        ps2_gt_count(2, 1); // PROBE-GT: skip_empty
     }
 
     // PERF-JD: every 128 latches print the average ms per latch for each stage
