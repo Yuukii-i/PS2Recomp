@@ -127,7 +127,7 @@ namespace
     long __stdcall ps2xCrashHandler(Ps2xExcPointers *p)
     {
         static std::atomic<int> s_reports{0};
-        ps2xFlushLog(); // PERF-LG
+        if (p && p->record && (p->record->code & 0xF0000000ul) == 0xC0000000ul) ps2xFlushLog(); // PERF-CF
         if (!p || !p->record || p->record->code != 0xC0000005ul || s_reports.fetch_add(1) >= 2)
             return 0; // EXCEPTION_CONTINUE_SEARCH
         void *frames[62];
