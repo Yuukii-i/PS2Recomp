@@ -5,6 +5,7 @@
 #include "../../spu2/spu2_state.h"
 
 #include <array>
+#include <chrono> // PROBE-AU3E
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -26,6 +27,7 @@ namespace ps2x::iop
     };
 
     void getLibsdDiagnostics(LibsdDiagSnapshot &outSnapshot, std::vector<std::string> &outPendingLogs);
+    int32_t getSpu2VoicePeak(uint32_t core, uint32_t voice) noexcept; // PROBE-AU3E
 }
 
 namespace ps2x::iop::detail
@@ -43,6 +45,39 @@ namespace ps2x::iop::detail
         std::array<std::array<bool, 24>, 2> g_hasPrevNax{};
         std::array<std::array<uint16_t, 24>, 2> g_prevEnvx{};
         std::array<std::array<bool, 24>, 2> g_hasPrevEnvx{};
+        uint32_t g_konTotalLogged = 0u; // PROBE-AU3E
+        constexpr uint32_t kMaxKonLogs = 600u; // PROBE-AU3E
+        uint64_t g_konSumCount = 0u; // PROBE-AU3E
+        uint64_t g_konSumSilentNotes = 0u; // PROBE-AU3E
+        uint64_t g_konSumUnwritten = 0u; // PROBE-AU3E
+        uint64_t g_konSumSweepVol = 0u; // PROBE-AU3E
+        uint64_t g_konSumZeroVol = 0u; // PROBE-AU3E
+        uint64_t g_konSumZeroPitch = 0u; // PROBE-AU3E
+        std::chrono::steady_clock::time_point g_konSumLastReport = std::chrono::steady_clock::now(); // PROBE-AU3E
+
+        void flushKonSummaryIfDueLocked() // PROBE-AU3E
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_konSumLastReport).count() < 5000)
+                return;
+            g_konSumLastReport = now;
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "[konsum] kon=%llu silentNotes=%llu unwritten=%llu sweepVol=%llu zeroVol=%llu zeroPitch=%llu",
+                          static_cast<unsigned long long>(g_konSumCount),
+                          static_cast<unsigned long long>(g_konSumSilentNotes),
+                          static_cast<unsigned long long>(g_konSumUnwritten),
+                          static_cast<unsigned long long>(g_konSumSweepVol),
+                          static_cast<unsigned long long>(g_konSumZeroVol),
+                          static_cast<unsigned long long>(g_konSumZeroPitch));
+            g_libsdFirstLogs.emplace_back(buf);
+            g_konSumCount = 0u;
+            g_konSumSilentNotes = 0u;
+            g_konSumUnwritten = 0u;
+            g_konSumSweepVol = 0u;
+            g_konSumZeroVol = 0u;
+            g_konSumZeroPitch = 0u;
+        }
 
         void recordSpu2NoticeOnce(bool &flag, const char *msg)
         {
@@ -132,6 +167,14 @@ namespace ps2x::iop::detail
         g_hasPrevNax = {};
         g_prevEnvx = {};
         g_hasPrevEnvx = {};
+        g_konTotalLogged = 0u; // PROBE-AU3E
+        g_konSumCount = 0u; // PROBE-AU3E
+        g_konSumSilentNotes = 0u; // PROBE-AU3E
+        g_konSumUnwritten = 0u; // PROBE-AU3E
+        g_konSumSweepVol = 0u; // PROBE-AU3E
+        g_konSumZeroVol = 0u; // PROBE-AU3E
+        g_konSumZeroPitch = 0u; // PROBE-AU3E
+        g_konSumLastReport = std::chrono::steady_clock::now(); // PROBE-AU3E
     }
 
     std::optional<IopLibsd::CompletionCallback> IopLibsd::takeCompletionCallback() noexcept
@@ -193,11 +236,71 @@ namespace ps2x::iop::detail
         }
 
         case 7: // sceSdSetSwitch(u16 entry, u32 value)
-            m_spu2.setSwitch(static_cast<uint16_t>(a0 & 0xFFFFu), a1);
-            if ((a0 & 0xFF00u) == 0x1500u) // SD_S_KON
+        {
+            const uint16_t entry = static_cast<uint16_t>(a0 & 0xFFFFu); // PROBE-AU3E
+            m_spu2.setSwitch(entry, a1);
+            if ((entry & 0xFF00u) == 0x1500u) // SD_S_KON
+            {
                 keyOns = popcount24(a1);
+                const uint32_t core = entry & 1u; // PROBE-AU3E
+                const uint32_t mask = a1 & 0x00FFFFFFu; // PROBE-AU3E
+                const uint16_t mvoll = m_spu2.getParam(static_cast<uint16_t>(0x0900u | core)); // PROBE-AU3E
+                const uint16_t mvolr = m_spu2.getParam(static_cast<uint16_t>(0x0A00u | core)); // PROBE-AU3E
+                for (uint32_t v = 0u; v < Spu2State::kNumVoices; ++v) // PROBE-AU3E
+                {
+                    if ((mask & (1u << v)) == 0u) // PROBE-AU3E
+                        continue; // PROBE-AU3E
+                    const uint16_t vc = static_cast<uint16_t>((v << 1u) | core); // PROBE-AU3E
+                    const uint32_t ssa = m_spu2.getAddr(static_cast<uint16_t>(0x2000u | vc)); // PROBE-AU3E
+                    const bool written = m_spu2.blockWritten(ssa); // PROBE-AU3E
+                    const uint16_t voll = m_spu2.getParam(static_cast<uint16_t>(0x0000u | vc)); // PROBE-AU3E
+                    const uint16_t volr = m_spu2.getParam(static_cast<uint16_t>(0x0100u | vc)); // PROBE-AU3E
+                    const uint16_t pitch = m_spu2.getParam(static_cast<uint16_t>(0x0200u | vc)); // PROBE-AU3E
+                    const uint16_t adsr1 = m_spu2.getParam(static_cast<uint16_t>(0x0300u | vc)); // PROBE-AU3E
+                    const uint16_t adsr2 = m_spu2.getParam(static_cast<uint16_t>(0x0400u | vc)); // PROBE-AU3E
+                    const int32_t prevPeak = getSpu2VoicePeak(core, v); // PROBE-AU3E
+
+                    bool shouldLog = false; // PROBE-AU3E
+                    {
+                        std::lock_guard<std::mutex> lock(g_libsdDiagMutex); // PROBE-AU3E
+                        ++g_konSumCount; // PROBE-AU3E
+                        if (prevPeak == 0) // PROBE-AU3E
+                            ++g_konSumSilentNotes; // PROBE-AU3E
+                        if (!written) // PROBE-AU3E
+                            ++g_konSumUnwritten; // PROBE-AU3E
+                        if (((voll | volr) & 0x8000u) != 0u) // PROBE-AU3E
+                            ++g_konSumSweepVol; // PROBE-AU3E
+                        if (voll == 0u && volr == 0u) // PROBE-AU3E
+                            ++g_konSumZeroVol; // PROBE-AU3E
+                        if (pitch == 0u) // PROBE-AU3E
+                            ++g_konSumZeroPitch; // PROBE-AU3E
+                        if (g_konTotalLogged < kMaxKonLogs) // PROBE-AU3E
+                        {
+                            ++g_konTotalLogged; // PROBE-AU3E
+                            shouldLog = true; // PROBE-AU3E
+                        }
+                    }
+                    if (shouldLog) // PROBE-AU3E
+                    {
+                        uint8_t hdr[16]{}; // PROBE-AU3E
+                        m_spu2.readRam(ssa, hdr, 16u); // PROBE-AU3E
+                        char hdrHex[33]{}; // PROBE-AU3E
+                        for (uint32_t i = 0u; i < 16u; ++i) // PROBE-AU3E
+                            std::snprintf(hdrHex + i * 2u, 3u, "%02x", static_cast<unsigned>(hdr[i])); // PROBE-AU3E
+                        char buf[256]; // PROBE-AU3E
+                        std::snprintf(buf, sizeof(buf), // PROBE-AU3E
+                                      "[kon] c=%u v=%u ssa=0x%06x written=%u hdr=%s pitch=0x%04x voll=0x%04x volr=0x%04x adsr1=0x%04x adsr2=0x%04x mvol=0x%04x/0x%04x prevPeak=%d", // PROBE-AU3E
+                                      core, v, ssa, written ? 1u : 0u, hdrHex, pitch, voll, volr, adsr1, adsr2, mvoll, mvolr, prevPeak); // PROBE-AU3E
+                        std::lock_guard<std::mutex> lock(g_libsdDiagMutex); // PROBE-AU3E
+                        g_libsdFirstLogs.emplace_back(buf); // PROBE-AU3E
+                    }
+                }
+                std::lock_guard<std::mutex> lock(g_libsdDiagMutex); // PROBE-AU3E
+                flushKonSummaryIfDueLocked(); // PROBE-AU3E
+            }
             ret = 0u;
             break;
+        }
 
         case 8: // sceSdGetSwitch(u16 entry)
             ret = m_spu2.getSwitch(static_cast<uint16_t>(a0 & 0xFFFFu));
@@ -398,6 +501,8 @@ namespace ps2x::iop
     void getLibsdDiagnostics(LibsdDiagSnapshot &outSnapshot, std::vector<std::string> &outPendingLogs)
     {
         std::lock_guard<std::mutex> lock(detail::g_libsdDiagMutex);
+        if (detail::g_konSumCount > 0u) // PROBE-AU3E
+            detail::flushKonSummaryIfDueLocked(); // PROBE-AU3E
         outSnapshot = detail::g_libsdDiag;
         outPendingLogs.swap(detail::g_libsdFirstLogs);
     }

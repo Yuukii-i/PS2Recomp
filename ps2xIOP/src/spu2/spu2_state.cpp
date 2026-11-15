@@ -66,6 +66,7 @@ namespace ps2x::iop::detail
                 m_ram.assign(kRamSize, 0u);
             else
                 std::fill(m_ram.begin(), m_ram.end(), 0u);
+            m_writtenBlocks.fill(0u); // PROBE-AU3E
         }
     }
 
@@ -85,10 +86,21 @@ namespace ps2x::iop::detail
         {
             const uint32_t chunk = std::min(remaining, kRamSize - dst);
             std::memcpy(m_ram.data() + dst, bytes, chunk);
+            const uint32_t firstBlock = dst >> 4u; // PROBE-AU3E
+            const uint32_t lastBlock = (dst + chunk - 1u) >> 4u; // PROBE-AU3E
+            for (uint32_t b = firstBlock; b <= lastBlock; ++b) // PROBE-AU3E
+                m_writtenBlocks[b >> 6u] |= (1ull << (b & 63u)); // PROBE-AU3E
             bytes += chunk;
             remaining -= chunk;
             dst = 0u;
         }
+    }
+
+    bool Spu2State::blockWritten(uint32_t addr) const // PROBE-AU3E
+    {
+        std::lock_guard<std::mutex> ramLock(m_ramMutex); // PROBE-AU3E
+        const uint32_t block = (addr % kRamSize) >> 4u; // PROBE-AU3E
+        return (m_writtenBlocks[block >> 6u] & (1ull << (block & 63u))) != 0u; // PROBE-AU3E
     }
 
     void Spu2State::readRam(uint32_t spuAddr, void *dst, uint32_t size) const

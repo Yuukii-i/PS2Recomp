@@ -99,6 +99,7 @@ namespace ps2x::iop::detail
 
         void writeRam(uint32_t spuAddr, const void *src, uint32_t size);
         void readRam(uint32_t spuAddr, void *dst, uint32_t size) const;
+        [[nodiscard]] bool blockWritten(uint32_t addr) const; // PROBE-AU3E
 
         void setParam(uint16_t entry, uint16_t value);
         [[nodiscard]] uint16_t getParam(uint16_t entry) const;
@@ -173,5 +174,6 @@ namespace ps2x::iop::detail
         };
         std::array<AutoDmaRing, 2> m_autoDmaRings{}; // PERF-AU3
         std::vector<uint8_t> m_ram;
+        std::array<uint64_t, kRamSize / (16u * 64u)> m_writtenBlocks{}; // PROBE-AU3E
     };
 }

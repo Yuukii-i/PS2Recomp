@@ -6,6 +6,21 @@
 #include <cstring>
 #include <mutex>
 
+namespace ps2x::iop // PROBE-AU3E
+{
+    namespace
+    {
+        std::array<std::array<std::atomic<int32_t>, detail::Spu2State::kNumVoices>, detail::Spu2State::kNumCores> g_voicePeakSinceKon{}; // PROBE-AU3E
+
+        void resetAllVoicePeaks() noexcept // PROBE-AU3E
+        {
+            for (auto &core : g_voicePeakSinceKon)
+                for (auto &v : core)
+                    v.store(0, std::memory_order_relaxed);
+        }
+    }
+}
+
 namespace ps2x::iop::detail
 {
     namespace
@@ -58,6 +73,7 @@ namespace ps2x::iop::detail
     {
         for (auto &core : m_voices)
             core = {};
+        resetAllVoicePeaks(); // PROBE-AU3E
     }
 
     void Spu2Mixer::decodeBlock(VoiceState &v, const Spu2State &state)
@@ -225,6 +241,7 @@ namespace ps2x::iop::detail
                 if ((kon & bit) != 0u)
                 {
                     keyOnVoice(reg, v, state);
+                    g_voicePeakSinceKon[ci][vi].store(0, std::memory_order_relaxed); // PROBE-AU3E
                 }
                 else if ((koff & bit) != 0u && v.active)
                 {
@@ -244,6 +261,7 @@ namespace ps2x::iop::detail
         }
 
         int32_t peak = 0;
+        std::array<std::array<int32_t, Spu2State::kNumVoices>, Spu2State::kNumCores> blockVoicePeak{}; // PROBE-AU3E
 
         for (uint32_t f = 0u; f < frameCount; ++f)
         {
@@ -284,10 +302,21 @@ namespace ps2x::iop::detail
 
                     const int32_t envSample = (sample * v.envLevel) >> 15;
                     const uint32_t bit = 1u << vi;
+                    int32_t vOutL = 0; // PROBE-AU3E
+                    int32_t vOutR = 0; // PROBE-AU3E
                     if ((coreReg.vmixl & bit) != 0u)
-                        coreL += (static_cast<int64_t>(envSample) * decodeFixedVol(reg.voll)) >> 14;
+                    {
+                        vOutL = static_cast<int32_t>((static_cast<int64_t>(envSample) * decodeFixedVol(reg.voll)) >> 14); // PROBE-AU3E
+                        coreL += vOutL; // PROBE-AU3E
+                    }
                     if ((coreReg.vmixr & bit) != 0u)
-                        coreR += (static_cast<int64_t>(envSample) * decodeFixedVol(reg.volr)) >> 14;
+                    {
+                        vOutR = static_cast<int32_t>((static_cast<int64_t>(envSample) * decodeFixedVol(reg.volr)) >> 14); // PROBE-AU3E
+                        coreR += vOutR; // PROBE-AU3E
+                    }
+                    const int32_t voiceAbs = std::max(std::abs(vOutL), std::abs(vOutR)); // PROBE-AU3E
+                    if (voiceAbs > blockVoicePeak[ci][vi]) // PROBE-AU3E
+                        blockVoicePeak[ci][vi] = voiceAbs; // PROBE-AU3E
 
                     const uint32_t pitch = std::min<uint32_t>(reg.pitch & 0x3FFFu, 0x3FFFu);
                     v.fracPhase += pitch;
@@ -344,6 +373,8 @@ namespace ps2x::iop::detail
         {
             for (uint32_t vi = 0u; vi < Spu2State::kNumVoices; ++vi)
             {
+                if (blockVoicePeak[ci][vi] > g_voicePeakSinceKon[ci][vi].load(std::memory_order_relaxed)) // PROBE-AU3E
+                    g_voicePeakSinceKon[ci][vi].store(blockVoicePeak[ci][vi], std::memory_order_relaxed); // PROBE-AU3E
                 VoiceState &v = m_voices[ci][vi];
                 if (v.active)
                     ++activeCount;
@@ -384,6 +415,7 @@ namespace ps2x::iop
         g_lastActiveVoices.store(0u, std::memory_order_relaxed);
         g_lastKeyOns.store(0u, std::memory_order_relaxed);
         g_peakAccum.store(0, std::memory_order_relaxed);
+        resetAllVoicePeaks(); // PROBE-AU3E
     }
 
     void unregisterActiveSpu2State(detail::Spu2State *state) noexcept
@@ -424,5 +456,12 @@ namespace ps2x::iop
         outActiveVoices = g_lastActiveVoices.load(std::memory_order_relaxed);
         outKeyOns = g_lastKeyOns.load(std::memory_order_relaxed);
         outPeak = g_peakAccum.exchange(0, std::memory_order_relaxed);
+    }
+
+    int32_t getSpu2VoicePeak(uint32_t core, uint32_t voice) noexcept // PROBE-AU3E
+    {
+        if (core >= detail::Spu2State::kNumCores || voice >= detail::Spu2State::kNumVoices) // PROBE-AU3E
+            return 0; // PROBE-AU3E
+        return g_voicePeakSinceKon[core][voice].load(std::memory_order_relaxed); // PROBE-AU3E
     }
 }
