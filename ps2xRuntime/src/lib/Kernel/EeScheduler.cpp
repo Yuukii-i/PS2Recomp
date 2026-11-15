@@ -39,6 +39,22 @@ namespace ps2_syscalls {
 #include <limits>
 #include <stdexcept>
 #include <chrono>
+namespace // PERF-SA
+{
+struct ScratchDepthGuard
+{
+    int &depth;
+    explicit ScratchDepthGuard(int &d) noexcept : depth(d) {}
+    ~ScratchDepthGuard() noexcept { --depth; }
+    ScratchDepthGuard(const ScratchDepthGuard &) = delete;
+    ScratchDepthGuard &operator=(const ScratchDepthGuard &) = delete;
+};
+
+thread_local std::vector<int> s_vsyncCompletedScratch;
+thread_local int s_vsyncCompletedDepth = 0;
+thread_local std::vector<EeEvent> s_pendingEventsScratch;
+thread_local int s_pendingEventsDepth = 0;
+} // namespace // PERF-SA
 extern "C" void ps2xFlushLog(); // PERF-LG
 #ifdef _WIN32 // PROBE-EX
 extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
@@ -1846,7 +1862,11 @@ uint32_t EeScheduler::setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_
 void EeScheduler::completeVSync(uint64_t tick)
 {
     assertExecutor();
-    std::vector<int> completed;
+    const bool outer = (s_vsyncCompletedDepth++ == 0); // PERF-SA
+    ScratchDepthGuard depthGuard(s_vsyncCompletedDepth); // PERF-SA
+    std::vector<int> local; // PERF-SA
+    auto &completed = outer ? s_vsyncCompletedScratch : local; // PERF-SA
+    completed.clear(); // PERF-SA
     for (const auto &[id, candidate] : m_threads)
     {
         if ((candidate.status == EeThreadStatus::Waiting || candidate.status == EeThreadStatus::WaitingSuspended) &&
@@ -2294,10 +2314,18 @@ void EeScheduler::processPendingEvents()
             dispatchIrq(false, 9u + timer);
         }
     }
-    std::deque<EeEvent> pending;
+    const bool outer = (s_pendingEventsDepth++ == 0); // PERF-SA
+    ScratchDepthGuard depthGuard(s_pendingEventsDepth); // PERF-SA
+    std::vector<EeEvent> local; // PERF-SA
+    auto &pending = outer ? s_pendingEventsScratch : local; // PERF-SA
+    pending.clear(); // PERF-SA
     {
         std::lock_guard lock(m_eventMutex);
-        pending.swap(m_events);
+        while (!m_events.empty()) // PERF-SA
+        { // PERF-SA
+            pending.push_back(m_events.front()); // PERF-SA
+            m_events.pop_front(); // PERF-SA
+        } // PERF-SA
     }
     for (const EeEvent &event : pending)
     {
@@ -2316,9 +2344,15 @@ void EeScheduler::processPendingEvents()
 
 void EeScheduler::processDueDeadlines()
 {
+    static thread_local std::vector<ScheduledEvent> s_dueScratch; // PERF-SA
+    static thread_local int s_dueDepth = 0; // PERF-SA
+    const bool outer = (s_dueDepth++ == 0); // PERF-SA
+    ScratchDepthGuard depthGuard(s_dueDepth); // PERF-SA
+    std::vector<ScheduledEvent> local; // PERF-SA
+    auto &due = outer ? s_dueScratch : local; // PERF-SA
     for (;;)
     {
-        std::vector<ScheduledEvent> due;
+        due.clear(); // PERF-SA
         {
             std::unique_lock lock(m_eventMutex);
             auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
