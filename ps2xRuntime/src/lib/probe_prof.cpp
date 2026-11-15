@@ -730,7 +730,7 @@ namespace probe_ae {
         bool splitUsed = false;
 
         for (size_t i = 0; i < limit; ++i) {
-            char item[256];
+            char item[640];
             int itemLen = snprintf(item, sizeof(item), "%s=%llu ",
                                    sorted[i].first.c_str(),
                                    (unsigned long long)sorted[i].second);
@@ -836,6 +836,17 @@ namespace probe_ae {
             return sys;
         };
 
+        // PROBE-EP: PS2X_PROF_EE_CHAIN=<comma-separated leaf substrings>
+        std::vector<std::string> chainSubs;
+        if (const char *ce = std::getenv("PS2X_PROF_EE_CHAIN")) {
+            std::string cs = ce, cur;
+            for (char c : cs) {
+                if (c == ',') { if (!cur.empty()) chainSubs.push_back(cur); cur.clear(); }
+                else cur += c;
+            }
+            if (!cur.empty()) chainSubs.push_back(cur);
+        }
+
         std::vector<EeSample> samples;
         samples.reserve(12000);
 
@@ -885,6 +896,7 @@ namespace probe_ae {
                 std::unordered_map<std::string, uint64_t> ownerCounts;
                 std::unordered_map<std::string, uint64_t> pairCounts;
                 std::unordered_map<std::string, uint64_t> waitCounts;
+                std::unordered_map<std::string, uint64_t> chainCounts;
 
                 for (const EeSample &s : samples) {
                     if (s.count == 0) continue;
@@ -904,6 +916,24 @@ namespace probe_ae {
                         }
                         if (chain.empty()) chain = "(none)";
                         waitCounts[chain]++;
+                    }
+                    if (!chainSubs.empty()) {
+                        bool hit = false;
+                        for (const auto &sub : chainSubs) {
+                            if (leafRaw.find(sub) != std::string::npos) { hit = true; break; }
+                        }
+                        if (hit) {
+                            std::string chain;
+                            int got = 0;
+                            for (uint8_t f = 0; f < s.count && got < 6; ++f) {
+                                if (f != 0 && isSysFrame(s.addr[f], s.fnStart[f])) continue;
+                                const std::string &sym = (f == 0) ? leafRaw : resolveSymByFn(s.addr[f], s.fnStart[f]);
+                                if (got) chain += "<";
+                                chain += shortenSymbolName(sym);
+                                got++;
+                            }
+                            chainCounts[chain]++;
+                        }
                     }
                     std::string leafShort = shortenSymbolName(leafRaw);
                     leafCounts[leafShort]++;
@@ -934,6 +964,7 @@ namespace probe_ae {
                 eeLogList(tSec, "owner", ownerCounts, 40);
                 eeLogList(tSec, "pair", pairCounts, 25);
                 eeLogList(tSec, "wait", waitCounts, 15);
+                if (!chainSubs.empty()) eeLogList(tSec, "chain", chainCounts, 15);
 
                 samples.clear();
             }
