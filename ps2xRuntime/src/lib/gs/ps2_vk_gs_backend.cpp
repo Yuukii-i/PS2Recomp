@@ -1647,7 +1647,7 @@ namespace
             const uint32_t zero[2] = {0, 0};
             std::memcpy(cnt, presOut_.map, 8);
             std::memcpy(presOut_.map, zero, 8);
-            static const bool s_fallbackOn = []() { const char *e = std::getenv("PS2X_GS_PRESENT_FALLBACK"); return !(e && (std::strcmp(e, "0") == 0 || std::strcmp(e, "false") == 0)); }();
+            static const bool s_fallbackOn = []() { const char *e = std::getenv("PS2X_GS_PRESENT_FALLBACK"); return e && (std::strcmp(e, "1") == 0 || std::strcmp(e, "true") == 0); }(); // FIX-BA
             if (s_fallbackOn && !gp.usedPreferred && (cnt[0] <= 256u || (gp.dual && cnt[1] <= 256u)))
             {
                 needCpu = true;

@@ -4960,7 +4960,7 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
         if (s_presentFallback == -1)
         {
             const char *env = std::getenv("PS2X_GS_PRESENT_FALLBACK");
-            s_presentFallback = (env && (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0)) ? 0 : 1;
+            s_presentFallback = (env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0)) ? 1 : 0; // FIX-BA
         }
         if (s_presentFallback != 0 && !usedPreferred && countNonBlackPixels(pixels, width, height) <= 256u)
         {
