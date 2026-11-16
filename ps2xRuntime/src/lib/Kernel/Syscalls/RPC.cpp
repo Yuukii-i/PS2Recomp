@@ -74,7 +74,7 @@ namespace
     {
         static const bool enabled = []() {
             const char *env = std::getenv("PS2X_SG2_LLE");
-            return env && env[0] != '\0' && std::strcmp(env, "0") != 0;
+            return !env || env[0] == '\0' || std::strcmp(env, "0") != 0; // FIX-AU10
         }();
         return enabled;
     }
@@ -764,7 +764,7 @@ static void onCid1Vblank()
                 }
             };
 
-            // 0x11223344u: SG2 Audio Server (PERF-AU1: skipped when PS2X_SG2_LLE=1 so IOP handles it)
+            // 0x11223344u: SG2 Audio Server (PERF-AU1: skipped unless PS2X_SG2_LLE=0 so IOP handles it) // FIX-AU10
             if (!isSg2LleEnabled())
             s_rpcHleServices[0x11223344u] = {
                 0x11223344u,
@@ -1263,7 +1263,7 @@ uint64_t vblDiff = 0;
 
         initRpcHleServices();
 
-        // PERF-AU1: When PS2X_SG2_LLE=1, ensure sg2iopm1.irx is loaded into the IOP emulator before binding 0x11223344.
+        // PERF-AU1: Unless PS2X_SG2_LLE=0, ensure sg2iopm1.irx is loaded into the IOP emulator before binding 0x11223344. // FIX-AU10
         if (isSg2LleEnabled() && rpcId == 0x11223344u && runtime)
         {
             static bool s_sg2FallbackAttempted = false;

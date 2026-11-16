@@ -97,7 +97,7 @@ namespace ps2x::audio
         bool isSg2LleEnabled() noexcept
         {
             const char *env = std::getenv("PS2X_SG2_LLE");
-            return env && env[0] != '\0' && std::strcmp(env, "0") != 0;
+            return !env || env[0] == '\0' || std::strcmp(env, "0") != 0; // FIX-AU10
         }
 
         bool isAudioOutMuted() noexcept
@@ -365,7 +365,7 @@ namespace ps2x::audio
         }
     }
 
-    // PERF-AU2: Start SPU2 mixer thread and raylib AudioStream when PS2X_SG2_LLE=1.
+    // PERF-AU2: Start SPU2 mixer thread and raylib AudioStream unless PS2X_SG2_LLE=0. // FIX-AU10
     void startSpu2Output()
     {
         if (!isSg2LleEnabled())
