@@ -63,6 +63,11 @@ namespace ps2x::iop
     void getSg2QueueDiag(std::string &out); // PROBE-AU3C
 }
 
+uint64_t ps2xAu6FramesMixed(); // PROBE-AU6
+uint64_t ps2xAu6FramesConsumed(); // PROBE-AU6
+static uint8_t *s_au6Rdram = nullptr; // PROBE-AU6
+static std::atomic<uint64_t> s_au6Hv{0}; // PROBE-AU7
+
 namespace
 {
     bool isSg2LleEnabled()
@@ -2118,6 +2123,7 @@ uint64_t vblDiff = 0;
 
         if (cid == 1u)
         {
+            if (rdram) s_au6Rdram = rdram; // PROBE-AU6
             auto tCid1Start = std::chrono::steady_clock::now();
             struct VfiDescriptorSlot
             {
@@ -3096,4 +3102,108 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram)
 void ps2xCid1Vblank() // FIX-AU5
 {
     ps2_syscalls::onCid1Vblank();
+    static const bool s_au6Enabled = []() { // PROBE-AU6
+        const char *env = std::getenv("PS2X_AU6_PROBE"); // PROBE-AU6
+        return env && std::strcmp(env, "1") == 0; // PROBE-AU6
+    }(); // PROBE-AU6
+    if (!s_au6Enabled || s_au6Rdram == nullptr) // PROBE-AU6
+        return; // PROBE-AU6
+    const uint64_t hv = ++s_au6Hv; // PROBE-AU6
+    auto readU32 = [&](uint32_t addr) -> uint32_t { // PROBE-AU6
+        uint32_t val = 0; // PROBE-AU6
+        std::memcpy(&val, s_au6Rdram + (addr & 0x1FFFFFFFu), 4); // PROBE-AU6
+        return val; // PROBE-AU6
+    }; // PROBE-AU6
+    const uint32_t st = readU32(0x772188u); // PROBE-AU6
+    static uint32_t s_au6Lines = 0; // PROBE-AU6
+    if (st == 9u && s_au6Lines < 15000u) // PROBE-AU6
+    { // PROBE-AU6
+        ++s_au6Lines; // PROBE-AU6
+        const uint32_t tot = readU32(0x7721DCu); // PROBE-AU6
+        const uint32_t fr = readU32(0x7721E4u); // PROBE-AU6
+        const uint32_t dev = readU32(0x771BB8u); // PROBE-AU6
+        const uint32_t gv = readU32(0x696FD0u); // PROBE-AU6
+        const uint32_t pos0 = readU32(0x74B080u + 0xC0u); // PROBE-AU6
+        static bool s_hasT0 = false; // PROBE-AU6
+        static std::chrono::steady_clock::time_point s_t0; // PROBE-AU6
+        const auto now = std::chrono::steady_clock::now(); // PROBE-AU6
+        if (!s_hasT0) { s_t0 = now; s_hasT0 = true; } // PROBE-AU6
+        const uint64_t ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - s_t0).count()); // PROBE-AU6
+        ps2x::iop::Sg2DiagSnapshot sg2{}; // PROBE-AU6
+        ps2x::iop::getSg2DiagSnapshot(sg2); // PROBE-AU6
+        ps2xSafeLog("[au6] hv=%llu ms=%llu gv=%u tot=%u fr=%u dev=%u pos0=0x%x mix=%llu out=%llu iopTick=%llu\n", // PROBE-AU6
+                    static_cast<unsigned long long>(hv), static_cast<unsigned long long>(ms), // PROBE-AU6
+                    gv, tot, fr, dev, pos0, // PROBE-AU6
+                    static_cast<unsigned long long>(ps2xAu6FramesMixed()), // PROBE-AU6
+                    static_cast<unsigned long long>(ps2xAu6FramesConsumed()), // PROBE-AU6
+                    static_cast<unsigned long long>(sg2.tickCount)); // PROBE-AU6
+    } // PROBE-AU6
 }
+
+void ps2xAu7Cb(uint8_t *rdram, R5900Context *ctx) // PROBE-AU7
+{ // PROBE-AU7
+    static const bool s_au7Enabled = []() { // PROBE-AU7
+        const char *env = std::getenv("PS2X_AU7_PROBE"); // PROBE-AU7
+        return env && std::strcmp(env, "1") == 0; // PROBE-AU7
+    }(); // PROBE-AU7
+    if (!s_au7Enabled || !rdram || !ctx) // PROBE-AU7
+        return; // PROBE-AU7
+    auto readU32 = [&](uint32_t addr) -> uint32_t { // PROBE-AU7
+        uint32_t val = 0; // PROBE-AU7
+        std::memcpy(&val, rdram + (addr & 0x1FFFFFFu), 4); // PROBE-AU7
+        return val; // PROBE-AU7
+    }; // PROBE-AU7
+    const uint32_t st = readU32(0x772188u); // PROBE-AU7
+    if (st != 8u && st != 9u) // PROBE-AU7
+        return; // PROBE-AU7
+    static std::atomic<uint32_t> s_au7Lines{0}; // PROBE-AU7
+    if (s_au7Lines.fetch_add(1u, std::memory_order_relaxed) >= 6000u) // PROBE-AU7
+        return; // PROBE-AU7
+    const uint64_t hv = s_au6Hv.load(std::memory_order_relaxed); // PROBE-AU7
+    const uint32_t fr = readU32(0x7721E4u); // PROBE-AU7
+    const uint32_t c6c = readU32(0x7721ECu); // PROBE-AU7
+    const uint32_t obj = getRegU32(ctx, 17); // PROBE-AU7
+    const uint32_t head = readU32(obj + 0x228u); // PROBE-AU7
+    const uint32_t tail = readU32(obj + 0x22Cu); // PROBE-AU7
+    const uint32_t ev = readU32(obj + 0xA8u + 12u * head); // PROBE-AU7
+    const uint32_t a3 = readU32(obj + 0xB0u + 12u * head); // PROBE-AU7
+    const int32_t v0 = static_cast<int32_t>(getRegU32(ctx, 2)); // PROBE-AU7
+    const uint32_t dev = readU32(0x771BB8u); // PROBE-AU7
+    const uint32_t tid = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFF); // PROBE-AU8
+    const uint32_t ra = getRegU32(ctx, 31); // PROBE-AU8
+    ps2xSafeLog("[au7] hv=%llu st=%u fr=%u c6c=%u obj=0x%x head=%u tail=%u ev=%u a3=0x%x v0=%d dev=%u tid=%u ra=0x%x\n", // PROBE-AU8
+                static_cast<unsigned long long>(hv), st, fr, c6c, obj, head, tail, ev, a3, v0, dev, tid, ra); // PROBE-AU8
+} // PROBE-AU7
+
+void ps2xAu8Push(uint8_t *rdram, R5900Context *ctx) // PROBE-AU8
+{ // PROBE-AU8
+    static const bool s_au8Enabled = []() { // PROBE-AU8
+        const char *env = std::getenv("PS2X_AU8_PROBE"); // PROBE-AU8
+        return env && std::strcmp(env, "1") == 0; // PROBE-AU8
+    }(); // PROBE-AU8
+    if (!s_au8Enabled || !rdram || !ctx) // PROBE-AU8
+        return; // PROBE-AU8
+    auto readU32 = [&](uint32_t addr) -> uint32_t { // PROBE-AU8
+        uint32_t val = 0; // PROBE-AU8
+        std::memcpy(&val, rdram + (addr & 0x1FFFFFFu), 4); // PROBE-AU8
+        return val; // PROBE-AU8
+    }; // PROBE-AU8
+    const uint32_t st = readU32(0x772188u); // PROBE-AU8
+    if (st != 8u && st != 9u) // PROBE-AU8
+        return; // PROBE-AU8
+    static std::atomic<uint32_t> s_au8Lines{0}; // PROBE-AU8
+    if (s_au8Lines.fetch_add(1u, std::memory_order_relaxed) >= 4000u) // PROBE-AU8
+        return; // PROBE-AU8
+    const uint64_t hv = s_au6Hv.load(std::memory_order_relaxed); // PROBE-AU8
+    const uint32_t fr = readU32(0x7721E4u); // PROBE-AU8
+    const uint32_t tid = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFF); // PROBE-AU8
+    const uint32_t obj = getRegU32(ctx, 4); // PROBE-AU8
+    const uint32_t ev = getRegU32(ctx, 5); // PROBE-AU8
+    const uint32_t a3 = getRegU32(ctx, 7); // PROBE-AU8
+    const uint32_t ra = getRegU32(ctx, 31); // PROBE-AU8
+    const uint32_t tail = readU32(obj + 0x22Cu); // PROBE-AU8
+    const uint32_t head = readU32(obj + 0x228u); // PROBE-AU8
+    const uint32_t flags = readU32(obj + 8u); // PROBE-AU8
+    ps2xSafeLog("[au8] hv=%llu fr=%u tid=%u obj=0x%x ev=%u tail=%u head=%u flags=0x%x a3=0x%x ra=0x%x\n", // PROBE-AU8
+                static_cast<unsigned long long>(hv), fr, tid, obj, ev, tail, head, flags, a3, ra); // PROBE-AU8
+} // PROBE-AU8

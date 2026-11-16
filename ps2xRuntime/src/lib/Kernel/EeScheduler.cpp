@@ -666,6 +666,7 @@ void EeScheduler::postEvent(EeEvent event)
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
     uint32_t pc = g_currentExecutingFunction;
+    bool hasThreadPc = false; // FIX-AU9
     if (m_currentThreadId != 0)
     {
         // PERF-KM: cached record of the running guest thread (was an unordered_map lookup on every checkpoint, ~4.5M/s)
@@ -684,6 +685,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         if (running != nullptr)
         {
             pc = running->activeContext().pc;
+            hasThreadPc = true; // FIX-AU9
         }
     }
     if ((pc >= 0x003D7000u && pc <= 0x003E5000u) ||
@@ -726,34 +728,62 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 
     accountCycles(cycles);
 
+    bool due = false; // FIX-AU9
     if (m_checkpointPending.load(std::memory_order_acquire) ||
         m_stopRequested.load(std::memory_order_acquire))
     {
-        return true;
+        due = true; // FIX-AU9
     }
+    else // FIX-AU9
+    { // FIX-AU9
+        const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+        if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
+        {
+            m_checkpointPending.store(true, std::memory_order_release);
+            due = true; // FIX-AU9
+        }
+        else if (m_eeCycle >= m_sliceEndCycle) // FIX-AU9
+        { // FIX-AU9
+            const GuestThread *running = currentThread();
+            if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
+            {
+                m_rescheduleRequested = true;
+                m_timeSliceExpired = true;
+                due = true; // FIX-AU9
+            }
+            else // FIX-AU9
+            { // FIX-AU9
+                renewTimeSlice();
+            } // FIX-AU9
+        } // FIX-AU9
+    } // FIX-AU9
 
-    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
-    if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
-    {
-        m_checkpointPending.store(true, std::memory_order_release);
-        return true;
-    }
-
-    if (m_eeCycle < m_sliceEndCycle)
-    {
-        return false;
-    }
-
-    const GuestThread *running = currentThread();
-    if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
-    {
-        m_rescheduleRequested = true;
-        m_timeSliceExpired = true;
-        return true;
-    }
-
-    renewTimeSlice();
-    return false;
+    static thread_local uint64_t s_au9ConsecutiveDeferrals = 0; // FIX-AU9
+    if (due) // FIX-AU9
+    { // FIX-AU9
+        if (hasThreadPc && pc != 0u && pc == g_currentExecutingFunction) // FIX-AU9
+        { // FIX-AU9
+            ++s_au9ConsecutiveDeferrals; // FIX-AU9
+            if ((s_au9ConsecutiveDeferrals % 10000000ull) == 0ull) // FIX-AU9
+            { // FIX-AU9
+                static std::atomic<uint32_t> s_au9LongLogCount{0}; // FIX-AU9
+                if (s_au9LongLogCount.fetch_add(1u, std::memory_order_relaxed) < 50u) // FIX-AU9
+                { // FIX-AU9
+                    ps2xSafeLog("[au9] LONG pc=0x%x n=%llu\n", pc, static_cast<unsigned long long>(s_au9ConsecutiveDeferrals)); // FIX-AU9
+                } // FIX-AU9
+            } // FIX-AU9
+            static std::atomic<uint64_t> s_au9DeferTotal{0}; // FIX-AU9
+            const uint64_t n = s_au9DeferTotal.fetch_add(1u, std::memory_order_relaxed) + 1u; // FIX-AU9
+            static const bool s_au9Log = []() { const char *e = std::getenv("PS2X_AU9_LOG"); return e && e[0] == '1'; }(); // FIX-AU9
+            if (s_au9Log && (n <= 20u || (n % 1000u) == 0u)) // FIX-AU9
+            { // FIX-AU9
+                ps2xSafeLog("[au9] deferred=%llu pc=0x%x\n", static_cast<unsigned long long>(n), pc); // FIX-AU9
+            } // FIX-AU9
+            return false; // FIX-AU9
+        } // FIX-AU9
+        s_au9ConsecutiveDeferrals = 0u; // FIX-AU9
+    } // FIX-AU9
+    return due; // FIX-AU9
 }
 
 extern const bool g_profCounts;                                     // PROBE-IJ (ps2_runtime.cpp)

@@ -143,6 +143,7 @@ namespace ps2x::audio
         };
 
         Spu2AudioState g_spu2Audio;
+        std::atomic<uint64_t> s_au6FramesMixed{0}; // PROBE-AU6
 
         uint32_t ringReadableFrames() noexcept
         {
@@ -224,6 +225,7 @@ namespace ps2x::audio
 
         void recordMixedBlock(const int16_t *samples, uint32_t frameCount) noexcept // FIX-AU4
         {
+            s_au6FramesMixed.fetch_add(frameCount, std::memory_order_relaxed); // PROBE-AU6
             if (g_spu2Audio.wavFile != nullptr) // PROBE-AU3D
             { // PROBE-AU3D
                 const size_t blockBytes = static_cast<size_t>(frameCount) * 2u * sizeof(int16_t); // PROBE-AU3D
@@ -482,3 +484,13 @@ void ps2xSpu2GuestVblank() // FIX-AU4
         remaining -= chunk;
     }
 }
+
+uint64_t ps2xAu6FramesMixed() // PROBE-AU6
+{ // PROBE-AU6
+    return ps2x::audio::s_au6FramesMixed.load(std::memory_order_relaxed); // PROBE-AU6
+} // PROBE-AU6
+
+uint64_t ps2xAu6FramesConsumed() // PROBE-AU6
+{ // PROBE-AU6
+    return ps2x::audio::g_spu2Audio.framesConsumed.load(std::memory_order_relaxed); // PROBE-AU6
+} // PROBE-AU6
