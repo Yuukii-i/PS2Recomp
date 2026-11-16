@@ -29,6 +29,9 @@ extern "C" void ps2_fe_recordUnpack(uint32_t qw, uint32_t ev, uint8_t cmd, uint1
 extern void ps2xSafeLog(const char *fmt, ...);
 extern bool ps2xVxOn(); extern void ps2xVxMarkThread(); extern void ps2xVxIdle(uint64_t); extern void ps2xVxEv(uint32_t, uint64_t); // PROBE-VX
 extern void ps2xVu1Path1Batch(bool); extern void ps2xVu1FlushPath1(); // PERF-V1I
+extern bool ps2xAxActive(); // FIX-AX
+extern bool ps2xAxTryAppend(const uint8_t *data, uint32_t size); // FIX-AX
+extern void ps2xAxStall(const uint8_t *rest, uint32_t n, uint16_t imm, uint8_t op); // FIX-AX
 
 // PROBE-VW: Vif1Worker (VIF1 parser thread) time split (PS2X_VW=1). Plain counters: only the Vif1Worker thread writes them.
 namespace vw // PROBE-VW
@@ -2660,6 +2663,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
         return;
+    if (ps2xAxActive() && ps2xAxTryAppend(data, sizeBytes)) // FIX-AX
+        return; // FIX-AX
     // PERF-V1J: hoist per-call probe/config checks out of the per-VIF-code loop
     const bool statOn = vifStatOn();
     VsTimer vsFn(&g_vs.fn);
@@ -2763,9 +2768,18 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
     uint32_t pos = 0;
     const bool vwOn = vpOn && vw::on(); // PROBE-VW
+    const bool axActive = ps2xAxActive(); // FIX-AX
+    bool axStallNext = false; // FIX-AX
+    uint16_t axStallImm = 0; // FIX-AX
+    uint8_t axStallOp = 0; // FIX-AX
 
     while (pos + 4 <= sizeBytes)
     {
+        if (axStallNext) // FIX-AX
+        { // FIX-AX
+            ps2xAxStall(data + pos, sizeBytes - pos, axStallImm, axStallOp); // FIX-AX
+            return; // FIX-AX
+        } // FIX-AX
         if (g_vif1PendingStc.load(std::memory_order_relaxed) &&
             g_vif1PendingStc.exchange(false, std::memory_order_acq_rel)) // PERF-V1K
         {
@@ -2848,6 +2862,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         if (s_aw3Probe) g_aw3LastVifCode.store(cmd, std::memory_order_relaxed); // PROBE-AW3
         if (irq)
         {
+            if (axActive) // FIX-AX
+            { // FIX-AX
+                axStallNext = true; // FIX-AX
+                axStallImm = imm; // FIX-AX
+                axStallOp = opcode; // FIX-AX
+            } // FIX-AX
             vif1_regs.stat |= (1u << 10); // VIS
             vif1_regs.stat |= (1u << 11); // INT
             publishVif1MarkAndStat(vif1_regs.mark, vif1_regs.stat); // PERF-V1K
@@ -2931,11 +2951,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 g_aw2Mark2000.fetch_add(1, std::memory_order_relaxed); // PROBE-AW2
                 g_aw3SawMark2000.store(true, std::memory_order_relaxed); // PROBE-AW3
             } // PROBE-AW3
-            recordCompletedIntcCause(5u);
+            if (!axActive) // FIX-AX2
+                recordCompletedIntcCause(5u); // FIX-AX
 #if defined(PS2X_PROBE_AE) || 1
             if (aeProbe) {
                 probe_ae::onVif1Mark(imm);
-                probe_ae::onCause5Raise();
+                if (!axActive || irq) probe_ae::onCause5Raise(); // FIX-AX2
                 if (imm == 0x2000u) {
                     probe_ae::onAwMark2000();
                 }
@@ -4342,6 +4363,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             continue;
         }
     }
+
+    if (axStallNext) // FIX-AX
+    { // FIX-AX
+        const uint32_t rem = (pos < sizeBytes) ? (sizeBytes - pos) : 0u; // FIX-AX
+        ps2xAxStall(data + pos, rem, axStallImm, axStallOp); // FIX-AX
+    } // FIX-AX
 
 #if defined(PS2X_PROBE_AE) || 1
     if (aeProbe) {

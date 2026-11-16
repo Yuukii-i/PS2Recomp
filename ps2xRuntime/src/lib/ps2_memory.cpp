@@ -582,6 +582,32 @@ namespace
     }
     constexpr uint32_t kVif1StcClearMask = (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13); // PERF-V1K
     thread_local bool t_onVif1Worker = false;
+    static std::vector<uint8_t> s_axBuf; // FIX-AX
+    static bool s_axStalled = false; // FIX-AX
+    static bool s_axD1Deferred = false; // FIX-AX
+    static uint64_t s_axStalls = 0; // FIX-AX
+    static uint64_t s_axResumes = 0; // FIX-AX
+    static uint64_t s_axAppends = 0; // FIX-AX
+    static uint64_t s_axDeferredD1 = 0; // FIX-AX
+
+    template <typename IoRegs, typename QueueFn> // FIX-AX
+    static void axCompleteVif1Dma(IoRegs &ioRegs, QueueFn &&queueCause) // FIX-AX
+    { // FIX-AX
+        static constexpr uint32_t kVif1Channel = 0x10009000u; // FIX-AX
+        static constexpr uint32_t kDStat = 0x1000E010u; // FIX-AX
+        uint32_t dstat = ioRegs.count(kDStat) ? ioRegs[kDStat] : 0u; // FIX-AX
+        dstat |= (1u << 1u); // FIX-AX
+        const uint32_t status = dstat & 0x3FFu; // FIX-AX
+        const uint32_t mask = (dstat >> 16) & 0x3FFu; // FIX-AX
+        if ((status & mask) != 0u) // FIX-AX
+            dstat |= (1u << 31); // FIX-AX
+        else // FIX-AX
+            dstat &= ~(1u << 31); // FIX-AX
+        ioRegs[kDStat] = dstat; // FIX-AX
+        queueCause(1u); // FIX-AX
+        ioRegs[kVif1Channel + 0x00u] &= ~0x100u; // FIX-AX
+        ioRegs[kVif1Channel + 0x20u] = 0; // FIX-AX
+    } // FIX-AX
     constexpr size_t kVif1AsyncMaxBytes = 16u * 1024u * 1024u;
 
     // PERF-VP: recycled DMA-chain buffers. Every EE DMA kick grew a fresh std::vector (repeated realloc + page faults for MB-sized chains) and the
@@ -1094,6 +1120,35 @@ static void vif1EnqueueCopy(const uint8_t *p, uint32_t n)
 }
 extern "C" bool ps2_vif1_on_worker() { return t_onVif1Worker; }
 extern "C" void ps2_vif1_mark_worker_thread() { t_onVif1Worker = true; }
+bool ps2xAxActive() // FIX-AX
+{ // FIX-AX
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_VIF1_ISTALL"); return e && e[0] == '1'; }(); // FIX-AX
+    return s_on && !vif1AsyncEnabled() && !t_onVif1Worker; // FIX-AX
+} // FIX-AX
+bool ps2xAxTryAppend(const uint8_t *data, uint32_t size) // FIX-AX
+{ // FIX-AX
+    if (!s_axStalled) // FIX-AX
+        return false; // FIX-AX
+    if (data && size > 0u) // FIX-AX
+        s_axBuf.insert(s_axBuf.end(), data, data + size); // FIX-AX
+    ++s_axAppends; // FIX-AX
+    return true; // FIX-AX
+} // FIX-AX
+void ps2xAxStall(const uint8_t *rest, uint32_t n, uint16_t imm, uint8_t op) // FIX-AX
+{ // FIX-AX
+    if (rest && n > 0u) // FIX-AX
+        s_axBuf.assign(rest, rest + n); // FIX-AX
+    else // FIX-AX
+        s_axBuf.clear(); // FIX-AX
+    s_axStalled = true; // FIX-AX
+    ++s_axStalls; // FIX-AX
+    if (s_axStalls <= 20u) // FIX-AX
+        ps2xSafeLog("[ax] stall imm=0x%04x op=0x%02x rest=%u\n", imm, op, n); // FIX-AX
+    if ((s_axStalls % 50000u) == 0u) // FIX-AX
+        ps2xSafeLog("[ax] stalls=%llu resumes=%llu appends=%llu deferredD1=%llu\n", // FIX-AX
+                    static_cast<unsigned long long>(s_axStalls), static_cast<unsigned long long>(s_axResumes), // FIX-AX
+                    static_cast<unsigned long long>(s_axAppends), static_cast<unsigned long long>(s_axDeferredD1)); // FIX-AX
+} // FIX-AX
 // PERF-SL: called by the per-frame sceGsSyncPath: remember how many jobs exist now and wait until the worker has finished the jobs that existed `lag` calls ago.
 // lag=1: at most one frame of VU1/GIF work is in flight while the EE builds the next one (steady cadence, bounded input latency).
 extern "C" void ps2_vif1_sync_lag(uint32_t lag)
@@ -2108,7 +2163,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (address >= 0x10003C00u && address < 0x10003E00u)
     {
-        if (address == 0x10003C10u && value == 0x8u && !t_onVif1Worker && markNoFenceEnabled()) // PERF-V1K: FBRST.STC only
+        if (address == 0x10003C10u && value == 0x8u && !t_onVif1Worker && markNoFenceEnabled() && !(ps2xAxActive() && s_axStalled)) // PERF-V1K: FBRST.STC only // FIX-AX
         {
             m_vifWriteCount.fetch_add(1, std::memory_order_relaxed);
             g_vif1PublishedStatBits.fetch_and(~kVif1StcClearMask, std::memory_order_acq_rel);
@@ -2126,6 +2181,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         case 0x10003C10u:     // VIF1_FBRST
             if (value & 0x1u) // RST
             {
+                s_axBuf.clear(); // FIX-AX
+                s_axStalled = false; // FIX-AX
+                s_axD1Deferred = false; // FIX-AX
                 const bool wasPath3Masked = m_path3Masked;
                 std::memset(&vif1_regs, 0, sizeof(vif1_regs));
                 g_vif1PublishedMark.store(0u, std::memory_order_release);     // PERF-V1K
@@ -2141,6 +2199,22 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             {
                 vif1_regs.stat &= ~kVif1StcClearMask;
                 g_vif1PublishedStatBits.fetch_and(~kVif1StcClearMask, std::memory_order_acq_rel); // PERF-V1K
+                if (ps2xAxActive() && s_axStalled) // FIX-AX
+                { // FIX-AX
+                    s_axStalled = false; // FIX-AX
+                    std::vector<uint8_t> local; // FIX-AX
+                    local.swap(s_axBuf); // FIX-AX
+                    ++s_axResumes; // FIX-AX
+                    if (s_axResumes <= 20u) // FIX-AX
+                        ps2xSafeLog("[ax] resume n=%u\n", static_cast<unsigned>(local.size())); // FIX-AX
+                    if (!local.empty()) // FIX-AX
+                        processVIF1Data(local.data(), static_cast<uint32_t>(local.size())); // FIX-AX
+                    if (!s_axStalled && s_axD1Deferred) // FIX-AX
+                    { // FIX-AX
+                        s_axD1Deferred = false; // FIX-AX
+                        axCompleteVif1Dma(m_ioRegisters, [&](uint32_t c) { queueCompletedDmacCause(c); }); // FIX-AX
+                    } // FIX-AX
+                } // FIX-AX
             }
             break;
         case 0x10003C30u:
@@ -3623,10 +3697,15 @@ void PS2Memory::processPendingTransfers()
     }
     if (hadVif1)
     {
-        raiseDStatChannel(1u); // VIF1 channel
-        queueCompletedDmacCause(1u);
-        m_ioRegisters[VIF1_CHANNEL + 0x00] &= ~0x100u;
-        m_ioRegisters[VIF1_CHANNEL + 0x20] = 0;
+        if (ps2xAxActive() && s_axStalled) // FIX-AX
+        { // FIX-AX
+            s_axD1Deferred = true; // FIX-AX
+            ++s_axDeferredD1; // FIX-AX
+        } // FIX-AX
+        else // FIX-AX
+        { // FIX-AX
+            axCompleteVif1Dma(m_ioRegisters, [&](uint32_t c) { queueCompletedDmacCause(c); }); // FIX-AX
+        } // FIX-AX
     }
 }
 
