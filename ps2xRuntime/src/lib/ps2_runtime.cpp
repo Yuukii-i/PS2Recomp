@@ -3728,6 +3728,21 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
+static void reportUnimplementedInterp(uint32_t pc, uint32_t inst) // FIX-CR6
+{ // FIX-CR6
+    static std::mutex s_unimplMutex; // FIX-CR6
+    static std::set<uint32_t> s_unimplSeen; // FIX-CR6
+    { // FIX-CR6
+        std::lock_guard<std::mutex> lock(s_unimplMutex); // FIX-CR6
+        if (s_unimplSeen.size() >= 200 || !s_unimplSeen.insert(pc).second) // FIX-CR6
+        { // FIX-CR6
+            return; // FIX-CR6
+        } // FIX-CR6
+    } // FIX-CR6
+    ps2xSafeLog("[guest-fallback-interp] UNIMPLEMENTED pc=0x%08x inst=0x%08x op=0x%02x funct=0x%02x\n", // FIX-CR6
+                pc, inst, inst >> 26, inst & 0x3Fu); // FIX-CR6
+} // FIX-CR6
+
 static bool executeUnrecompiledCode(uint8_t *rdram,
                                     R5900Context *ctx,
                                     uint32_t targetPc,
@@ -3885,7 +3900,7 @@ static bool executeUnrecompiledCode(uint8_t *rdram,
                 case 0x3C: writeGPR64(i_rd, readGPR(i_rt) << (i_shamt + 32)); break; // DSLL32
                 case 0x3E: writeGPR64(i_rd, readGPR(i_rt) >> (i_shamt + 32)); break; // DSRL32
                 case 0x3F: writeGPR64(i_rd, static_cast<int64_t>(readGPR(i_rt)) >> (i_shamt + 32)); break; // DSRA32
-                default: break;
+                default: reportUnimplementedInterp(i_pc, i_inst); break; // FIX-CR6
                 }
             }
             else
@@ -3912,7 +3927,7 @@ static bool executeUnrecompiledCode(uint8_t *rdram,
                 case 0x29: { uint32_t ea = readGPR32(i_rs) + i_signImm32; write16(ea, static_cast<uint16_t>(readGPR32(i_rt))); break; } // SH
                 case 0x2B: { uint32_t ea = readGPR32(i_rs) + i_signImm32; write32(ea, readGPR32(i_rt)); break; } // SW
                 case 0x3F: { uint32_t ea = readGPR32(i_rs) + i_signImm32; write64(ea, readGPR(i_rt)); break; } // SD
-                default: break;
+                default: reportUnimplementedInterp(i_pc, i_inst); break; // FIX-CR6
                 }
             }
         };
