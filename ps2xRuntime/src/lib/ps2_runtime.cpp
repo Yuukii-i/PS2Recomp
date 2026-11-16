@@ -3706,7 +3706,7 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
         static std::mutex s_missingFunctionLogMutex;
         {
             std::lock_guard<std::mutex> lock(s_missingFunctionLogMutex);
-            std::cerr << oss.str() << std::endl;
+            ps2xSafeLog("%s\n", oss.str().c_str()); // FIX-CR3
         }
     }
 

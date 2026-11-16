@@ -521,16 +521,16 @@ void EeScheduler::run()
 
         if (!m_runtime.hasFunction(context.pc))
         {
-            fprintf(stderr, "[abort] EeScheduler: missing function at pc=0x%08x, ra=0x%08x, sp=0x%08x, threadId=%d, invocations=%zu\n",
-                    context.pc,
-                    (uint32_t)_mm_extract_epi32(context.r[31], 0),
-                    (uint32_t)_mm_extract_epi32(context.r[29], 0),
-                    running ? running->id : -999,
-                    running ? running->invocations.size() : 0);
-            fprintf(stderr, "[abort] Last dispatched PCs by EeScheduler:\n");
+            ps2xSafeLog("[abort] EeScheduler: missing function at pc=0x%08x, ra=0x%08x, sp=0x%08x, threadId=%d, invocations=%zu\n", // FIX-CR3
+                        context.pc,
+                        (uint32_t)_mm_extract_epi32(context.r[31], 0),
+                        (uint32_t)_mm_extract_epi32(context.r[29], 0),
+                        running ? running->id : -999,
+                        running ? running->invocations.size() : 0);
+            ps2xSafeLog("[abort] Last dispatched PCs by EeScheduler:\n"); // FIX-CR3
             for (int i = 0; i < 32; ++i) {
                 uint32_t p = s_lastDispatchedPc[(s_lastDispatchIdx + i) % 32];
-                if (p) fprintf(stderr, "  [%d] 0x%08x\n", i, p);
+                if (p) ps2xSafeLog("  [%d] 0x%08x\n", i, p); // FIX-CR3
             }
             ps2xFlushLog(); // PERF-LG
             fflush(stderr);
