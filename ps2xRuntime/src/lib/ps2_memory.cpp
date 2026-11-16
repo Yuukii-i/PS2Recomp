@@ -1188,6 +1188,84 @@ std::atomic<uint32_t> g_vif1PublishedMark{0u};     // PERF-V1K
 std::atomic<uint32_t> g_vif1PublishedStatBits{0u}; // PERF-V1K
 std::atomic<bool> g_vif1PendingStc{false};         // PERF-V1K
 
+void recordCompletedIntcCause(uint32_t cause); // FIX-BB
+static std::mutex s_mqMutex; // FIX-BB
+static std::deque<uint32_t> s_mq; // FIX-BB
+static uint64_t s_mqPushes = 0; // FIX-BB
+static uint64_t s_mqStcs = 0; // FIX-BB
+static uint32_t s_mqMaxDepth = 0; // FIX-BB
+bool ps2xMqActive() // FIX-BB
+{ // FIX-BB
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_VIF1_MARKQ"); return !(e && e[0] == '0' && e[1] == '\0'); }(); // FIX-BC
+    return s_on && !ps2xAxActive(); // FIX-BB
+} // FIX-BB
+void ps2xMqPushIrq(uint32_t mark) // FIX-BB
+{ // FIX-BB
+    bool wasEmpty = false; // FIX-BB
+    uint32_t depth = 0; // FIX-BB
+    uint64_t pushes = 0; // FIX-BB
+    uint64_t stcs = 0; // FIX-BB
+    uint32_t maxDepth = 0; // FIX-BB
+    { // FIX-BB
+        std::lock_guard<std::mutex> lock(s_mqMutex); // FIX-BB
+        wasEmpty = s_mq.empty(); // FIX-BB
+        s_mq.push_back(mark); // FIX-BB
+        if (wasEmpty) // FIX-BB
+            g_vif1PublishedMark.store(mark & 0xFFFFu, std::memory_order_release); // FIX-BB
+        depth = static_cast<uint32_t>(s_mq.size()); // FIX-BB
+        if (depth > s_mqMaxDepth) s_mqMaxDepth = depth; // FIX-BB
+        pushes = ++s_mqPushes; // FIX-BB
+        stcs = s_mqStcs; // FIX-BB
+        maxDepth = s_mqMaxDepth; // FIX-BB
+    } // FIX-BB
+    if (wasEmpty) // FIX-BB
+        recordCompletedIntcCause(5u); // FIX-BB
+    if (pushes <= 20u) // FIX-BB
+        ps2xSafeLog("[mq] push mark=0x%04x depth=%u\n", mark & 0xFFFFu, depth); // FIX-BB
+    if ((pushes % 20000u) == 0u) // FIX-BB
+        ps2xSafeLog("[mq] pushes=%llu stcs=%llu maxdepth=%u\n", // FIX-BB
+                    static_cast<unsigned long long>(pushes), // FIX-BB
+                    static_cast<unsigned long long>(stcs), maxDepth); // FIX-BB
+} // FIX-BB
+bool ps2xMqFront(uint32_t &v) // FIX-BB
+{ // FIX-BB
+    std::lock_guard<std::mutex> lock(s_mqMutex); // FIX-BB
+    if (s_mq.empty()) // FIX-BB
+        return false; // FIX-BB
+    v = s_mq.front(); // FIX-BB
+    return true; // FIX-BB
+} // FIX-BB
+void ps2xMqOnStc() // FIX-BB
+{ // FIX-BB
+    bool raiseNext = false; // FIX-BB
+    { // FIX-BB
+        std::lock_guard<std::mutex> lock(s_mqMutex); // FIX-BB
+        ++s_mqStcs; // FIX-BB
+        if (!s_mq.empty()) // FIX-BB
+        { // FIX-BB
+            s_mq.pop_front(); // FIX-BB
+            if (!s_mq.empty()) // FIX-BB
+            { // FIX-BB
+                g_vif1PublishedMark.store(s_mq.front() & 0xFFFFu, std::memory_order_release); // FIX-BB
+                raiseNext = true; // FIX-BB
+            } // FIX-BB
+        } // FIX-BB
+    } // FIX-BB
+    if (raiseNext) // FIX-BB
+        recordCompletedIntcCause(5u); // FIX-BB
+} // FIX-BB
+void ps2xMqSetFront(uint32_t v) // FIX-BB
+{ // FIX-BB
+    std::lock_guard<std::mutex> lock(s_mqMutex); // FIX-BB
+    if (!s_mq.empty()) // FIX-BB
+        s_mq.front() = v; // FIX-BB
+} // FIX-BB
+void ps2xMqClear() // FIX-BB
+{ // FIX-BB
+    std::lock_guard<std::mutex> lock(s_mqMutex); // FIX-BB
+    s_mq.clear(); // FIX-BB
+} // FIX-BB
+
 extern "C" void ps2_vif1_fence()
 {
     if (!vif1AsyncEnabled() || t_onVif1Worker)
@@ -2168,6 +2246,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             m_vifWriteCount.fetch_add(1, std::memory_order_relaxed);
             g_vif1PublishedStatBits.fetch_and(~kVif1StcClearMask, std::memory_order_acq_rel);
             g_vif1PendingStc.store(true, std::memory_order_release);
+            if (ps2xMqActive()) // FIX-BB
+                ps2xMqOnStc(); // FIX-BB
             return true;
         }
 
@@ -2181,6 +2261,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         case 0x10003C10u:     // VIF1_FBRST
             if (value & 0x1u) // RST
             {
+                if (ps2xMqActive()) // FIX-BB
+                    ps2xMqClear(); // FIX-BB
                 s_axBuf.clear(); // FIX-AX
                 s_axStalled = false; // FIX-AX
                 s_axD1Deferred = false; // FIX-AX
@@ -2199,6 +2281,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             {
                 vif1_regs.stat &= ~kVif1StcClearMask;
                 g_vif1PublishedStatBits.fetch_and(~kVif1StcClearMask, std::memory_order_acq_rel); // PERF-V1K
+                if (ps2xMqActive()) // FIX-BB
+                    ps2xMqOnStc(); // FIX-BB
                 if (ps2xAxActive() && s_axStalled) // FIX-AX
                 { // FIX-AX
                     s_axStalled = false; // FIX-AX
@@ -2223,6 +2307,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             vif1_regs.stat &= ~(1u << 6); // clear MRK flag on CPU write
             g_vif1PublishedMark.store(value & 0xFFFFu, std::memory_order_release);      // PERF-V1K
             g_vif1PublishedStatBits.fetch_and(~(1u << 6), std::memory_order_acq_rel);   // PERF-V1K
+            if (ps2xMqActive()) // FIX-BB
+                ps2xMqSetFront(value & 0xFFFFu); // FIX-BB
             break;
         case 0x10003C40u:
             vif1_regs.cycle = value & 0xFFFFu;
@@ -4227,6 +4313,12 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
 
     if (address == 0x10003C30u) // VIF1_MARK
     {
+        if (ps2xMqActive()) // FIX-BB
+        { // FIX-BB
+            uint32_t v = 0; // FIX-BB
+            if (ps2xMqFront(v)) // FIX-BB
+                return v; // FIX-BB
+        } // FIX-BB
         if (!t_onVif1Worker && markNoFenceEnabled()) // PERF-V1K
             return g_vif1PublishedMark.load(std::memory_order_acquire);
         ps2_vif1_fence(); // PERF-HN

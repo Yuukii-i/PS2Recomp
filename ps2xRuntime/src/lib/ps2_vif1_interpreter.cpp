@@ -32,6 +32,8 @@ extern void ps2xVu1Path1Batch(bool); extern void ps2xVu1FlushPath1(); // PERF-V1
 extern bool ps2xAxActive(); // FIX-AX
 extern bool ps2xAxTryAppend(const uint8_t *data, uint32_t size); // FIX-AX
 extern void ps2xAxStall(const uint8_t *rest, uint32_t n, uint16_t imm, uint8_t op); // FIX-AX
+extern bool ps2xMqActive(); // FIX-BB
+extern void ps2xMqPushIrq(uint32_t mark); // FIX-BB
 
 // PROBE-VW: Vif1Worker (VIF1 parser thread) time split (PS2X_VW=1). Plain counters: only the Vif1Worker thread writes them.
 namespace vw // PROBE-VW
@@ -2769,6 +2771,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     uint32_t pos = 0;
     const bool vwOn = vpOn && vw::on(); // PROBE-VW
     const bool axActive = ps2xAxActive(); // FIX-AX
+    const bool mqActive = ps2xMqActive(); // FIX-BB
     bool axStallNext = false; // FIX-AX
     uint16_t axStallImm = 0; // FIX-AX
     uint8_t axStallOp = 0; // FIX-AX
@@ -2871,7 +2874,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.stat |= (1u << 10); // VIS
             vif1_regs.stat |= (1u << 11); // INT
             publishVif1MarkAndStat(vif1_regs.mark, vif1_regs.stat); // PERF-V1K
-            recordCompletedIntcCause(5u);
+            if (mqActive) // FIX-BB
+                ps2xMqPushIrq(opcode == VIF_MARK ? imm : vif1_regs.mark); // FIX-BB
+            else // FIX-BB
+                recordCompletedIntcCause(5u);
 #if defined(PS2X_PROBE_AE) || 1
             if (aeProbe) {
                 probe_ae::onVif1Irq();
@@ -2951,12 +2957,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 g_aw2Mark2000.fetch_add(1, std::memory_order_relaxed); // PROBE-AW2
                 g_aw3SawMark2000.store(true, std::memory_order_relaxed); // PROBE-AW3
             } // PROBE-AW3
-            if (!axActive) // FIX-AX2
+            if (!axActive && !mqActive) // FIX-AX2 // FIX-BB
                 recordCompletedIntcCause(5u); // FIX-AX
 #if defined(PS2X_PROBE_AE) || 1
             if (aeProbe) {
                 probe_ae::onVif1Mark(imm);
-                if (!axActive || irq) probe_ae::onCause5Raise(); // FIX-AX2
+                if ((!axActive && !mqActive) || irq) probe_ae::onCause5Raise(); // FIX-AX2 // FIX-BB
                 if (imm == 0x2000u) {
                     probe_ae::onAwMark2000();
                 }
