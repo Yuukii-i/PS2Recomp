@@ -28,6 +28,7 @@ extern std::atomic<uint32_t> g_trackedCurScene;
 #include <cstdlib>
 #include <cstring>
 #include <array>
+#include <deque> // FIX-AU5
 #include "probe_ae.h"
 
 // PERF-AU1 / PERF-AU3B: Local declarations for ps2xIOP diagnostics (header rule safe).
@@ -90,7 +91,7 @@ namespace
         {
             uint32_t op = 0u;
             std::memcpy(&op, sendBuf + i * 16u, sizeof(op));
-            if ((op == 0x18u || op == 0x1Cu) && s_sg2PktLogCount < 12u) // PROBE-AU3C
+            if ((op == 0x18u || op == 0x1Cu || op == 0x19u || op == 0x1Du || op == 0x1Au || op == 0x1Bu) && s_sg2PktLogCount < 80u) // PROBE-AU3H
             { // PROBE-AU3C
                 uint32_t w[4]{}; // PROBE-AU3C
                 std::memcpy(w, sendBuf + i * 16u, sizeof(w)); // PROBE-AU3C
@@ -311,6 +312,93 @@ struct Cid1StreamJob
 };
 static std::mutex s_cid1JobsMutex;
 static std::vector<Cid1StreamJob> s_cid1StreamJobs;
+
+// FIX-AU5: Deferred CID1 op 0x07 stream-read completion queue.
+struct PendingCid1Reply
+{
+    uint8_t replyBytes[112]{};
+    uint32_t slotPtr = 0;
+    uint32_t slotOffset = 0;
+    uint64_t dueVbl = 0;
+    uint8_t *rdram = nullptr;
+    PS2Runtime *runtime = nullptr;
+};
+static std::mutex s_cid1LatMutex;
+static std::deque<PendingCid1Reply> s_cid1PendingReplies;
+static uint64_t s_cid1VblankCounter = 0;
+
+static uint64_t getCid1LatVbl() noexcept
+{
+    static const uint64_t s_lat = []() -> uint64_t {
+        const char *env = std::getenv("PS2X_CID1_LAT_VBL");
+        if (!env || env[0] == '\0')
+            return 1ull;
+        char *end = nullptr;
+        unsigned long long val = std::strtoull(env, &end, 10);
+        if (end == env)
+            return 1ull;
+        return static_cast<uint64_t>(val);
+    }();
+    return s_lat;
+}
+
+static void deliverCid1Batch(const std::deque<PendingCid1Reply> &batch, uint64_t vbl, uint32_t remaining)
+{
+    if (batch.empty())
+        return;
+    for (const auto &item : batch)
+    {
+        if (item.slotPtr != 0u && item.rdram != nullptr)
+        {
+            if (uint8_t *slotMem = getMemPtr(item.rdram, item.slotPtr))
+            {
+                slotMem[0x0B] |= 0x80;
+                *reinterpret_cast<uint32_t *>(slotMem + 0x0C) = item.slotOffset;
+            }
+        }
+        ps2_stubs::dispatchSifCommand(item.rdram, item.runtime, 1u, item.replyBytes, sizeof(item.replyBytes));
+    }
+    static std::atomic<uint32_t> s_cid1LatLogCount{0};
+    if (s_cid1LatLogCount.fetch_add(1, std::memory_order_relaxed) < 200u)
+    {
+        ps2xSafeLog("[cid1lat] vbl=%llu delivered=%u pending=%u\n",
+                    static_cast<unsigned long long>(vbl),
+                    static_cast<unsigned>(batch.size()),
+                    static_cast<unsigned>(remaining));
+    }
+}
+
+static void flushAllCid1Pending()
+{
+    std::deque<PendingCid1Reply> toDeliver;
+    uint64_t vbl = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+        if (s_cid1PendingReplies.empty())
+            return;
+        vbl = s_cid1VblankCounter;
+        toDeliver.swap(s_cid1PendingReplies);
+    }
+    deliverCid1Batch(toDeliver, vbl, 0u);
+}
+
+static void onCid1Vblank()
+{
+    std::deque<PendingCid1Reply> toDeliver;
+    uint64_t vbl = 0;
+    uint32_t remaining = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+        vbl = ++s_cid1VblankCounter;
+        while (!s_cid1PendingReplies.empty() && s_cid1PendingReplies.front().dueVbl <= vbl)
+        {
+            toDeliver.push_back(s_cid1PendingReplies.front());
+            s_cid1PendingReplies.pop_front();
+        }
+        remaining = static_cast<uint32_t>(s_cid1PendingReplies.size());
+    }
+    deliverCid1Batch(toDeliver, vbl, remaining);
+}
 
 
     namespace
@@ -1516,6 +1604,30 @@ uint64_t vblDiff = 0;
                         }
                     }
                 }
+                { // PROBE-AU3H
+                    static uint64_t s_sg2StRpc = 0u; // PROBE-AU3H
+                    static uint32_t s_sg2StPrev[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}; // PROBE-AU3H
+                    static uint32_t s_sg2StLogCount = 0u; // PROBE-AU3H
+                    ++s_sg2StRpc; // PROBE-AU3H
+                    if (receiveBuffer != 0u && receiveSize >= 0xC8u) // PROBE-AU3H
+                    { // PROBE-AU3H
+                        if (const uint8_t *stPtr = getConstMemPtr(rdram, receiveBuffer)) // PROBE-AU3H
+                        { // PROBE-AU3H
+                            uint32_t cur[4]{}; // PROBE-AU3H
+                            std::memcpy(&cur[0], stPtr + 0x00, 4u); // PROBE-AU3H
+                            std::memcpy(&cur[1], stPtr + 0x04, 4u); // PROBE-AU3H
+                            std::memcpy(&cur[2], stPtr + 0xC0, 4u); // PROBE-AU3H
+                            std::memcpy(&cur[3], stPtr + 0xC4, 4u); // PROBE-AU3H
+                            if (s_sg2StLogCount < 3000u && std::memcmp(cur, s_sg2StPrev, sizeof(cur)) != 0) // PROBE-AU3H
+                            { // PROBE-AU3H
+                                ++s_sg2StLogCount; // PROBE-AU3H
+                                std::memcpy(s_sg2StPrev, cur, sizeof(cur)); // PROBE-AU3H
+                                ::ps2xSafeLog("[sg2st] rpc=%llu envx0=%04x envx1=%04x pos0=%06x pos1=%06x\n", // PROBE-AU3H
+                                              (unsigned long long)s_sg2StRpc, cur[0] & 0xFFFFu, cur[1] & 0xFFFFu, cur[2] & 0xFFFFFFu, cur[3] & 0xFFFFFFu); // PROBE-AU3H
+                            } // PROBE-AU3H
+                        } // PROBE-AU3H
+                    } // PROBE-AU3H
+                } // PROBE-AU3H
                 flushSg2LleDiagnostics(sendSize / 16u, nonZero, true);
             }
 
@@ -2106,6 +2218,13 @@ uint64_t vblDiff = 0;
             reply.ringTail = ringTail;
             reply.isDone = 1;
 
+            // FIX-AU5: Flush pending op 0x07 replies FIFO before any non-0x07 CID1 command.
+            if (opcode != 0x07u)
+            {
+                flushAllCid1Pending();
+            }
+            bool deferReply = false; // FIX-AU5
+
             switch (opcode)
             {
             case 0x03: // Open
@@ -2446,14 +2565,33 @@ uint64_t vblDiff = 0;
                     reply.result = static_cast<uint32_t>(toRead);
                     reply.isDone = 1;
 
-                    // Direct writeback to slot descriptor to guarantee completion flag
-                    if (slotPtr != 0u)
+                    const uint64_t cid1LatVbl = getCid1LatVbl(); // FIX-AU5
+                    if (cid1LatVbl == 0)
                     {
-                        if (uint8_t *slotMem = getMemPtr(rdram, slotPtr))
+                        // Direct writeback to slot descriptor to guarantee completion flag
+                        if (slotPtr != 0u)
                         {
-                            slotMem[0x0B] |= 0x80;
-                            *reinterpret_cast<uint32_t *>(slotMem + 0x0C) = static_cast<uint32_t>(slot.offset);
+                            if (uint8_t *slotMem = getMemPtr(rdram, slotPtr))
+                            {
+                                slotMem[0x0B] |= 0x80;
+                                *reinterpret_cast<uint32_t *>(slotMem + 0x0C) = static_cast<uint32_t>(slot.offset);
+                            }
                         }
+                    }
+                    else
+                    {
+                        // FIX-AU5: Defer slot done-bit writeback and SIF reply until due vblank.
+                        std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+                        PendingCid1Reply pending{};
+                        static_assert(sizeof(reply) == sizeof(pending.replyBytes), "reply size mismatch");
+                        std::memcpy(pending.replyBytes, &reply, sizeof(reply));
+                        pending.slotPtr = slotPtr;
+                        pending.slotOffset = static_cast<uint32_t>(slot.offset);
+                        pending.dueVbl = s_cid1VblankCounter + cid1LatVbl;
+                        pending.rdram = rdram;
+                        pending.runtime = runtime;
+                        s_cid1PendingReplies.push_back(pending);
+                        deferReply = true;
                     }
 
 
@@ -2731,7 +2869,10 @@ uint64_t vblDiff = 0;
             std::fflush(stderr);
 
                 probe_ae::onBlCid1Reply(reply.slotPtr, reply.seq, reply.result, (reply.cmd == 0x05) ? reply.result : 0);
-                ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
+                if (!deferReply) // FIX-AU5
+                {
+                    ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
+                }
                 uint32_t dev30_after = *reinterpret_cast<const uint32_t *>(rdram + (0x00771BB8u & 0x01FFFFFFu));
                 probe_ae::onBmCid1(opcode, seq, dev30_before, dev30_after);
                 return alignedCmdSize;
@@ -2950,4 +3091,9 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram)
         std::printf("[probe] dc7 cid1 guest dev30=0x%08X slotBBC=0x%08X 0x%08X 0x%08X 0x%08X slotC6C=0x%08X 0x%08X 0x%08X 0x%08X\n",
                      dev30, s1_0, s1_1, s1_2, s1_3, s2_0, s2_1, s2_2, s2_3);
     }
+}
+
+void ps2xCid1Vblank() // FIX-AU5
+{
+    ps2_syscalls::onCid1Vblank();
 }

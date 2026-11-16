@@ -1,6 +1,8 @@
 #include <cstdint>
 #include <cstdlib>
 void ps2xSafeLog(const char *fmt, ...);
+void ps2xSpu2GuestVblank(); // FIX-AU4
+void ps2xCid1Vblank(); // FIX-AU5
 extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 static inline bool isVerboseLog()
 {
@@ -2530,6 +2532,8 @@ void EeScheduler::processEvent(const EeEvent &event)
         m_vsyncFlagAddress = 0u;
         m_vsyncTickAddress = 0u;
         completeVSync(m_vsyncTick);
+        ps2xSpu2GuestVblank(); // FIX-AU4
+        ps2xCid1Vblank(); // FIX-AU5
 
         if (isVblankLatchEnabled())
         {

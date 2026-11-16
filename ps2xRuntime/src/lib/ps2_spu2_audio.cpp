@@ -9,6 +9,7 @@
 #include <cstdio> // PROBE-AU3D
 #include <cstdlib>
 #include <cstring>
+#include <mutex> // FIX-AU4
 #include <string> // PROBE-AU3D
 #include <thread>
 
@@ -105,6 +106,15 @@ namespace ps2x::audio
             return env && std::strcmp(env, "0") == 0;
         }
 
+        bool isSpu2WallclockMode() noexcept // FIX-AU5
+        {
+            static const bool s_wallclock = []() {
+                const char *env = std::getenv("PS2X_SPU2_GUESTCLOCK");
+                return !(env && std::strcmp(env, "1") == 0);
+            }();
+            return s_wallclock;
+        }
+
         struct Spu2AudioState
         {
             std::array<int16_t, kRingCapacityFrames * 2u> ring{};
@@ -126,6 +136,10 @@ namespace ps2x::audio
             std::FILE *wavFile = nullptr;      // PROBE-AU3D
             uint64_t wavDataBytes = 0u;        // PROBE-AU3D
             uint64_t wavFramesSinceFlush = 0u; // PROBE-AU3D
+
+            std::mutex diagMutex;              // FIX-AU4
+            LoudnessStats loudness{};          // FIX-AU4
+            uint64_t vblankTick = 0u;          // FIX-AU4
         };
 
         Spu2AudioState g_spu2Audio;
@@ -208,10 +222,49 @@ namespace ps2x::audio
             }
         }
 
+        void recordMixedBlock(const int16_t *samples, uint32_t frameCount) noexcept // FIX-AU4
+        {
+            if (g_spu2Audio.wavFile != nullptr) // PROBE-AU3D
+            { // PROBE-AU3D
+                const size_t blockBytes = static_cast<size_t>(frameCount) * 2u * sizeof(int16_t); // PROBE-AU3D
+                if (kWavHeaderBytes + g_spu2Audio.wavDataBytes + blockBytes <= kWavMaxBytes) // PROBE-AU3D
+                { // PROBE-AU3D
+                    std::fwrite(samples, 1, blockBytes, g_spu2Audio.wavFile); // PROBE-AU3D
+                    g_spu2Audio.wavDataBytes += blockBytes; // PROBE-AU3D
+                    g_spu2Audio.wavFramesSinceFlush += frameCount; // PROBE-AU3D
+                    if (g_spu2Audio.wavFramesSinceFlush >= kWavFlushFrames) // PROBE-AU3D
+                    { // PROBE-AU3D
+                        patchWavSizes(g_spu2Audio.wavFile, g_spu2Audio.wavDataBytes); // PROBE-AU3D
+                        g_spu2Audio.wavFramesSinceFlush = 0u; // PROBE-AU3D
+                    } // PROBE-AU3D
+                } // PROBE-AU3D
+            } // PROBE-AU3D
+
+            int32_t blockPeak = 0; // PROBE-AU3D
+            double blockSumSq = 0.0; // FIX-AU4
+            const uint32_t sampleCount = frameCount * 2u; // FIX-AU4
+            for (uint32_t i = 0u; i < sampleCount; ++i) // PROBE-AU3D
+            { // PROBE-AU3D
+                const int32_t s = static_cast<int32_t>(samples[i]); // PROBE-AU3D
+                const int32_t absS = (s < 0) ? -s : s; // PROBE-AU3D
+                if (absS > blockPeak) // PROBE-AU3D
+                    blockPeak = absS; // PROBE-AU3D
+                blockSumSq += static_cast<double>(s) * static_cast<double>(s); // PROBE-AU3D
+            } // PROBE-AU3D
+
+            std::lock_guard<std::mutex> lock(g_spu2Audio.diagMutex); // FIX-AU4
+            g_spu2Audio.loudness.sumSq += blockSumSq; // PROBE-AU3D
+            g_spu2Audio.loudness.sampleCount += sampleCount; // PROBE-AU3D
+            if (blockPeak > g_spu2Audio.loudness.peak) // PROBE-AU3D
+                g_spu2Audio.loudness.peak = blockPeak; // PROBE-AU3D
+            ++g_spu2Audio.loudness.blocks; // PROBE-AU3D
+            if (blockPeak > 64) // PROBE-AU3D
+                ++g_spu2Audio.loudness.audibleBlocks; // PROBE-AU3D
+        }
+
         void maybeLogDiagnostics(std::chrono::steady_clock::time_point &lastLog,
                                  const std::chrono::steady_clock::time_point &mixerStart, // PROBE-AU3D
-                                 uint64_t &lastKeyOns,
-                                 LoudnessStats &loudness) // PROBE-AU3D
+                                 uint64_t &lastKeyOns) // FIX-AU4
         {
             const auto now = std::chrono::steady_clock::now();
             const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLog).count();
@@ -244,6 +297,13 @@ namespace ps2x::audio
                 peak,
                 peakPct);
 
+            LoudnessStats loudness{}; // FIX-AU4
+            { // FIX-AU4
+                std::lock_guard<std::mutex> lock(g_spu2Audio.diagMutex); // FIX-AU4
+                loudness = g_spu2Audio.loudness; // FIX-AU4
+                g_spu2Audio.loudness = LoudnessStats{}; // PROBE-AU3D
+            } // FIX-AU4
+
             const double tSec = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(now - mixerStart).count()) / 1000.0; // PROBE-AU3D
             const double rms = (loudness.sampleCount > 0u) ? std::sqrt(loudness.sumSq / static_cast<double>(loudness.sampleCount)) : 0.0; // PROBE-AU3D
             const double rmsDb = (rms > 0.0) ? (20.0 * std::log10(rms / 32768.0)) : -120.0; // PROBE-AU3D
@@ -257,7 +317,6 @@ namespace ps2x::audio
                 audiblePct, // PROBE-AU3D
                 activeVoices, // PROBE-AU3D
                 static_cast<unsigned long long>(keyOns5s)); // PROBE-AU3D
-            loudness = LoudnessStats{}; // PROBE-AU3D
         }
 
         void mixerThreadMain()
@@ -267,7 +326,7 @@ namespace ps2x::audio
             auto lastLog = mixerStart; // PROBE-AU3D
             auto lastPace = mixerStart; // PROBE-AU3D
             uint64_t lastKeyOns = 0u;
-            LoudnessStats loudness{}; // PROBE-AU3D
+            const bool wallclockMode = isSpu2WallclockMode(); // FIX-AU4
 
             while (g_spu2Audio.running.load(std::memory_order_acquire))
             {
@@ -286,47 +345,19 @@ namespace ps2x::audio
                     }
                 }
 
-                while (g_spu2Audio.running.load(std::memory_order_acquire) &&
-                       ringReadableFrames() < kTargetFillFrames &&
-                       ringWritableFrames() >= kBlockFrames)
+                if (wallclockMode) // FIX-AU4
                 {
-                    ps2x::iop::mixSpu2AudioBlock(block.data(), kBlockFrames);
-                    pushFramesToRing(block.data(), kBlockFrames);
-
-                    if (g_spu2Audio.wavFile != nullptr) // PROBE-AU3D
-                    { // PROBE-AU3D
-                        constexpr size_t blockBytes = kBlockFrames * 2u * sizeof(int16_t); // PROBE-AU3D
-                        if (kWavHeaderBytes + g_spu2Audio.wavDataBytes + blockBytes <= kWavMaxBytes) // PROBE-AU3D
-                        { // PROBE-AU3D
-                            std::fwrite(block.data(), 1, blockBytes, g_spu2Audio.wavFile); // PROBE-AU3D
-                            g_spu2Audio.wavDataBytes += blockBytes; // PROBE-AU3D
-                            g_spu2Audio.wavFramesSinceFlush += kBlockFrames; // PROBE-AU3D
-                            if (g_spu2Audio.wavFramesSinceFlush >= kWavFlushFrames) // PROBE-AU3D
-                            { // PROBE-AU3D
-                                patchWavSizes(g_spu2Audio.wavFile, g_spu2Audio.wavDataBytes); // PROBE-AU3D
-                                g_spu2Audio.wavFramesSinceFlush = 0u; // PROBE-AU3D
-                            } // PROBE-AU3D
-                        } // PROBE-AU3D
-                    } // PROBE-AU3D
-
-                    int32_t blockPeak = 0; // PROBE-AU3D
-                    for (uint32_t i = 0u; i < kBlockFrames * 2u; ++i) // PROBE-AU3D
-                    { // PROBE-AU3D
-                        const int32_t s = static_cast<int32_t>(block[i]); // PROBE-AU3D
-                        const int32_t absS = (s < 0) ? -s : s; // PROBE-AU3D
-                        if (absS > blockPeak) // PROBE-AU3D
-                            blockPeak = absS; // PROBE-AU3D
-                        loudness.sumSq += static_cast<double>(s) * static_cast<double>(s); // PROBE-AU3D
-                    } // PROBE-AU3D
-                    loudness.sampleCount += kBlockFrames * 2u; // PROBE-AU3D
-                    if (blockPeak > loudness.peak) // PROBE-AU3D
-                        loudness.peak = blockPeak; // PROBE-AU3D
-                    ++loudness.blocks; // PROBE-AU3D
-                    if (blockPeak > 64) // PROBE-AU3D
-                        ++loudness.audibleBlocks; // PROBE-AU3D
+                    while (g_spu2Audio.running.load(std::memory_order_acquire) &&
+                           ringReadableFrames() < kTargetFillFrames &&
+                           ringWritableFrames() >= kBlockFrames)
+                    {
+                        ps2x::iop::mixSpu2AudioBlock(block.data(), kBlockFrames);
+                        pushFramesToRing(block.data(), kBlockFrames);
+                        recordMixedBlock(block.data(), kBlockFrames); // FIX-AU4
+                    }
                 }
 
-                maybeLogDiagnostics(lastLog, mixerStart, lastKeyOns, loudness); // PROBE-AU3D
+                maybeLogDiagnostics(lastLog, mixerStart, lastKeyOns); // PROBE-AU3D
                 std::this_thread::sleep_for(std::chrono::milliseconds(3));
             }
         }
@@ -346,6 +377,11 @@ namespace ps2x::audio
         g_spu2Audio.framesConsumed.store(0u, std::memory_order_relaxed);
         g_spu2Audio.underruns.store(0u, std::memory_order_relaxed);
         g_spu2Audio.muted.store(isAudioOutMuted(), std::memory_order_relaxed);
+        g_spu2Audio.vblankTick = 0u; // FIX-AU4
+        { // FIX-AU4
+            std::lock_guard<std::mutex> lock(g_spu2Audio.diagMutex); // FIX-AU4
+            g_spu2Audio.loudness = LoudnessStats{}; // FIX-AU4
+        } // FIX-AU4
 
         // Pre-fill target latency before starting playback to avoid initial underruns.
         std::array<int16_t, kBlockFrames * 2u> prefill{};
@@ -416,5 +452,33 @@ namespace ps2x::audio
         }
 #endif
         g_spu2Audio.streamActive.store(false, std::memory_order_relaxed);
+    }
+}
+
+void ps2xSpu2GuestVblank() // FIX-AU4
+{
+    using namespace ps2x::audio;
+    static const bool s_enabled = isSg2LleEnabled() && !isSpu2WallclockMode();
+    if (!s_enabled)
+        return;
+    if (!g_spu2Audio.running.load(std::memory_order_acquire))
+        return;
+
+    const uint64_t t = g_spu2Audio.vblankTick++;
+    const uint64_t nextTotal = ((t + 1ULL) * 48000ULL * 1001ULL) / 60000ULL;
+    const uint64_t curTotal = (t * 48000ULL * 1001ULL) / 60000ULL;
+    uint32_t remaining = static_cast<uint32_t>(nextTotal - curTotal);
+
+    static std::array<int16_t, kBlockFrames * 2u> s_block{};
+    while (remaining > 0u)
+    {
+        const uint32_t chunk = std::min(remaining, kBlockFrames);
+        ps2x::iop::mixSpu2AudioBlock(s_block.data(), chunk);
+        recordMixedBlock(s_block.data(), chunk);
+        const uint32_t writable = ringWritableFrames();
+        const uint32_t toPush = std::min(chunk, writable);
+        if (toPush > 0u)
+            pushFramesToRing(s_block.data(), toPush);
+        remaining -= chunk;
     }
 }
