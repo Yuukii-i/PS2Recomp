@@ -41,6 +41,15 @@ namespace ps2_syscalls {
 #include <limits>
 #include <stdexcept>
 #include <chrono>
+extern std::atomic<uint64_t> g_aw2Mark2000, g_aw2C5Raised, g_aw2C5Delivered; // PROBE-AW2
+extern std::atomic<uint32_t> g_vif1PublishedMark; // PROBE-AW2
+extern std::atomic<uint64_t> g_gsFrameKicks; // PROBE-AW2
+extern void aw3DumpRing(); // PROBE-AW3
+static inline bool aw2ProbeOn() // PROBE-AW2
+{ // PROBE-AW2
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_AW2_PROBE"); return e && e[0] == '1'; }(); // PROBE-AW2
+    return s_on; // PROBE-AW2
+} // PROBE-AW2
 namespace // PERF-SA
 {
 struct ScratchDepthGuard
@@ -58,6 +67,7 @@ thread_local std::vector<EeEvent> s_pendingEventsScratch;
 thread_local int s_pendingEventsDepth = 0;
 } // namespace // PERF-SA
 extern "C" void ps2xFlushLog(); // PERF-LG
+thread_local uint32_t g_au9SchedulerEntry = 0u; // FIX-AU9
 #ifdef _WIN32 // PROBE-EX
 extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
 #endif
@@ -426,6 +436,7 @@ void EeScheduler::run()
                     uint32_t cause = getRegU32(&invocation.context, 4);
                     probe_ae::onCeVblankDelivered(cause);
                     probe_ae::onDc3IrqDelivered(cause, invocation.context.pc);
+                    if (aw2ProbeOn() && cause == 5u) g_aw2C5Delivered.fetch_add(1, std::memory_order_relaxed); // PROBE-AW2
                 }
                 owner->status = EeThreadStatus::Running;
                 m_currentThreadId = owner->id;
@@ -507,6 +518,7 @@ void EeScheduler::run()
                 uint32_t cause = getRegU32(&invocation.context, 4);
                 probe_ae::onCeVblankDelivered(cause);
                 probe_ae::onDc3IrqDelivered(cause, invocation.context.pc);
+                if (aw2ProbeOn() && cause == 5u) g_aw2C5Delivered.fetch_add(1, std::memory_order_relaxed); // PROBE-AW2
             }
             if (getRegU32(&invocation.context, 29) == 0u)
             {
@@ -586,6 +598,8 @@ void EeScheduler::run()
             }
             const uint32_t prevExecutingFunction = g_currentExecutingFunction;
             g_currentExecutingFunction = entryPc;
+            const uint32_t prevAu9SchedulerEntry = g_au9SchedulerEntry; // FIX-AU9
+            g_au9SchedulerEntry = entryPc; // FIX-AU9
             s_lastDispatchedPc[s_lastDispatchIdx++ % 32] = entryPc;
             if (running && running->id == 1 && probe_ae::isEnabled())
             {
@@ -605,6 +619,7 @@ void EeScheduler::run()
                 }
             }
             g_currentExecutingFunction = prevExecutingFunction;
+            g_au9SchedulerEntry = prevAu9SchedulerEntry; // FIX-AU9
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
@@ -761,7 +776,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     static thread_local uint64_t s_au9ConsecutiveDeferrals = 0; // FIX-AU9
     if (due) // FIX-AU9
     { // FIX-AU9
-        if (hasThreadPc && pc != 0u && pc == g_currentExecutingFunction) // FIX-AU9
+        if (hasThreadPc && pc != 0u && pc == g_currentExecutingFunction && g_currentExecutingFunction != g_au9SchedulerEntry) // FIX-AU9
         { // FIX-AU9
             ++s_au9ConsecutiveDeferrals; // FIX-AU9
             if ((s_au9ConsecutiveDeferrals % 10000000ull) == 0ull) // FIX-AU9
@@ -2564,6 +2579,40 @@ void EeScheduler::processEvent(const EeEvent &event)
         completeVSync(m_vsyncTick);
         ps2xSpu2GuestVblank(); // FIX-AU4
         ps2xCid1Vblank(); // FIX-AU5
+        if (aw2ProbeOn()) // PROBE-AW2
+        { // PROBE-AW2
+            static uint64_t s_aw2Vbl = 0; // PROBE-AW2
+            static uint32_t s_aw2Lines = 0; // PROBE-AW2
+            if ((++s_aw2Vbl % 60u) == 0u && s_aw2Lines < 900u) // PROBE-AW2
+            { // PROBE-AW2
+                ++s_aw2Lines; // PROBE-AW2
+                uint32_t flag = 0; // PROBE-AW2
+                if (m_rdram && 0x649DE4u <= PS2_RAM_SIZE - sizeof(uint32_t)) // PROBE-AW2
+                    std::memcpy(&flag, m_rdram + 0x649DE4u, sizeof(flag)); // PROBE-AW2
+                ps2xSafeLog("[aw2] vbl=%llu mark2000=%llu c5raised=%llu c5deliv=%llu flag=%u mark=0x%04x kicks=%llu\n", // PROBE-AW2
+                            (unsigned long long)m_vsyncTick, // PROBE-AW2
+                            (unsigned long long)g_aw2Mark2000.load(std::memory_order_relaxed), // PROBE-AW2
+                            (unsigned long long)g_aw2C5Raised.load(std::memory_order_relaxed), // PROBE-AW2
+                            (unsigned long long)g_aw2C5Delivered.load(std::memory_order_relaxed), // PROBE-AW2
+                            (unsigned)flag, // PROBE-AW2
+                            (unsigned)g_vif1PublishedMark.load(std::memory_order_relaxed), // PROBE-AW2
+                            (unsigned long long)g_gsFrameKicks.load(std::memory_order_relaxed)); // PROBE-AW2
+            } // PROBE-AW2
+            static uint64_t s_aw3LastKicks = 0; // PROBE-AW3
+            static uint32_t s_aw3StallVbl = 0; // PROBE-AW3
+            static bool s_aw3Dumped = false; // PROBE-AW3
+            const uint64_t curKicks = g_gsFrameKicks.load(std::memory_order_relaxed); // PROBE-AW3
+            if (curKicks != s_aw3LastKicks) // PROBE-AW3
+            { // PROBE-AW3
+                s_aw3LastKicks = curKicks; // PROBE-AW3
+                s_aw3StallVbl = 0; // PROBE-AW3
+            } // PROBE-AW3
+            else if (!s_aw3Dumped && ++s_aw3StallVbl >= 120u) // PROBE-AW3
+            { // PROBE-AW3
+                s_aw3Dumped = true; // PROBE-AW3
+                aw3DumpRing(); // PROBE-AW3
+            } // PROBE-AW3
+        } // PROBE-AW2
 
         if (isVblankLatchEnabled())
         {

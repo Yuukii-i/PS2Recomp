@@ -16,6 +16,61 @@ static const void *s_gifStatOwner = nullptr;
 void ps2xSafeLog(const char *fmt, ...);
 
 std::atomic<uint64_t> g_gsFrameKicks{0};
+std::atomic<uint64_t> g_aw2Mark2000{0}, g_aw2C5Raised{0}, g_aw2C5Delivered{0}; // PROBE-AW2
+extern std::atomic<uint32_t> g_aw3LastVifCode; // PROBE-AW3
+extern std::atomic<bool> g_aw3SawMark2000; // PROBE-AW3
+
+static inline bool aw3ProbeOn() // PROBE-AW3
+{ // PROBE-AW3
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_AW2_PROBE"); return e && e[0] == '1'; }(); // PROBE-AW3
+    return s_on; // PROBE-AW3
+} // PROBE-AW3
+
+struct Aw3ChainEntry // PROBE-AW3
+{ // PROBE-AW3
+    char walker = '?'; // PROBE-AW3
+    uint32_t tadr0 = 0; // PROBE-AW3
+    uint32_t tags = 0; // PROBE-AW3
+    const char *endReason = "other"; // PROBE-AW3
+    uint32_t tadrEnd = 0; // PROBE-AW3
+    uint32_t chcr = 0; // PROBE-AW3
+    int mark2000 = 0; // PROBE-AW3
+    uint32_t lastvc = 0; // PROBE-AW3
+}; // PROBE-AW3
+
+static std::mutex g_aw3RingMutex; // PROBE-AW3
+static Aw3ChainEntry g_aw3Ring[16]; // PROBE-AW3
+static uint32_t g_aw3RingWrite = 0; // PROBE-AW3
+static uint32_t g_aw3RingCount = 0; // PROBE-AW3
+
+static void aw3RecordChain(char walker, uint32_t tadr0, uint32_t tags, const char *endReason, uint32_t tadrEnd, uint32_t chcr) // PROBE-AW3
+{ // PROBE-AW3
+    std::lock_guard<std::mutex> lock(g_aw3RingMutex); // PROBE-AW3
+    Aw3ChainEntry &e = g_aw3Ring[g_aw3RingWrite & 15u]; // PROBE-AW3
+    e.walker = walker; // PROBE-AW3
+    e.tadr0 = tadr0; // PROBE-AW3
+    e.tags = tags; // PROBE-AW3
+    e.endReason = endReason; // PROBE-AW3
+    e.tadrEnd = tadrEnd; // PROBE-AW3
+    e.chcr = chcr; // PROBE-AW3
+    e.mark2000 = g_aw3SawMark2000.load(std::memory_order_relaxed) ? 1 : 0; // PROBE-AW3
+    e.lastvc = g_aw3LastVifCode.load(std::memory_order_relaxed); // PROBE-AW3
+    ++g_aw3RingWrite; // PROBE-AW3
+    if (g_aw3RingCount < 16u) ++g_aw3RingCount; // PROBE-AW3
+} // PROBE-AW3
+
+void aw3DumpRing() // PROBE-AW3
+{ // PROBE-AW3
+    std::lock_guard<std::mutex> lock(g_aw3RingMutex); // PROBE-AW3
+    const uint32_t n = g_aw3RingCount; // PROBE-AW3
+    const uint32_t start = (g_aw3RingWrite >= n) ? (g_aw3RingWrite - n) : 0u; // PROBE-AW3
+    for (uint32_t i = 0; i < n; ++i) // PROBE-AW3
+    { // PROBE-AW3
+        const Aw3ChainEntry &e = g_aw3Ring[(start + i) & 15u]; // PROBE-AW3
+        ps2xSafeLog("[aw3] #%u walker=%c tadr0=0x%08x tags=%u end=%s tadrEnd=0x%08x chcr=0x%08x mark2000=%d lastvc=0x%08x\n", // PROBE-AW3
+                    i, e.walker, e.tadr0, e.tags, e.endReason, e.tadrEnd, e.chcr, e.mark2000, e.lastvc); // PROBE-AW3
+    } // PROBE-AW3
+} // PROBE-AW3
 
 namespace
 {
@@ -2314,6 +2369,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 int tagsProcessed = 0;
                                 uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
                                 uint32_t lastTagId = 0;
+                                const uint32_t aw3ChcrStart = chcr; // PROBE-AW3
+                                const bool aw3Track = !suppressProbes && !scanOnly && (channelBase == 0x10009000u) && aw3ProbeOn(); // PROBE-AW3
+                                if (aw3Track) g_aw3SawMark2000.store(false, std::memory_order_relaxed); // PROBE-AW3
+                                const char *aw3EndReason = "other"; // PROBE-AW3
 
                                 while (tagsProcessed < kMaxChainTags)
                                 {
@@ -2322,6 +2381,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                     if (scanOnly && tagInSPR) // PERF-GC
                                     {
                                         t_vif1ScanHitSpr = true;
+                                        aw3EndReason = "spr"; // PROBE-AW3
                                         break;
                                     }
                                     uint32_t physTag = 0;
@@ -2331,6 +2391,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                     }
                                     catch (...)
                                     {
+                                        aw3EndReason = "bad-addr"; // PROBE-AW3
                                         break;
                                     }
                                     const uint8_t *tagBase;
@@ -2346,7 +2407,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                         tagMax = PS2_RAM_SIZE;
                                     }
                                     if (physTag + 16 > tagMax)
+                                    { // PROBE-AW3
+                                        aw3EndReason = tagInSPR ? "spr" : "oob"; // PROBE-AW3
                                         break;
+                                    } // PROBE-AW3
 
                                     const uint8_t *tp = tagBase + physTag;
                                     uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "dma chain tag", tagAddr);
@@ -2368,6 +2432,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                         dataAddr = addr;
                                         tagAddr = tagAddr + 16;
                                         endChain = true;
+                                        aw3EndReason = "refe0"; // PROBE-AW3
                                         break;
                                     case 1:
                                         dataAddr = tagAddr + 16;
@@ -2414,15 +2479,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                         else
                                         {
                                             endChain = true;
+                                            aw3EndReason = "ret-empty6"; // PROBE-AW3
                                         }
                                         break;
                                     case 7:
                                         dataAddr = tagAddr + 16;
                                         endChain = true;
+                                        aw3EndReason = "end7"; // PROBE-AW3
                                         break;
                                     default:
                                         hasPayload = false;
                                         endChain = true;
+                                        aw3EndReason = "bad-id"; // PROBE-AW3
                                         break;
                                     }
 
@@ -2492,13 +2560,19 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                         }
                                     }
                                     if (irq && tieEnabled)
+                                    { // PROBE-AW3
+                                        if (!endChain) aw3EndReason = "irq+tie"; // PROBE-AW3
                                         endChain = true;
+                                    } // PROBE-AW3
                                     if (endChain)
                                         break;
                                 }
 
                                 if (scanOnly) // PERF-GC
                                     return DmaChainWalkResult{tagAddr, asr0, asr1, chcr, static_cast<uint32_t>(tagsProcessed), 0u};
+
+                                if (tagsProcessed >= kMaxChainTags && std::strcmp(aw3EndReason, "other") == 0) // PROBE-AW3
+                                    aw3EndReason = "cap"; // PROBE-AW3
 
                                 if (!suppressProbes && tagsProcessed >= kMaxChainTags)
                                 {
@@ -2546,6 +2620,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 }
                                 chcr = (chcr & ~(0x3u << 4)) | ((asp & 0x3u) << 4);
                                 chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
+                                if (aw3Track) // PROBE-AW3
+                                    aw3RecordChain('A', initialTagAddr, static_cast<uint32_t>(tagsProcessed), aw3EndReason, tagAddr, aw3ChcrStart); // PROBE-AW3
                                 return DmaChainWalkResult{tagAddr, asr0, asr1, chcr, static_cast<uint32_t>(tagsProcessed), spanCount};
                             };
 
@@ -2618,6 +2694,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 int tagsProcessed = 0;
                                 uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
                                 uint32_t lastTagId = 0u;
+                                const uint32_t aw3ChcrStart = chcr; // PROBE-AW3
+                                const bool aw3Track = !scanOnly && isVif1 && aw3ProbeOn(); // PROBE-AW3
+                                if (aw3Track) g_aw3SawMark2000.store(false, std::memory_order_relaxed); // PROBE-AW3
+                                const char *aw3EndReason = "other"; // PROBE-AW3
 
                                 while (tagsProcessed < kMaxChainTags)
                                 {
@@ -2637,6 +2717,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                         if (scanOnly && tagInSPR)
                                         {
                                             t_vif1ScanHitSpr = true;
+                                            aw3EndReason = "spr"; // PROBE-AW3
                                             break;
                                         }
                                         try
@@ -2645,12 +2726,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                         }
                                         catch (...)
                                         {
+                                            aw3EndReason = "bad-addr"; // PROBE-AW3
                                             break;
                                         }
                                         const uint8_t *tagBase = tagInSPR ? m_scratchpad : m_rdram;
                                         tagMax = tagInSPR ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
                                         if (physTag + 16u > tagMax)
+                                        { // PROBE-AW3
+                                            aw3EndReason = tagInSPR ? "spr" : "oob"; // PROBE-AW3
                                             break;
+                                        } // PROBE-AW3
                                         tp = tagBase + physTag;
                                     }
 
@@ -2674,6 +2759,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                         dataAddr = addr;
                                         tagAddr = tagAddr + 16u;
                                         endChain = true;
+                                        aw3EndReason = "refe0"; // PROBE-AW3
                                         break;
                                     case 1:
                                         dataAddr = tagAddr + 16u;
@@ -2720,15 +2806,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                         else
                                         {
                                             endChain = true;
+                                            aw3EndReason = "ret-empty6"; // PROBE-AW3
                                         }
                                         break;
                                     case 7:
                                         dataAddr = tagAddr + 16u;
                                         endChain = true;
+                                        aw3EndReason = "end7"; // PROBE-AW3
                                         break;
                                     default:
                                         hasPayload = false;
                                         endChain = true;
+                                        aw3EndReason = "bad-id"; // PROBE-AW3
                                         break;
                                     }
 
@@ -2847,13 +2936,19 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                         }
                                     }
                                     if (irq && tieEnabled)
+                                    { // PROBE-AW3
+                                        if (!endChain) aw3EndReason = "irq+tie"; // PROBE-AW3
                                         endChain = true;
+                                    } // PROBE-AW3
                                     if (endChain)
                                         break;
                                 }
 
                                 if (scanOnly)
                                     return DmaChainWalkResult{tagAddr, asr0, asr1, chcr, static_cast<uint32_t>(tagsProcessed), 0u};
+
+                                if (tagsProcessed >= kMaxChainTags && std::strcmp(aw3EndReason, "other") == 0) // PROBE-AW3
+                                    aw3EndReason = "cap"; // PROBE-AW3
 
                                 flushPending();
                                 if (!chainBuf.empty())
@@ -2897,6 +2992,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                                 chcr = (chcr & ~(0x3u << 4)) | ((asp & 0x3u) << 4);
                                 chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
+                                if (aw3Track) // PROBE-AW3
+                                    aw3RecordChain('B', initialTagAddr, static_cast<uint32_t>(tagsProcessed), aw3EndReason, tagAddr, aw3ChcrStart); // PROBE-AW3
                                 return DmaChainWalkResult{tagAddr, asr0, asr1, chcr, static_cast<uint32_t>(tagsProcessed), spanCount};
                             };
 
@@ -3554,6 +3651,8 @@ namespace {
 
 void recordCompletedIntcCause(uint32_t cause)
 {
+    static const bool s_aw2Probe = []() { const char *e = std::getenv("PS2X_AW2_PROBE"); return e && e[0] == '1'; }(); // PROBE-AW2
+    if (s_aw2Probe && cause == 5u) g_aw2C5Raised.fetch_add(1, std::memory_order_relaxed); // PROBE-AW2
     std::lock_guard<std::mutex> lock(s_completedIntcMutex);
     s_completedIntcCauses.push_back(cause);
 }

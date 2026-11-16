@@ -438,6 +438,9 @@ extern "C" void ps2_vif1_dumpEhShapes() {
 
 
 extern void recordCompletedIntcCause(uint32_t cause);
+extern std::atomic<uint64_t> g_aw2Mark2000; // PROBE-AW2
+std::atomic<uint32_t> g_aw3LastVifCode{0}; // PROBE-AW3
+std::atomic<bool> g_aw3SawMark2000{false}; // PROBE-AW3
 extern std::atomic<uint32_t> g_vif1PublishedMark;     // PERF-V1K
 extern std::atomic<uint32_t> g_vif1PublishedStatBits; // PERF-V1K
 extern std::atomic<bool> g_vif1PendingStc;         // PERF-V1K
@@ -2841,6 +2844,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
         vif1_regs.num = num;
+        static const bool s_aw3Probe = []() { const char *e = std::getenv("PS2X_AW2_PROBE"); return e && e[0] == '1'; }(); // PROBE-AW3
+        if (s_aw3Probe) g_aw3LastVifCode.store(cmd, std::memory_order_relaxed); // PROBE-AW3
         if (irq)
         {
             vif1_regs.stat |= (1u << 10); // VIS
@@ -2921,6 +2926,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (!ps2_vif1_on_worker()) // PERF-HN: m_ioRegisters is an unsynchronised map; the MARK read uses vif1_regs.mark
                 m_ioRegisters[0x10003C30u] = imm;
             publishVif1MarkAndStat(vif1_regs.mark, vif1_regs.stat); // PERF-V1K
+            static const bool s_aw2Probe = []() { const char *e = std::getenv("PS2X_AW2_PROBE"); return e && e[0] == '1'; }(); // PROBE-AW2
+            if (s_aw2Probe && imm == 0x2000u) { // PROBE-AW3
+                g_aw2Mark2000.fetch_add(1, std::memory_order_relaxed); // PROBE-AW2
+                g_aw3SawMark2000.store(true, std::memory_order_relaxed); // PROBE-AW3
+            } // PROBE-AW3
             recordCompletedIntcCause(5u);
 #if defined(PS2X_PROBE_AE) || 1
             if (aeProbe) {
