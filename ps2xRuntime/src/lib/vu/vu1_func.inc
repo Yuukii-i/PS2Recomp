@@ -17,6 +17,14 @@ extern void ps2xSafeLog(const char *fmt, ...);
 #include <atomic>
 extern std::atomic<uint64_t> g_hostPresentSeq; // PERF-SA: per presented frame (gs_frontend.cpp)
 
+struct RdVert // FEAT-RD1
+{
+    float pos[4];
+    uint8_t rgba[4];
+};
+extern bool ps2xRdViewOn(); // FEAT-RD1
+extern void ps2xRdPublish(const RdVert *v, size_t n, uint32_t skippedDraws); // FEAT-RD1
+
 namespace vu1func
 {
 constexpr uint64_t kImageHash = 0x86503d3905e35276ull; // FNV-1a of the 16 KB VU1 code image == s_hcCurHash (set by rebuildDecodedCodeCache)
@@ -500,7 +508,7 @@ namespace scene
 inline bool on()
 {
     static const bool v = []() { const char *e = std::getenv("PS2X_SCENE"); return e && e[0] == '1'; }();
-    return v;
+    return v || ::ps2xRdViewOn(); // FEAT-RD1
 }
 inline bool checkOn()
 {
@@ -1093,6 +1101,41 @@ inline void onFlush()
     {
         dumpSceneFrame(cur);
         t_scene.dumped = true;
+    }
+
+    if (::ps2xRdViewOn()) // FEAT-RD1
+    {
+        static thread_local std::vector<::RdVert> t_rdTris;
+        t_rdTris.clear();
+        uint32_t skippedDraws = 0;
+        const auto toRdVert = [](const SceneVertex &sv) -> ::RdVert {
+            ::RdVert rv;
+            rv.pos[0] = sv.pos[0];
+            rv.pos[1] = sv.pos[1];
+            rv.pos[2] = sv.pos[2];
+            rv.pos[3] = sv.pos[3];
+            for (int c = 0; c < 4; ++c)
+                rv.rgba[c] = static_cast<uint8_t>(std::min<uint32_t>(sv.rgba[c], 255u));
+            return rv;
+        };
+        for (const SceneDraw &d : cur.draws)
+        {
+            if (d.flags & 4u)
+            {
+                ++skippedDraws;
+                continue;
+            }
+            for (uint32_t i = 2; i < d.vertexCount; ++i)
+            {
+                const SceneVertex &sv2 = cur.vertices[d.firstVertex + i];
+                if (sv2.adc & 0x8000u)
+                    continue;
+                t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex + i - 2u]));
+                t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex + i - 1u]));
+                t_rdTris.push_back(toRdVert(sv2));
+            }
+        }
+        ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), skippedDraws);
     }
 
     t_scene.writeIdx ^= 1u;

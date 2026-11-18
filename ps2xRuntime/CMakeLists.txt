@@ -412,6 +412,7 @@ add_library(ps2_runtime STATIC
     src/lib/probe_prof.cpp
     src/lib/decomp/ee_gfx_decomp.cpp # DECOMP-BM
     src/lib/dev/dev_console.cpp # FEAT-DF
+    src/lib/render/rd_view.cpp # FEAT-RD1
 )
 
 if(PS2X_ENABLE_RUNTIME_LOGS)

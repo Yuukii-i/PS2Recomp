@@ -8,6 +8,8 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 #include "ps2_runtime.h"
 extern void ps2xEeGfxDecompInstall(PS2Runtime &); // DECOMP-BM
 extern void ps2xDevConsoleInstall(PS2Runtime &); // FEAT-DF
+extern bool ps2xRdViewOn(); // FEAT-RD1
+extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
 extern void ps2xPadMarker(); // PROBE-MK
 extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
 extern void ps2xMcInit(); // FEAT-DE
@@ -63,6 +65,7 @@ namespace {
 #include "Kernel/Stubs/IsoDisc.h"
 #include "Stubs/CD.h"
 #include "ps2_host_backend.h"
+#include "rlgl.h" // FEAT-RD1
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
 
@@ -6492,7 +6495,19 @@ void PS2Runtime::run()
                 (screenHeight - dstHeight) * 0.5f,
                 dstWidth,
                 dstHeight};
-            DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            static bool s_rdShow = true; // FEAT-RD1
+            if (ps2xRdViewOn() && IsKeyPressed(KEY_F11)) // FEAT-RD1
+                s_rdShow = !s_rdShow;
+            if (ps2xRdViewOn() && s_rdShow) // FEAT-RD1
+            {
+                rlClearScreenBuffers();
+                if (!ps2xRdDraw(dstRect.x, dstRect.y, dstRect.width, dstRect.height))
+                    DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            }
+            else
+            {
+                DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            }
             if (m_debugUiInitialized && m_debugUiDrawCallback)
             {
                 m_debugUiDrawCallback(*this, m_debugUiUserData);
