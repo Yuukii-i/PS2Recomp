@@ -12,6 +12,8 @@
 #include <cstdio> // FEAT-RD3b
 #include <filesystem> // FEAT-RD3b
 #include <unordered_set> // FEAT-RD3b
+#include <string> // FEAT-RD6
+#include <cctype> // FEAT-RD6
 #include <mutex> // FEAT-RD3c
 #include <cstring> // FEAT-RD3c
 #include <unordered_map>
@@ -51,9 +53,10 @@ struct RdContentEntry // FEAT-RD5
 {
     uint32_t w = 0;
     uint32_t h = 0;
+    uint32_t psm = 0; // FEAT-RD6
     std::vector<uint8_t> rgba;
 };
-std::mutex g_contentMutex;                                   // FEAT-RD5
+std::mutex g_contentMutex;                                // FEAT-RD5
 std::unordered_map<uint64_t, RdContentEntry> g_contentMap;   // FEAT-RD5
 
 struct RdContentGl // FEAT-RD5
@@ -65,6 +68,98 @@ std::unordered_map<uint64_t, RdContentGl> g_glByContentId; // FEAT-RD5 (main thr
 uint32_t g_texFramesSinceLog = 0;                          // FEAT-RD5
 uint32_t g_exactSinceLog = 0;                              // FEAT-RD5
 uint32_t g_fallbackSinceLog = 0;                           // FEAT-RD5
+
+// FEAT-RD6: texture dump (RD5 path) + replacement (main thread only)
+uint32_t g_replacedSinceLog = 0;
+std::unordered_map<std::string, std::string> g_replaceMap;
+bool g_replaceScanned = false;
+std::unordered_set<uint64_t> g_replaceFailed;
+uint32_t g_rd6Dumped = 0;
+
+void rd6Scan()
+{
+    g_replaceScanned = true;
+    const char *e = std::getenv("PS2X_TEX_REPLACE_DIR");
+    const std::filesystem::path dir = (e && e[0]) ? e : "mods/textures";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec))
+        return;
+    for (const auto &de : std::filesystem::directory_iterator(dir, ec))
+    {
+        if (!de.is_regular_file(ec))
+            continue;
+        std::string ext = de.path().extension().string();
+        for (auto &c : ext)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext != ".png")
+            continue;
+        std::string name = de.path().filename().string();
+        if (name.size() < 16u)
+            continue;
+        std::string key = name.substr(0, 16);
+        bool ok = true;
+        for (auto &c : key)
+        {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (!std::isxdigit(static_cast<unsigned char>(c)))
+                ok = false;
+        }
+        if (ok)
+            g_replaceMap[key] = de.path().string();
+    }
+    ps2xSafeLog("[texrep] scanned %u replacement files\n", static_cast<unsigned>(g_replaceMap.size()));
+}
+
+unsigned int rd6Upload(uint64_t cid, uint32_t w, uint32_t h, uint32_t psm, const std::vector<uint8_t> &rgba)
+{
+    static const bool s_dump = []() {
+        const char *e = std::getenv("PS2X_RD_TEXDUMP");
+        return e && e[0] == '1';
+    }();
+    char idStr[24];
+    std::snprintf(idStr, sizeof(idStr), "%016llx", static_cast<unsigned long long>(cid));
+    if (s_dump && g_rd6Dumped < 2000u)
+    {
+        ++g_rd6Dumped;
+        std::error_code ec;
+        std::filesystem::create_directories("logs/rdtex", ec);
+        std::vector<uint8_t> copy(rgba);
+        for (size_t i = 3; i < copy.size(); i += 4)
+            copy[i] = static_cast<uint8_t>(std::min<uint32_t>(static_cast<uint32_t>(copy[i]) * 2u, 255u));
+        Image img{copy.data(), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+        char path[256];
+        std::snprintf(path, sizeof(path), "logs/rdtex/%s_psm%u_%ux%u.png", idStr, static_cast<unsigned>(psm), w, h);
+        ExportImage(img, path);
+    }
+    if (!g_replaceScanned)
+        rd6Scan();
+    auto rit = g_replaceMap.find(idStr);
+    if (rit != g_replaceMap.end() && g_replaceFailed.find(cid) == g_replaceFailed.end())
+    {
+        Image img = LoadImage(rit->second.c_str());
+        if (img.data != nullptr && img.width > 0 && img.height > 0)
+        {
+            ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+            auto *p = static_cast<uint8_t *>(img.data);
+            const size_t n = static_cast<size_t>(img.width) * static_cast<size_t>(img.height);
+            for (size_t i = 0; i < n; ++i)
+                p[i * 4 + 3] = static_cast<uint8_t>((static_cast<uint32_t>(p[i * 4 + 3]) + 1u) / 2u);
+            const unsigned int glId = rlLoadTexture(img.data, img.width, img.height, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+            int mips = 1;
+            rlGenTextureMipmaps(glId, img.width, img.height, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, &mips);
+            rlTextureParameters(glId, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
+            ps2xSafeLog("[texrep] %s <- %s (%dx%d)\n", idStr, rit->second.c_str(), img.width, img.height);
+            UnloadImage(img);
+            ++g_replacedSinceLog;
+            return glId;
+        }
+        if (img.data != nullptr)
+            UnloadImage(img);
+        g_replaceFailed.insert(cid);
+        ps2xSafeLog("[texrep] %s: failed to load %s, using decoded texture\n", idStr, rit->second.c_str());
+    }
+    return rlLoadTexture(rgba.data(), static_cast<int>(w), static_cast<int>(h), PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+}
 
 struct RdTexKey // FEAT-RD3
 {
@@ -334,15 +429,16 @@ void ps2xRdTexTickFrame() // FEAT-RD3
     {
         const double secs = static_cast<double>(elapsedMs) / 1000.0;
         const double fr = g_texFramesSinceLog ? static_cast<double>(g_texFramesSinceLog) : 1.0; // FEAT-RD5
-        ps2xSafeLog("[rdtex] live=%u decodes/s=%.1f unsupported=%u notedClut=%u fallbackClut=%u exact=%u fallback=%u noteCalls=%u fullDecodes=%u fastHits=%u rawHits=%u\n",
+        ps2xSafeLog("[rdtex] live=%u decodes/s=%.1f unsupported=%u notedClut=%u fallbackClut=%u exact=%u fallback=%u noteCalls=%u fullDecodes=%u fastHits=%u rawHits=%u replaced=%u\n",
                     static_cast<unsigned>(g_texCache.size() + g_glByContentId.size()),
                     static_cast<double>(g_decodesSinceLog) / secs,
                     g_unsupportedSinceLog, g_notedClutSinceLog, g_fallbackClutSinceLog,
                     static_cast<unsigned>(static_cast<double>(g_exactSinceLog) / fr),
                     static_cast<unsigned>(static_cast<double>(g_fallbackSinceLog) / fr),
-                    static_cast<unsigned>(g_rdNoteCalls.exchange(0u)), static_cast<unsigned>(g_rdFullDecodes.exchange(0u)), static_cast<unsigned>(g_rdFastHits.exchange(0u)), static_cast<unsigned>(g_rdRawHits.exchange(0u))); // FEAT-RD5 FEAT-RD5b
+                    static_cast<unsigned>(g_rdNoteCalls.exchange(0u)), static_cast<unsigned>(g_rdFullDecodes.exchange(0u)), static_cast<unsigned>(g_rdFastHits.exchange(0u)), static_cast<unsigned>(g_rdRawHits.exchange(0u)), static_cast<unsigned>(g_replacedSinceLog)); // FEAT-RD5 FEAT-RD5b FEAT-RD6
+        g_replacedSinceLog = 0; // FEAT-RD6
         g_notedClutSinceLog = 0;                                                         // FEAT-RD3c
-        g_fallbackClutSinceLog = 0;                                                      // FEAT-RD3c
+        g_fallbackClutSinceLog = 0;                                                    // FEAT-RD3c
         g_exactSinceLog = 0;                                                             // FEAT-RD5
         g_fallbackSinceLog = 0;                                                          // FEAT-RD5
         g_texFramesSinceLog = 0;                                                         // FEAT-RD5
@@ -781,6 +877,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
             RdContentEntry entry;
             entry.w = w;
             entry.h = h;
+            entry.psm = psm; // FEAT-RD6
             entry.rgba.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
             auto *dst = reinterpret_cast<uint32_t *>(entry.rgba.data());
             for (size_t i = 0; i < t_raw.size(); ++i)
@@ -829,7 +926,7 @@ unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t t
             ++g_exactSinceLog;
             return it->second.glId;
         }
-        uint32_t w = 0u, h = 0u;
+        uint32_t w = 0u, h = 0u, cpsmFeat = 0u;
         std::vector<uint8_t> rgbaCopy;
         {
             std::lock_guard<std::mutex> lk(g_contentMutex);
@@ -838,13 +935,13 @@ unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t t
             {
                 w = cit->second.w;
                 h = cit->second.h;
+                cpsmFeat = cit->second.psm;
                 rgbaCopy = cit->second.rgba;
             }
         }
         if (w > 0u && h > 0u && !rgbaCopy.empty())
         {
-            const unsigned int glId = rlLoadTexture(rgbaCopy.data(), static_cast<int>(w), static_cast<int>(h),
-                                                    PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+            const unsigned int glId = rd6Upload(cid, w, h, cpsmFeat, rgbaCopy); // FEAT-RD6
             g_glByContentId.emplace(cid, RdContentGl{glId, g_texFrame});
             ++g_decodesSinceLog;
             ++g_exactSinceLog;
