@@ -47326,6 +47326,7 @@ struct DecompEntry // DECOMP-BN
     uint64_t loggedExpDiffs = 0; // PROBE-BS
     uint64_t checkCalls = 0;     // PROBE-BS
     uint64_t contSteps = 0;      // DECOMP-CU
+    uint64_t skipYield = 0, skipThread = 0, skipCap = 0, skipNull = 0; // DECOMP-DM
     bool noCheck = false; // DECOMP-BP2: generated code has jalr (side effects outside RAM) -> never dual-run
     bool experimental = false;   // PROBE-BS
     bool resumable = false;      // DECOMP-BV2: decomp starts with switch(ctx->pc) resume dispatch (re-entrant)
@@ -48109,7 +48110,7 @@ void maybeReportPeriodic() // DECOMP-BM
         if (e.calls > 0)
         {
             ps2xSafeLog("[eedc] %s calls=%llu checked=%llu ok=%llu skipped=%llu " // DECOMP-BN, DECOMP-BP
-                        "mis_pc=%llu mis_gpr=%llu mis_fpr=%llu mis_vu0=%llu mis_ram=%llu mis_spad=%llu cont=%llu\n", // DECOMP-CU
+                        "mis_pc=%llu mis_gpr=%llu mis_fpr=%llu mis_vu0=%llu mis_ram=%llu mis_spad=%llu cont=%llu sk_y=%llu sk_t=%llu sk_c=%llu sk_n=%llu\n", // DECOMP-CU, DECOMP-DM
                         e.name,
                         static_cast<unsigned long long>(e.calls),
                         static_cast<unsigned long long>(e.checked),
@@ -48121,7 +48122,11 @@ void maybeReportPeriodic() // DECOMP-BM
                         static_cast<unsigned long long>(e.misVu0),
                         static_cast<unsigned long long>(e.misRam),
                         static_cast<unsigned long long>(e.misSpad),
-                        static_cast<unsigned long long>(e.contSteps)); // DECOMP-CU
+                        static_cast<unsigned long long>(e.contSteps), // DECOMP-CU
+                        static_cast<unsigned long long>(e.skipYield), // DECOMP-DM
+                        static_cast<unsigned long long>(e.skipThread),
+                        static_cast<unsigned long long>(e.skipCap),
+                        static_cast<unsigned long long>(e.skipNull));
         }
     }
 }
@@ -48711,8 +48716,20 @@ static void decompThunkImpl(size_t Index, uint8_t *rdram, R5900Context *ctx, PS2
     entry.original(rdram, ctx, rt);
     // DECOMP-CU: run to return: execute continuation entries (tail jumps / split fallthrough) until pc == entry ra
     bool incompleteRun = false; // DECOMP-CU2: a run hit the step cap or a null slot without reaching entryRa
+    bool capHit = false; // DECOMP-DM
+    bool nullHit = false; // DECOMP-DM
+    static const int contMax = []() { // DECOMP-DM
+        int v = 256;
+        if (const char *s = std::getenv("PS2X_EEDC_CONTMAX"))
+        {
+            const long n = std::strtol(s, nullptr, 10);
+            if (n >= 1 && n <= 1000000)
+                v = static_cast<int>(n);
+        }
+        return v;
+    }();
     auto runToReturn = [&](uint64_t yBefore) { // DECOMP-CU
-        for (int step = 0; step < 256; ++step)
+        for (int step = 0; step < contMax; ++step) // DECOMP-DM
         {
             const uint32_t pc = ctx->pc;
             if (pc == expectedRa || g_ps2xCheckpointYields != yBefore)
@@ -48725,12 +48742,16 @@ static void decompThunkImpl(size_t Index, uint8_t *rdram, R5900Context *ctx, PS2
             if (!f)
             {
                 incompleteRun = true; // DECOMP-CU2
+                nullHit = true; // DECOMP-DM
                 break;
             }
             ++entry.contSteps;
             f(rdram, ctx, rt);
-            if (step == 255 && ctx->pc != expectedRa) // DECOMP-CU2
+            if (step == contMax - 1 && ctx->pc != expectedRa) // DECOMP-CU2, DECOMP-DM
+            {
                 incompleteRun = true;
+                capHit = true; // DECOMP-DM
+            }
         }
     };
     runToReturn(yOrigBefore); // DECOMP-CU
@@ -48794,6 +48815,14 @@ static void decompThunkImpl(size_t Index, uint8_t *rdram, R5900Context *ctx, PS2
                         expectedRa);
         }
         ++entry.skipped; // keep decomp state, game resumes it
+        if (yielded) // DECOMP-DM
+            ++entry.skipYield;
+        else if (decompEndTid != endTid)
+            ++entry.skipThread;
+        else if (capHit)
+            ++entry.skipCap;
+        else if (nullHit)
+            ++entry.skipNull;
         return;
     }
 
