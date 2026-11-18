@@ -42685,6 +42685,7 @@ label_3a1880:
         // Store initial/max HP from *($s1+0x74) and restore callee-saved regs (@0x3A1880)
         const uint32_t sp = GPR_U32(ctx, 29);
         const uint32_t s5 = GPR_U32(ctx, 21);
+        WRITE32(ADD32(s5, 0xA88u), GPR_U32(ctx, 2)); // DECOMP-DL: @0x3A1880 sw $v0, 0xA88($s5)
         const int32_t hpInt = static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 17), 0x74u)));
         const float hp = FPU_CVT_S_W(hpInt);
         ctx->f[0] = hp;
@@ -47329,6 +47330,7 @@ struct DecompEntry // DECOMP-BN
     bool experimental = false;   // PROBE-BS
     bool resumable = false;      // DECOMP-BV2: decomp starts with switch(ctx->pc) resume dispatch (re-entrant)
     bool exhaustive = false;     // DECOMP-BZ: PS2X_EEDC_ONLY member, checked on every call
+    bool noYield = false;        // DECOMP-DL: PS2X_EEDC_NOYIELD member, checkpoint yields suppressed during CHECK
     int64_t lastCheckNs = 0;     // DECOMP-DK: moved from template static to avoid C1128 section limit
     unsigned dumpCount = 0;      // DECOMP-DK: moved from template static to avoid C1128 section limit
 };
@@ -48666,6 +48668,21 @@ static void decompThunkImpl(size_t Index, uint8_t *rdram, R5900Context *ctx, PS2
     } guard(t_inCheck);
 
     // DECOMP-CM2 disabled: SuppressCkptGuard removed (made the game crawl); g_ps2xSuppressCheckpoint left unused
+    struct NoYieldGuard // DECOMP-DL: only for PS2X_EEDC_NOYIELD entries, only inside the check
+    {
+        bool active;
+        bool prev;
+        explicit NoYieldGuard(bool a) : active(a), prev(g_ps2xSuppressCheckpoint)
+        {
+            if (active)
+                g_ps2xSuppressCheckpoint = true;
+        }
+        ~NoYieldGuard()
+        {
+            if (active)
+                g_ps2xSuppressCheckpoint = false;
+        }
+    } noYieldGuard(entry.noYield); // DECOMP-DL
 
     CheckBuffers &bufs = getCheckBuffers();
     uint8_t *const scratchpad = ps2GetScratchpadHostPtr();
@@ -48959,6 +48976,32 @@ void ps2xEeGfxDecompInstall(PS2Runtime &rt) // DECOMP-BM, DECOMP-BO
             }
             g_exhaustiveMode = !onlyAddrs.empty();
         }
+        std::vector<uint32_t> noYieldAddrs; // DECOMP-DL
+        if (const char *nyEnv = std::getenv("PS2X_EEDC_NOYIELD")) // DECOMP-DL
+        {
+            const char *p = nyEnv;
+            while (*p)
+            {
+                while (*p == ',' || *p == ' ')
+                {
+                    ++p;
+                }
+                if (!*p)
+                {
+                    break;
+                }
+                char *endp = nullptr;
+                const unsigned long v = std::strtoul(p, &endp, 16);
+                if (endp == p)
+                {
+                    ++p;
+                    continue;
+                }
+                noYieldAddrs.push_back(static_cast<uint32_t>(v));
+                p = endp;
+            }
+        }
+        size_t noYieldCount = 0; // DECOMP-DL
         size_t exhaustiveCount = 0; // DECOMP-BZ
         const char *jalrEnv = std::getenv("PS2X_EEDC_CHECK_JALR"); // DECOMP-CX
         const bool checkJalr = jalrEnv && jalrEnv[0] == '1';       // DECOMP-CX
@@ -49102,8 +49145,17 @@ void ps2xEeGfxDecompInstall(PS2Runtime &rt) // DECOMP-BM, DECOMP-BO
             {
                 ++exhaustiveCount; // DECOMP-BZ
             }
+            e.noYield = std::find(noYieldAddrs.begin(), noYieldAddrs.end(), e.addr) != noYieldAddrs.end(); // DECOMP-DL
+            if (e.noYield)
+            {
+                ++noYieldCount; // DECOMP-DL
+            }
             rt.replaceFunction(e.addr, g_thunks[i]);
             ++installed;
+        }
+        if (!noYieldAddrs.empty())
+        {
+            ps2xSafeLog("[eedc] noyield entries: %zu\n", noYieldCount); // DECOMP-DL
         }
         if (checkJalr)
         {
