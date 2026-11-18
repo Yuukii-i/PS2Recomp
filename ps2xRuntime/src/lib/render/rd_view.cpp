@@ -10,13 +10,16 @@
 #include <vector>
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD1
+extern unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa); // FEAT-RD3
+extern void ps2xRdTexTickFrame(); // FEAT-RD3
 
 struct RdVert // FEAT-RD1
 {
     float pos[4];
     uint8_t rgba[4];
+    float uv[2]; // FEAT-RD3
 };
-static_assert(sizeof(RdVert) == 20, "RdVert size");
+static_assert(sizeof(RdVert) == 28, "RdVert size"); // FEAT-RD3
 
 struct RdBatch // FEAT-RD2
 {
@@ -27,6 +30,10 @@ struct RdBatch // FEAT-RD2
     uint64_t frame;
     uint64_t zbuf;
     uint64_t prim;
+    uint64_t tex0;  // FEAT-RD3
+    uint64_t clamp; // FEAT-RD3
+    uint64_t tex1;  // FEAT-RD3
+    uint64_t texa;  // FEAT-RD3
 };
 
 namespace
@@ -53,6 +60,10 @@ struct RdGpuState
     int flipLoc = -1;
     int atstLoc = -1; // FEAT-RD2
     int arefLoc = -1; // FEAT-RD2
+    int samplerLoc = -1; // FEAT-RD3
+    int texLoc = -1;     // FEAT-RD3
+    int tfxLoc = -1;     // FEAT-RD3
+    int tccLoc = -1;     // FEAT-RD3
     float flip[3] = {1.0f, -1.0f, 1.0f}; // FEAT-RD2
     std::vector<RdVert> localScratch;
     std::vector<RdBatch> localBatches; // FEAT-RD2
@@ -122,21 +133,51 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             "#version 330\n"
             "layout(location = 0) in vec4 aPos;\n"
             "layout(location = 1) in vec4 aCol;\n"
+            "layout(location = 2) in vec2 aUv;\n" // FEAT-RD3
             "uniform vec3 uFlip;\n"
             "out vec4 vCol;\n"
+            "out vec2 vUv;\n" // FEAT-RD3
             "void main() {\n"
             "    gl_Position = vec4(aPos.x * uFlip.x, aPos.y * uFlip.y, aPos.z * uFlip.z, aPos.w);\n"
             "    vCol = aCol;\n"
+            "    vUv = aUv;\n" // FEAT-RD3
             "}\n";
         static const char *kFs =
             "#version 330\n"
             "in vec4 vCol;\n"
+            "in vec2 vUv;\n" // FEAT-RD3
+            "uniform sampler2D uSampler;\n" // FEAT-RD3
+            "uniform int uTex;\n" // FEAT-RD3
+            "uniform int uTfx;\n" // FEAT-RD3
+            "uniform int uTcc;\n" // FEAT-RD3
             "uniform int uAtst;\n"
             "uniform int uAref;\n"
             "out vec4 finalColor;\n"
             "void main() {\n"
+            "    vec3 rgb = vCol.rgb;\n"
+            "    float a_ps2 = vCol.a * 255.0;\n"
+            "    if (uTex != 0) {\n" // FEAT-RD3
+            "        vec4 t = texture(uSampler, vUv);\n"
+            "        float t_a_ps2 = t.a * 255.0;\n"
+            "        vec3 vc_rgb = vCol.rgb * 255.0;\n"
+            "        float vc_a = vCol.a * 255.0;\n"
+            "        if (uTfx == 0) {\n"
+            "            rgb = t.rgb * vc_rgb / 128.0;\n"
+            "            a_ps2 = (uTcc != 0) ? (t_a_ps2 * vc_a / 128.0) : vc_a;\n"
+            "        } else if (uTfx == 1) {\n"
+            "            rgb = t.rgb;\n"
+            "            a_ps2 = (uTcc != 0) ? t_a_ps2 : vc_a;\n"
+            "        } else if (uTfx == 2) {\n"
+            "            rgb = t.rgb * vc_rgb / 128.0 + vec3(vc_a / 255.0);\n"
+            "            a_ps2 = (uTcc != 0) ? (t_a_ps2 * vc_a / 128.0) : vc_a;\n"
+            "        } else {\n"
+            "            rgb = t.rgb * vc_rgb / 128.0 + vec3(vc_a / 255.0);\n"
+            "            a_ps2 = (uTcc != 0) ? t_a_ps2 : vc_a;\n"
+            "        }\n"
+            "        rgb = clamp(rgb, 0.0, 1.0);\n"
+            "    }\n"
             "    if (uAtst != 1) {\n"
-            "        int a = int(vCol.a * 255.0 + 0.5);\n"
+            "        int a = int(clamp(a_ps2, 0.0, 255.0) + 0.5);\n"
             "        bool pass = true;\n"
             "        if (uAtst == 0) pass = false;\n"
             "        else if (uAtst == 2) pass = (a < uAref);\n"
@@ -147,12 +188,21 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             "        else if (uAtst == 7) pass = (a != uAref);\n"
             "        if (!pass) discard;\n"
             "    }\n"
-            "    finalColor = vec4(vCol.rgb, min(vCol.a * 2.0, 1.0));\n"
+            "    finalColor = vec4(rgb, min(a_ps2 / 128.0, 1.0));\n"
             "}\n";
         g_rdGpu.shader = LoadShaderFromMemory(kVs, kFs);
         g_rdGpu.flipLoc = GetShaderLocation(g_rdGpu.shader, "uFlip");
         g_rdGpu.atstLoc = GetShaderLocation(g_rdGpu.shader, "uAtst"); // FEAT-RD2
         g_rdGpu.arefLoc = GetShaderLocation(g_rdGpu.shader, "uAref"); // FEAT-RD2
+        g_rdGpu.samplerLoc = GetShaderLocation(g_rdGpu.shader, "uSampler"); // FEAT-RD3
+        g_rdGpu.texLoc = GetShaderLocation(g_rdGpu.shader, "uTex");         // FEAT-RD3
+        g_rdGpu.tfxLoc = GetShaderLocation(g_rdGpu.shader, "uTfx");         // FEAT-RD3
+        g_rdGpu.tccLoc = GetShaderLocation(g_rdGpu.shader, "uTcc");         // FEAT-RD3
+        if (g_rdGpu.samplerLoc >= 0) // FEAT-RD3
+        {
+            int samplerUnit = 0;
+            SetShaderValue(g_rdGpu.shader, g_rdGpu.samplerLoc, &samplerUnit, SHADER_UNIFORM_INT);
+        }
         const char *fe = std::getenv("PS2X_RD_FLIP");
         const int flipBits = (fe && *fe) ? std::atoi(fe) : 0;
         g_rdGpu.flip[0] = 1.0f;
@@ -184,6 +234,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rlEnableVertexAttribute(0);
                 rlSetVertexAttribute(1, 4, RL_UNSIGNED_BYTE, true, sizeof(RdVert), 16);
                 rlEnableVertexAttribute(1);
+                rlSetVertexAttribute(2, 2, RL_FLOAT, false, sizeof(RdVert), 20); // FEAT-RD3
+                rlEnableVertexAttribute(2);                                      // FEAT-RD3
                 rlDisableVertexBuffer();
                 rlDisableVertexArray();
             }
@@ -193,6 +245,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     }
 
     rlDrawRenderBatchActive();
+    ps2xRdTexTickFrame(); // FEAT-RD3
 
     const int rw = GetRenderWidth();
     const int rh = GetRenderHeight();
@@ -272,8 +325,42 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (g_rdGpu.arefLoc >= 0)
                 rlSetUniform(g_rdGpu.arefLoc, &arefVal, RL_SHADER_UNIFORM_INT, 1);
 
+            int texVal = 0; // FEAT-RD3
+            int tfxVal = 0;
+            int tccVal = 0;
+            if ((batch.prim >> 4) & 1ull)
+            {
+                const unsigned int texId = ps2xRdGetTexture(batch.tex0, batch.texa);
+                if (texId != 0u)
+                {
+                    const uint32_t wms = static_cast<uint32_t>(batch.clamp & 3ull);
+                    const uint32_t wmt = static_cast<uint32_t>((batch.clamp >> 2) & 3ull);
+                    const int wrapS = (wms == 0u) ? RL_TEXTURE_WRAP_REPEAT : RL_TEXTURE_WRAP_CLAMP;
+                    const int wrapT = (wmt == 0u) ? RL_TEXTURE_WRAP_REPEAT : RL_TEXTURE_WRAP_CLAMP;
+                    const int magFilter = (((batch.tex1 >> 5) & 1ull) == 0ull) ? RL_TEXTURE_FILTER_NEAREST : RL_TEXTURE_FILTER_LINEAR;
+                    const int minFilter = (((batch.tex1 >> 6) & 7ull) == 0ull) ? RL_TEXTURE_FILTER_NEAREST : RL_TEXTURE_FILTER_LINEAR;
+                    rlTextureParameters(texId, RL_TEXTURE_WRAP_S, wrapS);
+                    rlTextureParameters(texId, RL_TEXTURE_WRAP_T, wrapT);
+                    rlTextureParameters(texId, RL_TEXTURE_MAG_FILTER, magFilter);
+                    rlTextureParameters(texId, RL_TEXTURE_MIN_FILTER, minFilter);
+                    rlActiveTextureSlot(0);
+                    rlEnableTexture(texId);
+                    texVal = 1;
+                    tfxVal = static_cast<int>((batch.tex0 >> 35) & 3ull);
+                    tccVal = static_cast<int>((batch.tex0 >> 34) & 1ull);
+                }
+            }
+            if (g_rdGpu.texLoc >= 0)
+                rlSetUniform(g_rdGpu.texLoc, &texVal, RL_SHADER_UNIFORM_INT, 1);
+            if (g_rdGpu.tfxLoc >= 0)
+                rlSetUniform(g_rdGpu.tfxLoc, &tfxVal, RL_SHADER_UNIFORM_INT, 1);
+            if (g_rdGpu.tccLoc >= 0)
+                rlSetUniform(g_rdGpu.tccLoc, &tccVal, RL_SHADER_UNIFORM_INT, 1);
+
             rlDrawVertexArray(static_cast<int>(batch.first), static_cast<int>(batch.count));
         }
+        rlActiveTextureSlot(0); // FEAT-RD3
+        rlDisableTexture();     // FEAT-RD3
         rlDisableVertexArray();
         rlDisableShader();
     }

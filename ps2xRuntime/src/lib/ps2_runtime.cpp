@@ -1587,10 +1587,13 @@ bool PS2Runtime::isIopMemoryRange(uint32_t address, size_t size) const
 static VU1Interpreter s_vu1B(VU1Interpreter::Unit::VU1);
 std::function<void(uint32_t startPC, uint32_t top, uint32_t itop, uint8_t *vuData)> g_vu1MscalCallbackB;
 
+extern void ps2xRdSetVram(const uint8_t *vram); // FEAT-RD3
+
 bool PS2Runtime::syncCoreSubsystems()
 {
     uint8_t *const rdram = m_memory.getRDRAM();
     uint8_t *const gsVram = m_memory.getGSVRAM();
+    ps2xRdSetVram(gsVram); // FEAT-RD3
     if (!rdram || !gsVram)
     {
         return false;

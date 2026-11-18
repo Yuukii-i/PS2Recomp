@@ -50,6 +50,7 @@ extern "C" uint64_t ps2x_ft2_presentHold() { return g_gqPresentHold.load(std::me
 extern "C" void ps2_gs_vk_stats(uint64_t *out) { out[0] = g_gqLockWait.exchange(0); out[1] = g_gqLockWaits.exchange(0); out[2] = g_gqPresentHold.exchange(0); out[3] = g_gqPresents.exchange(0); }
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
 extern "C" void ps2_iu_gpu(uint64_t bytes, uint64_t ticks); // PROBE-IU, defined in gs_frontend.cpp
+extern void ps2xRdNoteClut(uint32_t tbp0, uint32_t tbw, uint32_t psm, uint32_t tw, uint32_t th, uint32_t cpsm, uint32_t csa, const uint16_t *clut512); // FEAT-RD3c
 extern bool g_gwOn; extern "C" int ps2_gw_sw(int cat); // PROBE-GW, defined in gs_frontend.cpp (cats: 6 statechg, 7 vkrec, 8 submit, 9 sync, 10 present)
 namespace { struct GwScope { int p; explicit GwScope(int c) : p(g_gwOn ? ps2_gw_sw(c) : -1) {} ~GwScope() { if (p >= 0) ps2_gw_sw(p); } }; } // PROBE-GW
 
@@ -2171,6 +2172,21 @@ namespace
             return true;
         }
 
+        void noteRdClut(const GSDrawState &st) // FEAT-RD3c
+        {
+            static const bool s_on = []() { const char *e = std::getenv("PS2X_RD_VIEW"); return e && e[0] == '1'; }(); // FEAT-RD3c
+            if (!s_on || !st.prim.tme || !isIndexedPsm(st.context.tex0.psm))
+                return;
+            const GSTex0Reg &t = st.context.tex0;
+            struct Last { uint32_t tbp0, tbw, psm, tw, th, csa, cpsm; int32_t slot; };
+            static thread_local Last last{~0u, 0, 0, 0, 0, 0, 0, -2};
+            const Last cur{t.tbp0, t.tbw, t.psm, t.tw, t.th, t.csa, t.cpsm, curClutSlot_};
+            if (std::memcmp(&last, &cur, sizeof(Last)) == 0)
+                return;
+            last = cur;
+            ps2xRdNoteClut(t.tbp0, t.tbw, t.psm, t.tw, t.th, t.cpsm, t.csa, cpu_->m_clut.data());
+        }
+
         int runBegin(const GSDrawState &st, uint32_t &outTlo, uint32_t &outThi, bool &outSprite, uint32_t *tmpl) // PERF-GA
         {
             const GSContext &ctx = st.context;
@@ -2209,6 +2225,7 @@ namespace
                 curClutSlot_ = static_cast<int32_t>(clutSlots_++);
                 clutChanged_ = false;
             }
+            noteRdClut(st); // FEAT-RD3c
             if (!vkReady_)
                 return 8;
 
@@ -2379,6 +2396,7 @@ namespace
                 curClutSlot_ = static_cast<int32_t>(clutSlots_++);
                 clutChanged_ = false;
             }
+            noteRdClut(st); // FEAT-RD3c
             if (!vkReady_)
                 return 8;
 

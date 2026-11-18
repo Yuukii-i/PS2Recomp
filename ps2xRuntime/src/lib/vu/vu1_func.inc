@@ -21,6 +21,7 @@ struct RdVert // FEAT-RD1
 {
     float pos[4];
     uint8_t rgba[4];
+    float uv[2]; // FEAT-RD3
 };
 struct RdBatch // FEAT-RD2
 {
@@ -31,6 +32,10 @@ struct RdBatch // FEAT-RD2
     uint64_t frame;
     uint64_t zbuf;
     uint64_t prim;
+    uint64_t tex0;  // FEAT-RD3
+    uint64_t clamp; // FEAT-RD3
+    uint64_t tex1;  // FEAT-RD3
+    uint64_t texa;  // FEAT-RD3
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws); // FEAT-RD2
@@ -1290,6 +1295,17 @@ inline void onFlush()
             rv.pos[3] = sv.pos[3];
             for (int c = 0; c < 4; ++c)
                 rv.rgba[c] = static_cast<uint8_t>(std::min<uint32_t>(sv.rgba[c], 255u));
+            const float q = sv.stq[2]; // FEAT-RD3
+            if (q != 0.0f)
+            {
+                rv.uv[0] = sv.stq[0] / q;
+                rv.uv[1] = sv.stq[1] / q;
+            }
+            else
+            {
+                rv.uv[0] = 0.0f;
+                rv.uv[1] = 0.0f;
+            }
             return rv;
         };
         for (size_t di = 0; di < cur.draws.size(); ++di) // FEAT-RD2
@@ -1322,13 +1338,16 @@ inline void onFlush()
             if (!t_rdBatches.empty())
             {
                 ::RdBatch &last = t_rdBatches.back();
-                if (last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf && last.prim == g.prim)
+                if (last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf &&
+                    last.prim == g.prim && last.tex0 == g.tex0 && last.clamp == g.clamp && last.tex1 == g.tex1 &&
+                    last.texa == g.texa) // FEAT-RD3
                 {
                     last.count += batchCount;
                     continue;
                 }
             }
-            t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, g.alpha, g.test, g.frame, g.zbuf, g.prim});
+            t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, g.alpha, g.test, g.frame, g.zbuf, g.prim, g.tex0,
+                                            g.clamp, g.tex1, g.texa}); // FEAT-RD3
         }
         ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws);
     }
