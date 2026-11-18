@@ -36,9 +36,12 @@ struct RdBatch // FEAT-RD2
     uint64_t clamp; // FEAT-RD3
     uint64_t tex1;  // FEAT-RD3
     uint64_t texa;  // FEAT-RD3
+    uint32_t kickSerial; // FEAT-RD5
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws); // FEAT-RD2
+extern std::atomic<uint32_t> g_rdKickSerial; // FEAT-RD5
+extern uint64_t ps2xRdLookupContentId(uint32_t serial); // FEAT-RD5
 
 namespace vu1func
 {
@@ -595,6 +598,7 @@ struct SceneGs // FEAT-RD2
     uint64_t texclut;
     uint32_t fba;
     uint32_t ownTex0;
+    uint32_t kickSerial; // FEAT-RD5
 };
 
 struct GsShadow // FEAT-RD2
@@ -643,6 +647,7 @@ struct SceneState
     float curObjMatrix[16] = {};
     GsShadow gs{}; // FEAT-RD2
     bool curOwnTex0 = false; // FEAT-RD2
+    uint32_t curKickSerial = 0u; // FEAT-RD5
     uint64_t totalFrames = 0;
     uint64_t totalDraws = 0;
     uint64_t totalVerts = 0;
@@ -991,8 +996,28 @@ static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_
         if (((tagLo >> 15) & 1u) != 0u) // EOP
             break;
     }
-    const uint32_t start = static_cast<uint32_t>(gif.size());
-    gif.resize(start + total);
+    uint32_t start = static_cast<uint32_t>(gif.size());
+    if (scene::on() && ::ps2xRdViewOn()) // FEAT-RD5
+    {
+        uint32_t serial = g_rdKickSerial.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        if (serial == 0u)
+            serial = g_rdKickSerial.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        scene::t_scene.curKickSerial = serial;
+        gif.resize(start + 32u + total);
+        const uint64_t mLo = 1ull | (1ull << 60); // NLOOP=1, EOP=0, FLG=0 (PACKED), NREG=1
+        const uint64_t mHi = 0xEull;              // REGS[0] = A+D
+        const uint64_t dLo = static_cast<uint64_t>(serial);
+        const uint64_t dHi = 0x7Full;             // byte 8 = 0x7F (GS NOP)
+        std::memcpy(gif.data() + start + 0u, &mLo, 8);
+        std::memcpy(gif.data() + start + 8u, &mHi, 8);
+        std::memcpy(gif.data() + start + 16u, &dLo, 8);
+        std::memcpy(gif.data() + start + 24u, &dHi, 8);
+        start += 32u;
+    }
+    else
+    {
+        gif.resize(start + total);
+    }
     for (uint32_t i = 0; i < total / 16u; ++i)
         std::memcpy(gif.data() + start + i * 16u, vu + (((q0 + i) & 0x3FFu) << 4), 16);
     kicks.emplace_back(start, total);
@@ -1343,7 +1368,14 @@ inline void onFlush()
             if (!t_rdBatches.empty())
             {
                 ::RdBatch &last = t_rdBatches.back();
-                if (last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf &&
+                bool serialMatch = (last.kickSerial == g.kickSerial); // FEAT-RD5
+                if (!serialMatch && last.kickSerial != 0u && g.kickSerial != 0u)
+                {
+                    const uint64_t c0 = ::ps2xRdLookupContentId(last.kickSerial);
+                    const uint64_t c1 = ::ps2xRdLookupContentId(g.kickSerial);
+                    serialMatch = (c0 != 0ull && c0 == c1);
+                }
+                if (serialMatch && last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf &&
                     last.prim == g.prim && last.tex0 == g.tex0 && last.clamp == g.clamp && last.tex1 == g.tex1 &&
                     last.texa == g.texa) // FEAT-RD3
                 {
@@ -1352,7 +1384,7 @@ inline void onFlush()
                 }
             }
             t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, g.alpha, g.test, g.frame, g.zbuf, g.prim, g.tex0,
-                                            g.clamp, g.tex1, g.texa}); // FEAT-RD3
+                                            g.clamp, g.tex1, g.texa, g.kickSerial}); // FEAT-RD3 // FEAT-RD5
         }
         ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws);
     }
@@ -1410,6 +1442,7 @@ inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t
     g.texclut = t_scene.gs.texclut;
     g.fba = static_cast<uint32_t>(t_scene.gs.fba[ctxt] & 1ull);
     g.ownTex0 = t_scene.curOwnTex0 ? 1u : 0u;
+    g.kickSerial = t_scene.curKickSerial; // FEAT-RD5
     f.gs.push_back(g);
     return f.draws.back();
 }
@@ -4112,18 +4145,19 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
     }
     {
         // PERF: kicks are normally appended back to back in `gif`; then submit the whole stream once (one arbiter pass instead of one per kick).
+        const uint32_t prefixBytes = (!capture && scene::on() && ::ps2xRdViewOn()) ? 32u : 0u; // FEAT-RD5
         uint32_t expect = 0u;
         bool contiguous = true;
         for (const auto &k : kicks)
         {
             if (k.second == 0u)
                 continue;
-            if (k.first != expect)
+            if (k.first != expect + prefixBytes)
             {
                 contiguous = false;
                 break;
             }
-            expect += k.second;
+            expect += prefixBytes + k.second;
         }
         if (contiguous && expect == gif.size())
         {
@@ -4139,17 +4173,19 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
             return true;
         }
     }
+    const uint32_t prefixBytes = (!capture && scene::on() && ::ps2xRdViewOn()) ? 32u : 0u; // FEAT-RD5
     for (const auto &k : kicks)
     {
         if (k.second == 0u)
             continue;
-        const uint8_t *p = gif.data() + k.first;
+        const uint8_t *p = gif.data() + k.first - prefixBytes;
+        const uint32_t len = k.second + prefixBytes;
         if (capture)
-            capture->insert(capture->end(), p, p + k.second);
+            capture->insert(capture->end(), p, p + len);
         else if (memory)
-            submitPath1Batched(memory, p, k.second); // PERF-V1I
+            submitPath1Batched(memory, p, len); // PERF-V1I
         else
-            gs.processGIFPacket(p, k.second);
+            gs.processGIFPacket(p, len);
     }
     return true;
 }

@@ -51,6 +51,14 @@ extern "C" void ps2_gs_vk_stats(uint64_t *out) { out[0] = g_gqLockWait.exchange(
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
 extern "C" void ps2_iu_gpu(uint64_t bytes, uint64_t ticks); // PROBE-IU, defined in gs_frontend.cpp
 extern void ps2xRdNoteClut(uint32_t tbp0, uint32_t tbw, uint32_t psm, uint32_t tw, uint32_t th, uint32_t cpsm, uint32_t csa, const uint16_t *clut512); // FEAT-RD3c
+#include <intrin.h> // PROBE-RDP
+extern bool g_rdpOn; extern uint64_t g_rdpCyc[4]; extern uint32_t g_rdpCnt[4]; // PROBE-RDP
+struct RdpScopeVk // PROBE-RDP
+{
+    uint64_t t0;
+    RdpScopeVk() : t0(g_rdpOn ? __rdtsc() : 0ull) {} // PROBE-RDP
+    ~RdpScopeVk() { if (g_rdpOn) { g_rdpCyc[1] += __rdtsc() - t0; ++g_rdpCnt[1]; } } // PROBE-RDP
+};
 extern bool g_gwOn; extern "C" int ps2_gw_sw(int cat); // PROBE-GW, defined in gs_frontend.cpp (cats: 6 statechg, 7 vkrec, 8 submit, 9 sync, 10 present)
 namespace { struct GwScope { int p; explicit GwScope(int c) : p(g_gwOn ? ps2_gw_sw(c) : -1) {} ~GwScope() { if (p >= 0) ps2_gw_sw(p); } }; } // PROBE-GW
 
@@ -2177,6 +2185,7 @@ namespace
             static const bool s_on = []() { const char *e = std::getenv("PS2X_RD_VIEW"); return e && e[0] == '1'; }(); // FEAT-RD3c
             if (!s_on || !st.prim.tme || !isIndexedPsm(st.context.tex0.psm))
                 return;
+            RdpScopeVk rdpS; // PROBE-RDP
             const GSTex0Reg &t = st.context.tex0;
             struct Last { uint32_t tbp0, tbw, psm, tw, th, csa, cpsm; int32_t slot; };
             static thread_local Last last{~0u, 0, 0, 0, 0, 0, 0, -2};

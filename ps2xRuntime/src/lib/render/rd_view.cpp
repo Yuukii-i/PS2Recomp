@@ -10,7 +10,7 @@
 #include <vector>
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD1
-extern unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa); // FEAT-RD3
+extern unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t texa); // FEAT-RD5
 extern void ps2xRdTexTickFrame(); // FEAT-RD3
 
 struct RdVert // FEAT-RD1
@@ -34,6 +34,7 @@ struct RdBatch // FEAT-RD2
     uint64_t clamp; // FEAT-RD3
     uint64_t tex1;  // FEAT-RD3
     uint64_t texa;  // FEAT-RD3
+    uint32_t kickSerial; // FEAT-RD5
 };
 
 namespace
@@ -330,7 +331,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             int tccVal = 0;
             if ((batch.prim >> 4) & 1ull)
             {
-                const unsigned int texId = ps2xRdGetTexture(batch.tex0, batch.texa);
+                const unsigned int texId = ps2xRdGetTextureForBatch(batch.kickSerial, batch.tex0, batch.texa); // FEAT-RD5
                 if (texId != 0u)
                 {
                     const uint32_t wms = static_cast<uint32_t>(batch.clamp & 3ull);

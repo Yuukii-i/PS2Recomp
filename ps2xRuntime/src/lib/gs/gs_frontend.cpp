@@ -21,6 +21,68 @@ namespace probe_ae {
 #include <intrin.h>
 #include <atomic>
 std::atomic<uint64_t> g_gqBuild{0}, g_gqSubmit{0}, g_gqDraws{0}; // PROBE-GQ2
+// PROBE-RDP: per-site rdtsc accounting (GS thread only; 0 noteDraw, 1 noteClut, 2 markDest, 3 0x7F nop)
+#include <cstdlib> // PROBE-RDP
+extern std::atomic<uint64_t> g_hostPresentSeq; // PROBE-RDP
+bool g_rdpOn = []() { const char *e = std::getenv("PS2X_RD_PROF"); return e && e[0] == '1'; }(); // PROBE-RDP
+uint64_t g_rdpCyc[4] = {0, 0, 0, 0}; // PROBE-RDP
+uint32_t g_rdpCnt[4] = {0, 0, 0, 0}; // PROBE-RDP
+static uint32_t s_rdpQueueDraws = 0u; // PROBE-RDP
+struct RdpScope // PROBE-RDP
+{
+    int id; uint64_t t0;
+    explicit RdpScope(int i) : id(i), t0(g_rdpOn ? __rdtsc() : 0ull) {} // PROBE-RDP
+    ~RdpScope() { if (g_rdpOn) { g_rdpCyc[id] += __rdtsc() - t0; ++g_rdpCnt[id]; } } // PROBE-RDP
+};
+extern void ps2xSafeLog(const char *fmt, ...); // PROBE-RDP
+static void rdpMaybeReport() // PROBE-RDP
+{
+    static uint64_t s_cyc0 = 0, s_seq0 = 0;
+    static std::chrono::steady_clock::time_point s_t0;
+    static bool s_init = false;
+    const auto now = std::chrono::steady_clock::now();
+    if (!s_init)
+    {
+        s_init = true; s_t0 = now; s_cyc0 = __rdtsc(); s_seq0 = g_hostPresentSeq.load(std::memory_order_relaxed);
+        return;
+    }
+    const double dms = std::chrono::duration<double, std::milli>(now - s_t0).count();
+    if (dms < 5000.0)
+        return;
+    const uint64_t cyc = __rdtsc() - s_cyc0;
+    const uint64_t seq = g_hostPresentSeq.load(std::memory_order_relaxed);
+    const double frames = static_cast<double>(seq - s_seq0 ? seq - s_seq0 : 1);
+    const double cpm = static_cast<double>(cyc) / dms; // cycles per ms
+    auto ms = [&](int i) { return static_cast<double>(g_rdpCyc[i]) / cpm / frames; };
+    auto cn = [&](int i) { return static_cast<unsigned>(static_cast<double>(g_rdpCnt[i]) / frames); };
+    ps2xSafeLog("[rdprof] per-frame ms: noteDraw=%.2f(%u) noteClut=%.2f(%u) markDest=%.2f(%u) nop=%.2f(%u) queueDraws=%u\n",
+                ms(0), cn(0), ms(1), cn(1), ms(2), cn(2), ms(3), cn(3),
+                static_cast<unsigned>(static_cast<double>(s_rdpQueueDraws) / frames));
+    for (int i = 0; i < 4; ++i) { g_rdpCyc[i] = 0; g_rdpCnt[i] = 0; }
+    s_rdpQueueDraws = 0u; s_t0 = now; s_cyc0 = __rdtsc(); s_seq0 = seq;
+}
+extern bool ps2xRdViewOn(); // FEAT-RD5
+extern void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t *vram, const uint16_t *clut512); // FEAT-RD5
+extern const uint16_t *ps2xRdActiveClut(); // FEAT-RD5
+static uint32_t s_rdCurSerial = 0u;       // FEAT-RD5
+static uint32_t s_rdLastNotedSerial = 0u; // FEAT-RD5
+extern void ps2xRdMarkVramWrite(uint32_t firstByte, uint32_t byteCount); // FEAT-RD5b
+static void rdMarkDest(uint32_t psm, uint32_t dbp, uint32_t dbw, uint32_t dsax, uint32_t dsay, uint32_t rrw, uint32_t rrh) // FEAT-RD5b
+{
+    uint32_t pageH = 32u, bppNum = 4u, bppDen = 1u; // CT32/CT24 and unknown (conservative)
+    switch (psm)
+    {
+    case 2u: case 10u: case 50u: case 58u: pageH = 64u; bppNum = 2u; break; // CT16/CT16S/Z16
+    case 19u: pageH = 64u; bppNum = 1u; break;                              // T8
+    case 20u: pageH = 128u; bppNum = 1u; bppDen = 2u; break;                // T4
+    default: break;
+    }
+    const uint32_t rows = std::min<uint32_t>(((dsay + rrh + pageH - 1u) / pageH) * pageH, 2048u);
+    const uint32_t widthPx = std::max<uint32_t>(std::max<uint32_t>(dbw, 1u) * 64u, dsax + rrw);
+    const uint64_t bytes = (static_cast<uint64_t>(widthPx) * rows * bppNum + bppDen - 1u) / bppDen;
+    const uint64_t pages = (bytes + 8191u) / 8192u + 1u;
+    ps2xRdMarkVramWrite(dbp * 256u, static_cast<uint32_t>(std::min<uint64_t>(pages * 8192u, 0x400000u)));
+}
 extern "C" void ps2_gs_front_stats(uint64_t *out) { out[0] = g_gqBuild.exchange(0); out[1] = g_gqSubmit.exchange(0); out[2] = g_gqDraws.exchange(0); }
 
 // PROBE-GW: GsWorker CPU-time split (PS2X_GW=1). Exclusive time per category via a category switch; only the thread that called ps2_gw_mark() accounts.
@@ -1635,6 +1697,9 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             offset += imageBytes;
         }
 
+        if (ps2xRdViewOn() && ((tagLo >> 15) & 1ull) != 0ull) // FEAT-RD5
+            s_rdCurSerial = 0u;
+
         if (s_gifStatOn)
         {
             const uint64_t gifStatTsc1 = __rdtsc();
@@ -1674,6 +1739,9 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
                 writeRegisterPacked(tag.regs[r], lo, hi);
             }
         }
+
+        if (ps2xRdViewOn() && ((tag.lo >> 15u) & 1ull) != 0ull) // FEAT-RD5
+            s_rdCurSerial = 0u;
 
         return true; });
 
@@ -2340,6 +2408,11 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     case GS_REG_TRXDIR:
     {
         m_trxdir = static_cast<uint32_t>(value & 0x3);
+        if ((m_trxdir == 0u || m_trxdir == 2u) && ps2xRdViewOn()) // FEAT-RD5b host->local and local->local (covers uploadImageNativeUnlocked + BeginTransfer)
+        {
+            RdpScope rdpS(2); // PROBE-RDP
+            rdMarkDest(m_bitbltbuf.dpsm, m_bitbltbuf.dbp, m_bitbltbuf.dbw, m_trxpos.dsax, m_trxpos.dsay, m_trxreg.rrw, m_trxreg.rrh);
+        }
 
         if (m_backend)
         {
@@ -2496,6 +2569,13 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     case 0x5f:
         if (m_privRegs)
             m_privRegs->bgcolor = value;
+        break;
+    case 0x7f: // FEAT-RD5
+        if (ps2xRdViewOn())
+        {
+            RdpScope rdpS(3); // PROBE-RDP
+            s_rdCurSerial = static_cast<uint32_t>(value & 0xFFFFFFFFull);
+        }
         break;
     default:
         break;
@@ -2854,6 +2934,31 @@ void GS::refreshDrawBatch(int vertexCount)
 
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
+    if (ps2xRdViewOn() && s_rdCurSerial != 0u && s_rdCurSerial != s_rdLastNotedSerial && batch.state.prim.tme) // FEAT-RD5
+    {
+        s_rdLastNotedSerial = s_rdCurSerial;
+        const GSTex0Reg &t = batch.state.context.tex0;
+        const uint64_t rawTex0 =
+            (static_cast<uint64_t>(t.tbp0) & 0x3FFFull) |
+            ((static_cast<uint64_t>(t.tbw) & 0x3Full) << 14) |
+            ((static_cast<uint64_t>(t.psm) & 0x3Full) << 20) |
+            ((static_cast<uint64_t>(t.tw) & 0xFull) << 26) |
+            ((static_cast<uint64_t>(t.th) & 0xFull) << 30) |
+            ((static_cast<uint64_t>(t.tcc) & 0x1ull) << 34) |
+            ((static_cast<uint64_t>(t.tfx) & 0x3ull) << 35) |
+            ((static_cast<uint64_t>(t.cbp) & 0x3FFFull) << 37) |
+            ((static_cast<uint64_t>(t.cpsm) & 0xFull) << 51) |
+            ((static_cast<uint64_t>(t.csm) & 0x1ull) << 55) |
+            ((static_cast<uint64_t>(t.csa) & 0x1Full) << 56) |
+            ((static_cast<uint64_t>(t.cld) & 0x7ull) << 61);
+        const uint64_t rawTexa =
+            static_cast<uint64_t>(batch.state.texa.ta0) |
+            (batch.state.texa.aem ? (1ull << 15) : 0ull) |
+            (static_cast<uint64_t>(batch.state.texa.ta1) << 32);
+        RdpScope rdpS(0); // PROBE-RDP
+        ps2xRdNoteDraw(s_rdCurSerial, rawTex0, rawTexa, m_localMemoryStorage, ps2xRdActiveClut());
+    }
+    if (g_rdpOn) { ++s_rdpQueueDraws; if ((s_rdpQueueDraws & 1023u) == 0u) rdpMaybeReport(); } // PROBE-RDP
     GwScope gwS(5); // PROBE-GW primbuild
     if (g_gwOn) ps2_gw_count(0, 1); // PROBE-GW prims
     if (!m_runPrims.empty() && m_runSerial != m_stateSerial)
