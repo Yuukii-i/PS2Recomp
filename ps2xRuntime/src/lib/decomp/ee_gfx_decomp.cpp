@@ -39030,6 +39030,2963 @@ label_3c2fc4:
     }
 }
 
+// DECOMP-DI: helper to emit a 6-register GIF A+D quad (0x60 bytes) used by sub_003A07C8
+static inline void writeGifAd6_07C8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t pkt,
+                                    uint64_t tag, uint64_t w08, uint64_t w10, uint64_t w18,
+                                    uint64_t w20, uint64_t w28, uint64_t w30, uint64_t w38,
+                                    uint64_t w40, uint64_t w48, uint64_t w50, uint64_t w58) // DECOMP-DI
+{
+    WRITE64(pkt + 0x00u, tag);
+    WRITE64(pkt + 0x08u, w08);
+    WRITE64(pkt + 0x10u, w10);
+    WRITE64(pkt + 0x18u, w18);
+    WRITE64(pkt + 0x20u, w20);
+    WRITE64(pkt + 0x28u, w28);
+    WRITE64(pkt + 0x30u, w30);
+    WRITE64(pkt + 0x38u, w38);
+    WRITE64(pkt + 0x40u, w40);
+    WRITE64(pkt + 0x48u, w48);
+    WRITE64(pkt + 0x50u, w50);
+    WRITE64(pkt + 0x58u, w58);
+}
+
+// DECOMP-DI: sub_003A07C8 (0x003A07C8 - 0x003A0E98, snowfesta_f overlay/render pass)
+// Renders a multi-band tiled fullscreen/vignette GS sprite overlay when *(float*)(a0+4) != 0.
+void sub_003A07C8_decomp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // DECOMP-DI
+{
+    switch (ctx->pc)
+    {
+    case 0x3A0828u: goto label_3a0828;
+    case 0x3A0834u: goto label_3a0834;
+    case 0x3A0868u: goto label_3a0868;
+    case 0x3A08A8u: goto label_3a08a8;
+    case 0x3A08B8u: goto label_3a08b8;
+    case 0x3A08C4u: goto label_3a08c4;
+    case 0x3A08DCu: goto label_3a08dc;
+    case 0x3A08ECu: goto label_3a08ec;
+    case 0x3A0900u: goto label_3a0900;
+    case 0x3A0910u: goto label_3a0910;
+    case 0x3A092Cu: goto label_3a092c;
+    case 0x3A0948u: goto label_3a0948;
+    case 0x3A0970u: goto label_3a0970;
+    case 0x3A09A0u: goto label_3a09a0;
+    case 0x3A09C0u: goto label_3a09c0;
+    case 0x3A0A50u: goto label_3a0a50;
+    case 0x3A0AECu: goto label_3a0aec;
+    case 0x3A0B10u: goto label_3a0b10;
+    case 0x3A0BC4u: goto label_3a0bc4;
+    case 0x3A0BE8u: goto label_3a0be8;
+    case 0x3A0CBCu: goto label_3a0cbc;
+    case 0x3A0CE0u: goto label_3a0ce0;
+    case 0x3A0DA0u: goto label_3a0da0;
+    case 0x3A0DC4u: goto label_3a0dc4;
+    case 0x3A0E68u: goto label_3a0e68;
+    default: break;
+    }
+
+    {
+        // Prologue + early-out check on *(float*)(a0 + 4) == 0.0f (@0x3A07C8)
+        const uint32_t sp = ADD32(GPR_U32(ctx, 29), static_cast<uint32_t>(-0xB0));
+        SET_GPR_S32(ctx, 29, static_cast<int32_t>(sp));
+        WRITE64(ADD32(sp, 0x78u), GPR_U64(ctx, 21));
+        {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &ctx->f[20], sizeof(bits));
+            WRITE32(ADD32(sp, 0xA0u), bits);
+        }
+        WRITE64(ADD32(sp, 0x50u), GPR_U64(ctx, 16));
+        WRITE64(ADD32(sp, 0x58u), GPR_U64(ctx, 17));
+        WRITE64(ADD32(sp, 0x60u), GPR_U64(ctx, 18));
+        WRITE64(ADD32(sp, 0x68u), GPR_U64(ctx, 19));
+        WRITE64(ADD32(sp, 0x70u), GPR_U64(ctx, 20));
+        WRITE64(ADD32(sp, 0x80u), GPR_U64(ctx, 22));
+        WRITE64(ADD32(sp, 0x88u), GPR_U64(ctx, 23));
+        WRITE64(ADD32(sp, 0x90u), GPR_U64(ctx, 30));
+        WRITE64(ADD32(sp, 0x98u), GPR_U64(ctx, 31));
+        ctx->f[20] = 0.0f;
+        {
+            const uint32_t bits = READ32(ADD32(GPR_U32(ctx, 4), 4u));
+            std::memcpy(&ctx->f[0], &bits, sizeof(bits));
+        }
+        const bool isZero = FPU_C_EQ_S(ctx->f[0], ctx->f[20]);
+        ctx->fcr31 = isZero ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u);
+        SET_GPR_U64(ctx, 21, GPR_U64(ctx, 4)); // $s5 = $a0
+        if (isZero)
+        {
+            goto label_3a0e68;
+        }
+
+        // Resolve texture/resource handle via 0x28A31C + 0x28A53C (@0x3A080C)
+        const __m128i q0 = READ128(0x71F890u);
+        const __m128i q1 = READ128(0x71F8A0u);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0x00720000u));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(0x0071F890u));
+        SET_GPR_VEC(ctx, 15, q0);
+        SET_GPR_VEC(ctx, 14, q1);
+        WRITE128(ADD32(sp, 0x00u), q0);
+        WRITE128(ADD32(sp, 0x10u), q1);
+        SET_GPR_U32(ctx, 31, 0x3A0828u);
+        ctx->pc = 0x28A31Cu;
+        if (!PS2_DCALL(0x28A31Cu, 0x3A0828u))
+        {
+            return;
+        }
+    }
+
+label_3a0828:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 29));
+    SET_GPR_U32(ctx, 31, 0x3A0834u);
+    ctx->pc = 0x28A53Cu;
+    if (!PS2_DCALL(0x28A53Cu, 0x3A0834u))
+    {
+        return;
+    }
+
+label_3a0834:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        WRITE32(ADD32(sp, 0x40u), GPR_U32(ctx, 2));
+        if (GPR_S64(ctx, 2) < 0)
+        {
+            goto label_3a0e68;
+        }
+
+        // Initialize render state descriptor at $sp+0x20 (@0x3A083C)
+        const int32_t mgr = static_cast<int32_t>(READ32(0x649434u));
+        SET_GPR_S32(ctx, 15, mgr);
+        const uint32_t desc = ADD32(sp, 0x20u);
+        SET_GPR_S32(ctx, 16, static_cast<int32_t>(desc));
+        SET_GPR_U64(ctx, 4, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(desc))));
+        SET_GPR_U64(ctx, 30, 0x00408040ull);
+        SET_GPR_U64(ctx, 18, 0xA400000000000000ull);
+        SET_GPR_S32(ctx, 20, static_cast<int32_t>(READ32(ADD32(static_cast<uint32_t>(mgr), 0x2Cu))));
+        SET_GPR_S32(ctx, 17, 0x04000000);
+        SET_GPR_U32(ctx, 31, 0x3A0868u);
+        ctx->pc = 0x3AFC08u;
+        if (!PS2_DCALL(0x3AFC08u, 0x3A0868u))
+        {
+            return;
+        }
+    }
+
+label_3a0868:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_U64(ctx, 18, GPR_U64(ctx, 18) | 0x8001ull); // 0xA400000000008001
+        WRITE32(ADD32(sp, 0x24u), ADD32(sp, 0x40u));
+        {
+            const uint32_t bits = READ32(0x71F8B8u);
+            std::memcpy(&ctx->f[0], &bits, sizeof(bits));
+            WRITE32(ADD32(sp, 0x20u), bits);
+        }
+        WRITE32(ADD32(sp, 0x28u), 1u);
+        WRITE32(ADD32(sp, 0x44u), 2u);
+        SET_GPR_S32(ctx, 15, 2);
+        SET_GPR_S32(ctx, 19, 0x15C);
+        SET_GPR_U64(ctx, 23, 0ull);
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 20));
+        SET_GPR_U64(ctx, 5, GPR_U64(ctx, 16));
+        SET_GPR_U32(ctx, 31, 0x3A08A8u);
+        ctx->pc = 0x3B7A00u;
+        if (!PS2_DCALL(0x3B7A00u, 0x3A08A8u))
+        {
+            return;
+        }
+    }
+
+label_3a08a8:
+    SET_GPR_U64(ctx, 16, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 20));
+    SET_GPR_U32(ctx, 31, 0x3A08B8u);
+    ctx->pc = 0x3B76D0u;
+    if (!PS2_DCALL(0x3B76D0u, 0x3A08B8u))
+    {
+        return;
+    }
+
+label_3a08b8:
+    ctx->f[12] = FPU_MOV_S(ctx->f[20]);
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 20));
+    SET_GPR_U32(ctx, 31, 0x3A08C4u);
+    ctx->pc = 0x3B7740u;
+    if (!PS2_DCALL(0x3B7740u, 0x3A08C4u))
+    {
+        return;
+    }
+
+label_3a08c4:
+    // Setup GS registers (ALPHA, TEST, CLAMP, TEX0) (@0x3A08C4)
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_S32(ctx, 5, 0x42);
+    SET_GPR_U64(ctx, 6, 0x0000008000000044ull);
+    SET_GPR_U32(ctx, 31, 0x3A08DCu);
+    ctx->pc = 0x3AFE58u;
+    if (!PS2_DCALL(0x3AFE58u, 0x3A08DCu))
+    {
+        return;
+    }
+
+label_3a08dc:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_S32(ctx, 5, 8);
+    SET_GPR_U64(ctx, 6, 0ull);
+    SET_GPR_U32(ctx, 31, 0x3A08ECu);
+    ctx->pc = 0x3AFE58u;
+    if (!PS2_DCALL(0x3AFE58u, 0x3A08ECu))
+    {
+        return;
+    }
+
+label_3a08ec:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_S32(ctx, 5, 0x47);
+    SET_GPR_U64(ctx, 6, 0x00030002ull);
+    SET_GPR_U32(ctx, 31, 0x3A0900u);
+    ctx->pc = 0x3AFE58u;
+    if (!PS2_DCALL(0x3AFE58u, 0x3A0900u))
+    {
+        return;
+    }
+
+label_3a0900:
+    SET_GPR_U64(ctx, 22, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 16));
+    SET_GPR_U64(ctx, 5, 0ull);
+    SET_GPR_U32(ctx, 31, 0x3A0910u);
+    ctx->pc = 0x3AFB68u;
+    if (!PS2_DCALL(0x3AFB68u, 0x3A0910u))
+    {
+        return;
+    }
+
+label_3a0910:
+    SET_GPR_U64(ctx, 16, GPR_U64(ctx, 2));
+    {
+        const uint32_t bitsA = READ32(ADD32(GPR_U32(ctx, 21), 4u));
+        const uint32_t bitsB = READ32(0x71F8BCu);
+        float a = 0.0f;
+        float b = 0.0f;
+        std::memcpy(&a, &bitsA, sizeof(a));
+        std::memcpy(&b, &bitsB, sizeof(b));
+        ctx->f[0] = b;
+        ctx->f[12] = FPU_MUL_S(a, b);
+    }
+    SET_GPR_S32(ctx, 15, static_cast<int32_t>(0x0071F8BCu));
+    SET_GPR_U32(ctx, 31, 0x3A092Cu);
+    ctx->pc = 0x423B08u;
+    if (!PS2_DCALL(0x423B08u, 0x3A092Cu))
+    {
+        return;
+    }
+
+label_3a092c:
+    {
+        const uint64_t alphaShifted = static_cast<uint64_t>(SLL32(GPR_U32(ctx, 2), 24));
+        SET_GPR_U64(ctx, 2, alphaShifted);
+        SET_GPR_U64(ctx, 30, alphaShifted | GPR_U64(ctx, 30));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+        SET_GPR_U64(ctx, 5, GPR_U64(ctx, 16));
+        SET_GPR_U32(ctx, 31, 0x3A0948u);
+        ctx->pc = 0x3AFE00u;
+        if (!PS2_DCALL(0x3AFE00u, 0x3A0948u))
+        {
+            return;
+        }
+    }
+
+label_3a0948:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 5, 0x7CC07F00ull);
+    SET_GPR_U64(ctx, 6, 0x7F808100ull);
+    SET_GPR_U64(ctx, 7, 0ull);
+    SET_GPR_U64(ctx, 8, 0x040002E0ull);
+    SET_GPR_U64(ctx, 9, GPR_U64(ctx, 30));
+    SET_GPR_U32(ctx, 31, 0x3A0970u);
+    ctx->pc = 0x3B0AA8u;
+    if (!PS2_DCALL(0x3B0AA8u, 0x3A0970u))
+    {
+        return;
+    }
+
+label_3a0970:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 5, (0x20Dull << 22) | 0x8100ull);
+    SET_GPR_U64(ctx, 6, (0x101ull << 23) | 0x7F00ull);
+    SET_GPR_U64(ctx, 7, 0ull);
+    SET_GPR_U64(ctx, 8, 0x040002E0ull);
+    SET_GPR_U64(ctx, 9, GPR_U64(ctx, 30));
+    SET_GPR_U32(ctx, 31, 0x3A09A0u);
+    ctx->pc = 0x3B0AA8u;
+    if (!PS2_DCALL(0x3B0AA8u, 0x3A09A0u))
+    {
+        return;
+    }
+
+label_3a09a0:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_S32(ctx, 5, 6);
+    SET_GPR_S32(ctx, 6, 0x10);
+    SET_GPR_U64(ctx, 7, 0ull);
+    SET_GPR_U64(ctx, 8, 0ull);
+    SET_GPR_U64(ctx, 9, 0x50000006ull);
+    SET_GPR_U32(ctx, 31, 0x3A09C0u);
+    ctx->pc = 0x3AFD98u;
+    if (!PS2_DCALL(0x3AFD98u, 0x3A09C0u))
+    {
+        return;
+    }
+
+label_3a09c0:
+    {
+        // Two border/edge quads (@0x3A09C0 and @0x3A0A50)
+        const uint32_t pkt = GPR_U32(ctx, 2);
+        const uint64_t prim = READ64(0x71F8B0u);
+        const uint64_t col = GPR_U64(ctx, 30);
+        const uint64_t tag = GPR_U64(ctx, 18);
+        const uint64_t rgba = GPR_U64(ctx, 19);
+        const uint64_t s1 = GPR_U64(ctx, 17);
+        writeGifAd6_07C8(rdram, ctx, runtime, pkt,
+                         tag, prim, rgba, col,
+                         0x000002E0ull, 0x7F007CC0ull,
+                         0x040002E0ull, 0x7F007F80ull,
+                         0ull, (0x81ull << 24) | 0x7CC0ull,
+                         s1, (0x81ull << 24) | 0x7F80ull);
+
+        SET_GPR_U64(ctx, 16, prim);
+        const uint32_t nextPkt = ADD32(pkt, 0x60u);
+        SET_GPR_S32(ctx, 22, static_cast<int32_t>(nextPkt));
+        SET_GPR_U64(ctx, 4, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(nextPkt))));
+        SET_GPR_S32(ctx, 5, 6);
+        SET_GPR_S32(ctx, 6, 0x10);
+        SET_GPR_U64(ctx, 7, 0ull);
+        SET_GPR_U64(ctx, 8, 0ull);
+        SET_GPR_U64(ctx, 9, 0x50000006ull);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0x040002E0u));
+        SET_GPR_U32(ctx, 31, 0x3A0A50u);
+        ctx->pc = 0x3AFD98u;
+        if (!PS2_DCALL(0x3AFD98u, 0x3A0A50u))
+        {
+            return;
+        }
+    }
+
+label_3a0a50:
+    {
+        const uint32_t pkt = GPR_U32(ctx, 2);
+        writeGifAd6_07C8(rdram, ctx, runtime, pkt,
+                         GPR_U64(ctx, 18), GPR_U64(ctx, 16), GPR_U64(ctx, 19), GPR_U64(ctx, 30),
+                         GPR_U64(ctx, 17), 0x7F008080ull,
+                         0ull, 0x7F008340ull,
+                         0x040002E0ull, (0x81ull << 24) | 0x8080ull,
+                         0x000002E0ull, (0x81ull << 24) | 0x8340ull);
+        SET_GPR_S32(ctx, 22, static_cast<int32_t>(ADD32(pkt, 0x60u)));
+
+        // Compute scroll phase offsets ($s0 = phase % 224, $s1 = (224 - $s0) % 224) (@0x3A0ABC)
+        const uint32_t b0 = READ32(ADD32(GPR_U32(ctx, 21), 0u));
+        const uint32_t b1 = READ32(0x71F8C0u);
+        float f0 = 0.0f;
+        float f1 = 0.0f;
+        std::memcpy(&f0, &b0, sizeof(f0));
+        std::memcpy(&f1, &b1, sizeof(f1));
+        ctx->f[1] = f1;
+        ctx->f[0] = FPU_MUL_S(f0, f1);
+        const int32_t iphase = FPU_CVT_W_S(ctx->f[0]);
+        std::memcpy(&ctx->f[1], &iphase, sizeof(iphase));
+
+        constexpr int32_t kPeriod = 0xE0;
+        SET_GPR_S32(ctx, 14, kPeriod);
+        ctx->lo = static_cast<uint64_t>(static_cast<int64_t>(iphase / kPeriod));
+        ctx->hi = static_cast<uint64_t>(static_cast<int64_t>(iphase % kPeriod));
+        SET_GPR_U64(ctx, 16, ctx->hi);
+
+        const uint32_t remSub = SUB32(static_cast<uint32_t>(kPeriod), GPR_U32(ctx, 16));
+        ctx->lo = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(remSub / static_cast<uint32_t>(kPeriod))));
+        ctx->hi = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(remSub % static_cast<uint32_t>(kPeriod))));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(remSub));
+        SET_GPR_U64(ctx, 17, ctx->hi);
+    }
+
+label_3a0aec:
+    // Band loop 1 (3 tiles horizontally) (@0x3A0AEC)
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+    SET_GPR_S32(ctx, 5, 6);
+    SET_GPR_S32(ctx, 6, 0x10);
+    SET_GPR_U64(ctx, 7, 0ull);
+    SET_GPR_U64(ctx, 8, 0ull);
+    SET_GPR_U64(ctx, 9, 0x50000006ull);
+    SET_GPR_S32(ctx, 18, static_cast<int32_t>(SLL32(GPR_U32(ctx, 17), 16)));
+    SET_GPR_U32(ctx, 31, 0x3A0B10u);
+    ctx->pc = 0x3AFD98u;
+    if (!PS2_DCALL(0x3AFD98u, 0x3A0B10u))
+    {
+        return;
+    }
+
+label_3a0b10:
+    {
+        const uint32_t pkt = GPR_U32(ctx, 2);
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const int32_t s3 = static_cast<int32_t>(ADD32(GPR_U32(ctx, 17), 0x2D0u));
+        SET_GPR_S32(ctx, 19, s3);
+        const int64_t x0 = static_cast<int64_t>(static_cast<uint64_t>(GPR_U32(ctx, 23)));
+        const int64_t t2Base = x0 + 0x7EF0ll;
+        const int64_t t5Base = x0 + 0x7C90ll;
+        const uint64_t yTop = 0x7A600000ull;
+        const uint64_t yBot = 0x7B200000ull;
+        const uint64_t u0 = GPR_U64(ctx, 18) | 0x2F0ull;
+        const uint64_t u1 = GPR_U64(ctx, 18) | 0x400ull;
+        const uint64_t t4Shift = static_cast<uint64_t>(static_cast<int64_t>(SLL32(static_cast<uint32_t>(s3), 16)));
+        const uint64_t u2 = t4Shift | 0x2F0ull;
+        const uint64_t u3 = t4Shift | 0x400ull;
+
+        const uint64_t xyz0 = static_cast<uint64_t>(t5Base) | yTop;
+        const uint64_t xyz1 = static_cast<uint64_t>(t2Base) | yTop;
+        const uint64_t xyz2 = static_cast<uint64_t>(t5Base) | yBot;
+        const uint64_t xyz3 = static_cast<uint64_t>(t2Base) | yBot;
+
+        writeGifAd6_07C8(rdram, ctx, runtime, pkt,
+                         0xA400000000008001ull, READ64(0x71F8B0u), 0x15Cull, GPR_U64(ctx, 30),
+                         u0, xyz0,
+                         u2, xyz1,
+                         u1, xyz2,
+                         u3, xyz3);
+
+        const int64_t nextX = x0 + 0x240ll;
+        SET_GPR_S64(ctx, 23, static_cast<int64_t>(static_cast<int32_t>(nextX)));
+        SET_GPR_S32(ctx, 22, static_cast<int32_t>(ADD32(pkt, 0x60u)));
+        const int32_t rem = static_cast<int32_t>(READ32(ADD32(sp, 0x44u))) - 1;
+        WRITE32(ADD32(sp, 0x44u), static_cast<uint32_t>(rem));
+        SET_GPR_S32(ctx, 15, rem);
+        if (rem >= 0)
+        {
+            ctx->pc = 0x3A0AECu;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a0aec;
+        }
+
+        SET_GPR_U64(ctx, 21, GPR_U64(ctx, 16));
+        SET_GPR_U64(ctx, 23, 0ull);
+        SET_GPR_S32(ctx, 16, 2);
+    }
+
+label_3a0bc4:
+    // Band loop 2 (3 tiles) (@0x3A0BC4)
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+    SET_GPR_S32(ctx, 5, 6);
+    SET_GPR_S32(ctx, 6, 0x10);
+    SET_GPR_U64(ctx, 7, 0ull);
+    SET_GPR_U64(ctx, 8, 0ull);
+    SET_GPR_U64(ctx, 9, 0x50000006ull);
+    SET_GPR_S32(ctx, 17, static_cast<int32_t>(ADD32(GPR_U32(ctx, 21), 0x2D0u)));
+    SET_GPR_U32(ctx, 31, 0x3A0BE8u);
+    ctx->pc = 0x3AFD98u;
+    if (!PS2_DCALL(0x3AFD98u, 0x3A0BE8u))
+    {
+        return;
+    }
+
+label_3a0be8:
+    {
+        const uint32_t pkt = GPR_U32(ctx, 2);
+        const int32_t iter = static_cast<int32_t>(ADD32(GPR_U32(ctx, 16), 0xFFFFFFFFu));
+        SET_GPR_S32(ctx, 16, iter);
+        const int64_t x0 = static_cast<int64_t>(static_cast<uint64_t>(GPR_U32(ctx, 23)));
+        const int64_t t1Base = x0 + 0x7EF0ll;
+        const int64_t t4Base = x0 + 0x7C90ll;
+        const uint64_t yTop = 0x427ull << 21;
+        const uint64_t yBot = 0x42Dull << 21;
+        const uint64_t s1Shift = static_cast<uint64_t>(static_cast<uint32_t>(SLL32(GPR_U32(ctx, 17), 16)));
+        const uint64_t s5Shift = static_cast<uint64_t>(static_cast<uint32_t>(SLL32(GPR_U32(ctx, 21), 16)));
+
+        writeGifAd6_07C8(rdram, ctx, runtime, pkt,
+                         0xA400000000008001ull, READ64(0x71F8B0u), 0x15Cull, GPR_U64(ctx, 30),
+                         s5Shift | 0x400ull, static_cast<uint64_t>(t4Base) | yTop,
+                         s1Shift | 0x400ull, static_cast<uint64_t>(t1Base) | yTop,
+                         s5Shift | 0x2F0ull, static_cast<uint64_t>(t4Base) | yBot,
+                         s1Shift | 0x2F0ull, static_cast<uint64_t>(t1Base) | yBot);
+
+        const int64_t nextX = x0 + 0x240ll;
+        SET_GPR_S64(ctx, 23, static_cast<int64_t>(static_cast<int32_t>(nextX)));
+        SET_GPR_S32(ctx, 22, static_cast<int32_t>(ADD32(pkt, 0x60u)));
+        if (iter >= 0)
+        {
+            ctx->pc = 0x3A0BC4u;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a0bc4;
+        }
+
+        SET_GPR_U64(ctx, 23, 0ull);
+        SET_GPR_U64(ctx, 21, GPR_U64(ctx, 5));
+        SET_GPR_S32(ctx, 16, 2);
+    }
+
+label_3a0cbc:
+    // Band loop 3 (3 tiles) (@0x3A0CBC)
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+    SET_GPR_S32(ctx, 5, 6);
+    SET_GPR_S32(ctx, 6, 0x10);
+    SET_GPR_U64(ctx, 7, 0ull);
+    SET_GPR_U64(ctx, 8, 0ull);
+    SET_GPR_U64(ctx, 9, 0x50000006ull);
+    SET_GPR_S32(ctx, 16, static_cast<int32_t>(ADD32(GPR_U32(ctx, 16), 0xFFFFFFFFu)));
+    SET_GPR_U32(ctx, 31, 0x3A0CE0u);
+    ctx->pc = 0x3AFD98u;
+    if (!PS2_DCALL(0x3AFD98u, 0x3A0CE0u))
+    {
+        return;
+    }
+
+label_3a0ce0:
+    {
+        const uint32_t pkt = GPR_U32(ctx, 2);
+        const int64_t x0 = static_cast<int64_t>(static_cast<uint64_t>(GPR_U32(ctx, 23)));
+        const uint64_t yTop = static_cast<uint64_t>(x0 + 0x7BF0ll) << 16;
+        const uint64_t yBot = static_cast<uint64_t>(x0 + 0x7EB0ll) << 16;
+        const uint64_t s1Shift = static_cast<uint64_t>(static_cast<uint32_t>(SLL32(GPR_U32(ctx, 17), 16)));
+        const uint64_t s5Lo = GPR_U64(ctx, 21);
+
+        writeGifAd6_07C8(rdram, ctx, runtime, pkt,
+                         0xA400000000008001ull, READ64(0x71F8B0u), 0x15Cull, GPR_U64(ctx, 30),
+                         static_cast<uint64_t>(static_cast<uint32_t>(s5Lo | 0x2F0ull)), yTop | 0x7A40ull,
+                         static_cast<uint64_t>(static_cast<uint32_t>(s5Lo | 0x400ull)), yTop | 0x7B00ull,
+                         static_cast<uint64_t>(static_cast<uint32_t>(s1Shift | 0x2F0ull)), yBot | 0x7A40ull,
+                         static_cast<uint64_t>(static_cast<uint32_t>(s1Shift | 0x400ull)), yBot | 0x7B00ull);
+
+        const int64_t nextX = x0 + 0x2A0ll;
+        SET_GPR_S64(ctx, 23, static_cast<int64_t>(static_cast<int32_t>(nextX)));
+        SET_GPR_S32(ctx, 22, static_cast<int32_t>(ADD32(pkt, 0x60u)));
+        if (GPR_S64(ctx, 16) >= 0)
+        {
+            ctx->pc = 0x3A0CBCu;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a0cbc;
+        }
+
+        SET_GPR_U64(ctx, 23, 0ull);
+        SET_GPR_S32(ctx, 16, 2);
+    }
+
+label_3a0da0:
+    // Band loop 4 (3 tiles) (@0x3A0DA0)
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+    SET_GPR_S32(ctx, 5, 6);
+    SET_GPR_S32(ctx, 6, 0x10);
+    SET_GPR_U64(ctx, 7, 0ull);
+    SET_GPR_U64(ctx, 8, 0ull);
+    SET_GPR_U64(ctx, 9, 0x50000006ull);
+    SET_GPR_S32(ctx, 16, static_cast<int32_t>(ADD32(GPR_U32(ctx, 16), 0xFFFFFFFFu)));
+    SET_GPR_U32(ctx, 31, 0x3A0DC4u);
+    ctx->pc = 0x3AFD98u;
+    if (!PS2_DCALL(0x3AFD98u, 0x3A0DC4u))
+    {
+        return;
+    }
+
+label_3a0dc4:
+    {
+        const uint32_t pkt = GPR_U32(ctx, 2);
+        const int64_t x0 = static_cast<int64_t>(static_cast<uint64_t>(GPR_U32(ctx, 23)));
+        const uint64_t yTop = static_cast<uint64_t>(x0 + 0x7BF0ll) << 16;
+        const uint64_t yBot = static_cast<uint64_t>(x0 + 0x7EB0ll) << 16;
+        const uint64_t s2Lo = GPR_U64(ctx, 18);
+        const uint64_t s3Shift = static_cast<uint64_t>(static_cast<uint32_t>(SLL32(GPR_U32(ctx, 19), 16)));
+
+        writeGifAd6_07C8(rdram, ctx, runtime, pkt,
+                         0xA400000000008001ull, READ64(0x71F8B0u), 0x15Cull, GPR_U64(ctx, 30),
+                         s2Lo | 0x400ull, yTop | 0x8500ull,
+                         s2Lo | 0x2F0ull, yTop | 0x85C0ull,
+                         s3Shift | 0x400ull, yBot | 0x8500ull,
+                         s3Shift | 0x2F0ull, yBot | 0x85C0ull);
+
+        const int64_t nextX = x0 + 0x2A0ll;
+        SET_GPR_S64(ctx, 23, static_cast<int64_t>(static_cast<int32_t>(nextX)));
+        SET_GPR_S32(ctx, 22, static_cast<int32_t>(ADD32(pkt, 0x60u)));
+        if (GPR_S64(ctx, 16) >= 0)
+        {
+            ctx->pc = 0x3A0DA0u;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a0da0;
+        }
+    }
+
+    // Flush packet via 0x3B7798 (@0x3A0E5C)
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 20));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 22));
+    SET_GPR_U32(ctx, 31, 0x3A0E68u);
+    ctx->pc = 0x3B7798u;
+    if (!PS2_DCALL(0x3B7798u, 0x3A0E68u))
+    {
+        return;
+    }
+
+label_3a0e68:
+    {
+        // Epilogue (@0x3A0E68)
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_U64(ctx, 16, READ64(ADD32(sp, 0x50u)));
+        SET_GPR_U64(ctx, 17, READ64(ADD32(sp, 0x58u)));
+        SET_GPR_U64(ctx, 18, READ64(ADD32(sp, 0x60u)));
+        SET_GPR_U64(ctx, 19, READ64(ADD32(sp, 0x68u)));
+        SET_GPR_U64(ctx, 20, READ64(ADD32(sp, 0x70u)));
+        SET_GPR_U64(ctx, 21, READ64(ADD32(sp, 0x78u)));
+        SET_GPR_U64(ctx, 22, READ64(ADD32(sp, 0x80u)));
+        SET_GPR_U64(ctx, 23, READ64(ADD32(sp, 0x88u)));
+        SET_GPR_U64(ctx, 30, READ64(ADD32(sp, 0x90u)));
+        const uint64_t ra = READ64(ADD32(sp, 0x98u));
+        SET_GPR_U64(ctx, 31, ra);
+        {
+            const uint32_t bits = READ32(ADD32(sp, 0xA0u));
+            std::memcpy(&ctx->f[20], &bits, sizeof(bits));
+        }
+        SET_GPR_S32(ctx, 29, static_cast<int32_t>(ADD32(sp, 0xB0u)));
+        ctx->pc = static_cast<uint32_t>(ra);
+    }
+}
+
+// DECOMP-DI: sub_003A3BA8 (0x003A3BA8 - 0x003A4384, snowfesta_f entity/effect matrix & particle update)
+// Updates transform matrices at $s6+0x7C0/0x990, transforms + submits 0x267F8C/0x26B1E0/0x26B310,
+// manages 3 attachment slots ($s6+0xA9A, 0xA9E, 0xB50), and invokes sub_003A07C8 on $s6+0xA74.
+void sub_003A3BA8_decomp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // DECOMP-DI
+{
+    auto writeUnaligned32 = [&](uint32_t addr, uint32_t val) {
+        WRITE8(addr + 0u, static_cast<uint8_t>(val & 0xFFu));
+        WRITE8(addr + 1u, static_cast<uint8_t>((val >> 8) & 0xFFu));
+        WRITE8(addr + 2u, static_cast<uint8_t>((val >> 16) & 0xFFu));
+        WRITE8(addr + 3u, static_cast<uint8_t>((val >> 24) & 0xFFu));
+    };
+
+    switch (ctx->pc)
+    {
+    case 0x3A3C08u: goto label_3a3c08;
+    case 0x3A3C14u: goto label_3a3c14;
+    case 0x3A3C1Cu: goto label_3a3c1c;
+    case 0x3A3C6Cu: goto label_3a3c6c;
+    case 0x3A3C7Cu: goto label_3a3c7c;
+    case 0x3A3CB0u: goto label_3a3cb0;
+    case 0x3A3CFCu: goto label_3a3cfc;
+    case 0x3A3D0Cu: goto label_3a3d0c;
+    case 0x3A3D24u: goto label_3a3d24;
+    case 0x3A3D64u: goto label_3a3d64;
+    case 0x3A3D74u: goto label_3a3d74;
+    case 0x3A3DA0u: goto label_3a3da0;
+    case 0x3A3DB8u: goto label_3a3db8;
+    case 0x3A3DD0u: goto label_3a3dd0;
+    case 0x3A3DECu: goto label_3a3dec;
+    case 0x3A3E00u: goto label_3a3e00;
+    case 0x3A3E28u: goto label_3a3e28;
+    case 0x3A3E74u: goto label_3a3e74;
+    case 0x3A3E84u: goto label_3a3e84;
+    case 0x3A3E8Cu: goto label_3a3e8c;
+    case 0x3A3E9Cu: goto label_3a3e9c;
+    case 0x3A3EA8u: goto label_3a3ea8;
+    case 0x3A3EACu: goto label_3a3eac;
+    case 0x3A3ED0u: goto label_3a3ed0;
+    case 0x3A3F24u: goto label_3a3f24;
+    case 0x3A3F34u: goto label_3a3f34;
+    case 0x3A3F3Cu: goto label_3a3f3c;
+    case 0x3A3F4Cu: goto label_3a3f4c;
+    case 0x3A3F58u: goto label_3a3f58;
+    case 0x3A3F5Cu: goto label_3a3f5c;
+    case 0x3A3F78u: goto label_3a3f78;
+    case 0x3A3F84u: goto label_3a3f84;
+    case 0x3A3F8Cu: goto label_3a3f8c;
+    case 0x3A3FA0u: goto label_3a3fa0;
+    case 0x3A3FFCu: goto label_3a3ffc;
+    case 0x3A4004u: goto label_3a4004;
+    case 0x3A4010u: goto label_3a4010;
+    case 0x3A403Cu: goto label_3a403c;
+    case 0x3A4058u: goto label_3a4058;
+    case 0x3A4070u: goto label_3a4070;
+    case 0x3A4100u: goto label_3a4100;
+    case 0x3A4118u: goto label_3a4118;
+    case 0x3A4130u: goto label_3a4130;
+    case 0x3A4134u: goto label_3a4134;
+    case 0x3A415Cu: goto label_3a415c;
+    case 0x3A4188u: goto label_3a4188;
+    case 0x3A41C0u: goto label_3a41c0;
+    case 0x3A4210u: goto label_3a4210;
+    case 0x3A4220u: goto label_3a4220;
+    case 0x3A422Cu: goto label_3a422c;
+    case 0x3A4234u: goto label_3a4234;
+    case 0x3A4284u: goto label_3a4284;
+    case 0x3A42A4u: goto label_3a42a4;
+    case 0x3A42B4u: goto label_3a42b4;
+    case 0x3A42ECu: goto label_3a42ec;
+    case 0x3A4300u: goto label_3a4300;
+    case 0x3A4324u: goto label_3a4324;
+    case 0x3A4334u: goto label_3a4334;
+    case 0x3A4348u: goto label_3a4348;
+    case 0x3A436Cu: goto label_3a436c;
+    case 0x3A437Cu: goto label_3a437c;
+    default: break;
+    }
+
+    {
+        // Prologue (@0x3A3BA8)
+        const uint32_t sp = ADD32(GPR_U32(ctx, 29), static_cast<uint32_t>(-0x260));
+        SET_GPR_S32(ctx, 29, static_cast<int32_t>(sp));
+        WRITE64(ADD32(sp, 0x228u), GPR_U64(ctx, 22));
+        WRITE64(ADD32(sp, 0x240u), GPR_U64(ctx, 31));
+        SET_GPR_U64(ctx, 22, GPR_U64(ctx, 4)); // $s6 = $a0
+        WRITE128(ADD32(sp, 0x1D0u), GPR_VEC(ctx, 16));
+        WRITE128(ADD32(sp, 0x1E0u), GPR_VEC(ctx, 17));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 29));
+        WRITE128(ADD32(sp, 0x1F0u), GPR_VEC(ctx, 18));
+        WRITE64(ADD32(sp, 0x220u), GPR_U64(ctx, 19));
+        WRITE128(ADD32(sp, 0x200u), GPR_VEC(ctx, 20));
+        SET_GPR_VEC(ctx, 18, _mm_setzero_si128());
+        WRITE128(ADD32(sp, 0x210u), GPR_VEC(ctx, 21));
+        SET_GPR_S32(ctx, 19, static_cast<int32_t>(ADD32(sp, 0x40u)));
+        WRITE64(ADD32(sp, 0x230u), GPR_U64(ctx, 23));
+        SET_GPR_S32(ctx, 20, static_cast<int32_t>(ADD32(sp, 0x80u)));
+        WRITE64(ADD32(sp, 0x238u), GPR_U64(ctx, 30));
+        SET_GPR_S32(ctx, 21, static_cast<int32_t>(ADD32(sp, 0x180u)));
+        {
+            uint32_t b22 = 0, b21 = 0, b20 = 0;
+            std::memcpy(&b22, &ctx->f[22], sizeof(b22));
+            std::memcpy(&b21, &ctx->f[21], sizeof(b21));
+            std::memcpy(&b20, &ctx->f[20], sizeof(b20));
+            WRITE32(ADD32(sp, 0x250u), b22);
+            WRITE32(ADD32(sp, 0x24Cu), b21);
+            WRITE32(ADD32(sp, 0x248u), b20);
+        }
+        SET_GPR_U64(ctx, 23, 0ull);
+        SET_GPR_S32(ctx, 30, static_cast<int32_t>(ADD32(sp, 0x140u)));
+        SET_GPR_VEC(ctx, 17, _mm_setzero_si128());
+        SET_GPR_U32(ctx, 31, 0x3A3C08u);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3C08u))
+        {
+            return;
+        }
+    }
+
+label_3a3c08:
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 29));
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0x7C0u)));
+    SET_GPR_U32(ctx, 31, 0x3A3C14u);
+    ctx->pc = 0x3A02D8u;
+    if (!PS2_DCALL(0x3A02D8u, 0x3A3C14u))
+    {
+        return;
+    }
+
+label_3a3c14:
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(GPR_U32(ctx, 29), 0xC0u)));
+    SET_GPR_U32(ctx, 31, 0x3A3C1Cu);
+    ctx->pc = 0x441F40u;
+    if (!PS2_DCALL(0x441F40u, 0x3A3C1Cu))
+    {
+        return;
+    }
+
+label_3a3c1c:
+    {
+        // Build identity/basis matrix at $sp+0x80 and $sp+0xC0, multiply into $s3 ($sp+0x40) (@0x3A3C1C)
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const __m128i t6v = PS2_PPACW(GPR_VEC(ctx, 17), GPR_VEC(ctx, 17));
+        SET_GPR_VEC(ctx, 14, t6v);
+        const __m128i t4v = _mm_castps_si128(ctx->vu0_vf[0]);
+        SET_GPR_VEC(ctx, 12, t4v);
+        ctx->vu0_vf[2] = _mm_castsi128_ps(t6v);
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 19));
+        __m128i t7v = _mm_shuffle_epi32(t4v, _MM_SHUFFLE(3, 0, 2, 1));
+        {
+            const __m128i mask = _mm_set_epi32(0, -1, -1, -1);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[2], _mm_castsi128_ps(mask));
+        }
+        t7v = _mm_unpackhi_epi64(GPR_VEC(ctx, 18), t7v);
+        t7v = _mm_unpackhi_epi64(t7v, GPR_VEC(ctx, 18));
+        WRITE128(ADD32(sp, 0x90u), t7v);
+        const __m128i t6rot = _mm_shuffle_epi32(t7v, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 14, t6rot);
+        {
+            const __m128i mask = _mm_set_epi32(-1, 0, 0, 0);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[0], _mm_castsi128_ps(mask));
+        }
+        WRITE128(ADD32(sp, 0xD0u), t7v);
+        WRITE128(ADD32(sp, 0x80u), t6rot);
+        const __m128i t7rot = _mm_shuffle_epi32(t6rot, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 15, t7rot);
+        WRITE128(ADD32(sp, 0xC0u), t6rot);
+        WRITE128(ADD32(sp, 0xA0u), t7rot);
+        WRITE128(ADD32(sp, 0xB0u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0xF0u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0xE0u), t7rot);
+        SET_GPR_U32(ctx, 31, 0x3A3C6Cu);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3C6Cu))
+        {
+            return;
+        }
+    }
+
+label_3a3c6c:
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 29));
+    SET_GPR_U64(ctx, 6, GPR_U64(ctx, 20));
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 19));
+    SET_GPR_U32(ctx, 31, 0x3A3C7Cu);
+    ctx->pc = 0x441F70u;
+    if (!PS2_DCALL(0x441F70u, 0x3A3C7Cu))
+    {
+        return;
+    }
+
+label_3a3c7c:
+    {
+        // Store result matrix to $s6+0x990..0x9C0, then build scaled basis into $s4 ($sp+0x80) (@0x3A3C7C)
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t s6 = GPR_U32(ctx, 22);
+        const __m128i q0 = READ128(ADD32(sp, 0x40u));
+        const __m128i q1 = READ128(ADD32(sp, 0x50u));
+        const __m128i q2 = READ128(ADD32(sp, 0x60u));
+        const __m128i q3 = READ128(ADD32(sp, 0x70u));
+        SET_GPR_VEC(ctx, 15, q0);
+        SET_GPR_VEC(ctx, 14, q1);
+        SET_GPR_VEC(ctx, 13, q2);
+        SET_GPR_VEC(ctx, 12, q3);
+        WRITE128(ADD32(s6, 0x990u), q0);
+        WRITE128(ADD32(s6, 0x9A0u), q1);
+        WRITE128(ADD32(s6, 0x9B0u), q2);
+        WRITE128(ADD32(s6, 0x9C0u), q3);
+
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0x100u)));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0xC0A00000u));
+        const __m128i s0tmp = PS2_PPACW(GPR_VEC(ctx, 15), GPR_VEC(ctx, 23));
+        SET_GPR_VEC(ctx, 16, PS2_PPACW(GPR_VEC(ctx, 17), s0tmp));
+        SET_GPR_U32(ctx, 31, 0x3A3CB0u);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3CB0u))
+        {
+            return;
+        }
+    }
+
+label_3a3cb0:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const __m128i t4v = _mm_castps_si128(ctx->vu0_vf[0]);
+        SET_GPR_VEC(ctx, 12, t4v);
+        ctx->vu0_vf[3] = _mm_castsi128_ps(GPR_VEC(ctx, 16));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 20));
+        __m128i t7v = _mm_shuffle_epi32(t4v, _MM_SHUFFLE(3, 0, 2, 1));
+        {
+            const __m128i mask = _mm_set_epi32(0, -1, -1, -1);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[3], _mm_castsi128_ps(mask));
+        }
+        t7v = _mm_unpackhi_epi64(GPR_VEC(ctx, 18), t7v);
+        t7v = _mm_unpackhi_epi64(t7v, GPR_VEC(ctx, 18));
+        WRITE128(ADD32(sp, 0x50u), t7v);
+        const __m128i t6rot = _mm_shuffle_epi32(t7v, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 14, t6rot);
+        {
+            const __m128i mask = _mm_set_epi32(-1, 0, 0, 0);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[0], _mm_castsi128_ps(mask));
+        }
+        WRITE128(ADD32(sp, 0x110u), t7v);
+        WRITE128(ADD32(sp, 0x40u), t6rot);
+        const __m128i t7rot = _mm_shuffle_epi32(t6rot, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 15, t7rot);
+        WRITE128(ADD32(sp, 0x100u), t6rot);
+        WRITE128(ADD32(sp, 0x60u), t7rot);
+        WRITE128(ADD32(sp, 0x70u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0x130u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0x120u), t7rot);
+        SET_GPR_U32(ctx, 31, 0x3A3CFCu);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3CFCu))
+        {
+            return;
+        }
+    }
+
+label_3a3cfc:
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 29));
+    SET_GPR_U64(ctx, 6, GPR_U64(ctx, 19));
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 20));
+    SET_GPR_U32(ctx, 31, 0x3A3D0Cu);
+    ctx->pc = 0x441F70u;
+    if (!PS2_DCALL(0x441F70u, 0x3A3D0Cu))
+    {
+        return;
+    }
+
+label_3a3d0c:
+    {
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0x3FA00000u));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 30));
+        const __m128i s0tmp = PS2_PPACW(GPR_VEC(ctx, 23), GPR_VEC(ctx, 15));
+        const __m128i t7tmp = PS2_PPACW(GPR_VEC(ctx, 15), GPR_VEC(ctx, 15));
+        SET_GPR_VEC(ctx, 15, t7tmp);
+        SET_GPR_VEC(ctx, 16, PS2_PPACW(s0tmp, t7tmp));
+        SET_GPR_U32(ctx, 31, 0x3A3D24u);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3D24u))
+        {
+            return;
+        }
+    }
+
+label_3a3d24:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const __m128 vfS0 = _mm_castsi128_ps(GPR_VEC(ctx, 16));
+        ctx->vu0_vf[1] = vfS0;
+        ctx->vu0_vf[2] = vfS0;
+        ctx->vu0_vf[3] = vfS0;
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0xC0u)));
+        {
+            const __m128 res = PS2_VSUB(ctx->vu0_vf[1], ctx->vu0_vf[1]);
+            ctx->vu0_vf[3] = PS2_VBLEND(ctx->vu0_vf[3], res, _mm_castsi128_ps(_mm_set_epi32(-1, 0, -1, -1)));
+            ctx->vu0_vf[2] = PS2_VBLEND(ctx->vu0_vf[2], res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, 0)));
+            ctx->vu0_vf[1] = PS2_VBLEND(ctx->vu0_vf[1], res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, 0, -1)));
+        }
+        WRITE128(ADD32(sp, 0x130u), _mm_castps_si128(ctx->vu0_vf[0]));
+        WRITE128(ADD32(sp, 0x170u), _mm_castps_si128(ctx->vu0_vf[0]));
+        WRITE128(ADD32(sp, 0x120u), _mm_castps_si128(ctx->vu0_vf[3]));
+        WRITE128(ADD32(sp, 0x100u), _mm_castps_si128(ctx->vu0_vf[2]));
+        WRITE128(ADD32(sp, 0x140u), _mm_castps_si128(ctx->vu0_vf[2]));
+        WRITE128(ADD32(sp, 0x160u), _mm_castps_si128(ctx->vu0_vf[3]));
+        WRITE128(ADD32(sp, 0x110u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0x150u), _mm_castps_si128(ctx->vu0_vf[1]));
+        SET_GPR_U32(ctx, 31, 0x3A3D64u);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3D64u))
+        {
+            return;
+        }
+    }
+
+label_3a3d64:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_S32(ctx, 6, static_cast<int32_t>(ADD32(sp, 0x100u)));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0xC0u)));
+        SET_GPR_U64(ctx, 5, GPR_U64(ctx, 20));
+        SET_GPR_U32(ctx, 31, 0x3A3D74u);
+        ctx->pc = 0x441F70u;
+        if (!PS2_DCALL(0x441F70u, 0x3A3D74u))
+        {
+            return;
+        }
+    }
+
+label_3a3d74:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_U64(ctx, 5, GPR_U64(ctx, 29));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA30u))));
+        WRITE128(ADD32(sp, 0x00u), READ128(ADD32(sp, 0xC0u)));
+        WRITE128(ADD32(sp, 0x10u), READ128(ADD32(sp, 0xD0u)));
+        WRITE128(ADD32(sp, 0x20u), READ128(ADD32(sp, 0xE0u)));
+        const __m128i q3 = READ128(ADD32(sp, 0xF0u));
+        SET_GPR_VEC(ctx, 15, q3);
+        WRITE128(ADD32(sp, 0x30u), q3);
+        SET_GPR_U32(ctx, 31, 0x3A3DA0u);
+        ctx->pc = 0x267F8Cu;
+        if (!PS2_DCALL(0x267F8Cu, 0x3A3DA0u))
+        {
+            return;
+        }
+    }
+
+label_3a3da0:
+    {
+        const int32_t w = static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xB14u)));
+        SET_GPR_S32(ctx, 15, w);
+        SET_GPR_VEC(ctx, 16, PS2_PPACW(GPR_VEC(ctx, 15), GPR_VEC(ctx, 23)));
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(0x0071FC80u));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 21));
+        SET_GPR_U32(ctx, 31, 0x3A3DB8u);
+        ctx->pc = 0x35AB88u;
+        if (!PS2_DCALL(0x35AB88u, 0x3A3DB8u))
+        {
+            return;
+        }
+    }
+
+label_3a3db8:
+    {
+        const __m128i s0v = PS2_PPACW(GPR_VEC(ctx, 17), GPR_VEC(ctx, 16));
+        SET_GPR_VEC(ctx, 16, s0v);
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA30u))));
+        SET_GPR_VEC(ctx, 7, s0v);
+        SET_GPR_U64(ctx, 6, 0ull);
+        SET_GPR_U64(ctx, 5, GPR_U64(ctx, 21));
+        SET_GPR_U32(ctx, 31, 0x3A3DD0u);
+        ctx->pc = 0x26B1E0u;
+        if (!PS2_DCALL(0x26B1E0u, 0x3A3DD0u))
+        {
+            return;
+        }
+    }
+
+label_3a3dd0:
+    {
+        const int32_t w = static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xB18u)));
+        SET_GPR_S32(ctx, 15, w);
+        const __m128i t7v = PS2_PPACW(GPR_VEC(ctx, 15), GPR_VEC(ctx, 23));
+        SET_GPR_VEC(ctx, 15, t7v);
+        SET_GPR_VEC(ctx, 17, PS2_PPACW(GPR_VEC(ctx, 17), t7v));
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(0x0071FC98u));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 21));
+        SET_GPR_U32(ctx, 31, 0x3A3DECu);
+        ctx->pc = 0x35AB88u;
+        if (!PS2_DCALL(0x35AB88u, 0x3A3DECu))
+        {
+            return;
+        }
+    }
+
+label_3a3dec:
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA30u))));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 21));
+    SET_GPR_VEC(ctx, 7, GPR_VEC(ctx, 17));
+    SET_GPR_U64(ctx, 6, 0ull);
+    SET_GPR_U32(ctx, 31, 0x3A3E00u);
+    ctx->pc = 0x26B1E0u;
+    if (!PS2_DCALL(0x26B1E0u, 0x3A3E00u))
+    {
+        return;
+    }
+
+label_3a3e00:
+    {
+        // Slot 1 ($s6+0xA9A) gated by $s6+0xA98 (@0x3A3E00)
+        const uint8_t flag = READ8(ADD32(GPR_U32(ctx, 22), 0xA98u));
+        SET_GPR_ZE32(ctx, 15, flag);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0x41000000u));
+        if (flag == 0u)
+        {
+            goto label_3a4360;
+        }
+
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0xC0u)));
+        const __m128i t6v = PS2_PPACW(GPR_VEC(ctx, 23), GPR_VEC(ctx, 15));
+        SET_GPR_VEC(ctx, 14, t6v);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0x3F800000u));
+        SET_GPR_S32(ctx, 17, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0xA9Au)));
+        const __m128i s0tmp = PS2_PPACW(GPR_VEC(ctx, 15), GPR_VEC(ctx, 23));
+        SET_GPR_VEC(ctx, 16, PS2_PPACW(s0tmp, t6v));
+        SET_GPR_U32(ctx, 31, 0x3A3E28u);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3E28u))
+        {
+            return;
+        }
+    }
+
+label_3a3e28:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        ctx->vu0_vf[2] = _mm_castsi128_ps(GPR_VEC(ctx, 16));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 30));
+        const __m128i t4v = _mm_castps_si128(ctx->vu0_vf[0]);
+        SET_GPR_VEC(ctx, 12, t4v);
+        {
+            const __m128i mask = _mm_set_epi32(0, -1, -1, -1);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[2], _mm_castsi128_ps(mask));
+        }
+        __m128i t7v = _mm_shuffle_epi32(t4v, _MM_SHUFFLE(3, 0, 2, 1));
+        t7v = _mm_unpackhi_epi64(_mm_setzero_si128(), t7v);
+        t7v = _mm_unpackhi_epi64(t7v, _mm_setzero_si128());
+        {
+            const __m128i mask = _mm_set_epi32(-1, 0, 0, 0);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[0], _mm_castsi128_ps(mask));
+        }
+        WRITE128(ADD32(sp, 0x110u), t7v);
+        WRITE128(ADD32(sp, 0xD0u), t7v);
+        const __m128i t6rot = _mm_shuffle_epi32(t7v, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 14, t6rot);
+        WRITE128(ADD32(sp, 0x100u), t6rot);
+        const __m128i t7rot = _mm_shuffle_epi32(t6rot, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 15, t7rot);
+        WRITE128(ADD32(sp, 0xC0u), t6rot);
+        WRITE128(ADD32(sp, 0x120u), t7rot);
+        WRITE128(ADD32(sp, 0x130u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0xF0u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0xE0u), t7rot);
+        SET_GPR_U32(ctx, 31, 0x3A3E74u);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3E74u))
+        {
+            return;
+        }
+    }
+
+label_3a3e74:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 30));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 29));
+    SET_GPR_S32(ctx, 6, static_cast<int32_t>(ADD32(GPR_U32(ctx, 29), 0x100u)));
+    SET_GPR_U32(ctx, 31, 0x3A3E84u);
+    ctx->pc = 0x441F70u;
+    if (!PS2_DCALL(0x441F70u, 0x3A3E84u))
+    {
+        return;
+    }
+
+label_3a3e84:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 17));
+    SET_GPR_U32(ctx, 31, 0x3A3E8Cu);
+    ctx->pc = 0x1651E4u;
+    if (!PS2_DCALL(0x1651E4u, 0x3A3E8Cu))
+    {
+        return;
+    }
+
+label_3a3e8c:
+    SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0xAF0u)));
+    if (GPR_U64(ctx, 2) == 0ull)
+    {
+        goto label_3a433c;
+    }
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 17));
+    SET_GPR_U32(ctx, 31, 0x3A3E9Cu);
+    ctx->pc = 0x1652A8u;
+    if (!PS2_DCALL(0x1652A8u, 0x3A3E9Cu))
+    {
+        return;
+    }
+
+label_3a3e9c:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 30));
+    SET_GPR_U32(ctx, 31, 0x3A3EA8u);
+    ctx->pc = 0x15DF6Cu;
+    if (!PS2_DCALL(0x15DF6Cu, 0x3A3EA8u))
+    {
+        return;
+    }
+
+label_3a3ea8:
+    SET_GPR_ZE32(ctx, 15, READ8(ADD32(GPR_U32(ctx, 22), 0xA99u)));
+
+label_3a3eac:
+    {
+        // Slot 2 ($s6+0xA9E) gated by $s6+0xA99 (@0x3A3EAC)
+        SET_GPR_U64(ctx, 14, 0ull);
+        if (GPR_U64(ctx, 15) == 0ull)
+        {
+            goto label_3a4318;
+        }
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0xC1000000u));
+        const __m128i t5v = PS2_PPACW(_mm_setzero_si128(), GPR_VEC(ctx, 15));
+        SET_GPR_VEC(ctx, 13, t5v);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0x3F800000u));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0xC0u)));
+        const __m128i s0tmp = PS2_PPACW(GPR_VEC(ctx, 15), _mm_setzero_si128());
+        SET_GPR_VEC(ctx, 16, PS2_PPACW(s0tmp, t5v));
+        SET_GPR_U32(ctx, 31, 0x3A3ED0u);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3ED0u))
+        {
+            return;
+        }
+    }
+
+label_3a3ed0:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_S32(ctx, 17, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0xA9Eu)));
+        ctx->vu0_vf[2] = _mm_castsi128_ps(GPR_VEC(ctx, 16));
+        SET_GPR_VEC(ctx, 14, _mm_setzero_si128());
+        const __m128i t4v = _mm_castps_si128(ctx->vu0_vf[0]);
+        SET_GPR_VEC(ctx, 12, t4v);
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 30));
+        {
+            const __m128i mask = _mm_set_epi32(0, -1, -1, -1);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[2], _mm_castsi128_ps(mask));
+        }
+        __m128i t7v = _mm_shuffle_epi32(t4v, _MM_SHUFFLE(3, 0, 2, 1));
+        t7v = _mm_unpackhi_epi64(_mm_setzero_si128(), t7v);
+        t7v = _mm_unpackhi_epi64(t7v, _mm_setzero_si128());
+        {
+            const __m128i mask = _mm_set_epi32(-1, 0, 0, 0);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[0], _mm_castsi128_ps(mask));
+        }
+        WRITE128(ADD32(sp, 0x110u), t7v);
+        const __m128i t6rot = _mm_shuffle_epi32(t7v, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 14, t6rot);
+        WRITE128(ADD32(sp, 0xD0u), t7v);
+        const __m128i t5rot = _mm_shuffle_epi32(t6rot, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 13, t5rot);
+        WRITE128(ADD32(sp, 0x100u), t6rot);
+        WRITE128(ADD32(sp, 0x120u), t5rot);
+        WRITE128(ADD32(sp, 0x130u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0xF0u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0xC0u), t6rot);
+        WRITE128(ADD32(sp, 0xE0u), t5rot);
+        SET_GPR_U32(ctx, 31, 0x3A3F24u);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3F24u))
+        {
+            return;
+        }
+    }
+
+label_3a3f24:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 30));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 29));
+    SET_GPR_S32(ctx, 6, static_cast<int32_t>(ADD32(GPR_U32(ctx, 29), 0x100u)));
+    SET_GPR_U32(ctx, 31, 0x3A3F34u);
+    ctx->pc = 0x441F70u;
+    if (!PS2_DCALL(0x441F70u, 0x3A3F34u))
+    {
+        return;
+    }
+
+label_3a3f34:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 17));
+    SET_GPR_U32(ctx, 31, 0x3A3F3Cu);
+    ctx->pc = 0x1651E4u;
+    if (!PS2_DCALL(0x1651E4u, 0x3A3F3Cu))
+    {
+        return;
+    }
+
+label_3a3f3c:
+    SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0xAF0u)));
+    if (GPR_U64(ctx, 2) == 0ull)
+    {
+        goto label_3a42f4;
+    }
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 17));
+    SET_GPR_U32(ctx, 31, 0x3A3F4Cu);
+    ctx->pc = 0x1652A8u;
+    if (!PS2_DCALL(0x1652A8u, 0x3A3F4Cu))
+    {
+        return;
+    }
+
+label_3a3f4c:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 30));
+    SET_GPR_U32(ctx, 31, 0x3A3F58u);
+    ctx->pc = 0x15DF6Cu;
+    if (!PS2_DCALL(0x15DF6Cu, 0x3A3F58u))
+    {
+        return;
+    }
+
+label_3a3f58:
+    SET_GPR_S32(ctx, 15, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA38u))));
+
+label_3a3f5c:
+    ctx->f[20] = 0.0f;
+    if (GPR_S64(ctx, 15) <= 0ll)
+    {
+        goto label_3a3fa4;
+    }
+    {
+        const uint8_t flag = READ8(ADD32(GPR_U32(ctx, 22), 0xA34u));
+        SET_GPR_ZE32(ctx, 15, flag);
+        if (flag != 0u)
+        {
+            goto label_3a3f84;
+        }
+    }
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA30u))));
+    SET_GPR_U32(ctx, 31, 0x3A3F78u);
+    ctx->pc = 0x268A50u;
+    if (!PS2_DCALL(0x268A50u, 0x3A3F78u))
+    {
+        return;
+    }
+
+label_3a3f78:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 22));
+    SET_GPR_U32(ctx, 31, 0x3A3F84u);
+    ctx->pc = 0x2460A0u;
+    if (!PS2_DCALL(0x2460A0u, 0x3A3F84u))
+    {
+        return;
+    }
+
+label_3a3f84:
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA30u))));
+    SET_GPR_U32(ctx, 31, 0x3A3F8Cu);
+    ctx->pc = 0x2689F8u;
+    if (!PS2_DCALL(0x2689F8u, 0x3A3F8Cu))
+    {
+        return;
+    }
+
+label_3a3f8c:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 22));
+    SET_GPR_S32(ctx, 6, -1);
+    SET_GPR_U64(ctx, 7, 0ull);
+    SET_GPR_U32(ctx, 31, 0x3A3FA0u);
+    ctx->pc = 0x285C44u;
+    if (!PS2_DCALL(0x285C44u, 0x3A3FA0u))
+    {
+        return;
+    }
+
+label_3a3fa0:
+    ctx->f[20] = 0.0f;
+
+label_3a3fa4:
+    {
+        // Transform local offset (1, 10, 0, 1) by $sp+0..0x30 into $s6->0xA60+0x30 (@0x3A3FA4)
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t s6 = GPR_U32(ctx, 22);
+        SET_GPR_S32(ctx, 19, static_cast<int32_t>(0x3F800000u));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0x41200000u));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(sp, 0x00u)));
+        SET_GPR_U32(ctx, 13, 0u);
+        SET_GPR_S32(ctx, 30, static_cast<int32_t>(ADD32(sp, 0x100u)));
+        const __m128i s0v = PS2_PPACW(GPR_VEC(ctx, 15), GPR_VEC(ctx, 13));
+        SET_GPR_VEC(ctx, 16, s0v);
+        const __m128i t7v = PS2_PPACW(GPR_VEC(ctx, 19), GPR_VEC(ctx, 13));
+        const __m128i vec = PS2_PPACW(t7v, s0v);
+        SET_GPR_VEC(ctx, 15, vec);
+        const uint32_t obj = READ32(ADD32(s6, 0xA60u));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(obj));
+        ctx->vu0_vf[2] = _mm_castsi128_ps(vec);
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 30));
+        {
+            const uint32_t bits = READ32(ADD32(s6, 0xA68u));
+            std::memcpy(&ctx->f[22], &bits, sizeof(bits));
+        }
+        SET_GPR_S32(ctx, 23, static_cast<int32_t>(ADD32(s6, 0x754u)));
+
+        ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(0, 0, 0, 0)));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(sp, 0x10u)));
+        ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(1, 1, 1, 1))));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(sp, 0x20u)));
+        ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(2, 2, 2, 2))));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(sp, 0x30u)));
+        ctx->vu0_vf[1] = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(3, 3, 3, 3))));
+        WRITE128(ADD32(obj, 0x30u), _mm_castps_si128(ctx->vu0_vf[1]));
+        SET_GPR_U32(ctx, 31, 0x3A3FFCu);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A3FFCu))
+        {
+            return;
+        }
+    }
+
+label_3a3ffc:
+    ctx->f[12] = FPU_MOV_S(ctx->f[22]);
+    SET_GPR_U32(ctx, 31, 0x3A4004u);
+    ctx->pc = 0x36DA14u;
+    if (!PS2_DCALL(0x36DA14u, 0x3A4004u))
+    {
+        return;
+    }
+
+label_3a4004:
+    ctx->f[21] = FPU_MOV_S(ctx->f[0]);
+    ctx->f[12] = FPU_MOV_S(ctx->f[22]);
+    SET_GPR_U32(ctx, 31, 0x3A4010u);
+    ctx->pc = 0x36DBF4u;
+    if (!PS2_DCALL(0x36DBF4u, 0x3A4010u))
+    {
+        return;
+    }
+
+label_3a4010:
+    ctx->f[14] = FPU_MOV_S(ctx->f[21]);
+    ctx->f[22] = FPU_MOV_S(ctx->f[0]);
+    ctx->f[13] = FPU_MOV_S(ctx->f[0]);
+    ctx->f[12] = FPU_MOV_S(ctx->f[20]);
+    ctx->f[15] = FPU_MOV_S(ctx->f[20]);
+    ctx->f[21] = FPU_NEG_S(ctx->f[21]);
+    {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &ctx->f[20], sizeof(bits));
+        SET_GPR_U32(ctx, 12, bits);
+    }
+    {
+        const __m128i s1v = PS2_PPACW(GPR_VEC(ctx, 12), GPR_VEC(ctx, 12));
+        const __m128i s2tmp = PS2_PPACW(GPR_VEC(ctx, 12), GPR_VEC(ctx, 19));
+        SET_GPR_VEC(ctx, 17, s1v);
+        SET_GPR_VEC(ctx, 18, PS2_PPACW(s1v, s2tmp));
+    }
+    SET_GPR_U32(ctx, 31, 0x3A403Cu);
+    ctx->pc = 0x44BD3Cu;
+    if (!PS2_DCALL(0x44BD3Cu, 0x3A403Cu))
+    {
+        return;
+    }
+
+label_3a403c:
+    ctx->f[14] = FPU_MOV_S(ctx->f[22]);
+    ctx->f[12] = FPU_MOV_S(ctx->f[20]);
+    ctx->f[15] = FPU_MOV_S(ctx->f[20]);
+    ctx->f[13] = FPU_MOV_S(ctx->f[21]);
+    SET_GPR_VEC(ctx, 21, GPR_VEC(ctx, 2));
+    SET_GPR_VEC(ctx, 16, PS2_PPACW(GPR_VEC(ctx, 17), GPR_VEC(ctx, 16)));
+    SET_GPR_U32(ctx, 31, 0x3A4058u);
+    ctx->pc = 0x44BD3Cu;
+    if (!PS2_DCALL(0x44BD3Cu, 0x3A4058u))
+    {
+        return;
+    }
+
+label_3a4058:
+    ctx->f[12] = FPU_MOV_S(ctx->f[20]);
+    ctx->f[13] = FPU_MOV_S(ctx->f[20]);
+    ctx->f[14] = FPU_MOV_S(ctx->f[20]);
+    {
+        const uint32_t bits = GPR_U32(ctx, 19);
+        std::memcpy(&ctx->f[15], &bits, sizeof(bits));
+    }
+    SET_GPR_VEC(ctx, 20, GPR_VEC(ctx, 2));
+    SET_GPR_U32(ctx, 31, 0x3A4070u);
+    ctx->pc = 0x44BD3Cu;
+    if (!PS2_DCALL(0x44BD3Cu, 0x3A4070u))
+    {
+        return;
+    }
+
+label_3a4070:
+    {
+        // Build rotated offset matrix at $sp+0x100..0x170 and transform (100, ...) into $s6->0xA60+0x40 (@0x3A4070)
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(0x42C80000u));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(GPR_VEC(ctx, 18));
+        const __m128i t7a = PS2_PPACW(GPR_VEC(ctx, 19), GPR_VEC(ctx, 15));
+        const __m128i t7b = PS2_PPACW(t7a, GPR_VEC(ctx, 17));
+        SET_GPR_VEC(ctx, 15, t7b);
+        ctx->vu0_vf[3] = _mm_castsi128_ps(GPR_VEC(ctx, 21));
+        ctx->vu0_vf[2] = _mm_castsi128_ps(t7b);
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 23));
+
+        __m128i t6v = PS2_PPACW(GPR_VEC(ctx, 19), GPR_VEC(ctx, 16));
+        ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(0, 0, 0, 0)));
+        WRITE128(ADD32(sp, 0x170u), GPR_VEC(ctx, 2));
+        ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[3], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(1, 1, 1, 1))));
+        WRITE128(ADD32(sp, 0x100u), GPR_VEC(ctx, 18));
+        t6v = _mm_shuffle_epi32(t6v, _MM_SHUFFLE(3, 0, 2, 1));
+        WRITE128(ADD32(sp, 0x110u), GPR_VEC(ctx, 21));
+        t6v = PS2_PCPYLD(t6v, GPR_VEC(ctx, 16));
+        SET_GPR_VEC(ctx, 14, t6v);
+        WRITE128(ADD32(sp, 0x120u), GPR_VEC(ctx, 20));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(GPR_VEC(ctx, 20));
+        ctx->vu0_vf[3] = _mm_castsi128_ps(t6v);
+        ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(2, 2, 2, 2))));
+        WRITE128(ADD32(sp, 0x130u), GPR_VEC(ctx, 2));
+        ctx->vu0_vf[2] = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[3], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(3, 3, 3, 3))));
+        WRITE128(ADD32(sp, 0x140u), GPR_VEC(ctx, 18));
+        WRITE128(ADD32(sp, 0x150u), GPR_VEC(ctx, 21));
+        WRITE128(ADD32(sp, 0x160u), GPR_VEC(ctx, 20));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(sp, 0x00u)));
+        WRITE128(ADD32(sp, 0x170u), t6v);
+
+        ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(0, 0, 0, 0)));
+        const uint32_t obj = READ32(ADD32(GPR_U32(ctx, 22), 0xA60u));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(obj));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(sp, 0x10u)));
+        ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(1, 1, 1, 1))));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(sp, 0x20u)));
+        ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(2, 2, 2, 2))));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(sp, 0x30u)));
+        ctx->vu0_vf[1] = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(3, 3, 3, 3))));
+        WRITE128(ADD32(obj, 0x40u), _mm_castps_si128(ctx->vu0_vf[1]));
+        SET_GPR_U32(ctx, 31, 0x3A4100u);
+        ctx->pc = 0x3A62ACu;
+        if (!PS2_DCALL(0x3A62ACu, 0x3A4100u))
+        {
+            return;
+        }
+    }
+
+label_3a4100:
+    if (GPR_U64(ctx, 2) == 0ull)
+    {
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA30u))));
+        goto label_3a42e4;
+    }
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 23));
+    SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(GPR_U32(ctx, 29), 0x1B0u)));
+    SET_GPR_S32(ctx, 6, static_cast<int32_t>(ADD32(GPR_U32(ctx, 29), 0x1C0u)));
+    SET_GPR_U32(ctx, 31, 0x3A4118u);
+    ctx->pc = 0x3A62B8u;
+    if (!PS2_DCALL(0x3A62B8u, 0x3A4118u))
+    {
+        return;
+    }
+
+label_3a4118:
+    if (GPR_U64(ctx, 2) == 0ull)
+    {
+        SET_GPR_ZE32(ctx, 15, READ8(ADD32(GPR_U32(ctx, 22), 0x5Cu)));
+        goto label_3a4134;
+    }
+    {
+        const uint32_t bits = READ32(ADD32(GPR_U32(ctx, 29), 0x1C0u));
+        std::memcpy(&ctx->f[12], &bits, sizeof(bits));
+    }
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA30u))));
+    SET_GPR_VEC(ctx, 5, READ128(ADD32(GPR_U32(ctx, 29), 0x1B0u)));
+    SET_GPR_U32(ctx, 31, 0x3A4130u);
+    ctx->pc = 0x26B310u;
+    if (!PS2_DCALL(0x26B310u, 0x3A4130u))
+    {
+        return;
+    }
+
+label_3a4130:
+    SET_GPR_ZE32(ctx, 15, READ8(ADD32(GPR_U32(ctx, 22), 0x5Cu)));
+
+label_3a4134:
+    {
+        const bool flagZero = (GPR_U64(ctx, 15) == 0ull);
+        SET_GPR_S32(ctx, 12, static_cast<int32_t>(0x00720000u));
+        if (flagZero)
+        {
+            goto label_3a42bc;
+        }
+        const uint32_t b1 = READ32(ADD32(GPR_U32(ctx, 22), 0xA64u));
+        const uint32_t b0 = READ32(0x71FCB0u);
+        std::memcpy(&ctx->f[1], &b1, sizeof(b1));
+        std::memcpy(&ctx->f[0], &b0, sizeof(b0));
+        SET_GPR_S32(ctx, 12, static_cast<int32_t>(0x0071FCB0u));
+        const bool lt = FPU_C_OLT_S(ctx->f[0], ctx->f[1]);
+        ctx->fcr31 = lt ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u);
+        if (!lt)
+        {
+            SET_GPR_VEC(ctx, 15, READ128(ADD32(GPR_U32(ctx, 22), 0x7D0u)));
+            goto label_3a4160;
+        }
+        const uint32_t obj = READ32(ADD32(GPR_U32(ctx, 22), 0xA30u));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(obj));
+        WRITE8(ADD32(obj, 0x30u), 0u);
+    }
+
+label_3a415c:
+    SET_GPR_VEC(ctx, 15, READ128(ADD32(GPR_U32(ctx, 22), 0x7D0u)));
+
+label_3a4160:
+    {
+        const uint32_t s6 = GPR_U32(ctx, 22);
+        const uint8_t f1 = READ8(ADD32(s6, 0xA34u));
+        SET_GPR_ZE32(ctx, 14, f1);
+        WRITE128(ADD32(s6, 0x30u), GPR_VEC(ctx, 15));
+        if (f1 != 0u)
+        {
+            goto label_3a4298;
+        }
+        const uint32_t b1 = READ32(ADD32(s6, 0x60u));
+        std::memcpy(&ctx->f[1], &b1, sizeof(b1));
+        ctx->f[0] = 0.0f;
+        const bool lt = FPU_C_OLT_S(ctx->f[0], ctx->f[1]);
+        ctx->fcr31 = lt ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u);
+        SET_GPR_S32(ctx, 16, static_cast<int32_t>(ADD32(s6, 0xB50u)));
+        if (!lt)
+        {
+            goto label_3a429c;
+        }
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+        SET_GPR_U32(ctx, 31, 0x3A4188u);
+        ctx->pc = 0x3A6B24u;
+        if (!PS2_DCALL(0x3A6B24u, 0x3A4188u))
+        {
+            return;
+        }
+    }
+
+label_3a4188:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t s6 = GPR_U32(ctx, 22);
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0xC0u)));
+        if (GPR_U64(ctx, 2) == 0ull)
+        {
+            goto label_3a4298;
+        }
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(s6, 0xB20u)));
+        ctx->vu0_vf[2] = _mm_castsi128_ps(READ128(ADD32(s6, 0x950u)));
+        SET_GPR_S32(ctx, 17, static_cast<int32_t>(ADD32(s6, 0xB50u)));
+        ctx->vu0_vf[4] = _mm_castsi128_ps(READ128(ADD32(s6, 0x960u)));
+        ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[2], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(0, 0, 0, 0)));
+        ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[4], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(1, 1, 1, 1))));
+        ctx->vu0_vf[3] = _mm_castsi128_ps(READ128(ADD32(s6, 0x970u)));
+        ctx->vu0_vf[2] = _mm_castsi128_ps(READ128(ADD32(s6, 0x980u)));
+        ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[3], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(2, 2, 2, 2))));
+        ctx->vu0_vf[1] = PS2_VADD(ctx->vu0_acc, PS2_VMUL(ctx->vu0_vf[2], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(3, 3, 3, 3))));
+        SET_GPR_VEC(ctx, 16, _mm_castps_si128(ctx->vu0_vf[1]));
+        SET_GPR_U32(ctx, 31, 0x3A41C0u);
+        ctx->pc = 0x441F40u;
+        if (!PS2_DCALL(0x441F40u, 0x3A41C0u))
+        {
+            return;
+        }
+    }
+
+label_3a41c0:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        ctx->vu0_vf[2] = _mm_castsi128_ps(GPR_VEC(ctx, 16));
+        SET_GPR_VEC(ctx, 14, _mm_setzero_si128());
+        const __m128i t4v = _mm_castps_si128(ctx->vu0_vf[0]);
+        SET_GPR_VEC(ctx, 12, t4v);
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 17));
+        {
+            const __m128i mask = _mm_set_epi32(0, -1, -1, -1);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[2], _mm_castsi128_ps(mask));
+        }
+        __m128i t7v = _mm_shuffle_epi32(t4v, _MM_SHUFFLE(3, 0, 2, 1));
+        t7v = _mm_unpackhi_epi64(_mm_setzero_si128(), t7v);
+        t7v = _mm_unpackhi_epi64(t7v, _mm_setzero_si128());
+        {
+            const __m128i mask = _mm_set_epi32(-1, 0, 0, 0);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], ctx->vu0_vf[0], _mm_castsi128_ps(mask));
+        }
+        WRITE128(ADD32(sp, 0x110u), t7v);
+        const __m128i t6rot = _mm_shuffle_epi32(t7v, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 14, t6rot);
+        WRITE128(ADD32(sp, 0xD0u), t7v);
+        const __m128i t5rot = _mm_shuffle_epi32(t6rot, _MM_SHUFFLE(3, 0, 2, 1));
+        SET_GPR_VEC(ctx, 13, t5rot);
+        WRITE128(ADD32(sp, 0x100u), t6rot);
+        WRITE128(ADD32(sp, 0x120u), t5rot);
+        WRITE128(ADD32(sp, 0x130u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0xF0u), _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0xC0u), t6rot);
+        WRITE128(ADD32(sp, 0xE0u), t5rot);
+        SET_GPR_U32(ctx, 31, 0x3A4210u);
+        ctx->pc = 0x1651E4u;
+        if (!PS2_DCALL(0x1651E4u, 0x3A4210u))
+        {
+            return;
+        }
+    }
+
+label_3a4210:
+    SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0xB30u)));
+    if (GPR_U64(ctx, 2) == 0ull)
+    {
+        goto label_3a4278;
+    }
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 17));
+    SET_GPR_U32(ctx, 31, 0x3A4220u);
+    ctx->pc = 0x1652A8u;
+    if (!PS2_DCALL(0x1652A8u, 0x3A4220u))
+    {
+        return;
+    }
+
+label_3a4220:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 30));
+    SET_GPR_U32(ctx, 31, 0x3A422Cu);
+    ctx->pc = 0x15DF6Cu;
+    if (!PS2_DCALL(0x15DF6Cu, 0x3A422Cu))
+    {
+        return;
+    }
+
+label_3a422c:
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0xA74u)));
+    SET_GPR_U32(ctx, 31, 0x3A4234u);
+    ctx->pc = 0x3A07C8u;
+    if (!PS2_DCALL(0x3A07C8u, 0x3A4234u))
+    {
+        return;
+    }
+
+label_3a4234:
+    {
+        // Epilogue (@0x3A4234)
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t s6 = GPR_U32(ctx, 22);
+        const __m128i q = READ128(ADD32(s6, 0x7D0u));
+        SET_GPR_VEC(ctx, 15, q);
+        WRITE128(ADD32(s6, 0x30u), q);
+        SET_GPR_VEC(ctx, 16, READ128(ADD32(sp, 0x1D0u)));
+        SET_GPR_VEC(ctx, 17, READ128(ADD32(sp, 0x1E0u)));
+        SET_GPR_VEC(ctx, 18, READ128(ADD32(sp, 0x1F0u)));
+        SET_GPR_U64(ctx, 19, READ64(ADD32(sp, 0x220u)));
+        SET_GPR_VEC(ctx, 20, READ128(ADD32(sp, 0x200u)));
+        SET_GPR_VEC(ctx, 21, READ128(ADD32(sp, 0x210u)));
+        SET_GPR_U64(ctx, 22, READ64(ADD32(sp, 0x228u)));
+        SET_GPR_U64(ctx, 23, READ64(ADD32(sp, 0x230u)));
+        SET_GPR_U64(ctx, 30, READ64(ADD32(sp, 0x238u)));
+        const uint64_t ra = READ64(ADD32(sp, 0x240u));
+        SET_GPR_U64(ctx, 31, ra);
+        {
+            const uint32_t b22 = READ32(ADD32(sp, 0x250u));
+            const uint32_t b21 = READ32(ADD32(sp, 0x24Cu));
+            const uint32_t b20 = READ32(ADD32(sp, 0x248u));
+            std::memcpy(&ctx->f[22], &b22, sizeof(b22));
+            std::memcpy(&ctx->f[21], &b21, sizeof(b21));
+            std::memcpy(&ctx->f[20], &b20, sizeof(b20));
+        }
+        SET_GPR_S32(ctx, 29, static_cast<int32_t>(ADD32(sp, 0x260u)));
+        ctx->pc = static_cast<uint32_t>(ra);
+        return;
+    }
+
+label_3a4278:
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(GPR_U32(ctx, 29), 0x1A0u)));
+    SET_GPR_U64(ctx, 6, GPR_U64(ctx, 30));
+    SET_GPR_U32(ctx, 31, 0x3A4284u);
+    ctx->pc = 0x16563Cu;
+    if (!PS2_DCALL(0x16563Cu, 0x3A4284u))
+    {
+        return;
+    }
+
+label_3a4284:
+    {
+        const uint32_t val = READ32(ADD32(GPR_U32(ctx, 29), 0x1A0u));
+        SET_GPR_S32(ctx, 13, static_cast<int32_t>(val));
+        writeUnaligned32(ADD32(GPR_U32(ctx, 22), 0xB50u), val);
+        ctx->pc = 0x3A422Cu;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        goto label_3a422c;
+    }
+
+label_3a4298:
+    SET_GPR_S32(ctx, 16, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0xB50u)));
+
+label_3a429c:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 16));
+    SET_GPR_U32(ctx, 31, 0x3A42A4u);
+    ctx->pc = 0x1651E4u;
+    if (!PS2_DCALL(0x1651E4u, 0x3A42A4u))
+    {
+        return;
+    }
+
+label_3a42a4:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 16));
+    if (GPR_U64(ctx, 2) == 0ull)
+    {
+        ctx->pc = 0x3A422Cu;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        goto label_3a422c;
+    }
+    SET_GPR_S32(ctx, 5, 3);
+    SET_GPR_U32(ctx, 31, 0x3A42B4u);
+    ctx->pc = 0x16525Cu;
+    if (!PS2_DCALL(0x16525Cu, 0x3A42B4u))
+    {
+        return;
+    }
+
+label_3a42b4:
+    ctx->pc = 0x3A422Cu;
+    if (runtime->eeCheckpointDue())
+    {
+        return;
+    }
+    goto label_3a422c;
+
+label_3a42bc:
+    {
+        const uint32_t b1 = READ32(ADD32(GPR_U32(ctx, 22), 0xA64u));
+        const uint32_t b0 = READ32(0x71FCB0u);
+        std::memcpy(&ctx->f[1], &b1, sizeof(b1));
+        std::memcpy(&ctx->f[0], &b0, sizeof(b0));
+        SET_GPR_S32(ctx, 13, static_cast<int32_t>(0x0071FCB0u));
+        const bool lt = FPU_C_OLT_S(ctx->f[0], ctx->f[1]);
+        ctx->fcr31 = lt ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u);
+        SET_GPR_S32(ctx, 15, 1);
+        if (!lt)
+        {
+            ctx->pc = 0x3A415Cu;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a415c;
+        }
+        const uint32_t obj = READ32(ADD32(GPR_U32(ctx, 22), 0xA30u));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(obj));
+        WRITE8(ADD32(obj, 0x30u), 1u);
+        ctx->pc = 0x3A415Cu;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        goto label_3a415c;
+    }
+
+label_3a42e4:
+    SET_GPR_U64(ctx, 5, 0ull);
+    SET_GPR_U32(ctx, 31, 0x3A42ECu);
+    ctx->pc = 0x26B3A4u;
+    if (!PS2_DCALL(0x26B3A4u, 0x3A42ECu))
+    {
+        return;
+    }
+
+label_3a42ec:
+    SET_GPR_ZE32(ctx, 15, READ8(ADD32(GPR_U32(ctx, 22), 0x5Cu)));
+    ctx->pc = 0x3A4134u;
+    if (runtime->eeCheckpointDue())
+    {
+        return;
+    }
+    goto label_3a4134;
+
+label_3a42f4:
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(GPR_U32(ctx, 29), 0x1A0u)));
+    SET_GPR_U64(ctx, 6, GPR_U64(ctx, 30));
+    SET_GPR_U32(ctx, 31, 0x3A4300u);
+    ctx->pc = 0x16563Cu;
+    if (!PS2_DCALL(0x16563Cu, 0x3A4300u))
+    {
+        return;
+    }
+
+label_3a4300:
+    {
+        const uint32_t val = READ32(ADD32(GPR_U32(ctx, 29), 0x1A0u));
+        SET_GPR_S32(ctx, 13, static_cast<int32_t>(val));
+        writeUnaligned32(ADD32(GPR_U32(ctx, 22), 0xA9Eu), val);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA38u))));
+        ctx->pc = 0x3A3F5Cu;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        goto label_3a3f5c;
+    }
+
+label_3a4318:
+    SET_GPR_S32(ctx, 16, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0xA9Eu)));
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 16));
+    SET_GPR_U32(ctx, 31, 0x3A4324u);
+    ctx->pc = 0x1651E4u;
+    if (!PS2_DCALL(0x1651E4u, 0x3A4324u))
+    {
+        return;
+    }
+
+label_3a4324:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 16));
+    if (GPR_U64(ctx, 2) == 0ull)
+    {
+        ctx->pc = 0x3A3F58u;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        goto label_3a3f58;
+    }
+    SET_GPR_S32(ctx, 5, 1);
+    SET_GPR_U32(ctx, 31, 0x3A4334u);
+    ctx->pc = 0x16525Cu;
+    if (!PS2_DCALL(0x16525Cu, 0x3A4334u))
+    {
+        return;
+    }
+
+label_3a4334:
+    SET_GPR_S32(ctx, 15, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 22), 0xA38u))));
+    ctx->pc = 0x3A3F5Cu;
+    if (runtime->eeCheckpointDue())
+    {
+        return;
+    }
+    goto label_3a3f5c;
+
+label_3a433c:
+    SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(GPR_U32(ctx, 29), 0x1A0u)));
+    SET_GPR_U64(ctx, 6, GPR_U64(ctx, 30));
+    SET_GPR_U32(ctx, 31, 0x3A4348u);
+    ctx->pc = 0x16563Cu;
+    if (!PS2_DCALL(0x16563Cu, 0x3A4348u))
+    {
+        return;
+    }
+
+label_3a4348:
+    {
+        const uint32_t val = READ32(ADD32(GPR_U32(ctx, 29), 0x1A0u));
+        SET_GPR_S32(ctx, 13, static_cast<int32_t>(val));
+        writeUnaligned32(ADD32(GPR_U32(ctx, 22), 0xA9Au), val);
+        SET_GPR_ZE32(ctx, 15, READ8(ADD32(GPR_U32(ctx, 22), 0xA99u)));
+        ctx->pc = 0x3A3EACu;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        goto label_3a3eac;
+    }
+
+label_3a4360:
+    SET_GPR_S32(ctx, 16, static_cast<int32_t>(ADD32(GPR_U32(ctx, 22), 0xA9Au)));
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 16));
+    SET_GPR_U32(ctx, 31, 0x3A436Cu);
+    ctx->pc = 0x1651E4u;
+    if (!PS2_DCALL(0x1651E4u, 0x3A436Cu))
+    {
+        return;
+    }
+
+label_3a436c:
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 16));
+    if (GPR_U64(ctx, 2) == 0ull)
+    {
+        ctx->pc = 0x3A3EA8u;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        goto label_3a3ea8;
+    }
+    SET_GPR_S32(ctx, 5, 1);
+    SET_GPR_U32(ctx, 31, 0x3A437Cu);
+    ctx->pc = 0x16525Cu;
+    if (!PS2_DCALL(0x16525Cu, 0x3A437Cu))
+    {
+        return;
+    }
+
+label_3a437c:
+    SET_GPR_ZE32(ctx, 15, READ8(ADD32(GPR_U32(ctx, 22), 0xA99u)));
+    ctx->pc = 0x3A3EACu;
+    if (runtime->eeCheckpointDue())
+    {
+        return;
+    }
+    goto label_3a3eac;
+}
+
+// DECOMP-DI: sub_003A1ED4 (0x003A1ED4 - 0x003A2558, snowfesta_f convex hull / polyhedron collision impulse)
+// Queries nearby collision planes via 0x29045C, evaluates 6 transformed planes against $s3+0x9D0..0xA20,
+// clips polygon vertices (ping-pong vectors at $sp+0x70 / $sp+0x90), and applies impulse via 0x3A0670/0x3A06F8.
+void sub_003A1ED4_decomp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // DECOMP-DI
+{
+    switch (ctx->pc)
+    {
+    case 0x3A1F34u: goto label_3a1f34;
+    case 0x3A1F48u: goto label_3a1f48;
+    case 0x3A1F70u: goto label_3a1f70;
+    case 0x3A1FD0u: goto label_3a1fd0;
+    case 0x3A1FF0u: goto label_3a1ff0;
+    case 0x3A2000u: goto label_3a2000;
+    case 0x3A2018u: goto label_3a2018;
+    case 0x3A2028u: goto label_3a2028;
+    case 0x3A2040u: goto label_3a2040;
+    case 0x3A205Cu: goto label_3a205c;
+    case 0x3A2090u: goto label_3a2090;
+    case 0x3A20B8u: goto label_3a20b8;
+    case 0x3A20DCu: goto label_3a20dc;
+    case 0x3A20FCu: goto label_3a20fc;
+    case 0x3A2100u: goto label_3a2100;
+    case 0x3A2144u: goto label_3a2144;
+    case 0x3A217Cu: goto label_3a217c;
+    case 0x3A2180u: goto label_3a2180;
+    case 0x3A21ACu: goto label_3a21ac;
+    case 0x3A21C4u: goto label_3a21c4;
+    case 0x3A21D0u: goto label_3a21d0;
+    case 0x3A221Cu: goto label_3a221c;
+    case 0x3A2244u: goto label_3a2244;
+    case 0x3A22D8u: goto label_3a22d8;
+    case 0x3A22ECu: goto label_3a22ec;
+    case 0x3A2380u: goto label_3a2380;
+    case 0x3A23A4u: goto label_3a23a4;
+    case 0x3A23B4u: goto label_3a23b4;
+    case 0x3A23E4u: goto label_3a23e4;
+    case 0x3A2404u: goto label_3a2404;
+    case 0x3A241Cu: goto label_3a241c;
+    case 0x3A24A8u: goto label_3a24a8;
+    case 0x3A24F8u: goto label_3a24f8;
+    case 0x3A2500u: goto label_3a2500;
+    case 0x3A2550u: goto label_3a2550;
+    default: break;
+    }
+
+    {
+        // Prologue + query collision candidates via 0x29045C (@0x3A1ED4)
+        const uint32_t sp = ADD32(GPR_U32(ctx, 29), static_cast<uint32_t>(-0x1B0));
+        SET_GPR_S32(ctx, 29, static_cast<int32_t>(sp));
+        SET_GPR_S32(ctx, 12, static_cast<int32_t>(0x0071FB20u));
+        WRITE64(ADD32(sp, 0x168u), GPR_U64(ctx, 19));
+        WRITE64(ADD32(sp, 0x150u), GPR_U64(ctx, 16));
+        SET_GPR_S32(ctx, 7, 6);
+        WRITE64(ADD32(sp, 0x158u), GPR_U64(ctx, 17));
+        SET_GPR_U64(ctx, 19, GPR_U64(ctx, 4)); // $s3 = $a0
+        WRITE64(ADD32(sp, 0x160u), GPR_U64(ctx, 18));
+        SET_GPR_U64(ctx, 6, GPR_U64(ctx, 4));
+        WRITE64(ADD32(sp, 0x170u), GPR_U64(ctx, 20));
+        SET_GPR_U64(ctx, 8, 0ull);
+        WRITE64(ADD32(sp, 0x178u), GPR_U64(ctx, 21));
+        WRITE64(ADD32(sp, 0x180u), GPR_U64(ctx, 22));
+        WRITE64(ADD32(sp, 0x188u), GPR_U64(ctx, 23));
+        WRITE64(ADD32(sp, 0x190u), GPR_U64(ctx, 30));
+        WRITE64(ADD32(sp, 0x198u), GPR_U64(ctx, 31));
+        {
+            uint32_t b22 = 0, b21 = 0, b20 = 0;
+            std::memcpy(&b22, &ctx->f[22], sizeof(b22));
+            std::memcpy(&b21, &ctx->f[21], sizeof(b21));
+            std::memcpy(&b20, &ctx->f[20], sizeof(b20));
+            WRITE32(ADD32(sp, 0x1A8u), b22);
+            WRITE32(ADD32(sp, 0x1A4u), b21);
+            WRITE32(ADD32(sp, 0x1A0u), b20);
+        }
+        SET_GPR_VEC(ctx, 5, READ128(ADD32(GPR_U32(ctx, 4), 0x7D0u)));
+        {
+            const uint32_t bits = READ32(0x71FB20u);
+            std::memcpy(&ctx->f[12], &bits, sizeof(bits));
+        }
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 29));
+        SET_GPR_U32(ctx, 31, 0x3A1F34u);
+        ctx->pc = 0x29045Cu;
+        if (!PS2_DCALL(0x29045Cu, 0x3A1F34u))
+        {
+            return;
+        }
+    }
+
+label_3a1f34:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const int32_t count = static_cast<int32_t>(READ32(ADD32(sp, 4u)));
+        SET_GPR_S32(ctx, 13, count);
+        WRITE32(ADD32(sp, 0x108u), static_cast<uint32_t>(count));
+        SET_GPR_S32(ctx, 14, 4);
+        SET_GPR_S32(ctx, 15, -1);
+    }
+
+label_3a1f48:
+    {
+        const uint32_t t6 = ADD32(GPR_U32(ctx, 14), 0xFFFFFFFFu);
+        const bool loop = (GPR_U64(ctx, 14) != GPR_U64(ctx, 15));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(t6));
+        if (loop)
+        {
+            ctx->pc = 0x3A1F48u;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a1f48;
+        }
+        const uint32_t s3 = GPR_U32(ctx, 19);
+        ctx->vu0_vf[6] = _mm_castsi128_ps(READ128(ADD32(s3, 0x950u)));
+        SET_GPR_U64(ctx, 13, 0ull);
+        ctx->vu0_vf[5] = _mm_castsi128_ps(READ128(ADD32(s3, 0x960u)));
+    }
+
+label_3a1f70:
+    {
+        // Transform 6 local planes ($s3+0x9D0..0xA20) into world space at $sp+0x10..0x60 (@0x3A1F70)
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t s3 = GPR_U32(ctx, 19);
+        const uint32_t off = SLL32(GPR_U32(ctx, 13), 4);
+        ctx->vu0_vf[4] = _mm_castsi128_ps(READ128(ADD32(s3, 0x970u)));
+        const uint32_t src = ADD32(off, s3);
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(s3, 0x980u)));
+        ctx->vu0_vf[2] = _mm_castsi128_ps(READ128(ADD32(src, 0x9D0u)));
+        const uint32_t dst = ADD32(off, sp);
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(dst));
+        const int32_t nextIdx = static_cast<int32_t>(ADD32(GPR_U32(ctx, 13), 1u));
+        SET_GPR_S32(ctx, 13, nextIdx);
+
+        {
+            const __m128 res = PS2_VMUL(ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(0, 0, 0, 0)));
+            ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
+        }
+        const uint64_t more = (static_cast<int64_t>(nextIdx) < 6ll) ? 1ull : 0ull;
+        SET_GPR_U64(ctx, 15, more);
+        {
+            const __m128 mul = PS2_VMUL(ctx->vu0_vf[5], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(1, 1, 1, 1)));
+            const __m128 res = PS2_VADD(ctx->vu0_acc, mul);
+            ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
+        }
+        {
+            const __m128 mul = PS2_VMUL(ctx->vu0_vf[4], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(2, 2, 2, 2)));
+            const __m128 res = PS2_VADD(ctx->vu0_acc, mul);
+            ctx->vu0_vf[3] = _mm_blendv_ps(ctx->vu0_vf[3], res, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
+        }
+        ctx->vu0_vf[1] = PS2_VMUL(ctx->vu0_vf[3], ctx->vu0_vf[1]);
+        {
+            const __m128 res = PS2_VMUL(ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(0, 0, 0, 0)));
+            ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, 0, 0, 0)));
+        }
+        {
+            const __m128 mul = PS2_VMUL(ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(1, 1, 1, 1)));
+            const __m128 res = PS2_VADD(ctx->vu0_acc, mul);
+            ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, 0, 0, 0)));
+        }
+        {
+            const __m128 mul = PS2_VMUL(ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(2, 2, 2, 2)));
+            const __m128 res = PS2_VADD(ctx->vu0_acc, mul);
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], res, _mm_castsi128_ps(_mm_set_epi32(-1, 0, 0, 0)));
+        }
+        {
+            const __m128 res = PS2_VSUB(ctx->vu0_vf[2], ctx->vu0_vf[1]);
+            ctx->vu0_vf[3] = _mm_blendv_ps(ctx->vu0_vf[3], res, _mm_castsi128_ps(_mm_set_epi32(-1, 0, 0, 0)));
+        }
+        WRITE128(ADD32(dst, 0x10u), _mm_castps_si128(ctx->vu0_vf[3]));
+        if (more != 0ull)
+        {
+            ctx->pc = 0x3A1F70u;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a1f70;
+        }
+
+        WRITE32(ADD32(sp, 0x10Cu), 0u);
+        const int32_t nCand = static_cast<int32_t>(READ32(ADD32(sp, 0x108u)));
+        SET_GPR_S32(ctx, 14, nCand);
+        SET_GPR_U64(ctx, 30, 0ull);
+        if (nCand <= 0)
+        {
+            goto label_3a2230;
+        }
+        WRITE32(ADD32(sp, 0x110u), 0u);
+        WRITE32(ADD32(sp, 0x70u), 0u);
+    }
+
+label_3a1fd0:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_S32(ctx, 4, 0xA0);
+        WRITE32(ADD32(sp, 0x74u), 0u);
+        SET_GPR_S32(ctx, 22, static_cast<int32_t>(ADD32(sp, 0x70u)));
+        WRITE32(ADD32(sp, 0x78u), 0u);
+        WRITE32(ADD32(sp, 0x90u), 0u);
+        WRITE32(ADD32(sp, 0x94u), 0u);
+        WRITE32(ADD32(sp, 0x98u), 0u);
+        SET_GPR_U32(ctx, 31, 0x3A1FF0u);
+        ctx->pc = 0x101584u;
+        if (!PS2_DCALL(0x101584u, 0x3A1FF0u))
+        {
+            return;
+        }
+    }
+
+label_3a1ff0:
+    SET_GPR_U64(ctx, 16, GPR_U64(ctx, 2));
+    if (GPR_U64(ctx, 2) != 0ull)
+    {
+        goto label_3a2004;
+    }
+    SET_GPR_S32(ctx, 4, 0xA0);
+    SET_GPR_U32(ctx, 31, 0x3A2000u);
+    ctx->pc = 0x44E280u;
+    if (!PS2_DCALL(0x44E280u, 0x3A2000u))
+    {
+        return;
+    }
+
+label_3a2000:
+    SET_GPR_U64(ctx, 16, GPR_U64(ctx, 2));
+
+label_3a2004:
+    SET_GPR_U64(ctx, 7, 0ull);
+    SET_GPR_U64(ctx, 4, 0ull);
+    SET_GPR_U64(ctx, 5, 0ull);
+    SET_GPR_U64(ctx, 6, GPR_U64(ctx, 16));
+    SET_GPR_U32(ctx, 31, 0x3A2018u);
+    ctx->pc = 0x4FE6DCu;
+    if (!PS2_DCALL(0x4FE6DCu, 0x3A2018u))
+    {
+        return;
+    }
+
+label_3a2018:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(READ32(ADD32(sp, 0x70u))));
+        SET_GPR_U64(ctx, 6, 0ull);
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(READ32(ADD32(sp, 0x74u))));
+        SET_GPR_U32(ctx, 31, 0x3A2028u);
+        ctx->pc = 0x46327Cu;
+        if (!PS2_DCALL(0x46327Cu, 0x3A2028u))
+        {
+            return;
+        }
+    }
+
+label_3a2028:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t t7 = READ32(ADD32(sp, 0x70u));
+        const uint32_t a1 = READ32(ADD32(sp, 0x78u));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(t7));
+        SET_GPR_S32(ctx, 5, SRA32(static_cast<int32_t>(SUB32(a1, t7)), 4));
+        SET_GPR_U32(ctx, 31, 0x3A2040u);
+        ctx->pc = 0x4632ACu;
+        if (!PS2_DCALL(0x4632ACu, 0x3A2040u))
+        {
+            return;
+        }
+    }
+
+label_3a2040:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t s0 = GPR_U32(ctx, 16);
+        const uint32_t t7 = ADD32(s0, 0xA0u);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        WRITE32(ADD32(sp, 0x70u), s0);
+        WRITE32(ADD32(sp, 0x78u), t7);
+        WRITE32(ADD32(sp, 0x74u), s0);
+        SET_GPR_S32(ctx, 5, 10);
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0x90u)));
+        SET_GPR_U32(ctx, 31, 0x3A205Cu);
+        ctx->pc = 0x4FEA78u;
+        if (!PS2_DCALL(0x4FEA78u, 0x3A205Cu))
+        {
+            return;
+        }
+    }
+
+label_3a205c:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t base = READ32(ADD32(sp, 0x00u));
+        const uint32_t off = READ32(ADD32(sp, 0x110u));
+        const uint32_t cur = READ32(ADD32(sp, 0x74u));
+        const uint32_t end = READ32(ADD32(sp, 0x78u));
+        SET_GPR_S32(ctx, 12, static_cast<int32_t>(off));
+        const uint32_t t7 = ADD32(off, base);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(end));
+        const __m128i t6v = READ128(t7);
+        SET_GPR_VEC(ctx, 14, t6v);
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(cur));
+        WRITE128(ADD32(sp, 0xA0u), t6v);
+        if (cur == end)
+        {
+            goto label_3a2544;
+        }
+        if (cur != 0u)
+        {
+            WRITE128(cur, t6v);
+        }
+        WRITE32(ADD32(sp, 0x74u), ADD32(cur, 0x10u));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(ADD32(cur, 0x10u)));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(base));
+    }
+
+label_3a2090:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t base = GPR_U32(ctx, 14);
+        const uint32_t fp = GPR_U32(ctx, 30);
+        const uint32_t elem1 = ADD32(SLL32(ADD32(fp, 1u), 4), base);
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(sp, 0xB0u)));
+        const __m128i q = READ128(elem1);
+        SET_GPR_VEC(ctx, 15, q);
+        SET_GPR_U64(ctx, 23, 0ull);
+        SET_GPR_S32(ctx, 21, static_cast<int32_t>(ADD32(sp, 0x10u)));
+        WRITE128(ADD32(sp, 0xB0u), q);
+        SET_GPR_U32(ctx, 31, 0x3A20B8u);
+        ctx->pc = 0x462EF0u;
+        if (!PS2_DCALL(0x462EF0u, 0x3A20B8u))
+        {
+            return;
+        }
+    }
+
+label_3a20b8:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t base = READ32(ADD32(sp, 0x00u));
+        const uint32_t fp = GPR_U32(ctx, 30);
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(base));
+        const uint32_t elem2 = ADD32(SLL32(ADD32(fp, 2u), 4), base);
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(sp, 0xC0u)));
+        const __m128i q = READ128(elem2);
+        SET_GPR_VEC(ctx, 15, q);
+        WRITE128(ADD32(sp, 0xC0u), q);
+        SET_GPR_U32(ctx, 31, 0x3A20DCu);
+        ctx->pc = 0x462EF0u;
+        if (!PS2_DCALL(0x462EF0u, 0x3A20DCu))
+        {
+            return;
+        }
+    }
+
+label_3a20dc:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t base = READ32(ADD32(sp, 0x00u));
+        const uint32_t fp = GPR_U32(ctx, 30);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(base));
+        const uint32_t elem0 = ADD32(SLL32(fp, 4), base);
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(elem0));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(sp, 0xD0u)));
+        const __m128i q = READ128(elem0);
+        SET_GPR_VEC(ctx, 15, q);
+        WRITE128(ADD32(sp, 0xD0u), q);
+        SET_GPR_U32(ctx, 31, 0x3A20FCu);
+        ctx->pc = 0x462EF0u;
+        if (!PS2_DCALL(0x462EF0u, 0x3A20FCu))
+        {
+            return;
+        }
+    }
+
+label_3a20fc:
+    SET_GPR_U64(ctx, 13, 0ull);
+
+label_3a2100:
+    {
+        // Loop over polygon edges (index $t5) clipping against plane $s7 (@0x3A2100)
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t t6 = READ32(ADD32(sp, 0x70u));
+        const uint32_t t2 = READ32(ADD32(sp, 0x74u));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(t6));
+        SET_GPR_S32(ctx, 10, static_cast<int32_t>(t2));
+        const int32_t nVertsMinus1 = SRA32(static_cast<int32_t>(SUB32(t2, t6)), 4) - 1;
+        const bool hasEdge = (GPR_S64(ctx, 13) < static_cast<int64_t>(nVertsMinus1));
+        SET_GPR_U64(ctx, 15, hasEdge ? 1ull : 0ull);
+        SET_GPR_S32(ctx, 18, static_cast<int32_t>(SLL32(GPR_U32(ctx, 13), 4)));
+        if (hasEdge)
+        {
+            goto label_3a2438;
+        }
+
+        const uint32_t a1 = READ32(ADD32(sp, 0x90u));
+        const uint32_t t7 = READ32(ADD32(sp, 0x94u));
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(a1));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0x90u)));
+        if (a1 != t7)
+        {
+            goto label_3a23ac;
+        }
+
+        WRITE32(ADD32(sp, 0x100u), t6);
+        WRITE32(ADD32(sp, 0x104u), t6);
+        const uint32_t t4 = READ32(ADD32(GPR_U32(ctx, 22), 4u));
+        SET_GPR_S32(ctx, 12, static_cast<int32_t>(t4));
+        SET_GPR_S32(ctx, 11, static_cast<int32_t>(t6));
+        if (t6 == t4)
+        {
+            goto label_3a2164;
+        }
+    }
+
+label_3a2144:
+    {
+        const uint32_t t7 = ADD32(GPR_U32(ctx, 11), 0x10u);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        SET_GPR_U64(ctx, 11, GPR_U64(ctx, 15));
+        if (GPR_U64(ctx, 15) != GPR_U64(ctx, 12))
+        {
+            ctx->pc = 0x3A2144u;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a2144;
+        }
+        WRITE32(ADD32(GPR_U32(ctx, 29), 0x104u), t7);
+    }
+
+label_3a2164:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t diff = SUB32(GPR_U32(ctx, 10), GPR_U32(ctx, 14));
+        const uint32_t aligned = SLL32(static_cast<uint32_t>(SRA32(static_cast<int32_t>(diff), 4)), 4);
+        const uint32_t t7 = SUB32(GPR_U32(ctx, 12), aligned);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        WRITE32(ADD32(GPR_U32(ctx, 22), 4u), t7);
+        SET_GPR_S32(ctx, 16, 1);
+    }
+
+label_3a217c:
+    SET_GPR_S32(ctx, 14, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 29), 0x70u))));
+
+label_3a2180:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t t7 = READ32(ADD32(sp, 0x74u));
+        const int32_t nMinus1 = SRA32(static_cast<int32_t>(SUB32(t7, GPR_U32(ctx, 14))), 4) - 1;
+        const bool more = (GPR_S64(ctx, 16) < static_cast<int64_t>(nMinus1));
+        SET_GPR_U64(ctx, 15, more ? 1ull : 0ull);
+        SET_GPR_S32(ctx, 20, static_cast<int32_t>(ADD32(GPR_U32(ctx, 16), 1u)));
+        if (more)
+        {
+            goto label_3a2280;
+        }
+
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(READ32(ADD32(sp, 0x90u))));
+        SET_GPR_U64(ctx, 6, 0ull);
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(READ32(ADD32(sp, 0x94u))));
+        SET_GPR_U32(ctx, 31, 0x3A21ACu);
+        ctx->pc = 0x46327Cu;
+        if (!PS2_DCALL(0x46327Cu, 0x3A21ACu))
+        {
+            return;
+        }
+    }
+
+label_3a21ac:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t t7 = READ32(ADD32(sp, 0x90u));
+        const uint32_t a1 = READ32(ADD32(sp, 0x98u));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(t7));
+        SET_GPR_S32(ctx, 5, SRA32(static_cast<int32_t>(SUB32(a1, t7)), 4));
+        SET_GPR_U32(ctx, 31, 0x3A21C4u);
+        ctx->pc = 0x4632ACu;
+        if (!PS2_DCALL(0x4632ACu, 0x3A21C4u))
+        {
+            return;
+        }
+    }
+
+label_3a21c4:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(READ32(ADD32(sp, 0x74u))));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0x70u)));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(READ32(ADD32(sp, 0x70u))));
+    }
+
+label_3a21d0:
+    {
+        const uint32_t t7 = ADD32(GPR_U32(ctx, 15), 0x10u);
+        const bool loop = (GPR_U64(ctx, 15) != GPR_U64(ctx, 14));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        if (loop)
+        {
+            ctx->pc = 0x3A21D0u;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a21d0;
+        }
+
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t a0ptr = GPR_U32(ctx, 4);
+        const uint32_t a1 = READ32(ADD32(a0ptr, 8u));
+        const uint32_t a0 = READ32(a0ptr);
+        SET_GPR_S32(ctx, 30, static_cast<int32_t>(ADD32(GPR_U32(ctx, 30), 5u)));
+        const uint32_t iter = ADD32(READ32(ADD32(sp, 0x10Cu)), 1u);
+        const uint32_t off = ADD32(READ32(ADD32(sp, 0x110u)), 0x50u);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(iter));
+        SET_GPR_S32(ctx, 12, static_cast<int32_t>(off));
+        WRITE32(ADD32(sp, 0x10Cu), iter);
+        WRITE32(ADD32(sp, 0x110u), off);
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(a0));
+        SET_GPR_S32(ctx, 5, SRA32(static_cast<int32_t>(SUB32(a1, a0)), 4));
+        SET_GPR_U32(ctx, 31, 0x3A221Cu);
+        ctx->pc = 0x4632ACu;
+        if (!PS2_DCALL(0x4632ACu, 0x3A221Cu))
+        {
+            return;
+        }
+    }
+
+label_3a221c:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const int32_t t5 = static_cast<int32_t>(READ32(ADD32(sp, 0x10Cu)));
+        const int32_t t6 = static_cast<int32_t>(READ32(ADD32(sp, 0x108u)));
+        SET_GPR_S32(ctx, 13, t5);
+        SET_GPR_S32(ctx, 14, t6);
+        const bool more = (t5 < t6);
+        SET_GPR_U64(ctx, 15, more ? 1ull : 0ull);
+        if (more)
+        {
+            WRITE32(ADD32(sp, 0x70u), 0u);
+            ctx->pc = 0x3A1FD0u;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a1fd0;
+        }
+    }
+
+label_3a2230:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t a0 = READ32(ADD32(sp, 0x00u));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(a0));
+        if (a0 == 0u)
+        {
+            SET_GPR_U64(ctx, 16, READ64(ADD32(sp, 0x150u)));
+            goto label_3a2248;
+        }
+        SET_GPR_U32(ctx, 31, 0x3A2244u);
+        ctx->pc = 0x41A3D8u;
+        if (!PS2_DCALL(0x41A3D8u, 0x3A2244u))
+        {
+            return;
+        }
+    }
+
+label_3a2244:
+    SET_GPR_U64(ctx, 16, READ64(ADD32(GPR_U32(ctx, 29), 0x150u)));
+
+label_3a2248:
+    {
+        // Epilogue (@0x3A2248)
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_U64(ctx, 17, READ64(ADD32(sp, 0x158u)));
+        SET_GPR_U64(ctx, 18, READ64(ADD32(sp, 0x160u)));
+        SET_GPR_U64(ctx, 19, READ64(ADD32(sp, 0x168u)));
+        SET_GPR_U64(ctx, 20, READ64(ADD32(sp, 0x170u)));
+        SET_GPR_U64(ctx, 21, READ64(ADD32(sp, 0x178u)));
+        SET_GPR_U64(ctx, 22, READ64(ADD32(sp, 0x180u)));
+        SET_GPR_U64(ctx, 23, READ64(ADD32(sp, 0x188u)));
+        SET_GPR_U64(ctx, 30, READ64(ADD32(sp, 0x190u)));
+        const uint64_t ra = READ64(ADD32(sp, 0x198u));
+        SET_GPR_U64(ctx, 31, ra);
+        {
+            const uint32_t b22 = READ32(ADD32(sp, 0x1A8u));
+            const uint32_t b21 = READ32(ADD32(sp, 0x1A4u));
+            const uint32_t b20 = READ32(ADD32(sp, 0x1A0u));
+            std::memcpy(&ctx->f[22], &b22, sizeof(b22));
+            std::memcpy(&ctx->f[21], &b21, sizeof(b21));
+            std::memcpy(&ctx->f[20], &b20, sizeof(b20));
+        }
+        SET_GPR_S32(ctx, 29, static_cast<int32_t>(ADD32(sp, 0x1B0u)));
+        ctx->pc = static_cast<uint32_t>(ra);
+        return;
+    }
+
+label_3a2280:
+    {
+        // Compute triangle fan normal & contact impulse (@0x3A2280)
+        const uint32_t base = GPR_U32(ctx, 14);
+        const __m128i v0 = READ128(base);
+        SET_GPR_VEC(ctx, 5, v0);
+        const uint32_t s1 = SLL32(GPR_U32(ctx, 20), 4);
+        const uint32_t s0 = SLL32(GPR_U32(ctx, 16), 4);
+        SET_GPR_S32(ctx, 17, static_cast<int32_t>(s1));
+        SET_GPR_S32(ctx, 16, static_cast<int32_t>(s0));
+        const uint32_t t7 = ADD32(base, s1);
+        const uint32_t t6 = ADD32(base, s0);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(t6));
+
+        ctx->vu0_vf[3] = _mm_castsi128_ps(v0);
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(t7));
+        ctx->vu0_vf[2] = _mm_castsi128_ps(READ128(t6));
+        ctx->vu0_vf[1] = PS2_VSUB(ctx->vu0_vf[1], ctx->vu0_vf[3]);
+        ctx->vu0_vf[2] = PS2_VSUB(ctx->vu0_vf[2], ctx->vu0_vf[3]);
+        {
+            const __m128 fs_yzx = _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(3, 0, 2, 1));
+            const __m128 ft_zxy = _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(3, 1, 0, 2));
+            const __m128 res = PS2_VMUL(fs_yzx, ft_zxy);
+            ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
+        }
+        {
+            const __m128 fs_yzx = _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(3, 0, 2, 1));
+            const __m128 ft_zxy = _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(3, 1, 0, 2));
+            const __m128 mul = PS2_VMUL(fs_yzx, ft_zxy);
+            const __m128 res = PS2_VSUB(ctx->vu0_acc, mul);
+            ctx->vu0_vf[2] = _mm_blendv_ps(ctx->vu0_vf[2], res, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
+        }
+        ctx->vu0_vf[1] = PS2_VMUL(ctx->vu0_vf[2], ctx->vu0_vf[2]);
+        {
+            const __m128 res = PS2_VADD(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(1, 1, 1, 1)));
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], res, _mm_castsi128_ps(_mm_set_epi32(-1, 0, -1, -1)));
+        }
+        ctx->vu0_vf[1] = PS2_VADD(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(2, 2, 2, 2)));
+        ctx->vu0_q = ps2x_vu0_rsqrt(1.0f, _mm_cvtss_f32(ctx->vu0_vf[1]));
+        ctx->vu0_vf[2] = PS2_VMUL(ctx->vu0_vf[2], _mm_set1_ps(ctx->vu0_q));
+
+        SET_GPR_S32(ctx, 18, static_cast<int32_t>(ADD32(GPR_U32(ctx, 19), 0x7C0u)));
+        SET_GPR_VEC(ctx, 4, _mm_castps_si128(ctx->vu0_vf[2]));
+        WRITE128(ADD32(GPR_U32(ctx, 29), 0x130u), _mm_castps_si128(ctx->vu0_vf[2]));
+        SET_GPR_U32(ctx, 31, 0x3A22D8u);
+        ctx->pc = 0x4748ACu;
+        if (!PS2_DCALL(0x4748ACu, 0x3A22D8u))
+        {
+            return;
+        }
+    }
+
+label_3a22d8:
+    ctx->f[0] = FPU_NEG_S(ctx->f[0]);
+    ctx->vu0_vf[2] = _mm_castsi128_ps(READ128(ADD32(GPR_U32(ctx, 29), 0x130u)));
+    SET_GPR_VEC(ctx, 4, _mm_castps_si128(ctx->vu0_vf[2]));
+    ctx->f[12] = FPU_MOV_S(ctx->f[0]);
+    SET_GPR_U32(ctx, 31, 0x3A22ECu);
+    ctx->pc = 0x44C3C8u;
+    if (!PS2_DCALL(0x44C3C8u, 0x3A22ECu))
+    {
+        return;
+    }
+
+label_3a22ec:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t s3 = GPR_U32(ctx, 19);
+        ctx->vu0_vf[5] = _mm_castsi128_ps(GPR_VEC(ctx, 2));
+        SET_GPR_S32(ctx, 12, static_cast<int32_t>(0x44480000u));
+        ctx->vu0_vf[4] = _mm_castsi128_ps(READ128(ADD32(s3, 0x860u)));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 18));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(GPR_VEC(ctx, 12));
+        ctx->vu0_vf[3] = PS2_VMUL(ctx->vu0_vf[4], ctx->vu0_vf[5]);
+        ctx->f[0] = 0.0f;
+        ctx->vu0_vf[2] = PS2_VMUL(ctx->vu0_vf[5], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(0, 0, 0, 0)));
+
+        const uint32_t t6 = READ32(ADD32(sp, 0x70u));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(t6));
+        SET_GPR_S32(ctx, 16, static_cast<int32_t>(ADD32(t6, GPR_U32(ctx, 16))));
+        SET_GPR_S32(ctx, 13, static_cast<int32_t>(ADD32(t6, GPR_U32(ctx, 17))));
+        {
+            const __m128 res = PS2_VADD(ctx->vu0_vf[3], _mm_shuffle_ps(ctx->vu0_vf[3], ctx->vu0_vf[3], _MM_SHUFFLE(1, 1, 1, 1)));
+            ctx->vu0_vf[3] = _mm_blendv_ps(ctx->vu0_vf[3], res, _mm_castsi128_ps(_mm_set_epi32(-1, 0, -1, -1)));
+        }
+        SET_GPR_VEC(ctx, 5, _mm_castps_si128(ctx->vu0_vf[2]));
+        ctx->vu0_vf[3] = PS2_VADD(ctx->vu0_vf[3], _mm_shuffle_ps(ctx->vu0_vf[3], ctx->vu0_vf[3], _MM_SHUFFLE(2, 2, 2, 2)));
+        SET_GPR_VEC(ctx, 12, _mm_castps_si128(ctx->vu0_vf[3]));
+        const uint32_t dotBits = GPR_U32(ctx, 12);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(dotBits));
+        std::memcpy(&ctx->f[1], &dotBits, sizeof(dotBits));
+        const bool lt = FPU_C_OLT_S(ctx->f[1], ctx->f[0]);
+        ctx->fcr31 = lt ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u);
+        ctx->vu0_vf[1] = _mm_castsi128_ps(GPR_VEC(ctx, 15));
+        if (lt)
+        {
+            ctx->vu0_vf[1] = PS2_VMUL(ctx->vu0_vf[5], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(0, 0, 0, 0)));
+            ctx->vu0_vf[1] = PS2_VSUB(ctx->vu0_vf[4], ctx->vu0_vf[1]);
+            WRITE128(ADD32(s3, 0x860u), _mm_castps_si128(ctx->vu0_vf[1]));
+        }
+    }
+
+label_3a2348:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        ctx->vu0_vf[2] = _mm_castsi128_ps(READ128(GPR_U32(ctx, 16)));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(GPR_U32(ctx, 14)));
+        WRITE128(ADD32(sp, 0x140u), _mm_castps_si128(ctx->vu0_vf[5]));
+        SET_GPR_U64(ctx, 16, GPR_U64(ctx, 20));
+        ctx->vu0_vf[1] = PS2_VADD(ctx->vu0_vf[1], ctx->vu0_vf[2]);
+        ctx->vu0_vf[2] = _mm_castsi128_ps(READ128(GPR_U32(ctx, 13)));
+        ctx->vu0_vf[1] = PS2_VADD(ctx->vu0_vf[1], ctx->vu0_vf[2]);
+        SET_GPR_S32(ctx, 13, static_cast<int32_t>(0x3EAAAAAAu));
+        ctx->vu0_vf[2] = _mm_castsi128_ps(GPR_VEC(ctx, 13));
+        ctx->vu0_vf[1] = PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(0, 0, 0, 0)));
+        SET_GPR_VEC(ctx, 6, _mm_castps_si128(ctx->vu0_vf[1]));
+        WRITE128(ADD32(sp, 0x120u), _mm_castps_si128(ctx->vu0_vf[1]));
+        SET_GPR_U32(ctx, 31, 0x3A2380u);
+        ctx->pc = 0x3A0670u;
+        if (!PS2_DCALL(0x3A0670u, 0x3A2380u))
+        {
+            return;
+        }
+    }
+
+label_3a2380:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(ADD32(sp, 0x120u)));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(0x43480000u));
+        ctx->vu0_vf[5] = _mm_castsi128_ps(READ128(ADD32(sp, 0x140u)));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 18));
+        SET_GPR_VEC(ctx, 6, _mm_castps_si128(ctx->vu0_vf[1]));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(GPR_VEC(ctx, 14));
+        ctx->vu0_vf[1] = PS2_VMUL(ctx->vu0_vf[5], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(0, 0, 0, 0)));
+        SET_GPR_VEC(ctx, 5, _mm_castps_si128(ctx->vu0_vf[1]));
+        SET_GPR_U32(ctx, 31, 0x3A23A4u);
+        ctx->pc = 0x3A06F8u;
+        if (!PS2_DCALL(0x3A06F8u, 0x3A23A4u))
+        {
+            return;
+        }
+    }
+
+label_3a23a4:
+    SET_GPR_S32(ctx, 14, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 29), 0x70u))));
+    ctx->pc = 0x3A2180u;
+    if (runtime->eeCheckpointDue())
+    {
+        return;
+    }
+    goto label_3a2180;
+
+label_3a23ac:
+    SET_GPR_S32(ctx, 23, static_cast<int32_t>(ADD32(GPR_U32(ctx, 23), 1u)));
+    SET_GPR_U32(ctx, 31, 0x3A23B4u);
+    ctx->pc = 0x462EF0u;
+    if (!PS2_DCALL(0x462EF0u, 0x3A23B4u))
+    {
+        return;
+    }
+
+label_3a23b4:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        SET_GPR_S32(ctx, 21, static_cast<int32_t>(ADD32(GPR_U32(ctx, 21), 0x10u)));
+        const uint32_t t6 = READ32(ADD32(sp, 0x70u));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0x78u)));
+        const uint32_t t7 = READ32(ADD32(sp, 0x90u));
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(sp, 0x98u)));
+        const uint32_t t5 = READ32(ADD32(sp, 0x74u));
+        WRITE32(ADD32(sp, 0x70u), t7);
+        WRITE32(ADD32(sp, 0x90u), t6);
+        const uint32_t t7b = READ32(ADD32(sp, 0x94u));
+        WRITE32(ADD32(sp, 0x94u), t5);
+        WRITE32(ADD32(sp, 0x74u), t7b);
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(t6));
+        SET_GPR_S32(ctx, 13, static_cast<int32_t>(t5));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7b));
+        SET_GPR_U32(ctx, 31, 0x3A23E4u);
+        ctx->pc = 0x619648u;
+        if (!PS2_DCALL(0x619648u, 0x3A23E4u))
+        {
+            return;
+        }
+    }
+
+label_3a23e4:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t s0 = READ32(ADD32(sp, 0x94u));
+        const uint32_t s1 = READ32(ADD32(sp, 0x90u));
+        SET_GPR_U64(ctx, 7, 0ull);
+        SET_GPR_S32(ctx, 17, static_cast<int32_t>(s1));
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(s0));
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(s0));
+        SET_GPR_S32(ctx, 6, static_cast<int32_t>(s1));
+        SET_GPR_S32(ctx, 16, static_cast<int32_t>(SUB32(s0, s1)));
+        SET_GPR_U32(ctx, 31, 0x3A2404u);
+        ctx->pc = 0x462238u;
+        if (!PS2_DCALL(0x462238u, 0x3A2404u))
+        {
+            return;
+        }
+    }
+
+label_3a2404:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const int32_t s0sra = SRA32(GPR_S32(ctx, 16), 4);
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(READ32(ADD32(sp, 0x94u))));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2));
+        SET_GPR_U64(ctx, 6, 0ull);
+        SET_GPR_S32(ctx, 16, static_cast<int32_t>(SLL32(static_cast<uint32_t>(s0sra), 4)));
+        SET_GPR_U32(ctx, 31, 0x3A241Cu);
+        ctx->pc = 0x619614u;
+        if (!PS2_DCALL(0x619614u, 0x3A241Cu))
+        {
+            return;
+        }
+    }
+
+label_3a241c:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t t7 = SUB32(READ32(ADD32(sp, 0x94u)), GPR_U32(ctx, 16));
+        const bool more = (GPR_S64(ctx, 23) < 6ll);
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        SET_GPR_U64(ctx, 14, more ? 1ull : 0ull);
+        WRITE32(ADD32(sp, 0x94u), t7);
+        if (more)
+        {
+            ctx->pc = 0x3A20FCu;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a20fc;
+        }
+        SET_GPR_S32(ctx, 16, 1);
+        ctx->pc = 0x3A217Cu;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        goto label_3a217c;
+    }
+
+label_3a2438:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const uint32_t t6Base = GPR_U32(ctx, 14);
+        ctx->vu0_vf[3] = _mm_castsi128_ps(READ128(GPR_U32(ctx, 21)));
+        const uint32_t t7 = ADD32(t6Base, GPR_U32(ctx, 18));
+        ctx->f[22] = 0.0f;
+        ctx->vu0_vf[4] = _mm_castsi128_ps(READ128(t7));
+        const uint32_t s4 = ADD32(GPR_U32(ctx, 13), 1u);
+        const uint32_t s1 = SLL32(s4, 4);
+        SET_GPR_S32(ctx, 20, static_cast<int32_t>(s4));
+        SET_GPR_S32(ctx, 17, static_cast<int32_t>(s1));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(t7));
+        ctx->vu0_vf[1] = PS2_VMUL(ctx->vu0_vf[3], ctx->vu0_vf[4]);
+        const uint32_t t6 = ADD32(t6Base, s1);
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(t6));
+        ctx->vu0_vf[5] = _mm_castsi128_ps(READ128(t6));
+        ctx->vu0_vf[2] = PS2_VMUL(ctx->vu0_vf[3], ctx->vu0_vf[5]);
+        {
+            const __m128 r1 = PS2_VADD(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(1, 1, 1, 1)));
+            ctx->vu0_vf[1] = _mm_blendv_ps(ctx->vu0_vf[1], r1, _mm_castsi128_ps(_mm_set_epi32(-1, 0, -1, -1)));
+            const __m128 r2 = PS2_VADD(ctx->vu0_vf[2], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(1, 1, 1, 1)));
+            ctx->vu0_vf[2] = _mm_blendv_ps(ctx->vu0_vf[2], r2, _mm_castsi128_ps(_mm_set_epi32(-1, 0, -1, -1)));
+        }
+        ctx->vu0_vf[1] = PS2_VADD(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[1], ctx->vu0_vf[1], _MM_SHUFFLE(2, 2, 2, 2)));
+        ctx->vu0_vf[2] = PS2_VADD(ctx->vu0_vf[2], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(2, 2, 2, 2)));
+        ctx->vu0_vf[1] = PS2_VADD(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[3], ctx->vu0_vf[3], _MM_SHUFFLE(3, 3, 3, 3)));
+        ctx->vu0_vf[2] = PS2_VADD(ctx->vu0_vf[2], _mm_shuffle_ps(ctx->vu0_vf[3], ctx->vu0_vf[3], _MM_SHUFFLE(3, 3, 3, 3)));
+
+        const uint32_t b1 = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_castps_si128(ctx->vu0_vf[1])));
+        const uint32_t b2 = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_castps_si128(ctx->vu0_vf[2])));
+        SET_GPR_S32(ctx, 13, static_cast<int32_t>(b1));
+        std::memcpy(&ctx->f[21], &b1, sizeof(b1));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(b2));
+        std::memcpy(&ctx->f[20], &b2, sizeof(b2));
+        const bool lt = FPU_C_OLT_S(ctx->f[21], ctx->f[22]);
+        ctx->fcr31 = lt ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u);
+        if (!lt)
+        {
+            goto label_3a2508;
+        }
+        SET_GPR_S32(ctx, 16, static_cast<int32_t>(ADD32(sp, 0x90u)));
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 16));
+        SET_GPR_U32(ctx, 31, 0x3A24A8u);
+        ctx->pc = 0x462EF0u;
+        if (!PS2_DCALL(0x462EF0u, 0x3A24A8u))
+        {
+            return;
+        }
+    }
+
+label_3a24a8:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        ctx->f[1] = FPU_NEG_S(ctx->f[21]);
+        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 16));
+        const bool lt = FPU_C_OLT_S(ctx->f[22], ctx->f[20]);
+        ctx->fcr31 = lt ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u);
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(sp, 0xE0u)));
+        if (!lt)
+        {
+            goto label_3a2500;
+        }
+        ctx->f[0] = FPU_SUB_S(ctx->f[20], ctx->f[21]);
+        const uint32_t base = READ32(ADD32(sp, 0x70u));
+        const uint32_t t6 = ADD32(base, GPR_U32(ctx, 17));
+        const uint32_t t7 = ADD32(base, GPR_U32(ctx, 18));
+        SET_GPR_S32(ctx, 14, static_cast<int32_t>(t6));
+        SET_GPR_S32(ctx, 15, static_cast<int32_t>(t7));
+        ctx->vu0_vf[1] = _mm_castsi128_ps(READ128(t6));
+        if (ctx->f[0] == 0.0f)
+        {
+            ctx->fcr31 |= 0x100000u;
+        }
+        ctx->f[2] = FPU_DIV_S(ctx->f[1], ctx->f[0]);
+        ctx->vu0_vf[2] = _mm_castsi128_ps(READ128(t7));
+        ctx->vu0_vf[1] = PS2_VSUB(ctx->vu0_vf[1], ctx->vu0_vf[2]);
+        {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &ctx->f[2], sizeof(bits));
+            SET_GPR_U32(ctx, 12, bits);
+        }
+        ctx->vu0_vf[3] = _mm_castsi128_ps(GPR_VEC(ctx, 12));
+        ctx->vu0_vf[1] = PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[3], ctx->vu0_vf[3], _MM_SHUFFLE(0, 0, 0, 0)));
+        ctx->vu0_vf[2] = PS2_VADD(ctx->vu0_vf[2], ctx->vu0_vf[1]);
+        WRITE128(ADD32(sp, 0xE0u), _mm_castps_si128(ctx->vu0_vf[2]));
+    }
+
+label_3a24f8:
+    SET_GPR_U32(ctx, 31, 0x3A2500u);
+    ctx->pc = 0x462EF0u;
+    if (!PS2_DCALL(0x462EF0u, 0x3A2500u))
+    {
+        return;
+    }
+
+label_3a2500:
+    SET_GPR_U64(ctx, 13, GPR_U64(ctx, 20));
+    ctx->pc = 0x3A2100u;
+    if (runtime->eeCheckpointDue())
+    {
+        return;
+    }
+    goto label_3a2100;
+
+label_3a2508:
+    {
+        const uint32_t sp = GPR_U32(ctx, 29);
+        const bool lt = FPU_C_OLT_S(ctx->f[20], ctx->f[22]);
+        ctx->fcr31 = lt ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u);
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(sp, 0x90u)));
+        if (!lt)
+        {
+            ctx->pc = 0x3A2500u;
+            if (runtime->eeCheckpointDue())
+            {
+                return;
+            }
+            goto label_3a2500;
+        }
+        ctx->f[0] = FPU_SUB_S(ctx->f[21], ctx->f[20]);
+        ctx->vu0_vf[1] = PS2_VSUB(ctx->vu0_vf[5], ctx->vu0_vf[4]);
+        SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(sp, 0xF0u)));
+        if (ctx->f[0] == 0.0f)
+        {
+            ctx->fcr31 |= 0x100000u;
+        }
+        ctx->f[1] = FPU_DIV_S(ctx->f[21], ctx->f[0]);
+        {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &ctx->f[1], sizeof(bits));
+            SET_GPR_U32(ctx, 12, bits);
+        }
+        ctx->vu0_vf[2] = _mm_castsi128_ps(GPR_VEC(ctx, 12));
+        ctx->vu0_vf[1] = PS2_VMUL(ctx->vu0_vf[1], _mm_shuffle_ps(ctx->vu0_vf[2], ctx->vu0_vf[2], _MM_SHUFFLE(0, 0, 0, 0)));
+        ctx->vu0_vf[1] = PS2_VADD(ctx->vu0_vf[4], ctx->vu0_vf[1]);
+        WRITE128(ADD32(sp, 0xF0u), _mm_castps_si128(ctx->vu0_vf[1]));
+        ctx->pc = 0x3A24F8u;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        goto label_3a24f8;
+    }
+
+label_3a2544:
+    SET_GPR_S32(ctx, 6, static_cast<int32_t>(ADD32(GPR_U32(ctx, 29), 0xA0u)));
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 22));
+    SET_GPR_U32(ctx, 31, 0x3A2550u);
+    ctx->pc = 0x4630C8u;
+    if (!PS2_DCALL(0x4630C8u, 0x3A2550u))
+    {
+        return;
+    }
+
+label_3a2550:
+    SET_GPR_S32(ctx, 14, static_cast<int32_t>(READ32(ADD32(GPR_U32(ctx, 29), 0x00u))));
+    ctx->pc = 0x3A2090u;
+    if (runtime->eeCheckpointDue())
+    {
+        return;
+    }
+    goto label_3a2090;
+}
+
 struct DecompEntry // DECOMP-BN
 {
     uint32_t addr;
@@ -39542,6 +42499,9 @@ DecompEntry g_entries[] = { // DECOMP-BN, DECOMP-BO, DECOMP-BP
     {0x003A5E1Cu, "sub_003A5E1C", &sub_003A5E1C_decomp, nullptr}, // DECOMP-DH
     {0x003B99B8u, "sub_003B99B8", &sub_003B99B8_decomp, nullptr}, // DECOMP-DH
     {0x003A4384u, "sub_003A4384", &sub_003A4384_decomp, nullptr}, // DECOMP-DH
+    {0x003A07C8u, "sub_003A07C8", &sub_003A07C8_decomp, nullptr}, // DECOMP-DI
+    {0x003A3BA8u, "sub_003A3BA8", &sub_003A3BA8_decomp, nullptr}, // DECOMP-DI
+    {0x003A1ED4u, "sub_003A1ED4", &sub_003A1ED4_decomp, nullptr}, // DECOMP-DI
 };
 
 bool g_eedcEnabled = false;   // DECOMP-BO
@@ -40798,7 +43758,8 @@ void ps2xEeGfxDecompInstall(PS2Runtime &rt) // DECOMP-BM, DECOMP-BO
                            e.addr == 0x003C36C8u || e.addr == 0x003C3910u || e.addr == 0x003A5534u ||
                            e.addr == 0x003A55F0u || e.addr == 0x003A5C60u || e.addr == 0x003A1AECu ||
                            e.addr == 0x003A19C4u || e.addr == 0x003A4604u || e.addr == 0x003A5E1Cu ||
-                           e.addr == 0x003B99B8u || e.addr == 0x003A4384u); // DECOMP-DH
+                           e.addr == 0x003B99B8u || e.addr == 0x003A4384u || // DECOMP-DH
+                           e.addr == 0x003A07C8u || e.addr == 0x003A3BA8u || e.addr == 0x003A1ED4u); // DECOMP-DI
             if (e.resumable)
             {
                 ps2xSafeLog("[eedc] resumable %s\n", e.name); // DECOMP-BV2
