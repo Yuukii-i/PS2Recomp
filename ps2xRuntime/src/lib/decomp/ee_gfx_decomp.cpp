@@ -47337,6 +47337,7 @@ struct DecompEntry // DECOMP-BN
 };
 
 static bool g_exhaustiveMode = false; // DECOMP-BZ: PS2X_EEDC_ONLY set
+static std::vector<std::pair<uint32_t, uint32_t>> g_ignoreRanges; // DECOMP-DO: PS2X_EEDC_IGNORE_RAM (addr,len)
 
 DecompEntry g_entries[] = { // DECOMP-BN, DECOMP-BO, DECOMP-BP
     {0x003BA7D8u, "sub_003BA7D8", &sub_003BA7D8_decomp, nullptr},
@@ -48828,6 +48829,10 @@ static void decompThunkImpl(size_t Index, uint8_t *rdram, R5900Context *ctx, PS2
 
     ++entry.checked;
 
+    // DECOMP-DO: ignore ranges: overwrite the ORIGINAL-run copy (ramA, a temp buffer) with the decomp's live bytes; live RAM untouched
+    for (const auto &ir : g_ignoreRanges)
+        std::memcpy(bufs.ramA.get() + ir.first, rdram + ir.first, ir.second);
+
     bool anyDiff = false; // DECOMP-BN
     if (compareContexts(entry, callIdx, ctxA, *ctx))
     {
@@ -48943,6 +48948,36 @@ void ps2xEeGfxDecompInstall(PS2Runtime &rt) // DECOMP-BM, DECOMP-BO
 
     if (g_eedcEnabled)
     {
+        if (const char *igEnv = std::getenv("PS2X_EEDC_IGNORE_RAM")) // DECOMP-DO
+        {
+            const char *p = igEnv;
+            while (*p && g_ignoreRanges.size() < 16)
+            {
+                char *end = nullptr;
+                const unsigned long a = std::strtoul(p, &end, 16);
+                if (end == p)
+                    break;
+                unsigned long l = 4;
+                p = end;
+                if (*p == ':')
+                {
+                    l = std::strtoul(p + 1, &end, 10);
+                    p = end;
+                }
+                if (l > 0 && a < PS2_RAM_SIZE)
+                {
+                    if (a + l > PS2_RAM_SIZE)
+                        l = PS2_RAM_SIZE - a;
+                    g_ignoreRanges.push_back({static_cast<uint32_t>(a), static_cast<uint32_t>(l)});
+                }
+                while (*p && *p != ',')
+                    ++p;
+                if (*p == ',')
+                    ++p;
+            }
+        }
+        ps2xSafeLog("[eedc] ignore ram ranges: %zu\n", g_ignoreRanges.size()); // DECOMP-DO
+
         const char *checkEnv = std::getenv("PS2X_EEDC_CHECK");
         if (checkEnv && *checkEnv)
         {
