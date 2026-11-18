@@ -86,6 +86,11 @@ namespace {
 #include <cmath>
 extern "C" uint32_t ps2_getDuDecodesSinceLast();
 extern "C" void ps2_onDuPresent();
+#ifdef _WIN32
+// FEAT-BGWIN: manual decl, windows.h clashes with raylib names
+extern "C" __declspec(dllimport) int __stdcall SetWindowPos(void *hWnd, void *hWndInsertAfter, int X, int Y, int cx, int cy, unsigned int uFlags);
+static inline int ps2x_bgSetWindowPos(void *h, void *after, int x, int y, int cx, int cy, unsigned int f) { return SetWindowPos(h, after, x, y, cx, cy, f); } // FEAT-BGWIN
+#endif
 
 
 static std::mutex s_logMutex;
@@ -1720,8 +1725,27 @@ bool PS2Runtime::initialize(const char *title)
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
-        SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+        const char *bgWinEnv = std::getenv("PS2X_WINDOW_BACKGROUND"); // FEAT-BGWIN
+        const bool bgWin = bgWinEnv && bgWinEnv[0] == '1';            // FEAT-BGWIN
+        if (bgWin)                                                    // FEAT-BGWIN
+        {
+            std::cerr << "[win] background window mode" << std::endl; // FEAT-BGWIN
+            SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_UNFOCUSED); // FEAT-BGWIN
+        }
+        else
+        {
+            SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+        }
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+#ifdef _WIN32
+        if (bgWin) // FEAT-BGWIN
+        {
+            void *const kBgHwndBottom = (void *)(intptr_t)1;
+            constexpr unsigned int kBgSwpNoSize = 0x0001u, kBgSwpNoMove = 0x0002u, kBgSwpNoActivate = 0x0010u;
+            ps2x_bgSetWindowPos(GetWindowHandle(), kBgHwndBottom, 0, 0, 0, 0,
+                                kBgSwpNoMove | kBgSwpNoSize | kBgSwpNoActivate); // FEAT-BGWIN
+        }
+#endif
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         ps2x::audio::startSpu2Output(); // PERF-AU2
