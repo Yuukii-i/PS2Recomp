@@ -73,6 +73,8 @@ struct RdGpuState
     uint64_t totalSkippedDraws = 0;
     uint64_t totalMaskedDraws = 0; // FEAT-RD2
     uint64_t totalUnsupportedBlend = 0; // FEAT-RD2
+    uint64_t totalApproxAd = 0; // FEAT-RD7
+    int fixLoc = -1; // FEAT-RD7
     std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
 };
 RdGpuState g_rdGpu;
@@ -153,6 +155,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             "uniform int uTcc;\n" // FEAT-RD3
             "uniform int uAtst;\n"
             "uniform int uAref;\n"
+            "uniform float uFixAlpha;\n" // FEAT-RD7
             "out vec4 finalColor;\n"
             "void main() {\n"
             "    vec3 rgb = vCol.rgb;\n"
@@ -189,12 +192,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             "        else if (uAtst == 7) pass = (a != uAref);\n"
             "        if (!pass) discard;\n"
             "    }\n"
-            "    finalColor = vec4(rgb, min(a_ps2 / 128.0, 1.0));\n"
+            "    finalColor = vec4(rgb, (uFixAlpha >= 0.0) ? min(uFixAlpha, 1.0) : min(a_ps2 / 128.0, 1.0));\n" // FEAT-RD7
             "}\n";
         g_rdGpu.shader = LoadShaderFromMemory(kVs, kFs);
         g_rdGpu.flipLoc = GetShaderLocation(g_rdGpu.shader, "uFlip");
         g_rdGpu.atstLoc = GetShaderLocation(g_rdGpu.shader, "uAtst"); // FEAT-RD2
         g_rdGpu.arefLoc = GetShaderLocation(g_rdGpu.shader, "uAref"); // FEAT-RD2
+        g_rdGpu.fixLoc = GetShaderLocation(g_rdGpu.shader, "uFixAlpha"); // FEAT-RD7
         g_rdGpu.samplerLoc = GetShaderLocation(g_rdGpu.shader, "uSampler"); // FEAT-RD3
         g_rdGpu.texLoc = GetShaderLocation(g_rdGpu.shader, "uTex");         // FEAT-RD3
         g_rdGpu.tfxLoc = GetShaderLocation(g_rdGpu.shader, "uTfx");         // FEAT-RD3
@@ -264,6 +268,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     rlDisableBackfaceCulling();
 
     uint64_t unsupBlend = 0; // FEAT-RD2
+    uint64_t approxAd = 0;   // FEAT-RD7
     if (g_rdGpu.gpuVertCount > 0 && g_rdGpu.vao != 0 && g_rdGpu.shader.id != 0)
     {
         rlEnableShader(g_rdGpu.shader.id);
@@ -291,19 +296,63 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             else
                 rlEnableDepthMask();
 
-            int blendState = 0; // FEAT-RD2b: 0 off, 1 alpha, 2 additive
+            // FEAT-RD7: blendState 0 = off, else 1 + sfk*64 + dfk*16 + eqk (factor kinds: 0 ZERO, 1 ONE, 2 C, 3 1-C)
+            int blendState = 0;
+            float fixAlpha = -1.0f;
             if ((batch.prim >> 6) & 1ull)
             {
-                const uint32_t a = static_cast<uint32_t>((batch.alpha >> 0) & 3ull);
-                const uint32_t b = static_cast<uint32_t>((batch.alpha >> 2) & 3ull);
+                uint32_t a = static_cast<uint32_t>((batch.alpha >> 0) & 3ull);
+                uint32_t b = static_cast<uint32_t>((batch.alpha >> 2) & 3ull);
                 const uint32_t c = static_cast<uint32_t>((batch.alpha >> 4) & 3ull);
-                const uint32_t d = static_cast<uint32_t>((batch.alpha >> 6) & 3ull);
-                if (a == 0u && b == 1u && c == 0u && d == 1u)
-                    blendState = 1;
-                else if (a == 0u && b == 2u && c == 0u && d == 1u)
-                    blendState = 2;
-                else
+                uint32_t d = static_cast<uint32_t>((batch.alpha >> 6) & 3ull);
+                if (a == 3u) a = 2u;
+                if (b == 3u) b = 2u;
+                if (d == 3u) d = 2u;
+                int sfk = -1, dfk = -1, eqk = 0; // eqk 0 add, 1 subtract, 2 reverse subtract
+                if (a == b)
+                {
+                    sfk = (d == 0u) ? 1 : 0;
+                    dfk = (d == 1u) ? 1 : 0;
+                }
+                else if (a == 0u && b == 1u && d == 1u) { sfk = 2; dfk = 3; }
+                else if (a == 0u && b == 2u && d == 1u) { sfk = 2; dfk = 1; }
+                else if (a == 2u && b == 0u && d == 1u) { sfk = 2; dfk = 1; eqk = 2; }
+                else if (a == 0u && b == 2u && d == 2u) { sfk = 2; dfk = 0; }
+                else if (a == 0u && b == 1u && d == 2u) { sfk = 2; dfk = 2; eqk = 1; }
+                else if (a == 1u && b == 0u && d == 0u) { sfk = 3; dfk = 2; }
+                else if (a == 1u && b == 2u && d == 2u) { sfk = 0; dfk = 2; }
+                else if (a == 1u && b == 2u && d == 0u) { sfk = 1; dfk = 2; }
+                else if (a == 2u && b == 1u && d == 1u) { sfk = 0; dfk = 3; }
+                if (sfk < 0 || c == 3u)
+                {
                     ++unsupBlend;
+                    static uint64_t s_unsupSeen[8];
+                    static int s_unsupN = 0;
+                    bool seen = false;
+                    for (int i = 0; i < s_unsupN; ++i)
+                        if (s_unsupSeen[i] == batch.alpha)
+                            seen = true;
+                    if (!seen && s_unsupN < 8)
+                    {
+                        s_unsupSeen[s_unsupN++] = batch.alpha;
+                        ps2xSafeLog("[rd] unsupported ALPHA=0x%016llx\n", static_cast<unsigned long long>(batch.alpha));
+                    }
+                }
+                else
+                {
+                    const bool usesC = (sfk >= 2 || dfk >= 2);
+                    if (usesC && c == 1u)
+                        ++approxAd; // Ad approximated as 1
+                    if (usesC && c == 2u)
+                        fixAlpha = std::min(static_cast<float>((batch.alpha >> 32) & 0xFFull) / 128.0f, 1.0f);
+                    blendState = 1 + sfk * 64 + dfk * 16 + eqk;
+                    if (c == 1u) // Ad -> ONE: encode as factor kinds with c=ONE (C->ONE, 1-C->ZERO)
+                    {
+                        const int sk = (sfk == 2) ? 1 : (sfk == 3) ? 0 : sfk;
+                        const int dk = (dfk == 2) ? 1 : (dfk == 3) ? 0 : dfk;
+                        blendState = 1 + sk * 64 + dk * 16 + eqk;
+                    }
+                }
             }
             if (blendState != prevBlend) // FEAT-RD2b: blend calls flush raylib batch and unbind shader/VAO
             {
@@ -311,8 +360,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     rlDisableColorBlend();
                 else
                 {
+                    const int code = blendState - 1;
+                    const int sk = code / 64, dk = (code / 16) & 3, ek = code & 3;
+                    auto glf = [](int k) { return k == 0 ? RL_ZERO : k == 1 ? RL_ONE : k == 2 ? RL_SRC_ALPHA : RL_ONE_MINUS_SRC_ALPHA; };
                     rlEnableColorBlend();
-                    rlSetBlendFactors(RL_SRC_ALPHA, blendState == 1 ? RL_ONE_MINUS_SRC_ALPHA : RL_ONE, RL_FUNC_ADD);
+                    rlSetBlendFactors(glf(sk), glf(dk), ek == 0 ? RL_FUNC_ADD : ek == 1 ? RL_FUNC_SUBTRACT : RL_FUNC_REVERSE_SUBTRACT);
                     rlSetBlendMode(RL_BLEND_CUSTOM);
                 }
                 rlEnableShader(g_rdGpu.shader.id);
@@ -325,6 +377,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rlSetUniform(g_rdGpu.atstLoc, &atstVal, RL_SHADER_UNIFORM_INT, 1);
             if (g_rdGpu.arefLoc >= 0)
                 rlSetUniform(g_rdGpu.arefLoc, &arefVal, RL_SHADER_UNIFORM_INT, 1);
+            if (g_rdGpu.fixLoc >= 0) // FEAT-RD7
+                rlSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
 
             int texVal = 0; // FEAT-RD3
             int tfxVal = 0;
@@ -378,17 +432,19 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     g_rdGpu.totalSkippedDraws += static_cast<uint64_t>(g_rdGpu.lastSkippedDraws);
     g_rdGpu.totalMaskedDraws += static_cast<uint64_t>(g_rdGpu.lastMaskedDraws); // FEAT-RD2
     g_rdGpu.totalUnsupportedBlend += unsupBlend; // FEAT-RD2
+    g_rdGpu.totalApproxAd += approxAd; // FEAT-RD7
     const auto now = std::chrono::steady_clock::now();
     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_rdGpu.lastLog).count() >= 5000)
     {
         g_rdGpu.lastLog = now;
         const double fr = g_rdGpu.frames ? static_cast<double>(g_rdGpu.frames) : 1.0;
-        ps2xSafeLog("[rd] frames=%u tris/frame=%.0f skippedDraws/frame=%.1f maskedDraws/frame=%.1f unsupBlend/frame=%.1f\n",
+        ps2xSafeLog("[rd] frames=%u tris/frame=%.0f skippedDraws/frame=%.1f maskedDraws/frame=%.1f unsupBlend/frame=%.1f approxAd/frame=%.1f\n",
                     g_rdGpu.frames,
                     static_cast<double>(g_rdGpu.totalTris) / fr,
                     static_cast<double>(g_rdGpu.totalSkippedDraws) / fr,
                     static_cast<double>(g_rdGpu.totalMaskedDraws) / fr,
-                    static_cast<double>(g_rdGpu.totalUnsupportedBlend) / fr);
+                    static_cast<double>(g_rdGpu.totalUnsupportedBlend) / fr,
+                    static_cast<double>(g_rdGpu.totalApproxAd) / fr); // FEAT-RD7
     }
     return true;
 }
