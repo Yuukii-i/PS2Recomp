@@ -1312,17 +1312,22 @@ inline void onFlush()
         {
             const SceneDraw &d = cur.draws[di];
             const SceneGs &g = cur.gs[di];
-            if (d.flags & 4u)
-            {
-                ++skippedDraws;
-                continue;
-            }
             if (static_cast<uint32_t>(g.frame >> 32) == 0xFFFFFFFFu) // FEAT-RD2: FRAME.FBMSK == 0xFFFFFFFF
             {
                 ++maskedDraws;
                 continue;
             }
             const uint32_t batchFirst = static_cast<uint32_t>(t_rdTris.size());
+            if (d.flags & 4u) // FEAT-RD4: clipped convex polygon -> triangle fan
+            {
+                for (uint32_t k = 2; k < d.vertexCount; ++k)
+                {
+                    t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex]));
+                    t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex + k - 1u]));
+                    t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex + k]));
+                }
+            }
+            else
             for (uint32_t i = 2; i < d.vertexCount; ++i)
             {
                 const SceneVertex &sv2 = cur.vertices[d.firstVertex + i];
