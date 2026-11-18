@@ -22,8 +22,18 @@ struct RdVert // FEAT-RD1
     float pos[4];
     uint8_t rgba[4];
 };
+struct RdBatch // FEAT-RD2
+{
+    uint32_t first;
+    uint32_t count;
+    uint64_t alpha;
+    uint64_t test;
+    uint64_t frame;
+    uint64_t zbuf;
+    uint64_t prim;
+};
 extern bool ps2xRdViewOn(); // FEAT-RD1
-extern void ps2xRdPublish(const RdVert *v, size_t n, uint32_t skippedDraws); // FEAT-RD1
+extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws); // FEAT-RD2
 
 namespace vu1func
 {
@@ -566,12 +576,44 @@ struct SceneBinHeader // 32 bytes
 };
 static_assert(sizeof(SceneBinHeader) == 32u, "SceneBinHeader size");
 
+struct SceneGs // FEAT-RD2
+{
+    uint64_t prim;
+    uint64_t tex0;
+    uint64_t clamp;
+    uint64_t tex1;
+    uint64_t alpha;
+    uint64_t test;
+    uint64_t frame;
+    uint64_t zbuf;
+    uint64_t texa;
+    uint64_t texclut;
+    uint32_t fba;
+    uint32_t ownTex0;
+};
+
+struct GsShadow // FEAT-RD2
+{
+    uint64_t prim = 0;
+    uint64_t tex0[2] = {};
+    uint64_t clamp[2] = {};
+    uint64_t tex1[2] = {};
+    uint64_t alpha[2] = {};
+    uint64_t test[2] = {};
+    uint64_t frame[2] = {};
+    uint64_t zbuf[2] = {};
+    uint64_t fba[2] = {};
+    uint64_t texa = 0;
+    uint64_t texclut = 0;
+};
+
 struct SceneFrame
 {
     uint64_t frameIndex = 0;
     uint32_t mscalCount = 0;
     uint32_t gifBytes = 0;
     std::vector<SceneDraw> draws;
+    std::vector<SceneGs> gs; // FEAT-RD2
     std::vector<SceneVertex> vertices;
     void clear()
     {
@@ -579,6 +621,7 @@ struct SceneFrame
         mscalCount = 0;
         gifBytes = 0;
         draws.clear();
+        gs.clear(); // FEAT-RD2
         vertices.clear();
     }
 };
@@ -593,16 +636,127 @@ struct SceneState
     uint32_t frameGifBytes = 0;
     uint32_t curBoneCount = 0;
     float curObjMatrix[16] = {};
+    GsShadow gs{}; // FEAT-RD2
+    bool curOwnTex0 = false; // FEAT-RD2
     uint64_t totalFrames = 0;
     uint64_t totalDraws = 0;
     uint64_t totalVerts = 0;
     uint64_t totalMismatch = 0;
+    uint64_t totalOwnTex0 = 0; // FEAT-RD2
+    uint64_t totalTme = 0; // FEAT-RD2
+    uint64_t totalAbe = 0; // FEAT-RD2
+    uint64_t totalDistinctTex0 = 0; // FEAT-RD2
+    uint64_t totalFallbacks = 0; // FEAT-RD2
     uint64_t mismatchByHandler[4] = {}; // 0:1EE0, 1:1EF0, 2:2440, 3:2900
     std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
     bool dumped = false;
 };
 
 static thread_local SceneState t_scene;
+
+inline void applyAD(uint64_t data, uint8_t reg) // FEAT-RD2
+{
+    GsShadow &g = t_scene.gs;
+    switch (reg)
+    {
+    case 0x00u: g.prim = data & 0x7FFull; break;
+    case 0x06u: case 0x07u: g.tex0[reg - 0x06u] = data; t_scene.curOwnTex0 = true; break;
+    case 0x08u: case 0x09u: g.clamp[reg - 0x08u] = data; break;
+    case 0x14u: case 0x15u: g.tex1[reg - 0x14u] = data; break;
+    case 0x16u: case 0x17u:
+    {
+        constexpr uint64_t kTex2Mask = 0xFFFFFFE003F00000ull; // PSM, CBP, CPSM, CSM, CSA, CLD
+        const uint32_t c = reg - 0x16u;
+        g.tex0[c] = (g.tex0[c] & ~kTex2Mask) | (data & kTex2Mask);
+        t_scene.curOwnTex0 = true;
+        break;
+    }
+    case 0x1Cu: g.texclut = data; break;
+    case 0x3Bu: g.texa = data; break;
+    case 0x42u: case 0x43u: g.alpha[reg - 0x42u] = data; break;
+    case 0x47u: case 0x48u: g.test[reg - 0x47u] = data; break;
+    case 0x4Au: case 0x4Bu: g.fba[reg - 0x4Au] = data; break;
+    case 0x4Cu: case 0x4Du: g.frame[reg - 0x4Cu] = data; break;
+    case 0x4Eu: case 0x4Fu: g.zbuf[reg - 0x4Eu] = data; break;
+    default: break;
+    }
+}
+
+inline void parseChain(const uint8_t *p, uint32_t len) // FEAT-RD2
+{
+    t_scene.curOwnTex0 = false;
+    uint32_t off = 0u;
+    while (off + 16u <= len)
+    {
+        uint64_t tagLo, tagHi;
+        std::memcpy(&tagLo, p + off, 8);
+        std::memcpy(&tagHi, p + off + 8u, 8);
+        off += 16u;
+        const uint64_t nloop = tagLo & 0x7FFFu;
+        const uint32_t eop = static_cast<uint32_t>((tagLo >> 15) & 1u);
+        const uint32_t pre = static_cast<uint32_t>((tagLo >> 46) & 1u);
+        const uint32_t flg = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
+        uint64_t nreg = (tagLo >> 60) & 0xFu;
+        if (nreg == 0u)
+            nreg = 16u;
+        if (pre)
+            t_scene.gs.prim = (tagLo >> 47) & 0x7FFull;
+        if (flg == 0u)
+        {
+            const uint64_t nq = nloop * nreg;
+            if (nq * 16u > len - off)
+                break;
+            for (uint64_t i = 0; i < nq; ++i)
+            {
+                const uint32_t r = static_cast<uint32_t>(i % nreg);
+                const uint32_t desc = static_cast<uint32_t>((tagHi >> (r * 4u)) & 0xFu);
+                if (desc == 0xEu)
+                {
+                    uint64_t data;
+                    std::memcpy(&data, p + off + i * 16u, 8);
+                    applyAD(data, p[off + i * 16u + 8u]);
+                }
+                else if (desc == 0x0u)
+                {
+                    uint64_t data;
+                    std::memcpy(&data, p + off + i * 16u, 8);
+                    t_scene.gs.prim = data & 0x7FFull;
+                }
+            }
+            off += static_cast<uint32_t>(nq * 16u);
+        }
+        else if (flg == 1u)
+        {
+            const uint64_t nd = nloop * nreg;
+            const uint64_t bytes = ((nd + 1u) & ~1ull) * 8u;
+            if (bytes > len - off)
+                break;
+            for (uint64_t i = 0; i < nd; ++i)
+            {
+                const uint32_t r = static_cast<uint32_t>(i % nreg);
+                const uint32_t desc = static_cast<uint32_t>((tagHi >> (r * 4u)) & 0xFu);
+                if (desc == 0x0u)
+                {
+                    uint64_t data;
+                    std::memcpy(&data, p + off + i * 8u, 8);
+                    t_scene.gs.prim = data & 0x7FFull;
+                }
+            }
+            off += static_cast<uint32_t>(bytes);
+        }
+        else if (flg == 2u)
+        {
+            const uint64_t bytes = nloop * 16u;
+            if (bytes > len - off)
+                break;
+            off += static_cast<uint32_t>(bytes);
+        }
+        else
+            break;
+        if (eop)
+            break;
+    }
+}
 
 inline int handlerSlot(uint32_t pc)
 {
@@ -655,6 +809,7 @@ inline void rollbackMscal(size_t d0, size_t v0)
 {
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     f.draws.resize(d0);
+    f.gs.resize(d0); // FEAT-RD2
     f.vertices.resize(v0);
 }
 } // namespace scene
@@ -836,6 +991,8 @@ static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_
     for (uint32_t i = 0; i < total / 16u; ++i)
         std::memcpy(gif.data() + start + i * 16u, vu + (((q0 + i) & 0x3FFu) << 4), 16);
     kicks.emplace_back(start, total);
+    if (scene::on()) // FEAT-RD2
+        scene::parseChain(gif.data() + start, total);
     return true;
 }
 
@@ -1095,6 +1252,20 @@ inline void onFlush()
     ++t_scene.totalFrames;
     t_scene.totalDraws += cur.draws.size();
     t_scene.totalVerts += cur.vertices.size();
+    { // FEAT-RD2
+        static thread_local std::vector<uint64_t> t_tex0s;
+        t_tex0s.clear();
+        t_tex0s.reserve(cur.gs.size());
+        for (const SceneGs &g : cur.gs)
+        {
+            if (g.ownTex0) ++t_scene.totalOwnTex0;
+            if ((g.prim >> 4) & 1ull) ++t_scene.totalTme;
+            if ((g.prim >> 6) & 1ull) ++t_scene.totalAbe;
+            t_tex0s.push_back(g.tex0);
+        }
+        std::sort(t_tex0s.begin(), t_tex0s.end());
+        t_scene.totalDistinctTex0 += static_cast<uint64_t>(std::unique(t_tex0s.begin(), t_tex0s.end()) - t_tex0s.begin());
+    }
 
     const int64_t df = dumpFrame();
     if (df >= 0 && !t_scene.dumped && cur.frameIndex == static_cast<uint64_t>(df))
@@ -1106,8 +1277,11 @@ inline void onFlush()
     if (::ps2xRdViewOn()) // FEAT-RD1
     {
         static thread_local std::vector<::RdVert> t_rdTris;
+        static thread_local std::vector<::RdBatch> t_rdBatches; // FEAT-RD2
         t_rdTris.clear();
+        t_rdBatches.clear();
         uint32_t skippedDraws = 0;
+        uint32_t maskedDraws = 0; // FEAT-RD2
         const auto toRdVert = [](const SceneVertex &sv) -> ::RdVert {
             ::RdVert rv;
             rv.pos[0] = sv.pos[0];
@@ -1118,13 +1292,21 @@ inline void onFlush()
                 rv.rgba[c] = static_cast<uint8_t>(std::min<uint32_t>(sv.rgba[c], 255u));
             return rv;
         };
-        for (const SceneDraw &d : cur.draws)
+        for (size_t di = 0; di < cur.draws.size(); ++di) // FEAT-RD2
         {
+            const SceneDraw &d = cur.draws[di];
+            const SceneGs &g = cur.gs[di];
             if (d.flags & 4u)
             {
                 ++skippedDraws;
                 continue;
             }
+            if (static_cast<uint32_t>(g.frame >> 32) == 0xFFFFFFFFu) // FEAT-RD2: FRAME.FBMSK == 0xFFFFFFFF
+            {
+                ++maskedDraws;
+                continue;
+            }
+            const uint32_t batchFirst = static_cast<uint32_t>(t_rdTris.size());
             for (uint32_t i = 2; i < d.vertexCount; ++i)
             {
                 const SceneVertex &sv2 = cur.vertices[d.firstVertex + i];
@@ -1134,8 +1316,21 @@ inline void onFlush()
                 t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex + i - 1u]));
                 t_rdTris.push_back(toRdVert(sv2));
             }
+            const uint32_t batchCount = static_cast<uint32_t>(t_rdTris.size()) - batchFirst;
+            if (batchCount == 0u)
+                continue;
+            if (!t_rdBatches.empty())
+            {
+                ::RdBatch &last = t_rdBatches.back();
+                if (last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf && last.prim == g.prim)
+                {
+                    last.count += batchCount;
+                    continue;
+                }
+            }
+            t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, g.alpha, g.test, g.frame, g.zbuf, g.prim});
         }
-        ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), skippedDraws);
+        ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws);
     }
 
     t_scene.writeIdx ^= 1u;
@@ -1148,11 +1343,17 @@ inline void onFlush()
     {
         t_scene.lastLog = now;
         const double fr = t_scene.totalFrames ? static_cast<double>(t_scene.totalFrames) : 1.0;
-        ::ps2xSafeLog("[scene] frames=%llu draws/frame=%.1f verts/frame=%.1f checkMismatch=%llu\n",
+        const double dr = t_scene.totalDraws ? static_cast<double>(t_scene.totalDraws) : 1.0; // FEAT-RD2
+        ::ps2xSafeLog("[scene] frames=%llu draws/frame=%.1f verts/frame=%.1f checkMismatch=%llu ownTex0=%.1f%% tex0/frame=%.1f tme=%.1f%% abe=%.1f%% fb=%llu\n",
                       static_cast<unsigned long long>(t_scene.totalFrames),
                       static_cast<double>(t_scene.totalDraws) / fr,
                       static_cast<double>(t_scene.totalVerts) / fr,
-                      static_cast<unsigned long long>(t_scene.totalMismatch));
+                      static_cast<unsigned long long>(t_scene.totalMismatch),
+                      100.0 * static_cast<double>(t_scene.totalOwnTex0) / dr,
+                      static_cast<double>(t_scene.totalDistinctTex0) / fr,
+                      100.0 * static_cast<double>(t_scene.totalTme) / dr,
+                      100.0 * static_cast<double>(t_scene.totalAbe) / dr,
+                      static_cast<unsigned long long>(t_scene.totalFallbacks));
     }
 }
 
@@ -1171,6 +1372,21 @@ inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t
     _mm_storeu_ps(d.vpScale, c1v);
     _mm_storeu_ps(d.vpOffset, c2v);
     f.draws.push_back(d);
+    const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull); // FEAT-RD2
+    SceneGs g{};
+    g.prim = t_scene.gs.prim;
+    g.tex0 = t_scene.gs.tex0[ctxt];
+    g.clamp = t_scene.gs.clamp[ctxt];
+    g.tex1 = t_scene.gs.tex1[ctxt];
+    g.alpha = t_scene.gs.alpha[ctxt];
+    g.test = t_scene.gs.test[ctxt];
+    g.frame = t_scene.gs.frame[ctxt];
+    g.zbuf = t_scene.gs.zbuf[ctxt];
+    g.texa = t_scene.gs.texa;
+    g.texclut = t_scene.gs.texclut;
+    g.fba = static_cast<uint32_t>(t_scene.gs.fba[ctxt] & 1ull);
+    g.ownTex0 = t_scene.curOwnTex0 ? 1u : 0u;
+    f.gs.push_back(g);
     return f.draws.back();
 }
 
@@ -3864,6 +4080,8 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
     }
     if (!ok)
     {
+        if (!capture && scene::on()) // FEAT-RD2
+            ++scene::t_scene.totalFallbacks;
         if (t_path1BatchOn && !capture) // PERF-V1I: flush pending PATH1 before fallback submits directly
             flushPath1Pending(true);
         return false;
