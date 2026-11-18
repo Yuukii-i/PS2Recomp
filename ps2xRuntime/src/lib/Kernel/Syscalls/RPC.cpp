@@ -14,6 +14,29 @@ extern std::atomic<bool> g_movieSeekDone;
 extern std::atomic<uint32_t> g_movieReadsCount;
 extern std::atomic<uint32_t> g_trackedCurScene;
 
+// FEAT-DE: Main character selector (0 = boy, 1 = girl, -1 = unset)
+std::atomic<int> g_mcPendingChoice{-1};
+
+void ps2xMcInit() // FEAT-DE
+{
+    static std::once_flag s_once;
+    std::call_once(s_once, []() {
+        const char *env = std::getenv("PS2X_MC");
+        if (!env || env[0] == '\0')
+            return;
+        if (std::strcmp(env, "boy") == 0)
+        {
+            g_mcPendingChoice.store(0, std::memory_order_relaxed);
+            ps2xSafeLog("[mc] requested=boy\n");
+        }
+        else if (std::strcmp(env, "girl") == 0)
+        {
+            g_mcPendingChoice.store(1, std::memory_order_relaxed);
+            ps2xSafeLog("[mc] requested=girl\n");
+        }
+    });
+}
+
 #include <atomic>
 #include <mutex>
 #include <cstring>
@@ -2644,6 +2667,24 @@ uint64_t vblDiff = 0;
                 uint32_t statDst = *reinterpret_cast<const uint32_t *>(src + 0x10);
                 const char *pathPtr = reinterpret_cast<const char *>(src + 0x18);
                 std::string path(pathPtr);
+                // FEAT-DE: apply pending MC choice right before a stage loads
+                {
+                    const int pending = g_mcPendingChoice.load(std::memory_order_relaxed);
+                    if ((pending == 0 || pending == 1) && path.find("/etc/norma/") != std::string::npos)
+                    {
+                        if (uint8_t *mcMem = getMemPtr(rdram, 0x00649910u))
+                        {
+                            uint32_t curMc = 0;
+                            std::memcpy(&curMc, mcMem, sizeof(uint32_t));
+                            const uint32_t wantMc = static_cast<uint32_t>(pending);
+                            if ((curMc == 0u || curMc == 1u) && curMc != wantMc)
+                            {
+                                std::memcpy(mcMem, &wantMc, sizeof(uint32_t));
+                                ps2xSafeLog("[mc] applied=%s at '%s'\n", (wantMc == 0u) ? "boy" : "girl", path.c_str());
+                            }
+                        }
+                    }
+                }
                 const auto *entry = ps2x::vfi::VfiArchive::instance().find(path);
                 const auto *dirEntry = entry ? nullptr : ps2x::vfi::VfiArchive::instance().findDir(path);
                 if (!entry && !dirEntry)
@@ -3102,6 +3143,57 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram)
 void ps2xCid1Vblank() // FIX-AU5
 {
     ps2_syscalls::onCid1Vblank();
+    static const bool s_au11Enabled = []() { // PROBE-AU11
+        const char *env = std::getenv("PS2X_AU11_PROBE"); // PROBE-AU11
+        return env && std::strcmp(env, "1") == 0; // PROBE-AU11
+    }(); // PROBE-AU11
+    if (s_au11Enabled) // PROBE-AU11
+    { // PROBE-AU11
+        static bool s_au11Init = false; // PROBE-AU11
+        static std::chrono::steady_clock::time_point s_au11T0{}; // PROBE-AU11
+        static std::chrono::steady_clock::time_point s_au11Last{}; // PROBE-AU11
+        static uint32_t s_au11Eevb = 0; // PROBE-AU11
+        static uint64_t s_au11PrevIopVb = 0; // PROBE-AU11
+        static uint64_t s_au11PrevSg2Tick = 0; // PROBE-AU11
+        static uint64_t s_au11PrevMix = 0; // PROBE-AU11
+        static uint64_t s_au11PrevOut = 0; // PROBE-AU11
+        const auto now = std::chrono::steady_clock::now(); // PROBE-AU11
+        ++s_au11Eevb; // PROBE-AU11
+        if (!s_au11Init) // PROBE-AU11
+        { // PROBE-AU11
+            ps2x::iop::Sg2DiagSnapshot sg2{}; // PROBE-AU11
+            ps2x::iop::getSg2DiagSnapshot(sg2); // PROBE-AU11
+            s_au11T0 = now; // PROBE-AU11
+            s_au11Last = now; // PROBE-AU11
+            s_au11PrevIopVb = sg2.vblankDelivered; // PROBE-AU11
+            s_au11PrevSg2Tick = sg2.tickCount; // PROBE-AU11
+            s_au11PrevMix = ps2xAu6FramesMixed(); // PROBE-AU11
+            s_au11PrevOut = ps2xAu6FramesConsumed(); // PROBE-AU11
+            s_au11Eevb = 0; // PROBE-AU11
+            s_au11Init = true; // PROBE-AU11
+        } // PROBE-AU11
+        else if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_au11Last).count() >= 1000) // PROBE-AU11
+        { // PROBE-AU11
+            ps2x::iop::Sg2DiagSnapshot sg2{}; // PROBE-AU11
+            ps2x::iop::getSg2DiagSnapshot(sg2); // PROBE-AU11
+            const uint64_t mixNow = ps2xAu6FramesMixed(); // PROBE-AU11
+            const uint64_t outNow = ps2xAu6FramesConsumed(); // PROBE-AU11
+            const uint64_t ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - s_au11T0).count()); // PROBE-AU11
+            ps2xSafeLog("[au11] ms=%llu eevb=%u iopvb=%llu sg2tick=%llu mix=%llu out=%llu\n", // PROBE-AU11
+                        static_cast<unsigned long long>(ms), // PROBE-AU11
+                        s_au11Eevb, // PROBE-AU11
+                        static_cast<unsigned long long>(sg2.vblankDelivered - s_au11PrevIopVb), // PROBE-AU11
+                        static_cast<unsigned long long>(sg2.tickCount - s_au11PrevSg2Tick), // PROBE-AU11
+                        static_cast<unsigned long long>(mixNow - s_au11PrevMix), // PROBE-AU11
+                        static_cast<unsigned long long>(outNow - s_au11PrevOut)); // PROBE-AU11
+            s_au11Last = now; // PROBE-AU11
+            s_au11Eevb = 0; // PROBE-AU11
+            s_au11PrevIopVb = sg2.vblankDelivered; // PROBE-AU11
+            s_au11PrevSg2Tick = sg2.tickCount; // PROBE-AU11
+            s_au11PrevMix = mixNow; // PROBE-AU11
+            s_au11PrevOut = outNow; // PROBE-AU11
+        } // PROBE-AU11
+    } // PROBE-AU11
     static const bool s_au6Enabled = []() { // PROBE-AU6
         const char *env = std::getenv("PS2X_AU6_PROBE"); // PROBE-AU6
         return env && std::strcmp(env, "1") == 0; // PROBE-AU6

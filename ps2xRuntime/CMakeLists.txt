@@ -410,6 +410,8 @@ add_library(ps2_runtime STATIC
     src/lib/vu/generated/vu0_hot_blocks.cpp
     src/lib/games_database.cpp
     src/lib/probe_prof.cpp
+    src/lib/decomp/ee_gfx_decomp.cpp # DECOMP-BM
+    src/lib/dev/dev_console.cpp # FEAT-DF
 )
 
 if(PS2X_ENABLE_RUNTIME_LOGS)

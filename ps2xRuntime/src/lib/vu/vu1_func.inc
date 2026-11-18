@@ -22,6 +22,125 @@ namespace vu1func
 constexpr uint64_t kImageHash = 0x86503d3905e35276ull; // FNV-1a of the 16 KB VU1 code image == s_hcCurHash (set by rebuildDecodedCodeCache)
 constexpr uint32_t kMaxKickBytes = 0x10000u;           // == XgkickPipeline::kBufferSize
 
+// PERF-BE: per-handler code signatures for multi-image functional VU1
+struct HSig { uint16_t pc; uint8_t n; uint16_t r[9][2]; uint64_t h; }; // PERF-BE
+static constexpr HSig kHandlerSigs[36] = { // PERF-BE // PERF-BF // PERF-BI
+    {0x0000u, 1, {{0x0000u, 0x0048u}}, 0x9a470ad35b2fb298ull}, // PERF-BE
+    {0x0050u, 1, {{0x0050u, 0x0068u}}, 0xd1238c8e19fb0c28ull}, // PERF-BE
+    {0x0060u, 1, {{0x0060u, 0x0068u}}, 0x276777db3da0ce7dull}, // PERF-BE
+    {0x0070u, 2, {{0x0070u, 0x0080u}, {0x0188u, 0x0190u}}, 0x182f8fc8cbe144adull}, // PERF-BE
+    {0x0088u, 1, {{0x0088u, 0x00A0u}}, 0xe1d264bedbdf4018ull}, // PERF-BE
+    {0x00A8u, 1, {{0x00A8u, 0x0190u}}, 0xb42910c677d880d9ull}, // PERF-BE
+    {0x0198u, 1, {{0x0198u, 0x02D8u}}, 0x3a3412efa47f6308ull}, // PERF-BE
+    {0x02E0u, 1, {{0x02E0u, 0x0558u}}, 0xd01cb535a3a5ea1eull}, // PERF-BE
+    {0x0560u, 1, {{0x0560u, 0x0620u}}, 0x1f89f4bd4fa428daull}, // PERF-BE
+    {0x0628u, 1, {{0x0628u, 0x0838u}}, 0x6a3767c3ac00a980ull}, // PERF-BE
+    {0x0840u, 1, {{0x0840u, 0x0AD8u}}, 0xcf3832fc516675d2ull}, // PERF-BE
+    {0x0AE0u, 1, {{0x0AE0u, 0x0B30u}}, 0x70738a21ff72c8f9ull}, // PERF-BE
+    {0x0AF0u, 1, {{0x0AF0u, 0x0B30u}}, 0xadb6b0883764841cull}, // PERF-BE
+    {0x0B38u, 1, {{0x0B38u, 0x0C30u}}, 0x59f48768f25f8591ull}, // PERF-BE
+    {0x0B40u, 1, {{0x0B40u, 0x0C30u}}, 0x8d3a867942246c9dull}, // PERF-BE
+    {0x0C38u, 1, {{0x0C38u, 0x0CB8u}}, 0x90c1db5943198cbcull}, // PERF-BE
+    {0x0C80u, 1, {{0x0C80u, 0x0CB8u}}, 0x4f6e5991c0e08f11ull}, // PERF-BE
+    {0x0CC0u, 1, {{0x0CC0u, 0x1058u}}, 0x8578087ce78d7452ull}, // PERF-BE
+    {0x1090u, 1, {{0x1090u, 0x1530u}}, 0x713febc9f3ffe43bull}, // PERF-BE
+    {0x15E0u, 1, {{0x15E0u, 0x1710u}}, 0xf697ac66790259a4ull}, // PERF-BE
+    {0x1720u, 1, {{0x1720u, 0x18F0u}}, 0x2bd578cd4cb2acf0ull}, // PERF-BE
+    {0x1900u, 2, {{0x1900u, 0x1908u}, {0x1970u, 0x1A40u}}, 0xefa6f02f67fb107eull}, // PERF-BE
+    {0x1910u, 2, {{0x1910u, 0x1968u}, {0x19B0u, 0x1A40u}}, 0xc75180296fafa399ull}, // PERF-BE
+    {0x1A68u, 1, {{0x1A68u, 0x1C20u}}, 0x4b79cd7cb3651352ull}, // PERF-BE
+    {0x1C48u, 1, {{0x1C48u, 0x1CB8u}}, 0x9e6185d439761fbfull}, // PERF-BE
+    {0x1CC0u, 2, {{0x1CC0u, 0x1CD0u}, {0x1CF0u, 0x1E38u}}, 0xb20321232f75beebull}, // PERF-BE
+    {0x1CD8u, 1, {{0x1CD8u, 0x1E38u}}, 0x27ac1ae939a38d6full}, // PERF-BE
+    {0x1E50u, 1, {{0x1E50u, 0x1EC8u}}, 0x28ff0ad08ea31dfeull}, // PERF-BE
+    {0x1EE0u, 9, {{0x1EE0u, 0x1EE8u}, {0x1EF8u, 0x1FA0u}, {0x1FE0u, 0x2200u}, {0x2210u, 0x2430u}, {0x2440u, 0x25F0u}, {0x2670u, 0x2818u}, {0x28A0u, 0x2E18u}, {0x2E78u, 0x2E80u}, {0x2EC8u, 0x2F68u}}, 0x5000ff6d326f5ee6ull}, // PERF-BE
+    {0x1EF0u, 8, {{0x1EF0u, 0x1FA0u}, {0x1FE0u, 0x2200u}, {0x2210u, 0x2430u}, {0x2440u, 0x25F0u}, {0x2670u, 0x2818u}, {0x28A0u, 0x2E18u}, {0x2E78u, 0x2E80u}, {0x2EC8u, 0x2F68u}}, 0x891459df4abaf8e4ull}, // PERF-BE
+    {0x2E20u, 2, {{0x2E20u, 0x2E80u}, {0x2EC8u, 0x2F68u}}, 0xf246fb92d7a7dd5cull}, // PERF-BE
+    {0x2E88u, 2, {{0x2D50u, 0x2DB0u}, {0x2E88u, 0x2EC0u}}, 0x8673a1e3ebf7bb01ull}, // PERF-BE
+    {0x3160u, 1, {{0x3160u, 0x3270u}}, 0x91c21fb050fcc384ull}, // PERF-BE
+    {0x32A0u, 1, {{0x32A0u, 0x3450u}}, 0x958591742b5184bfull}, // PERF-BE
+    {0x01C8u, 1, {{0x01C8u, 0x02D8u}}, 0x7e4251d07ffd694dull}, // PERF-BF
+    {0x0640u, 1, {{0x0640u, 0x0838u}}, 0x6fadae7b531ddfc6ull}, // PERF-BI
+}; // PERF-BE
+
+struct ImgSlot // PERF-BE
+{ // PERF-BE
+    uint64_t hash = 0; // PERF-BE
+    uint64_t mask = 0; // PERF-BE
+    uint64_t runs = 0; // PERF-BE
+    uint64_t taken = 0; // PERF-BE
+    uint64_t fb = 0; // PERF-BE
+    bool used = false; // PERF-BE
+}; // PERF-BE
+static ImgSlot s_imgCache[8]; // PERF-BE
+static thread_local int t_curSlot = -1; // PERF-BE
+
+inline const uint8_t *pcToRow() // PERF-BE
+{ // PERF-BE
+    static uint8_t tbl[2048]; // PERF-BE
+    static const bool init = []() { // PERF-BE
+        std::memset(tbl, 0xFF, sizeof(tbl)); // PERF-BE
+        for (size_t i = 0; i < 36u; ++i) // PERF-BE // PERF-BF // PERF-BI
+            tbl[kHandlerSigs[i].pc >> 3] = static_cast<uint8_t>(i); // PERF-BE
+        return true; // PERF-BE
+    }(); // PERF-BE
+    (void)init; // PERF-BE
+    return tbl; // PERF-BE
+} // PERF-BE
+
+inline bool imageSelect(uint64_t hash, const uint8_t *code) // PERF-BE
+{ // PERF-BE
+    if (t_curSlot >= 0 && s_imgCache[t_curSlot].used && s_imgCache[t_curSlot].hash == hash) // PERF-BE
+    { // PERF-BE
+        ImgSlot &s = s_imgCache[t_curSlot]; // PERF-BE
+        ++s.runs; // PERF-BE
+        return (s.mask & 0x8000000000000001ull) != 0ull; // PERF-BE // PERF-BK
+    } // PERF-BE
+    int slot = -1; // PERF-BE
+    for (int i = 0; i < 8; ++i) // PERF-BE
+    { // PERF-BE
+        if (s_imgCache[i].used && s_imgCache[i].hash == hash) // PERF-BE
+        { // PERF-BE
+            slot = i; // PERF-BE
+            break; // PERF-BE
+        } // PERF-BE
+    } // PERF-BE
+    if (slot >= 0) // PERF-BE
+    { // PERF-BE
+        t_curSlot = slot; // PERF-BE
+        ++s_imgCache[slot].runs; // PERF-BE
+        return (s_imgCache[slot].mask & 0x8000000000000001ull) != 0ull; // PERF-BE // PERF-BK
+    } // PERF-BE
+    int evict = 0; // PERF-BE
+    for (int i = 0; i < 8; ++i) // PERF-BE
+    { // PERF-BE
+        if (!s_imgCache[i].used) { evict = i; break; } // PERF-BE
+        if (s_imgCache[i].runs < s_imgCache[evict].runs) evict = i; // PERF-BE
+    } // PERF-BE
+    uint64_t mask = 0; // PERF-BE
+    if (code) // PERF-BE
+    { // PERF-BE
+        for (size_t row = 0; row < 36u; ++row) // PERF-BE // PERF-BF // PERF-BI
+        { // PERF-BE
+            const HSig &sig = kHandlerSigs[row]; // PERF-BE
+            uint64_t hv = 1469598103934665603ull; // PERF-BE
+            for (uint8_t j = 0; j < sig.n; ++j) // PERF-BE
+                for (uint32_t off = sig.r[j][0]; off <= static_cast<uint32_t>(sig.r[j][1]) + 7u; ++off) // PERF-BE
+                    hv = (hv ^ code[off]) * 1099511628211ull; // PERF-BE
+            if (hv == sig.h) // PERF-BE
+                mask |= (1ull << row); // PERF-BE
+        } // PERF-BE
+        uint64_t hvFx = 1469598103934665603ull; // PERF-BK
+        for (uint32_t off = 0u; off <= 0x0E7Fu; ++off) // PERF-BK
+            hvFx = (hvFx ^ code[off]) * 1099511628211ull; // PERF-BK
+        if (hvFx == 0xf64cba610d7fe263ull) // PERF-BK
+            mask |= (1ull << 63); // PERF-BK
+    } // PERF-BE
+    s_imgCache[evict] = ImgSlot{hash, mask, 1ull, 0ull, 0ull, true}; // PERF-BE
+    t_curSlot = evict; // PERF-BE
+    return (mask & 0x8000000000000001ull) != 0ull; // PERF-BE // PERF-BK
+} // PERF-BE
+
 // PROBE-VX: Vu1Exec time split (PS2X_VX=1). Counters are plain: only the thread that called ps2xVxMarkThread() writes them.
 namespace vx // PROBE-VX
 {
@@ -1340,10 +1459,11 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
                 }
             if (hit < 0)
             {
+                // FIX-BJ: 25B0/27D8 MADD.xyzw vf13 (Lit[j]) -> 24E0/2708 LOI 255.0 -> 24E8/2710 MINIi.xyzw vf13, vf13, I before BAL 28A0->2900; 2978 MAXx.xyzw vf13, vf13, vf0 completes clampI(Lit[j]).
                 const uint64_t vxClip0 = vx::act() ? __rdtsc() : 0ull; // PROBE-VX
                 const bool vxClipOk = clipPolygon(vu, vi13, vi5, vi6, Wd[j], vi8, vi9, vi10, copyS, c1v, c2v, c5v,
                                  Ps[j - 2], Ps[j - 1], Ps[j], fmacV<0>(V7(Ss[j - 2]), zero, zero), V7(Ss[j - 1]), V7(Ss[j]),
-                                 clampI(Lit[j - 2]), clampI(Lit[j - 1]), Lit[j], kicks, gif); // PROBE-VX
+                                 clampI(Lit[j - 2]), clampI(Lit[j - 1]), clampI(Lit[j]), kicks, gif); // PROBE-VX // FIX-BJ
                 if (vxClip0) { vx::g_vx.hT[vx::kHClip] += __rdtsc() - vxClip0; ++vx::g_vx.hN[vx::kHClip]; } // PROBE-VX
                 if (!vxClipOk) // PROBE-VX
                     return fb1EE0(kFbRigidClip);
@@ -2104,13 +2224,16 @@ static bool handler02E0(Regs &R, uint8_t *vu, uint16_t &vi13)
 }
 
 // PERF-V1P: handler 0628 (0628..0830, 67 pairs) -- point diffuse light (RSQRT 1/d), preceded by 3 live-in stores SQ vf11..13 -> 17/19/21(vi4)
-static bool handler0628(Regs &R, uint8_t *vu, uint16_t &vi13)
+static bool handler0628(Regs &R, uint8_t *vu, uint16_t &vi13, bool prologue) // PERF-BI
 {
-    if ((R.viValid & (1u << 4)) == 0u || (R.vfValid & ((1u << 11) | (1u << 12) | (1u << 13))) != ((1u << 11) | (1u << 12) | (1u << 13)))
-        return false;
-    stq(vu, static_cast<uint32_t>(R.vi[4]) + 17u, R.vf[11]);
-    stq(vu, static_cast<uint32_t>(R.vi[4]) + 19u, R.vf[12]);
-    stq(vu, static_cast<uint32_t>(R.vi[4]) + 21u, R.vf[13]);
+    if (prologue) // PERF-BI
+    { // PERF-BI
+        if ((R.viValid & (1u << 4)) == 0u || (R.vfValid & ((1u << 11) | (1u << 12) | (1u << 13))) != ((1u << 11) | (1u << 12) | (1u << 13)))
+            return false;
+        stq(vu, static_cast<uint32_t>(R.vi[4]) + 17u, R.vf[11]);
+        stq(vu, static_cast<uint32_t>(R.vi[4]) + 19u, R.vf[12]);
+        stq(vu, static_cast<uint32_t>(R.vi[4]) + 21u, R.vf[13]);
+    } // PERF-BI
     const uint16_t base = ilw(vu, 1011, 0), n = ilw(vu, 1011, 3);
     if (n == 0u || n > 240u)
         return false;
@@ -2593,10 +2716,16 @@ static inline void vncNote(uint16_t pc)
         t_newPcs[t_newN++] = pc;
 }
 
+static thread_local uint16_t t_seq[64]; // PROBE-BG
+static thread_local uint32_t t_seqN = 0; // PROBE-BG
+inline uint32_t traceSeqLen() { return t_seqN; } // PROBE-BG
+inline const uint16_t *traceSeq() { return t_seq; } // PROBE-BG
+
 static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool oneShot, bool vxA)
 {
     static const bool funcNewOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_NEW"); return !(e && e[0] == '0'); }(); // PERF-V1M: default ON (PERF-VNC); PS2X_VU1_FUNC_NEW=0 disables
     t_newN = 0; // PERF-VNC
+    t_seqN = 0; // PROBE-BG
     Regs R; // PERF-V1G: skip 560-byte memset; vfValid/viValid track exact live-in registers across handlers
     R.vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
     R.vi[0] = 0u;
@@ -2605,13 +2734,25 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
     R.viValid = 1u | (1u << 12);
     uint16_t vi13 = R.vi[12];
     uint16_t vi1 = ilw(vu, vi13, 0);
+    const uint64_t imgMask = (t_curSlot >= 0) ? s_imgCache[t_curSlot].mask : ~0ull; // PERF-BE
+    const uint8_t *const rowIdx = pcToRow(); // PERF-BE
     vx::HScope vxHs; // PROBE-VX
     for (uint32_t step = 0; step < 100000u; ++step)
     {
         vi13 = static_cast<uint16_t>(vi13 + 1u);                      // 0028 IADDIU vi13, vi13, 1
         const uint16_t vi2 = ilw(vu, static_cast<uint32_t>(vi13) - 1u, 1); // 0038 ILW.y vi2, -1(vi13)
         const uint32_t h = (static_cast<uint32_t>(vi1) << 3) & 0x3FFFu;
+        if (h != 0u) // PERF-BE
+        { // PERF-BE
+            const uint8_t row = rowIdx[h >> 3]; // PERF-BE
+            if (row != 0xFFu && ((imgMask >> row) & 1ull) == 0ull) // PERF-BE
+            { // PERF-BE
+                s_fbPc = 0x4000u | h; // PERF-BE
+                return false; // PERF-BE
+            } // PERF-BE
+        } // PERF-BE
         if (vxA) { if (h) vxHs.begin(vx::slotOf(h, vu), __rdtsc()); else vxHs.end(__rdtsc()); } // PROBE-VX
+        if (t_seqN < 64u) t_seq[t_seqN++] = static_cast<uint16_t>(h); // PROBE-BG
         switch (h)
         {
         case 0x0000u: // program end (E bit)
@@ -2759,12 +2900,20 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             break;
         case 0x0628u: // PERF-V1N
             vncNote(0x0628u); // PERF-VNC
-            if (!funcNewOn || !handler0628(R, vu, vi13))
+            if (!funcNewOn || !handler0628(R, vu, vi13, true)) // PERF-BI
             {
                 s_fbPc = 0x0628u;
                 return false;
             }
             break;
+        case 0x0640u: // PERF-BI
+            vncNote(0x0640u); // PERF-BI
+            if (!funcNewOn || !handler0628(R, vu, vi13, false)) // PERF-BI
+            { // PERF-BI
+                s_fbPc = 0x0640u; // PERF-BI
+                return false; // PERF-BI
+            } // PERF-BI
+            break; // PERF-BI
         case 0x1720u: // PERF-V1N
             vncNote(0x1720u); // PERF-VNC
             if (!funcNewOn || !handler1720(R, vu, vi13))
@@ -2788,7 +2937,17 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
                 s_fbPc = 0x0198u;
                 return false;
             }
+            R.vfValid &= ~((1u << 17) | (1u << 18)); // PERF-BF
+            R.viValid &= ~(1u << 6); // PERF-BF
             break;
+        case 0x01C8u: // PERF-BF
+            vncNote(0x01C8u); // PERF-BF
+            if (!funcNewOn || !handler0198(R, vu, vi13)) // PERF-BF
+            { // PERF-BF
+                s_fbPc = 0x01C8u; // PERF-BF
+                return false; // PERF-BF
+            } // PERF-BF
+            break; // PERF-BF
         case 0x0B38u: // PERF-V1O
             vncNote(0x0B38u); // PERF-VNC
             if (!funcNewOn || !handler0B38(R, vu, R.vi[12]))
@@ -2889,6 +3048,510 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
     return false;
 }
 
+// PERF-BK: decompiled full-screen/particle VU1 programs of image 40204101 (P0=0000, P1=04A0, P2=0A18)
+template <int MASK> // PERF-BK
+inline __m128 fxBlend(__m128 oldV, __m128 newV) { return _mm_blend_ps(oldV, newV, MASK); } // PERF-BK
+inline __m128 fxItof0(__m128 v) { return _mm_cvtepi32_ps(_mm_castps_si128(v)); } // PERF-BK
+inline __m128 fxMfirW(__m128 v, uint16_t vi) // PERF-BK
+{ // PERF-BK
+    const int32_t sv = static_cast<int32_t>(static_cast<int16_t>(vi)); // PERF-BK
+    return _mm_castsi128_ps(_mm_insert_epi32(_mm_castps_si128(v), sv, 3)); // PERF-BK
+} // PERF-BK
+inline uint32_t fxRinit(__m128 v, int lane) // PERF-BK
+{ // PERF-BK
+    alignas(16) uint32_t w[4]; // PERF-BK
+    _mm_store_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(v)); // PERF-BK
+    return 0x3F800000u | (w[lane] & 0x007FFFFFu); // PERF-BK
+} // PERF-BK
+inline __m128 fxRnext(uint32_t &r, __m128 oldV, int lane) // PERF-BK
+{ // PERF-BK
+    const uint32_t x = (r >> 4) & 1u, y = (r >> 22) & 1u; // PERF-BK
+    r = (((r << 1) ^ x ^ y) & 0x007FFFFFu) | 0x3F800000u; // PERF-BK
+    float f; // PERF-BK
+    std::memcpy(&f, &r, 4); // PERF-BK
+    const __m128 fv = _mm_set1_ps(f); // PERF-BK
+    if (lane == 0) return _mm_blend_ps(oldV, fv, 0x1); // PERF-BK
+    if (lane == 1) return _mm_blend_ps(oldV, fv, 0x2); // PERF-BK
+    return _mm_blend_ps(oldV, fv, 0x4); // PERF-BK
+} // PERF-BK
+inline void fxRand3(uint32_t &r, __m128 seed, __m128 &dst) // PERF-BK
+{ // PERF-BK
+    r = fxRinit(seed, 0); dst = fxRnext(r, dst, 0); // PERF-BK
+    r = fxRinit(seed, 1); dst = fxRnext(r, dst, 1); // PERF-BK
+    r = fxRinit(seed, 2); dst = fxRnext(r, dst, 2); // PERF-BK
+} // PERF-BK
+inline __m128 fxMatMul(__m128 c0, __m128 c1, __m128 c2, __m128 c3, __m128 v, bool wOne) // PERF-BK
+{ // PERF-BK
+    const __m128 zero = _mm_setzero_ps(); // PERF-BK
+    __m128 acc = fmacV<4>(c0, bc<0>(v), zero); // PERF-BK
+    acc = fmacV<2>(c1, bc<1>(v), acc); // PERF-BK
+    acc = fmacV<2>(c2, bc<2>(v), acc); // PERF-BK
+    return fmacV<2>(c3, wOne ? _mm_set1_ps(1.0f) : bc<3>(v), acc); // PERF-BK
+} // PERF-BK
+inline uint16_t fxFcor6(uint32_t clipFlags) // PERF-BK
+{ // PERF-BK
+    const bool r = ((clipFlags & 0x041u) == 0x041u) || ((clipFlags & 0x082u) == 0x082u) || ((clipFlags & 0x104u) == 0x104u) || // PERF-BK
+                   ((clipFlags & 0x208u) == 0x208u) || ((clipFlags & 0x410u) == 0x410u) || ((clipFlags & 0x820u) == 0x820u); // PERF-BK
+    return static_cast<uint16_t>(r ? 32768u : 32767u); // PERF-BK
+} // PERF-BK
+inline uint16_t fxFcor4Z(uint32_t clipFlags) // PERF-BK
+{ // PERF-BK
+    const bool r = ((clipFlags & 0x041u) == 0x041u) || ((clipFlags & 0x082u) == 0x082u) || ((clipFlags & 0x104u) == 0x104u) || // PERF-BK
+                   ((clipFlags & 0x208u) == 0x208u) || ((clipFlags & 0x0C30u) != 0u); // PERF-BK
+    return static_cast<uint16_t>(r ? 32768u : 32767u); // PERF-BK
+} // PERF-BK
+
+static bool fxProgram0000(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif) // PERF-BK
+{ // PERF-BK
+    vncNote(0xF000u); // PERF-BK
+    const uint32_t base = top & 0x3FFu; // PERF-BK
+    const uint16_t count = ilw(vu, base + 11u, 0u); // PERF-BK FIX-BK2
+    if (count > 4096u) // PERF-BK4
+    { // PERF-BK3
+        s_fbPc = 0xF101u; // PERF-BK3
+        return false; // PERF-BK
+    } // PERF-BK3
+    const __m128 vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f); // PERF-BK
+    const __m128 vf10 = ldq(vu, base + 0u), vf11 = ldq(vu, base + 1u), vf12 = ldq(vu, base + 2u), vf13 = ldq(vu, base + 3u); // PERF-BK
+    const __m128 vf14 = ldq(vu, base + 4u), vf15 = ldq(vu, base + 5u), vf16 = ldq(vu, base + 6u); // PERF-BK
+    __m128 vf17 = ldq(vu, base + 7u), vf18 = ldq(vu, base + 8u); // PERF-BK
+    const __m128 vf19 = ldq(vu, base + 9u), vf20 = ldq(vu, base + 10u); // PERF-BK
+    __m128 vf21 = ldq(vu, base + 12u); // PERF-BK
+    const __m128 vf22 = ldq(vu, base + 13u), vf23 = ldq(vu, base + 14u), vf24 = ldq(vu, base + 15u); // PERF-BK
+    __m128 vf25 = ldq(vu, base + 16u); // PERF-BK
+    const __m128 vf26 = ldq(vu, base + 17u); // PERF-BK
+    uint32_t r = 0x3F800000u, clipFlags = 0u; // PERF-BK
+    fxRand3(r, vf21, vf21); // PERF-BK
+    __m128 vf27 = vf0, vf28 = vf0, vf29 = vf0, vf30 = vf0, vf31 = vf0; // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fmacV<2>(vf20, one, fmacV<1>(vf21, one, zero))); // PERF-BK
+    vf29 = fxBlend<0x7>(vf29, fxItof0(_mm_castsi128_ps(ftoiS<1>(vf27)))); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fmacV<1>(vf27, vf29, zero)); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fmacV<2>(vf18, one, fmacV<4>(vf27, vf19, zero))); // PERF-BK
+    vf28 = fxMatMul(vf10, vf11, vf12, vf13, vf27, true); // PERF-BK
+    uint16_t vi3 = 512u, vi4 = 768u, vi6 = vi3, vi5 = vi3, vi7 = vi3, vi8 = vi4; // PERF-BK
+    int16_t vi2 = static_cast<int16_t>(count - 2u); // PERF-BK
+    const __m128 i01 = _mm_set1_ps(0.01f); // PERF-BK
+    // Prologue particle 0 (00F8..0240) // PERF-BK
+    vf29 = fxBlend<0x3>(vf29, fmacV<1>(vf28, vf24, zero)); // PERF-BK
+    vf29 = fxBlend<0xC>(vf29, maxV(vf28, vf28)); // PERF-BK
+    vf27 = fxBlend<0x3>(vf27, fmacV<0>(vf28, vf24, zero)); // PERF-BK
+    vf27 = fxBlend<0xC>(vf27, maxV(vf28, vf28)); // PERF-BK
+    fxRand3(r, vf21, vf21); // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf29)) & 0xFFFFFFu; // PERF-BK
+    vf29 = fxMatMul(vf14, vf15, vf16, vf17, vf29, false); // PERF-BK
+    vf18 = fxBlend<0x8>(vf18, fmacV<4>(vf28, i01, zero)); // PERF-BK
+    vi3 = vi6; vi6 = vi4; // PERF-BK
+    vf28 = fxBlend<0x7>(vf28, fmacV<2>(vf20, one, fmacV<1>(vf21, one, zero))); // PERF-BK
+    vf25 = fxItof0(vf25); // PERF-BK
+    stq(vu, vi5++, vf26); // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf27)) & 0xFFFFFFu; // PERF-BK
+    vf30 = fxBlend<0x7>(vf30, _mm_castsi128_ps(ftoiS<1>(vf28))); // PERF-BK
+    vf18 = fxBlend<0x8>(vf18, miniV(vf18, vf0)); // PERF-BK
+    float q = divQ(vf29); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fxMatMul(vf14, vf15, vf16, vf17, vf27, false)); // PERF-BK
+    vf31 = fxBlend<0x7>(vf31, fxItof0(vf30)); // PERF-BK
+    vf18 = fxBlend<0x8>(vf18, maxV(vf18, zero)); // PERF-BK
+    vf30 = fxBlend<0x7>(vf30, maxV(vf25, vf25)); // PERF-BK
+    vf31 = fxBlend<0x7>(vf31, fmacV<1>(vf28, vf31, zero)); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fmacV<4>(vf27, _mm_set1_ps(q), zero)); // PERF-BK
+    vf30 = fxBlend<0x8>(vf30, fmacV<4>(vf25, vf18, zero)); // PERF-BK
+    vf28 = fxBlend<0x7>(vf28, fmacV<4>(vf29, _mm_set1_ps(q), zero)); // PERF-BK
+    vf29 = fxBlend<0x7>(vf29, fmacV<2>(vf18, one, fmacV<4>(vf31, vf19, zero))); // PERF-BK
+    const uint16_t adc0 = fxFcor6(clipFlags); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, _mm_castsi128_ps(ftoiS<16>(vf27))); // PERF-BK
+    vf30 = _mm_castsi128_ps(ftoiS<1>(vf30)); // PERF-BK
+    vf28 = fxMfirW(vf28, adc0); // PERF-BK
+    vf28 = fxBlend<0x7>(vf28, _mm_castsi128_ps(ftoiS<16>(vf28))); // PERF-BK
+    vf27 = fxMfirW(vf27, adc0); // PERF-BK
+    vf29 = fxMatMul(vf10, vf11, vf12, vf13, vf29, true); // PERF-BK
+    uint16_t vi1 = vi5; // PERF-BK
+    stq(vu, vi1++, vf30); // PERF-BK
+    stq(vu, vi1++, vf22); // PERF-BK
+    stq(vu, vi1++, vf28); // PERF-BK
+    stq(vu, vi1++, vf23); // PERF-BK
+    stq(vu, vi1++, vf27); // PERF-BK
+    vf27 = fxBlend<0x3>(vf27, fmacV<1>(vf29, vf24, zero)); // PERF-BK
+    vf27 = fxBlend<0xC>(vf27, maxV(vf29, vf29)); // PERF-BK
+    vi5 = vi4; // PERF-BK
+    vf28 = fxBlend<0x3>(vf28, fmacV<0>(vf29, vf24, zero)); // PERF-BK
+    // Main loop (0248..0380 + delay 0388) // PERF-BK
+    do // PERF-BK
+    { // PERF-BK
+        vf28 = fxBlend<0xC>(vf28, maxV(vf29, vf29)); // PERF-BK
+        fxRand3(r, vf21, vf21); // PERF-BK
+        clipFlags = ((clipFlags << 6) | clipBitsV(vf27)) & 0xFFFFFFu; // PERF-BK
+        vf27 = fxMatMul(vf14, vf15, vf16, vf17, vf27, false); // PERF-BK
+        clipFlags = ((clipFlags << 6) | clipBitsV(vf28)) & 0xFFFFFFu; // PERF-BK
+        vi4 = vi6; vi6 = vi3; // PERF-BK
+        vf18 = fxBlend<0x8>(vf18, fmacV<4>(vf29, i01, zero)); // PERF-BK
+        q = divQ(vf27); // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, fmacV<2>(vf20, one, fmacV<1>(vf21, one, zero))); // PERF-BK
+        vf27 = fxBlend<0x8>(vf27, miniV(vf18, vf0)); // PERF-BK
+        vf30 = fxBlend<0x7>(vf30, _mm_castsi128_ps(ftoiS<1>(vf29))); // PERF-BK
+        vf28 = fxBlend<0x7>(vf28, fxMatMul(vf14, vf15, vf16, vf17, vf28, false)); // PERF-BK
+        vf31 = fxBlend<0x7>(vf31, fxItof0(vf30)); // PERF-BK
+        vf27 = fxBlend<0x8>(vf27, maxV(vf27, zero)); // PERF-BK
+        vf30 = fxBlend<0x7>(vf30, maxV(vf25, vf25)); // PERF-BK
+        vf28 = fxBlend<0x7>(vf28, fmacV<4>(vf28, _mm_set1_ps(q), zero)); // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, fmacV<1>(vf29, vf31, zero)); // PERF-BK
+        vf30 = fxBlend<0x8>(vf30, fmacV<4>(vf25, vf27, zero)); // PERF-BK
+        vf21 = fxBlend<0x7>(vf21, maxV(vf21, vf21)); // PERF-BK
+        const uint16_t adc = fxFcor6(clipFlags); // PERF-BK
+        vf28 = fxMfirW(vf28, adc); // PERF-BK
+        vf27 = fxMfirW(vf27, adc); // PERF-BK
+        vf31 = fxBlend<0x7>(vf31, fmacV<4>(vf27, _mm_set1_ps(q), zero)); // PERF-BK
+        stq(vu, vi5++, vf26); // PERF-BK
+        if (!kick(vu, vi7, kicks, gif)) { s_fbPc = 0xF102u; return false; } // PERF-BK3
+        vf29 = fxBlend<0x7>(vf29, fmacV<2>(vf18, one, fmacV<4>(vf29, vf19, zero))); // PERF-BK
+        vi2 = static_cast<int16_t>(vi2 - 1); // PERF-BK
+        vf30 = _mm_castsi128_ps(ftoiS<1>(vf30)); // PERF-BK
+        vf27 = fxBlend<0x7>(vf27, _mm_castsi128_ps(ftoiS<16>(vf28))); // PERF-BK
+        vi7 = vi8; // PERF-BK
+        vf28 = fxBlend<0x7>(vf28, _mm_castsi128_ps(ftoiS<16>(vf31))); // PERF-BK
+        vi8 = vi5; vi5 = vi3; // PERF-BK
+        vf29 = fxMatMul(vf10, vf11, vf12, vf13, vf29, true); // PERF-BK
+        stq(vu, vi8++, vf30); // PERF-BK
+        stq(vu, vi8++, vf22); // PERF-BK
+        stq(vu, vi8++, vf28); // PERF-BK
+        stq(vu, vi8++, vf23); // PERF-BK
+        stq(vu, vi8++, vf27); // PERF-BK
+        vf27 = fxBlend<0x3>(vf27, fmacV<1>(vf29, vf24, zero)); // PERF-BK
+        vi8 = vi3; // PERF-BK
+        vf27 = fxBlend<0xC>(vf27, maxV(vf29, vf29)); // PERF-BK
+        vf28 = fxBlend<0x3>(vf28, fmacV<0>(vf29, vf24, zero)); // PERF-BK
+        vi3 = vi4; // PERF-BK
+    } while (vi2 > 0); // PERF-BK
+    // Epilogue particle (0390..0490) // PERF-BK
+    vf28 = fxBlend<0xC>(vf28, maxV(vf29, vf29)); // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf27)) & 0xFFFFFFu; // PERF-BK
+    vf27 = fxMatMul(vf14, vf15, vf16, vf17, vf27, false); // PERF-BK
+    vf17 = fxBlend<0x8>(vf17, fmacV<4>(vf29, i01, zero)); // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf28)) & 0xFFFFFFu; // PERF-BK
+    stq(vu, vi5++, vf26); // PERF-BK
+    if (!kick(vu, vi7, kicks, gif)) { s_fbPc = 0xF103u; return false; } // PERF-BK3
+    q = divQ(vf27); // PERF-BK3 (03D8 DIV reads vf27.w before same-pair MINI.w writes it)
+    vf27 = fxBlend<0x8>(vf27, miniV(vf17, vf0)); // PERF-BK3
+    vf28 = fxBlend<0x7>(vf28, fxMatMul(vf14, vf15, vf16, vf17, vf28, false)); // PERF-BK
+    vf27 = fxBlend<0x8>(vf27, maxV(vf27, zero)); // PERF-BK
+    vf17 = fxBlend<0x7>(vf17, maxV(vf25, vf25)); // PERF-BK
+    vf17 = fxBlend<0x8>(vf17, fmacV<4>(vf25, vf27, zero)); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fmacV<4>(vf27, _mm_set1_ps(q), zero)); // PERF-BK
+    vf25 = fxBlend<0x7>(vf25, fmacV<4>(vf28, _mm_set1_ps(q), zero)); // PERF-BK
+    const __m128 vf26Out = _mm_castsi128_ps(ftoiS<1>(vf17)); // PERF-BK
+    const uint16_t adcLast = fxFcor6(clipFlags); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, _mm_castsi128_ps(ftoiS<16>(vf27))); // PERF-BK
+    vf27 = fxMfirW(vf27, adcLast); // PERF-BK
+    vf25 = fxMfirW(vf25, adcLast); // PERF-BK
+    vf25 = fxBlend<0x7>(vf25, _mm_castsi128_ps(ftoiS<16>(vf25))); // PERF-BK
+    stq(vu, vi5++, vf26Out); // PERF-BK
+    stq(vu, vi5++, vf22); // PERF-BK
+    stq(vu, vi5++, vf27); // PERF-BK
+    stq(vu, vi5++, vf23); // PERF-BK
+    stq(vu, vi5++, vf25); // PERF-BK
+    if (!kick(vu, vi8, kicks, gif)) { s_fbPc = 0xF104u; return false; } // PERF-BK3
+    return true; // PERF-BK3
+} // PERF-BK
+
+static bool fxProgram04A0(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif) // PERF-BK
+{ // PERF-BK
+    vncNote(0xF4A0u); // PERF-BK
+    const uint32_t base = top & 0x3FFu; // PERF-BK
+    const uint16_t count = ilw(vu, base + 11u, 0u); // PERF-BK FIX-BK2
+    if (count > 4096u) // PERF-BK4
+    { // PERF-BK3
+        s_fbPc = 0xF105u; // PERF-BK3
+        return false; // PERF-BK
+    } // PERF-BK3
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f); // PERF-BK
+    const __m128 vf10 = ldq(vu, base + 0u); // PERF-BK
+    __m128 vf11 = ldq(vu, base + 1u), vf12 = ldq(vu, base + 2u), vf13 = ldq(vu, base + 3u); // PERF-BK
+    const __m128 vf14 = ldq(vu, base + 4u), vf15 = ldq(vu, base + 5u), vf16 = ldq(vu, base + 6u); // PERF-BK
+    __m128 vf17 = ldq(vu, base + 7u); // PERF-BK
+    const __m128 vf18 = ldq(vu, base + 8u), vf19 = ldq(vu, base + 9u), vf20 = ldq(vu, base + 10u); // PERF-BK
+    __m128 vf21 = ldq(vu, base + 12u); // PERF-BK
+    const __m128 vf22 = ldq(vu, base + 13u), vf23 = ldq(vu, base + 14u), vf24 = ldq(vu, base + 15u), vf25 = ldq(vu, base + 16u); // PERF-BK
+    uint32_t r = 0x3F800000u, clipFlags = 0u; // PERF-BK
+    __m128 vf26 = zero, vf27 = zero, vf28 = zero, vf29 = zero, vf30 = zero, vf31 = zero; // PERF-BK
+    fxRand3(r, vf21, vf26); // PERF-BK
+    vf21 = fxBlend<0x7>(vf21, maxV(vf26, vf26)); // PERF-BK
+    vf26 = fxBlend<0x7>(vf26, fmacV<2>(vf20, one, fmacV<1>(vf26, one, zero))); // PERF-BK
+    r = fxRinit(vf21, 0); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fxItof0(_mm_castsi128_ps(ftoiS<1>(vf26)))); // PERF-BK
+    vf26 = fxBlend<0x7>(vf26, fmacV<1>(vf26, vf27, zero)); // PERF-BK
+    vf29 = fxRnext(r, vf29, 0); r = fxRinit(vf21, 1); vf29 = fxRnext(r, vf29, 1); r = fxRinit(vf21, 2); vf29 = fxRnext(r, vf29, 2); // PERF-BK
+    vf26 = fxBlend<0x7>(vf26, fmacV<2>(vf18, one, fmacV<4>(vf26, vf19, zero))); // PERF-BK
+    vf21 = fxBlend<0x7>(vf21, maxV(vf29, vf29)); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fmacV<0>(vf26, vf24, zero)); // PERF-BK
+    vf26 = fxMatMul(vf10, vf11, vf12, vf13, vf26, true); // PERF-BK
+    vf27 = fxMatMul(vf10, vf11, vf12, vf13, vf27, true); // PERF-BK
+    vf29 = fxBlend<0x7>(vf29, fmacV<2>(vf20, one, fmacV<1>(vf29, one, zero))); // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf26)) & 0xFFFFFFu; // PERF-BK
+    vf28 = fxBlend<0x7>(vf28, fxItof0(_mm_castsi128_ps(ftoiS<1>(vf29)))); // PERF-BK
+    vf26 = fxMatMul(vf14, vf15, vf16, vf17, vf26, false); // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf27)) & 0xFFFFFFu; // PERF-BK
+    uint16_t vi3 = 512u, vi4 = 768u; // PERF-BK
+    int16_t vi2 = static_cast<int16_t>(count - 2u); // PERF-BK
+    vf29 = fxBlend<0x7>(vf29, fmacV<1>(vf29, vf28, zero)); // PERF-BK
+    vf27 = fxMatMul(vf14, vf15, vf16, vf17, vf27, false); // PERF-BK
+    vf29 = fxBlend<0x7>(vf29, fmacV<2>(vf18, one, fmacV<4>(vf29, vf19, zero))); // PERF-BK
+    // Prologue particle 0 (0620..0760) // PERF-BK
+    const uint16_t adc0 = fxFcor4Z(clipFlags); // PERF-BK
+    float qA = divQ(vf26); // PERF-BK
+    vf31 = fxBlend<0x7>(vf31, fmacV<0>(vf29, vf24, zero)); // PERF-BK
+    vf30 = fxMatMul(vf10, vf11, vf12, vf13, vf29, true); // PERF-BK
+    fxRand3(r, vf21, vf28); // PERF-BK
+    vf29 = fxBlend<0x7>(vf29, fmacV<4>(vf26, _mm_set1_ps(qA), zero)); // PERF-BK
+    qA = divQ(vf27); // PERF-BK
+    vf26 = fxMatMul(vf10, vf11, vf12, vf13, vf31, true); // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf30)) & 0xFFFFFFu; // PERF-BK
+    vf31 = maxV(vf30, vf30); // PERF-BK
+    vf21 = fxBlend<0x7>(vf21, maxV(vf28, vf28)); // PERF-BK
+    vi2 = static_cast<int16_t>(vi2 - 1); // PERF-BK
+    vf30 = fxBlend<0x7>(vf30, fmacV<2>(vf20, one, fmacV<1>(vf28, one, zero))); // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf26)) & 0xFFFFFFu; // PERF-BK
+    vf28 = fxBlend<0x7>(vf28, fmacV<4>(vf27, _mm_set1_ps(qA), zero)); // PERF-BK
+    vf29 = fxMfirW(vf29, adc0); // PERF-BK
+    uint16_t vi5 = vi3; // PERF-BK
+    stq(vu, vi5++, vf25); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, _mm_castsi128_ps(ftoiS<1>(vf30))); // PERF-BK
+    vf28 = fxMfirW(vf28, adc0); // PERF-BK
+    vf28 = fxBlend<0x7>(vf28, _mm_castsi128_ps(ftoiS<16>(vf28))); // PERF-BK
+    stq(vu, vi5++, vf22); // PERF-BK
+    const __m128 vf27Next = fxMatMul(vf14, vf15, vf16, vf17, vf31, false); // PERF-BK
+    vf31 = fxBlend<0x7>(vf31, fxItof0(vf27)); // PERF-BK
+    vf27 = vf27Next; // PERF-BK
+    vf29 = fxBlend<0x7>(vf29, _mm_castsi128_ps(ftoiS<16>(vf29))); // PERF-BK
+    vf30 = fxBlend<0x7>(vf30, fmacV<1>(vf30, vf31, zero)); // PERF-BK
+    vf26 = fxMatMul(vf14, vf15, vf16, vf17, vf26, false); // PERF-BK
+    qA = divQ(vf27); // PERF-BK
+    uint16_t adcLoop = fxFcor4Z(clipFlags); // PERF-BK
+    stq(vu, vi5++, vf29); // PERF-BK
+    vf29 = fxBlend<0x7>(vf29, fmacV<2>(vf18, one, fmacV<4>(vf30, vf19, zero))); // PERF-BK
+    stq(vu, vi5++, vf23); // PERF-BK
+    stq(vu, vi5++, vf28); // PERF-BK
+    if (!kick(vu, vi3, kicks, gif)) { s_fbPc = 0xF106u; return false; } // PERF-BK3
+    vf28 = fxBlend<0x7>(vf28, fmacV<0>(vf29, vf24, zero)); // PERF-BK
+    vi5 = vi3; // PERF-BK
+    // Main loop (0768..0888 + delay 0890) // PERF-BK
+    do // PERF-BK
+    { // PERF-BK
+        vi3 = vi4; // PERF-BK
+        fxRand3(r, vf21, vf30); // PERF-BK
+        vf31 = fxMatMul(vf10, vf11, vf12, vf13, vf29, true); // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, fmacV<4>(vf27, _mm_set1_ps(qA), zero)); // PERF-BK
+        qA = divQ(vf26); // PERF-BK
+        vf28 = fxMatMul(vf10, vf11, vf12, vf13, vf28, true); // PERF-BK
+        clipFlags = ((clipFlags << 6) | clipBitsV(vf31)) & 0xFFFFFFu; // PERF-BK
+        vi4 = vi5; // PERF-BK
+        vf27 = vf31; // PERF-BK
+        vf21 = fxBlend<0x7>(vf21, maxV(vf30, vf30)); // PERF-BK
+        vf31 = fxBlend<0x7>(vf31, fmacV<2>(vf20, one, fmacV<1>(vf30, one, zero))); // PERF-BK
+        clipFlags = ((clipFlags << 6) | clipBitsV(vf28)) & 0xFFFFFFu; // PERF-BK
+        const uint16_t adcCur = adcLoop; // PERF-BK
+        vf29 = fxMfirW(vf29, adcCur); // PERF-BK
+        vf30 = fxBlend<0x7>(vf30, fmacV<4>(vf26, _mm_set1_ps(qA), zero)); // PERF-BK
+        vi5 = vi3; // PERF-BK
+        vf26 = fxBlend<0x7>(vf26, _mm_castsi128_ps(ftoiS<1>(vf31))); // PERF-BK
+        vf30 = fxBlend<0x7>(vf30, _mm_castsi128_ps(ftoiS<16>(vf30))); // PERF-BK
+        vf26 = fxBlend<0x7>(vf26, fxItof0(vf26)); // PERF-BK
+        vf27 = fxMatMul(vf14, vf15, vf16, vf17, vf27, false); // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, _mm_castsi128_ps(ftoiS<16>(vf29))); // PERF-BK
+        vf31 = fxBlend<0x7>(vf31, fmacV<1>(vf31, vf26, zero)); // PERF-BK
+        stq(vu, vi5++, vf25); // PERF-BK
+        stq(vu, vi5++, vf22); // PERF-BK
+        vf26 = fxMatMul(vf14, vf15, vf16, vf17, vf28, false); // PERF-BK
+        vf30 = fxMfirW(vf30, adcCur); // PERF-BK
+        stq(vu, vi5++, vf29); // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, fmacV<2>(vf18, one, fmacV<4>(vf31, vf19, zero))); // PERF-BK
+        stq(vu, vi5++, vf23); // PERF-BK
+        adcLoop = fxFcor4Z(clipFlags); // PERF-BK
+        stq(vu, vi5++, vf30); // PERF-BK
+        vi2 = static_cast<int16_t>(vi2 - 1); // PERF-BK
+        if (!kick(vu, vi3, kicks, gif)) { s_fbPc = 0xF107u; return false; } // PERF-BK3
+        qA = divQ(vf27); // PERF-BK
+        vf28 = fxBlend<0x7>(vf28, fmacV<0>(vf29, vf24, zero)); // PERF-BK
+        vi5 = vi3; // PERF-BK
+    } while (vi2 > 0); // PERF-BK
+    // Epilogue two particles (0898..0A08) // PERF-BK
+    vf29 = fxMatMul(vf10, vf11, vf12, vf13, vf29, true); // PERF-BK
+    __m128 acc28 = fmacV<4>(vf10, bc<0>(vf28), zero); // PERF-BK
+    acc28 = fmacV<2>(vf11, bc<1>(vf28), acc28); // PERF-BK
+    acc28 = fmacV<2>(vf12, bc<2>(vf28), acc28); // PERF-BK
+    const float qB = divQ(vf26); // PERF-BK3 (08B8 DIV; 08C8 MULq is 2 pairs later -> reads older qA from 0880)
+    vf12 = fxBlend<0x7>(vf12, fmacV<4>(vf27, _mm_set1_ps(qA), zero)); // PERF-BK3
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf29)) & 0xFFFFFFu; // PERF-BK
+    vf13 = fmacV<2>(vf13, one, acc28); // PERF-BK
+    vf11 = maxV(vf29, vf29); // PERF-BK
+    const uint16_t vi2Epi = vi4; // PERF-BK
+    vf12 = fxBlend<0x7>(vf12, _mm_castsi128_ps(ftoiS<16>(vf12))); // PERF-BK
+    vf26 = fxBlend<0x7>(vf26, fmacV<4>(vf26, _mm_set1_ps(qB), zero)); // PERF-BK3 (08F0 MULq is 7 pairs after 08B8)
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf13)) & 0xFFFFFFu; // PERF-BK
+    vf12 = fxMfirW(vf12, adcLoop); // PERF-BK
+    vi4 = vi2Epi; // PERF-BK
+    stq(vu, vi4++, vf25); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, _mm_castsi128_ps(ftoiS<16>(vf26))); // PERF-BK
+    stq(vu, vi4++, vf22); // PERF-BK
+    vf27 = fxMfirW(vf27, adcLoop); // PERF-BK
+    vf26 = fxMatMul(vf14, vf15, vf16, vf17, vf11, false); // PERF-BK
+    stq(vu, vi4++, vf12); // PERF-BK
+    stq(vu, vi4++, vf23); // PERF-BK
+    const float q1 = divQ(vf26); // PERF-BK
+    vf17 = fxMatMul(vf14, vf15, vf16, vf17, vf13, false); // PERF-BK
+    const float q2 = divQ(vf17); // PERF-BK
+    const uint16_t adcEnd = fxFcor4Z(clipFlags); // PERF-BK
+    stq(vu, vi4++, vf27); // PERF-BK
+    if (!kick(vu, vi2Epi, kicks, gif)) { s_fbPc = 0xF108u; return false; } // PERF-BK3
+    // 09A0 MULq vf26 reads q1 (0978 DIV Q2 has 7-cycle latency, ready at 09B0) // PERF-BK
+    vf26 = fxBlend<0x7>(vf26, fmacV<4>(vf26, _mm_set1_ps(q1), zero)); // PERF-BK
+    const uint16_t vi1Epi = vi5; // PERF-BK
+    vf12 = fxBlend<0x7>(vf12, fmacV<4>(vf17, _mm_set1_ps(q2), zero)); // PERF-BK
+    vf17 = fxMfirW(vf17, adcEnd); // PERF-BK
+    vf17 = fxBlend<0x7>(vf17, _mm_castsi128_ps(ftoiS<16>(vf26))); // PERF-BK
+    vi5 = vi1Epi; // PERF-BK
+    vf12 = fxMfirW(vf12, adcEnd); // PERF-BK
+    vf12 = fxBlend<0x7>(vf12, _mm_castsi128_ps(ftoiS<16>(vf12))); // PERF-BK
+    stq(vu, vi5++, vf25); // PERF-BK
+    stq(vu, vi5++, vf22); // PERF-BK
+    stq(vu, vi5++, vf17); // PERF-BK
+    stq(vu, vi5++, vf23); // PERF-BK
+    stq(vu, vi5++, vf12); // PERF-BK
+    if (!kick(vu, vi1Epi, kicks, gif)) { s_fbPc = 0xF109u; return false; } // PERF-BK3
+    return true; // PERF-BK3
+} // PERF-BK
+
+static bool fxProgram0A18(uint8_t *vu, uint32_t top, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif) // PERF-BK
+{ // PERF-BK
+    vncNote(0xFA18u); // PERF-BK
+    const uint32_t base = top & 0x3FFu; // PERF-BK
+    const uint16_t count = ilw(vu, base + 11u, 0u); // PERF-BK FIX-BK2
+    if (count > 4096u) // PERF-BK4
+    { // PERF-BK3
+        s_fbPc = 0xF10Au; // PERF-BK3
+        return false; // PERF-BK
+    } // PERF-BK3
+    const __m128 vf0 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f); // PERF-BK
+    const __m128 vf10 = ldq(vu, base + 0u), vf11 = ldq(vu, base + 1u), vf12 = ldq(vu, base + 2u), vf13 = ldq(vu, base + 3u); // PERF-BK
+    const __m128 vf14 = ldq(vu, base + 4u), vf15 = ldq(vu, base + 5u), vf16 = ldq(vu, base + 6u); // PERF-BK
+    __m128 vf17 = ldq(vu, base + 7u), vf18 = ldq(vu, base + 8u); // PERF-BK
+    const __m128 vf19 = ldq(vu, base + 9u), vf20 = ldq(vu, base + 10u); // PERF-BK
+    __m128 vf21 = ldq(vu, base + 12u); // PERF-BK
+    const __m128 vf22 = ldq(vu, base + 13u), vf23 = ldq(vu, base + 14u), vf24 = ldq(vu, base + 15u); // PERF-BK
+    __m128 vf25 = ldq(vu, base + 16u); // PERF-BK
+    const __m128 vf26 = ldq(vu, base + 17u); // PERF-BK
+    uint32_t r = 0x3F800000u, clipFlags = 0u; // PERF-BK
+    __m128 vf27 = vf0, vf28 = vf0, vf29 = vf0, vf30 = vf0, vf31 = vf0; // PERF-BK
+    fxRand3(r, vf21, vf21); // PERF-BK
+    vf28 = fxBlend<0x7>(vf28, fmacV<2>(vf20, one, fmacV<1>(vf21, one, zero))); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fxItof0(_mm_castsi128_ps(ftoiS<1>(vf28)))); // PERF-BK
+    vf28 = fxBlend<0x7>(vf28, fmacV<1>(vf28, vf27, zero)); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fmacV<2>(vf18, one, fmacV<4>(vf28, vf19, zero))); // PERF-BK
+    const __m128 iInit = _mm_set1_ps(6.0f); // PERF-BK4 (0AA0 LOI 0x40C00000 = 6.0f)
+    vf29 = fxBlend<0x7>(vf29, fmacV<4>(vf28, iInit, zero)); // PERF-BK
+    vf30 = fxMatMul(vf10, vf11, vf12, vf13, vf27, true); // PERF-BK
+    vf31 = fxBlend<0x7>(vf31, fmacV<3>(vf28, iInit, fmacV<0>(vf0, iInit, zero))); // PERF-BK
+    vf25 = fxItof0(vf25); // PERF-BK
+    vf27 = fxBlend<0x3>(vf27, fmacV<0>(vf30, vf24, zero)); // PERF-BK
+    vf28 = fxBlend<0x3>(vf28, fmacV<1>(vf30, vf24, zero)); // PERF-BK
+    const __m128 i01 = _mm_set1_ps(0.01f); // PERF-BK
+    vf29 = fxBlend<0x7>(vf29, miniV(vf29, vf31)); // PERF-BK
+    vf28 = fxBlend<0xC>(vf28, vf30); // PERF-BK
+    vf18 = fxBlend<0x8>(vf18, fmacV<4>(vf30, i01, zero)); // PERF-BK
+    vf27 = fxBlend<0xC>(vf27, maxV(vf30, vf30)); // PERF-BK
+    uint16_t vi3 = 512u, vi4 = 768u, vi1 = vi3, vi6 = vi3, vi5 = vi3; // PERF-BK
+    vi3 = vi4; vi4 = vi1; // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf28)) & 0xFFFFFFu; // PERF-BK
+    vf18 = fxBlend<0x8>(vf18, miniV(vf18, bc<0>(vf29))); // PERF-BK
+    clipFlags = ((clipFlags << 6) | clipBitsV(vf27)) & 0xFFFFFFu; // PERF-BK
+    vf18 = fxBlend<0x8>(vf18, miniV(vf18, bc<1>(vf29))); // PERF-BK
+    stq(vu, vi6++, vf26); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, fxMatMul(vf14, vf15, vf16, vf17, vf27, false)); // PERF-BK
+    int16_t vi2 = static_cast<int16_t>(count - 1u); // PERF-BK
+    vf18 = fxBlend<0x8>(vf18, miniV(vf18, bc<2>(vf29))); // PERF-BK
+    uint16_t vi7 = (clipFlags & 0x041u) == 0x041u ? 1u : 0u; // PERF-BK
+    __m128 acc28 = fmacV<4>(vf14, bc<0>(vf28), zero); // PERF-BK
+    acc28 = fmacV<2>(vf15, bc<1>(vf28), acc28); // PERF-BK
+    // Main loop (0B68..0D28 + delay 0D30) // PERF-BK
+    do // PERF-BK
+    { // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, vf25); // PERF-BK
+        acc28 = fmacV<2>(vf16, bc<2>(vf28), acc28); // PERF-BK
+        vf28 = fmacV<2>(vf17, bc<3>(vf28), acc28); // PERF-BK
+        vf18 = fxBlend<0x8>(vf18, miniV(vf18, vf0)); // PERF-BK
+        fxRand3(r, vf21, vf21); // PERF-BK
+        vf18 = fxBlend<0x8>(vf18, maxV(vf18, zero)); // PERF-BK
+        const float q = divQ(vf28); // PERF-BK
+        vf29 = fxBlend<0x8>(vf29, fmacV<4>(vf25, vf18, zero)); // PERF-BK
+        uint16_t vi8 = vi6; // PERF-BK
+        vf30 = fxBlend<0x7>(vf30, fmacV<2>(vf20, one, fmacV<1>(vf21, one, zero))); // PERF-BK
+        vi7 = vi3; // PERF-BK
+        vf21 = fxBlend<0x7>(vf21, maxV(vf21, vf21)); // PERF-BK
+        const uint16_t adc = fxFcor6(clipFlags); // PERF-BK
+        vf31 = _mm_castsi128_ps(ftoiS<1>(vf29)); // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, _mm_castsi128_ps(ftoiS<1>(vf30))); // PERF-BK
+        vf28 = fxBlend<0x7>(vf28, fmacV<4>(vf28, _mm_set1_ps(q), zero)); // PERF-BK
+        stq(vu, vi8++, vf31); // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, fxItof0(vf29)); // PERF-BK
+        vf27 = fxBlend<0x7>(vf27, fmacV<4>(vf27, _mm_set1_ps(q), zero)); // PERF-BK
+        vf28 = fxMfirW(vf28, adc); // PERF-BK
+        vf28 = fxBlend<0x7>(vf28, _mm_castsi128_ps(ftoiS<16>(vf28))); // PERF-BK
+        vf27 = fxMfirW(vf27, adc); // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, fmacV<1>(vf30, vf29, zero)); // PERF-BK
+        stq(vu, vi8++, vf22); // PERF-BK
+        vi1 = vi5; // PERF-BK
+        vf27 = fxBlend<0x7>(vf27, _mm_castsi128_ps(ftoiS<16>(vf27))); // PERF-BK
+        vi6 = vi3; // PERF-BK
+        stq(vu, vi8++, vf28); // PERF-BK
+        vf28 = fxBlend<0x7>(vf28, maxV(vf29, vf29)); // PERF-BK
+        stq(vu, vi8++, vf23); // PERF-BK
+        const __m128 vf27Next = fxBlend<0x7>(vf27, fmacV<2>(vf18, one, fmacV<4>(vf29, vf19, zero))); // PERF-BK
+        stq(vu, vi8++, vf27); // PERF-BK
+        vf27 = vf27Next; // PERF-BK
+        vi5 = vi3; vi3 = vi4; vi4 = vi7; // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, fmacV<4>(vf28, iInit, zero)); // PERF-BK4 (MULi.xyz with I = 6.0f from 0C40)
+        if (!kick(vu, vi1, kicks, gif)) { s_fbPc = 0xF10Bu; return false; } // PERF-BK3
+        vf30 = fxMatMul(vf10, vf11, vf12, vf13, vf27, true); // PERF-BK
+        vf31 = fxBlend<0x7>(vf31, fmacV<3>(vf28, iInit, fmacV<0>(vf0, iInit, zero))); // PERF-BK4 (ADDAi/MSUBi with I = 6.0f from 0C40)
+        vf27 = fxBlend<0x3>(vf27, fmacV<0>(vf30, vf24, zero)); // PERF-BK
+        vf28 = fxBlend<0x3>(vf28, fmacV<1>(vf30, vf24, zero)); // PERF-BK
+        vf29 = fxBlend<0x7>(vf29, miniV(vf29, vf31)); // PERF-BK
+        vf28 = fxBlend<0xC>(vf28, vf30); // PERF-BK
+        vf18 = fxBlend<0x8>(vf18, fmacV<4>(vf30, i01, zero)); // PERF-BK
+        vf27 = fxBlend<0xC>(vf27, maxV(vf30, vf30)); // PERF-BK
+        clipFlags = ((clipFlags << 6) | clipBitsV(vf28)) & 0xFFFFFFu; // PERF-BK
+        vf18 = fxBlend<0x8>(vf18, miniV(vf18, bc<0>(vf29))); // PERF-BK
+        stq(vu, vi6++, vf26); // PERF-BK
+        clipFlags = ((clipFlags << 6) | clipBitsV(vf27)) & 0xFFFFFFu; // PERF-BK
+        vf18 = fxBlend<0x8>(vf18, miniV(vf18, bc<1>(vf29))); // PERF-BK
+        vi2 = static_cast<int16_t>(vi2 - 1); // PERF-BK
+        vf27 = fxBlend<0x7>(vf27, fxMatMul(vf14, vf15, vf16, vf17, vf27, false)); // PERF-BK
+        acc28 = fmacV<4>(vf14, bc<0>(vf28), zero); // PERF-BK
+        acc28 = fmacV<2>(vf15, bc<1>(vf28), acc28); // PERF-BK
+        vf18 = fxBlend<0x8>(vf18, miniV(vf18, bc<2>(vf29))); // PERF-BK
+    } while (vi2 > 0); // PERF-BK
+    // Epilogue particle (0D38..0DF8) // PERF-BK
+    vf27 = fxBlend<0x8>(vf27, miniV(vf18, vf0)); // PERF-BK
+    acc28 = fmacV<2>(vf16, bc<2>(vf28), acc28); // PERF-BK
+    vf27 = fxBlend<0x8>(vf27, maxV(vf27, zero)); // PERF-BK
+    vf17 = fmacV<2>(vf17, bc<3>(vf28), acc28); // PERF-BK
+    vf25 = fxBlend<0x8>(vf25, fmacV<4>(vf25, vf27, zero)); // PERF-BK
+    const float q = divQ(vf17); // PERF-BK
+    vf25 = _mm_castsi128_ps(ftoiS<1>(vf25)); // PERF-BK
+    stq(vu, vi6++, vf25); // PERF-BK
+    vf25 = fxBlend<0x7>(vf25, fmacV<4>(vf17, _mm_set1_ps(q), zero)); // PERF-BK
+    vf17 = fxBlend<0x7>(vf17, fmacV<4>(vf27, _mm_set1_ps(q), zero)); // PERF-BK
+    const uint16_t adcLast = fxFcor6(clipFlags); // PERF-BK
+    vf27 = fxMfirW(vf27, adcLast); // PERF-BK
+    vf17 = fxMfirW(vf17, adcLast); // PERF-BK
+    vf27 = fxBlend<0x7>(vf27, _mm_castsi128_ps(ftoiS<16>(vf25))); // PERF-BK
+    vf17 = fxBlend<0x7>(vf17, _mm_castsi128_ps(ftoiS<16>(vf17))); // PERF-BK
+    stq(vu, vi6++, vf22); // PERF-BK
+    stq(vu, vi6++, vf27); // PERF-BK
+    stq(vu, vi6++, vf23); // PERF-BK
+    stq(vu, vi6++, vf17); // PERF-BK
+    if (!kick(vu, vi5, kicks, gif)) { s_fbPc = 0xF10Cu; return false; } // PERF-BK3
+    return true; // PERF-BK3
+} // PERF-BK
+
 // startPC / TOP / ITOP: only the main entry 0008 is supported (TOP is read by XTOP at 0010; ITOP is not used by the supported handlers).
 static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t itop, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool vxA)
 {
@@ -2896,6 +3559,22 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     kicks.clear();
     gif.clear();
     s_fbPc = 0u;
+    const uint32_t pc = startPC & 0xFFFFu; // PERF-BK
+    if ((pc == 0x0000u || pc == 0x04A0u || pc == 0x0A18u) && t_curSlot >= 0 && (s_imgCache[t_curSlot].mask & (1ull << 63)) != 0ull) // PERF-BK
+    { // PERF-BK
+        t_newN = 0u; // PERF-BK
+        UndoLog &log = undoLog(); // PERF-BK
+        log.clear(); // PERF-BK
+        const bool fxOk = (pc == 0x0000u) ? fxProgram0000(vu, top, kicks, gif) : (pc == 0x04A0u) ? fxProgram04A0(vu, top, kicks, gif) : fxProgram0A18(vu, top, kicks, gif); // PERF-BK
+        if (fxOk) // PERF-BK
+            return true; // PERF-BK
+        for (uint32_t i = log.size; i-- > 0;) // PERF-BK
+            std::memcpy(vu + (static_cast<uint32_t>(log.data[i].qword) << 4), log.data[i].old, 16); // PERF-BK
+        log.clear(); // PERF-BK
+        kicks.clear(); // PERF-BK
+        gif.clear(); // PERF-BK
+        return false; // PERF-BK
+    } // PERF-BK
     const bool oneShot = (startPC & 0xFFFFu) == 0x40u; // 0040: vi15 := 0, then entry at 0010; one handler, then END
     if ((startPC & 0xFFFFu) != 8u && !oneShot)
     {
@@ -2979,7 +3658,7 @@ static void reportMaybe()
     for (const auto &kv : s_fbPcs)
         v.emplace_back(kv.second, kv.first);
     std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-    char buf[768];
+    char buf[1024]; // PERF-BE
     int n = std::snprintf(buf, sizeof(buf), "[vfunc] taken=%llu fallback=%llu fb_pcs:", (unsigned long long)s_taken, (unsigned long long)s_fallback);
     for (size_t i = 0; i < v.size() && i < 8u && n > 0 && n < 440; ++i)
         n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %04X:%llu", v[i].second, (unsigned long long)v[i].first);
@@ -3004,6 +3683,20 @@ static void reportMaybe()
         n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " skinN: 0:%llu 1:%llu 2:%llu 3:%llu 4-99:%llu 100-199:%llu 200+:%llu",
                            (unsigned long long)s_skinNHist[0], (unsigned long long)s_skinNHist[1], (unsigned long long)s_skinNHist[2], (unsigned long long)s_skinNHist[3],
                            (unsigned long long)s_skinNHist[4], (unsigned long long)s_skinNHist[5], (unsigned long long)s_skinNHist[6]);
+    if (n > 0 && static_cast<size_t>(n) < sizeof(buf) - 16u) // PERF-BE
+    { // PERF-BE
+        n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " img:"); // PERF-BE
+        for (int i = 0; i < 8 && n > 0 && static_cast<size_t>(n) < sizeof(buf) - 48u; ++i) // PERF-BE
+        { // PERF-BE
+            if (!s_imgCache[i].used) continue; // PERF-BE
+            uint64_t offMask = (~s_imgCache[i].mask) & ((1ull << 36) - 1ull); // PERF-BE // PERF-BF // PERF-BI
+            uint32_t offbits = 0; // PERF-BE
+            while (offMask) { offMask &= (offMask - 1ull); ++offbits; } // PERF-BE
+            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %08llx:%llu/%llu/%llu/%u", // PERF-BE
+                               (unsigned long long)(s_imgCache[i].hash >> 32), (unsigned long long)s_imgCache[i].runs, // PERF-BE
+                               (unsigned long long)s_imgCache[i].taken, (unsigned long long)s_imgCache[i].fb, offbits); // PERF-BE
+        } // PERF-BE
+    } // PERF-BE
     ps2xSafeLog("%s\n", buf);
 }
 
@@ -3113,10 +3806,14 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
     if (stats)
     {
         if (ok)
+        { // PERF-BE
             ++s_taken;
+            if (t_curSlot >= 0) ++s_imgCache[t_curSlot].taken; // PERF-BE
+        } // PERF-BE
         else
         {
             ++s_fallback;
+            if (t_curSlot >= 0) ++s_imgCache[t_curSlot].fb; // PERF-BE
             ++s_fbPcs[s_fbPc];
         }
         if (!capture)

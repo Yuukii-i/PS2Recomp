@@ -3585,8 +3585,14 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     uint32_t fbKey = 0xFFFFFFFFu; // PROBE-FB: set only when the functional run fell back (vuData is restored by the undo log)
     // PERF-V1G: fast functional engine entry before per-run atomic/probe/movie-HLE/decode-cache overhead; generation check is cached inline.
     if (m_unit == Unit::VU1 && s_vu1FuncCfgOk && !s_vfyRef && !s_kickRec && memory != nullptr &&
-        codeSize == 16384u && dataSize == 16384u && ((startPC & 0xFFFFu) == 8u || (startPC & 0xFFFFu) == 0x40u) && vuCode == memory->getVU1Code()) // PERF-V40
+        codeSize == 16384u && dataSize == 16384u && ((startPC & 0xFFFFu) == 8u || (startPC & 0xFFFFu) == 0x40u || (startPC & 0xFFFFu) == 0x0000u || (startPC & 0xFFFFu) == 0x04A0u || (startPC & 0xFFFFu) == 0x0A18u) && vuCode == memory->getVU1Code()) // PERF-V40 // PERF-BK
     {
+        struct BhRzGuard // FIX-BH
+        { // FIX-BH
+            const uint32_t bhCsr = _mm_getcsr(); // FIX-BH
+            BhRzGuard() { _mm_setcsr(bhCsr | 0x6000u); } // FIX-BH
+            ~BhRzGuard() { _mm_setcsr((_mm_getcsr() & ~0x6000u) | (bhCsr & 0x6000u)); } // FIX-BH
+        } bhRzGuard; // FIX-BH
         const uint64_t generation = memory->getVU1CodeGeneration();
         if (!m_decodedCodeCacheValid || m_cachedVuCode != vuCode || m_cachedMemory != memory ||
             m_cachedCodeSize != codeSize || m_cachedCodeGeneration != generation)
@@ -3606,7 +3612,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         {
             s_vncSnap.assign(vuData, vuData + dataSize);
             s_vncCapF.clear();
-            vncOk = s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, &s_vncCapF, true);
+            vncOk = vu1func::imageSelect(s_hcCurHash, vuCode) && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, &s_vncCapF, true); // PERF-BE
             if (vncOk)
             {
                 if (!s_vncCapF.empty())
@@ -3671,7 +3677,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         }
         else
         {
-            vncOk = s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, nullptr, true);
+            vncOk = vu1func::imageSelect(s_hcCurHash, vuCode) && vu1func::vu1FuncExec(vuData, dataSize, startPC & 0x7FFFFFFFu, top, itop, gs, memory, nullptr, true); // PERF-BE
             if (vncOk && vu1func::t_newN != 0u && s_vncEvery != 0u && ++s_vncCount >= s_vncEvery)
                 s_vncDue = true;
         }
@@ -4887,6 +4893,9 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             std::unordered_map<uint32_t, ScramblePcStat> scramblePcMap;
             uint32_t scrambleOutDiff = 0;
             uint32_t total = 0, skipped = 0, bad = 0, cVf = 0, cVi = 0, cAcc = 0, cQpi = 0, cFlags = 0, cPc = 0, cCyc = 0, cWc = 0, cMem = 0, cGif = 0, cMisc = 0;
+            uint32_t bgPrinted = 0; // PROBE-BG
+            std::unordered_map<uint32_t, uint32_t> bgMemQHist; // PROBE-BG
+            std::unordered_map<uint16_t, uint32_t> bgLastHHist; // PROBE-BG
             std::fprintf(out, "records=%zu codeImages=%zu stateSize file=%u now=%zu\n", runsIdx.size(), codeOff.size(), stSize, sizeof(VU1State));
             for (const auto &kv : codeOff)
                 std::fprintf(out, "image gen=%llu hash=%016llx\n", (unsigned long long)kv.first, (unsigned long long)rpImageHash(kv.second));
@@ -4980,7 +4989,18 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                         s_vfyCapture = &cap;
                         const auto rpT0 = std::chrono::steady_clock::now();
                         const uint64_t rpC0 = __rdtsc();
-                        if (!(vu1func::replayFuncOn() && s_hcCurHash == vu1func::kImageHash && vu1func::vu1FuncExec(vuData, dataSize, rStart & 0x7FFFFFFFu, rTop, rItop, gs, memory, &cap, true))) // PS2X_VU1_REPLAY_FUNC
+                        bool rpFuncTook = false; // FIX-BH
+                        if (vu1func::replayFuncOn() && vu1func::imageSelect(s_hcCurHash, vuCode)) // FIX-BH
+                        { // FIX-BH
+                            struct BhRzGuard // FIX-BH
+                            { // FIX-BH
+                                const uint32_t bhCsr = _mm_getcsr(); // FIX-BH
+                                BhRzGuard() { _mm_setcsr(bhCsr | 0x6000u); } // FIX-BH
+                                ~BhRzGuard() { _mm_setcsr((_mm_getcsr() & ~0x6000u) | (bhCsr & 0x6000u)); } // FIX-BH
+                            } bhRzGuard; // FIX-BH
+                            rpFuncTook = vu1func::vu1FuncExec(vuData, dataSize, rStart & 0x7FFFFFFFu, rTop, rItop, gs, memory, &cap, true); // PS2X_VU1_REPLAY_FUNC // PERF-BE // FIX-BH
+                        } // FIX-BH
+                        if (!rpFuncTook) // FIX-BH
                             run(vuCode, codeSize, vuData, dataSize, gs, memory, rMax);
                         rpRunTicks += __rdtsc() - rpC0;
                         rpRunNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rpT0).count());
@@ -5027,6 +5047,62 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                             std::fprintf(out, "MISMATCH rec=%zu start=%04X vf=%d vi=%d acc=%d qpi=%d flags=%d(mac %X/%X st %X/%X clip %X/%X) pc=%d cyc=%d(%llu/%llu) wc=%d misc=%d mem=%d gif=%d(%u/%zu)\n",
                                          ri, rStart & 0xFFFFu, badVf, badVi, fAcc, fQpi, fFlags, sA.mac, sB.mac, sA.status, sB.status, sA.clip, sB.clip, fPc, fCyc,
                                          (unsigned long long)cycA, (unsigned long long)m_cycle, fWc, fMisc, badMem, fGif, gn, cap.size());
+                        if (vu1func::replayFuncOn()) // PROBE-BG
+                        { // PROBE-BG
+                            if (badMem >= 0) // PROBE-BG
+                                for (uint32_t q = 0; q * 16u + 16u <= dsz; ++q) // PROBE-BG
+                                    if (std::memcmp(expMem.data() + q * 16u, vuData + q * 16u, 16) != 0) // PROBE-BG
+                                        ++bgMemQHist[q]; // PROBE-BG
+                            const uint32_t seqN = vu1func::traceSeqLen(); // PROBE-BG
+                            const uint16_t *seq = vu1func::traceSeq(); // PROBE-BG
+                            if (fGif && seqN > 0u) // PROBE-BG
+                                ++bgLastHHist[seq[seqN - 1u]]; // PROBE-BG
+                            if (bgPrinted < 40u) // PROBE-BG
+                            { // PROBE-BG
+                                ++bgPrinted; // PROBE-BG
+                                std::fprintf(out, "BG rec=%zu seq=", ri); // PROBE-BG
+                                for (uint32_t si = 0; si < seqN; ++si) // PROBE-BG
+                                    std::fprintf(out, "%s%04X", si ? " " : "", seq[si]); // PROBE-BG
+                                std::fprintf(out, "\n"); // PROBE-BG
+                                if (badMem >= 0) // PROBE-BG
+                                { // PROBE-BG
+                                    uint32_t ndiff = 0; // PROBE-BG
+                                    for (uint32_t q = 0; q * 16u + 16u <= dsz; ++q) // PROBE-BG
+                                        if (std::memcmp(expMem.data() + q * 16u, vuData + q * 16u, 16) != 0) ++ndiff; // PROBE-BG
+                                    std::fprintf(out, "BG mem ndiff=%u\n", ndiff); // PROBE-BG
+                                    uint32_t printedQ = 0; // PROBE-BG
+                                    for (uint32_t q = 0; q * 16u + 16u <= dsz && printedQ < 8u; ++q) // PROBE-BG
+                                    { // PROBE-BG
+                                        if (std::memcmp(expMem.data() + q * 16u, vuData + q * 16u, 16) == 0) continue; // PROBE-BG
+                                        uint32_t e[4], g[4]; // PROBE-BG
+                                        std::memcpy(e, expMem.data() + q * 16u, 16); // PROBE-BG
+                                        std::memcpy(g, vuData + q * 16u, 16); // PROBE-BG
+                                        std::fprintf(out, "q=%u exp=%08X %08X %08X %08X got=%08X %08X %08X %08X\n", q, e[0], e[1], e[2], e[3], g[0], g[1], g[2], g[3]); // PROBE-BG
+                                        ++printedQ; // PROBE-BG
+                                    } // PROBE-BG
+                                } // PROBE-BG
+                                if (fGif) // PROBE-BG
+                                { // PROBE-BG
+                                    const size_t minLen = std::min<size_t>(gn, cap.size()); // PROBE-BG
+                                    const size_t maxLen = std::max<size_t>(gn, cap.size()); // PROBE-BG
+                                    size_t ndiffBytes = maxLen - minLen, firstOff = minLen; // PROBE-BG
+                                    for (size_t gi = 0; gi < minLen; ++gi) // PROBE-BG
+                                        if (cap[gi] != gifRec[gi]) { ++ndiffBytes; if (firstOff == minLen) firstOff = gi; } // PROBE-BG
+                                    std::fprintf(out, "BG gif ndiffbytes=%zu first=%zu\n", ndiffBytes, firstOff); // PROBE-BG
+                                    auto printGifQ = [&](size_t off) { // PROBE-BG
+                                        uint8_t eb[16] = {}, gb[16] = {}; // PROBE-BG
+                                        if (off < gn) std::memcpy(eb, gifRec + off, std::min<size_t>(16u, gn - off)); // PROBE-BG
+                                        if (off < cap.size()) std::memcpy(gb, cap.data() + off, std::min<size_t>(16u, cap.size() - off)); // PROBE-BG
+                                        uint32_t e[4], g[4]; // PROBE-BG
+                                        std::memcpy(e, eb, 16); std::memcpy(g, gb, 16); // PROBE-BG
+                                        std::fprintf(out, "  off=%zu exp=%08X %08X %08X %08X got=%08X %08X %08X %08X\n", off, e[0], e[1], e[2], e[3], g[0], g[1], g[2], g[3]); // PROBE-BG
+                                    }; // PROBE-BG
+                                    const size_t qOff = (firstOff / 16u) * 16u; // PROBE-BG
+                                    if (qOff >= 16u) printGifQ(qOff - 16u); // PROBE-BG
+                                    printGifQ(qOff); // PROBE-BG
+                                } // PROBE-BG
+                            } // PROBE-BG
+                        } // PROBE-BG
                     }
                 }
             }
@@ -5053,6 +5129,26 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                         std::fprintf(out, " %04X:%llu", spv[i].second, (unsigned long long)spv[i].first);
                 }
                 std::fprintf(out, "\n");
+                { // PROBE-BG
+                    std::vector<std::pair<uint32_t, uint32_t>> mqv; // PROBE-BG
+                    mqv.reserve(bgMemQHist.size()); // PROBE-BG
+                    for (const auto &kv : bgMemQHist) // PROBE-BG
+                        mqv.emplace_back(kv.second, kv.first); // PROBE-BG
+                    std::sort(mqv.begin(), mqv.end(), [](const auto &a, const auto &b) { return a.first != b.first ? a.first > b.first : a.second < b.second; }); // PROBE-BG
+                    std::fprintf(out, "BG memq:"); // PROBE-BG
+                    for (size_t i = 0; i < mqv.size() && i < 20u; ++i) // PROBE-BG
+                        std::fprintf(out, " %u:%u", mqv[i].second, mqv[i].first); // PROBE-BG
+                    std::fprintf(out, "\n"); // PROBE-BG
+                    std::vector<std::pair<uint32_t, uint16_t>> lhv; // PROBE-BG
+                    lhv.reserve(bgLastHHist.size()); // PROBE-BG
+                    for (const auto &kv : bgLastHHist) // PROBE-BG
+                        lhv.emplace_back(kv.second, kv.first); // PROBE-BG
+                    std::sort(lhv.begin(), lhv.end(), [](const auto &a, const auto &b) { return a.first != b.first ? a.first > b.first : a.second < b.second; }); // PROBE-BG
+                    std::fprintf(out, "BG lasth:"); // PROBE-BG
+                    for (size_t i = 0; i < lhv.size() && i < 10u; ++i) // PROBE-BG
+                        std::fprintf(out, " %04X:%u", lhv[i].second, lhv[i].first); // PROBE-BG
+                    std::fprintf(out, "\n"); // PROBE-BG
+                } // PROBE-BG
             }
             std::fprintf(out, "run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);
             std::printf("[probe] replay run_ms=%.2f reps=%u calls=%u us_per_call=%.3f\n", static_cast<double>(rpRunNs) / 1e6, rpReps, total, total ? static_cast<double>(rpRunNs) / 1e3 / (static_cast<double>(total) * rpReps) : 0.0);

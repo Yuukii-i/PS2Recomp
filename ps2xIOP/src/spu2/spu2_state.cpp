@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 
+void ps2xSafeLog(const char *, ...); // FIX-BD
+
 namespace ps2x::iop::detail
 {
     namespace
@@ -345,6 +347,10 @@ namespace ps2x::iop::detail
         c.effectAttr.depthR = depthR;
         c.effectAttr.delay = delay;
         c.effectAttr.feedback = feedback;
+        c.evoll = static_cast<uint16_t>(depthL); // FIX-BD
+        c.evolr = static_cast<uint16_t>(depthR); // FIX-BD
+        ps2xSafeLog("[rev] core=%d mode=%d depth=%d/%d delay=%d fb=%d\n", // FIX-BD
+                    core, mode, static_cast<int>(depthL), static_cast<int>(depthR), delay, feedback); // FIX-BD
     }
 
     const Spu2State::EffectAttr &Spu2State::getEffectAttr(int32_t core) const

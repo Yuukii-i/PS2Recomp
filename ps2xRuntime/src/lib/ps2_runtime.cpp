@@ -6,7 +6,11 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 #include <io.h>
 #endif
 #include "ps2_runtime.h"
+extern void ps2xEeGfxDecompInstall(PS2Runtime &); // DECOMP-BM
+extern void ps2xDevConsoleInstall(PS2Runtime &); // FEAT-DF
 extern void ps2xPadMarker(); // PROBE-MK
+extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
+extern void ps2xMcInit(); // FEAT-DE
 extern "C" bool ps2_gt_enabled(); // PROBE-GT
 extern "C" void ps2_gt_count(int what, uint64_t n); // PROBE-GT
 extern "C" void ps2_gt_take_counts(uint64_t *out); // PROBE-GT
@@ -1712,6 +1716,7 @@ bool PS2Runtime::initialize(const char *title)
         }
 
         probe_ae::bhInitStartup();
+        ps2xMcInit(); // FEAT-DE
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
@@ -2303,6 +2308,9 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             ctx->pc = getRegU32(ctx, 31);
         });
     }
+
+    ps2xEeGfxDecompInstall(*this); // DECOMP-BM
+    ps2xDevConsoleInstall(*this); // FEAT-DF
 
     // 0x003703D4: Early exit check returning non-zero error code -> force return 0
     replaceFunction(0x003703D4u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
@@ -5850,9 +5858,20 @@ void PS2Runtime::postEeEvent(EeEvent event)
     m_eeScheduler->postEvent(event);
 }
 
+thread_local bool g_ps2xSuppressCheckpoint = false; // DECOMP-CM
+thread_local uint64_t g_ps2xCheckpointYields = 0;   // DECOMP-CT
+
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
+    if (g_ps2xSuppressCheckpoint) // DECOMP-CM
+    {
+        return false;
+    }
     const bool due = m_eeScheduler ? m_eeScheduler->checkpointDue(cycles) : false;
+    if (due)
+    {
+        ++g_ps2xCheckpointYields; // DECOMP-CT
+    }
     if (g_profCounts) // PROBE-IJ
     {
         ++g_pcCkpt;
@@ -6244,6 +6263,45 @@ void PS2Runtime::run()
         }
         // C312: F9 dumps all EE RAM (32 MB) to logs/ram_f9.bin for diffing against a PCSX2 save state
         if (IsKeyPressed(KEY_F7)) ps2xPadMarker(); // PROBE-MK
+        if (IsKeyPressed(KEY_F8)) // FEAT-DE
+        {
+            int cur = g_mcPendingChoice.load(std::memory_order_relaxed);
+            int next = 0;
+            if (cur == 0 || cur == 1)
+            {
+                next = (cur == 0) ? 1 : 0;
+            }
+            else
+            {
+                uint32_t guestVal = 0;
+                if (const uint8_t *rdram = m_memory.getRDRAM())
+                {
+                    std::memcpy(&guestVal, rdram + 0x00649910u, sizeof(uint32_t));
+                }
+                next = (guestVal == 0u) ? 1 : 0;
+            }
+            g_mcPendingChoice.store(next, std::memory_order_relaxed);
+            ps2xSafeLog("[mc] pending=%s\n", (next == 0) ? "boy" : "girl");
+        }
+        { // FEAT-DE2: detect game-set MC value and override with pending choice
+            const int mcPend = g_mcPendingChoice.load(std::memory_order_relaxed);
+            if (mcPend == 0 || mcPend == 1)
+            {
+                static uint32_t s_mcLastSeen = 0xFFFFFFFFu;
+                if (uint8_t *mcRam = m_memory.getRDRAM())
+                {
+                    uint32_t cur = 0;
+                    std::memcpy(&cur, mcRam + 0x00649910u, sizeof(uint32_t));
+                    const uint32_t want = static_cast<uint32_t>(mcPend);
+                    if ((cur == 0u || cur == 1u) && cur != s_mcLastSeen && cur != want)
+                    {
+                        std::memcpy(mcRam + 0x00649910u, &want, sizeof(uint32_t));
+                        ps2xSafeLog("[mc] applied=%s (game set %u)\n", (want == 0u) ? "boy" : "girl", cur);
+                    }
+                    std::memcpy(&s_mcLastSeen, mcRam + 0x00649910u, sizeof(uint32_t));
+                }
+            }
+        }
         if (IsKeyPressed(KEY_F9))
         {
             FILE *rf = std::fopen("logs/ram_f9.bin", "wb");
