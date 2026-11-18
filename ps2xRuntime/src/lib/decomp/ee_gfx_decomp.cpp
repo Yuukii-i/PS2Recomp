@@ -33554,6 +33554,7 @@ void sub_003A0038_decomp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     WRITE32(ADD32(sp, 0u), ADD32(s0, 32u));
     WRITE32(ADD32(sp, 16u), ADD32(s0, 48u));
 
+    SET_GPR_VEC(ctx, 13, zeroVec); // DECOMP-DH3: @0x3A00F0 por t5,zero,zero clears the upper 64 bits
     SET_GPR_S32(ctx, 13, -65536);
     SET_GPR_U64(ctx, 13, GPR_U64(ctx, 13) >> 32);
     {
