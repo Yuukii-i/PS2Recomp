@@ -30795,10 +30795,13 @@ void sub_003B8ADC_decomp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 // DECOMP-CZ: sub_003A7C20 (sub-entry of sub_003A7BB8 at 0x003A7C20, resumable)
 void sub_003A7C20_decomp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // DECOMP-CZ
 {
-    if (ctx->pc == 0u)
-    {
-        ctx->pc = 0x003A7C20u;
-    }
+    // DECOMP-DH2: generated code @0x3A7C20 does a0=s1, a1=s2, ra=0x3A7C2C and flattens the self-call
+    // (goto @0x3A7BB8), so it returns to pc=0x3A7C2C as soon as the child's epilogue runs; the loop
+    // tail (@0x3A7C2C..) is entered again through its own entry. Mirror that: run only the child.
+    SET_GPR_U64(ctx, 4, GPR_U64(ctx, 17));
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 18));
+    SET_GPR_U32(ctx, 31, 0x3A7C2Cu);
+    ctx->pc = 0x3A7BB8u;
     sub_003A7BB8_decomp(rdram, ctx, runtime);
 }
 
@@ -33583,9 +33586,8 @@ void sub_003A0038_decomp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     SET_GPR_S32(ctx, 30, static_cast<int32_t>(ADD32(s0, 64u)));
     SET_GPR_U64(ctx, 17, 0ull);
     SET_GPR_S32(ctx, 20, static_cast<int32_t>(ADD32(s0, 96u)));
-    SET_GPR_U64(ctx, 4, static_cast<uint64_t>(sp));
+    // DECOMP-DH2: a0 stays the 128-bit a0v set above (@0x3A00E0), t0 keeps the mfc1 bits (@0x3A00FC)
     SET_GPR_S32(ctx, 5, 1);
-    SET_GPR_S32(ctx, 8, 0x0071F878);
     SET_GPR_S32(ctx, 14, 0x0071F87C);
     SET_GPR_U32(ctx, 31, 0x3A0174u);
     ctx->pc = 0x44BD80u;
