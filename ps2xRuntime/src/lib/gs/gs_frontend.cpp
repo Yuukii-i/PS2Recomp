@@ -69,6 +69,7 @@ extern void ps2xRdNoteState(uint32_t serial, uint64_t prim, uint64_t alpha, uint
                             uint64_t zbuf, uint64_t tex0, uint64_t tex1, uint64_t clamp, uint64_t texa, uint64_t fba); // FEAT-RD17
 extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
 extern void ps2xRdNoteXyoff(uint32_t serial, uint64_t xyoff); // FEAT-RD21
+extern void ps2xRdNoteScissor(uint32_t serial, uint64_t scis); // FEAT-RD22
 extern const uint16_t *ps2xRdActiveClut(); // FEAT-RD5
 static uint32_t s_rdCurSerial = 0u;       // FEAT-RD5
 static uint32_t s_rdLastNotedSerial = 0u; // FEAT-RD5
@@ -111,6 +112,68 @@ bool ps2xRdHasDisplayFbp() // FEAT-RD19
     return false;
 }
 static bool s_rdRunIsGeom = false;         // FEAT-RD18
+// FEAT-RD23: main 3D pass = (FBP, XYOFFSET) with most geometry kicks in the previous frame
+static std::atomic<uint64_t> s_rdPassKey[8] = {{~0ull}, {~0ull}, {~0ull}, {~0ull}, {~0ull}, {~0ull}, {~0ull}, {~0ull}}; // FEAT-RD23
+static std::atomic<uint32_t> s_rdPassCnt[8]; // FEAT-RD23
+static std::atomic<uint64_t> s_rdMainKey{~0ull}; // FEAT-RD23
+static uint64_t rdPassKey(uint32_t fbp, uint64_t ofx, uint64_t ofy) // FEAT-RD23
+{
+    return (static_cast<uint64_t>(fbp & 0x1FFu) << 32) | ((ofx & 0xFFFFull) << 16) | (ofy & 0xFFFFull);
+}
+static void rdNotePassKick(uint32_t fbp, uint64_t ofx, uint64_t ofy) // FEAT-RD23
+{
+    const uint64_t k = rdPassKey(fbp, ofx, ofy);
+    for (int i = 0; i < 8; ++i)
+    {
+        const uint64_t cur = s_rdPassKey[i].load(std::memory_order_relaxed);
+        if (cur == k)
+        {
+            s_rdPassCnt[i].fetch_add(1u, std::memory_order_relaxed);
+            return;
+        }
+        if (cur == ~0ull)
+        {
+            uint64_t exp = ~0ull;
+            s_rdPassKey[i].compare_exchange_strong(exp, k, std::memory_order_relaxed);
+            if (exp == ~0ull || exp == k)
+            {
+                s_rdPassCnt[i].fetch_add(1u, std::memory_order_relaxed);
+                return;
+            }
+        }
+    }
+}
+static void rdRollPassFrame() // FEAT-RD23: called once per presented frame
+{
+    uint32_t best = 0u;
+    uint64_t bestKey = ~0ull;
+    for (int i = 0; i < 8; ++i)
+    {
+        const uint32_t n = s_rdPassCnt[i].exchange(0u, std::memory_order_relaxed);
+        const uint64_t k = s_rdPassKey[i].exchange(~0ull, std::memory_order_relaxed);
+        if (k != ~0ull && n > best)
+        {
+            best = n;
+            bestKey = k;
+        }
+    }
+    if (best > 0u)
+        s_rdMainKey.store(bestKey, std::memory_order_relaxed);
+}
+bool ps2xRdIsMainPass(uint32_t fbp, uint64_t xyoffset) // FEAT-RD23: xyoffset = ofx | ofy<<32
+{
+    const uint64_t m = s_rdMainKey.load(std::memory_order_relaxed);
+    if (m == ~0ull)
+        return true;
+    return rdPassKey(fbp, xyoffset & 0xFFFFull, (xyoffset >> 32) & 0xFFFFull) == m;
+}
+uint64_t ps2xRdMainXyoff() // FEAT-RD23: ofx | ofy<<32, or ~0 if unknown
+{
+    const uint64_t m = s_rdMainKey.load(std::memory_order_relaxed);
+    if (m == ~0ull)
+        return ~0ull;
+    return ((m >> 16) & 0xFFFFull) | ((m & 0xFFFFull) << 32);
+}
 
 struct RdVert // FEAT-RD8
 {
@@ -134,6 +197,7 @@ struct Rd2DBatch // FEAT-RD8
     uint64_t test;
     uint64_t frame;
     uint64_t zbuf;
+    uint64_t scissor; // FEAT-RD22
 };
 
 extern void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped, uint32_t gMin, uint32_t gMax); // FEAT-RD8 // FEAT-RD13
@@ -188,6 +252,12 @@ static uint64_t rdPackFrame(const GSFrameReg &f) // FEAT-RD8
            ((static_cast<uint64_t>(f.fbw) & 0x3Full) << 16) |
            ((static_cast<uint64_t>(f.psm) & 0x3Full) << 24) |
            (static_cast<uint64_t>(f.fbmsk) << 32);
+}
+
+static uint64_t rdPackScissor(const GSContext &c) // FEAT-RD22
+{
+    return static_cast<uint64_t>(c.scissor.x0 & 0x7FF) | (static_cast<uint64_t>(c.scissor.x1 & 0x7FF) << 16) |
+           (static_cast<uint64_t>(c.scissor.y0 & 0x7FF) << 32) | (static_cast<uint64_t>(c.scissor.y1 & 0x7FF) << 48);
 }
 
 static uint64_t rdPackZbuf(const GSZbufReg &z) // FEAT-RD8
@@ -1278,6 +1348,7 @@ void GS::latchHostPresentationFrame()
     struct GwPres { uint64_t t0; ~GwPres() { if (g_gwOn) { g_gwPresentT.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); g_gwFrames.fetch_add(1, std::memory_order_relaxed); } } } gwPres{pjStart}; // PROBE-GW
     const bool takeover = ps2xRdTakeoverOn(); // FEAT-RD12
     const bool frameHasGeom = s_rdFrameHasGeom.exchange(false, std::memory_order_acq_rel); // FEAT-RD18
+    rdRollPassFrame(); // FEAT-RD23
     const bool useClassic = takeover && !frameHasGeom; // FEAT-RD18
     const uint32_t frameGeomFbp = s_rdFrameGeomFbp.exchange(0xFFFFFFFFu, std::memory_order_acq_rel); // FEAT-RD18b
     if (!takeover || useClassic) // FEAT-RD18
@@ -3212,6 +3283,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
     if (isGeomKick) // FEAT-RD8b // FEAT-RD10 // FEAT-RD18
     {
         s_rdMainFbp = batch.state.context.frame.fbp;
+        rdNotePassKick(batch.state.context.frame.fbp, static_cast<uint64_t>(batch.state.context.xyoffset.ofx), static_cast<uint64_t>(batch.state.context.xyoffset.ofy)); // FEAT-RD23
         s_rdFrameHasGeom.store(true, std::memory_order_relaxed);
         if (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(batch.state.context.frame.fbp)) // FEAT-RD19
             s_rdFrameGeomFbp.store(batch.state.context.frame.fbp, std::memory_order_relaxed); // FEAT-RD18b
@@ -3239,6 +3311,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                             rdPackTexa(batch.state.texa),
                             ctx.fba);
             ps2xRdNoteXyoff(s_rdCurSerial, static_cast<uint64_t>(ctx.xyoffset.ofx) | (static_cast<uint64_t>(ctx.xyoffset.ofy) << 32)); // FEAT-RD21
+            ps2xRdNoteScissor(s_rdCurSerial, rdPackScissor(ctx)); // FEAT-RD22
         }
         else if (!s_rdKickStateChanged &&
                  (ctx.alpha != s_rdFirstAlpha || rawFrame != s_rdFirstFrame || ctx.test != s_rdFirstTest))
@@ -3350,6 +3423,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             b2d.test = ctx.test;
             b2d.frame = rdPackFrame(ctx.frame);
             b2d.zbuf = rdPackZbuf(ctx.zbuf);
+            b2d.scissor = rdPackScissor(ctx); // FEAT-RD22
 
             std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
             b2d.first = static_cast<uint32_t>(s_rd2dVerts.size());
@@ -3392,7 +3466,8 @@ void GS::flushPendingDraws() const
     if (g_gwOn) ps2_gw_count(2, 1); // PROBE-GW
     if (m_backend)
     {
-        g_rdCurDrawIsGeom = s_rdRunIsGeom && (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(m_runState.context.frame.fbp)); // FEAT-RD18 // FEAT-RD19: off-screen RT draws still rasterised
+        g_rdCurDrawIsGeom = s_rdRunIsGeom && (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(m_runState.context.frame.fbp)) &&
+            ps2xRdIsMainPass(m_runState.context.frame.fbp, static_cast<uint64_t>(m_runState.context.xyoffset.ofx) | (static_cast<uint64_t>(m_runState.context.xyoffset.ofy) << 32)); // FEAT-RD23 // FEAT-RD18 // FEAT-RD19: off-screen RT draws still rasterised
         const uint64_t gqS0 = __rdtsc(); // PROBE-GQ2
         m_backend->SubmitRun(m_runState, m_runPrims.data(), m_runPrims.size());
         g_gqSubmit.fetch_add(__rdtsc() - gqS0, std::memory_order_relaxed);

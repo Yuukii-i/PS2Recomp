@@ -13,6 +13,8 @@ static bool g_rdAlwaysFunc = false; // FEAT-RD20
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio> // PROBE-RD24
+#include <string> // PROBE-RD24
 #include <mutex>
 #include <vector>
 
@@ -23,6 +25,9 @@ extern bool ps2xRdHasDisplayFbp(); // FEAT-RD19
 extern bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_t &test, uint64_t &frame,
                               uint64_t &zbuf, uint64_t &tex0, uint64_t &tex1, uint64_t &clamp, uint64_t &texa, uint64_t &fba); // FEAT-RD17
 extern bool ps2xRdLookupXyoff(uint32_t serial, uint64_t &xyoff); // FEAT-RD21
+extern bool ps2xRdLookupScissor(uint32_t serial, uint64_t &scis); // FEAT-RD22
+extern bool ps2xRdIsMainPass(uint32_t fbp, uint64_t xyoffset); // FEAT-RD23
+extern uint64_t ps2xRdMainXyoff(); // FEAT-RD23
 extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
 extern std::atomic<uint32_t> g_rdMergedSpan;        // FEAT-RD17
 extern void ps2xRdTexTickFrame(); // FEAT-RD3
@@ -69,6 +74,7 @@ struct Rd2DBatch // FEAT-RD8
     uint64_t test;
     uint64_t frame;
     uint64_t zbuf;
+    uint64_t scissor; // FEAT-RD22
 };
 
 struct Rd3DFrame // FEAT-RD13 // FEAT-RD14
@@ -273,6 +279,18 @@ int computeRdBlend(uint64_t prim, uint64_t alpha, uint64_t &unsupBlend, uint64_t
     return blendState;
 }
 
+// FEAT-RD25: DATE approximation. States: sk=6 (DATM0: SRC 1-Ad, DST Ad), sk=7 (DATM1: SRC Ad, DST 1-Ad)
+uint64_t g_rdDateCount = 0, g_rdDateAbeCount = 0; // FEAT-RD25
+int applyRdDate(uint64_t test, uint64_t prim, int blendState) // FEAT-RD25
+{
+    if (!((test >> 14) & 1ull))
+        return blendState;
+    ++g_rdDateCount;
+    if ((prim >> 6) & 1ull)
+        ++g_rdDateAbeCount;
+    return 1 + (((test >> 15) & 1ull) ? 7 : 6) * 128;
+}
+
 // FEAT-RD15: GL state cache (redundant call elimination)
 struct RdGlCache
 {
@@ -391,6 +409,9 @@ void applyRdBlend(int blendState, unsigned int vao) // FEAT-RD8
         const int sk = code / 128, dk = (code / 16) & 7, ek = code & 3; // FEAT-RD9
         auto glf = [](int k) { return k == 0 ? RL_ZERO : k == 1 ? RL_ONE : k == 2 ? RL_SRC_ALPHA : k == 3 ? RL_ONE_MINUS_SRC_ALPHA : k == 4 ? RL_DST_ALPHA : RL_ONE_MINUS_DST_ALPHA; };
         rlEnableColorBlend();
+        if (sk >= 6) // FEAT-RD25: DATE approximation
+            rlSetBlendFactors(sk == 6 ? RL_ONE_MINUS_DST_ALPHA : RL_DST_ALPHA, sk == 6 ? RL_DST_ALPHA : RL_ONE_MINUS_DST_ALPHA, RL_FUNC_ADD);
+        else
         rlSetBlendFactors(glf(sk), glf(dk), ek == 0 ? RL_FUNC_ADD : ek == 1 ? RL_FUNC_SUBTRACT : RL_FUNC_REVERSE_SUBTRACT);
         rlSetBlendMode(RL_BLEND_CUSTOM);
     }
@@ -680,6 +701,10 @@ void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h) // FEAT-RD12
     h = g_rdPresentH.load(std::memory_order_relaxed);
 }
 
+static const bool g_rd24On = []{ const char *e = std::getenv("PS2X_RD_BIGLOG"); return e && e[0] == '1'; }(); // PROBE-RD24
+static std::vector<RdVert> g_rd24Verts[4]; // PROBE-RD24
+static std::vector<uint16_t> g_rd24Idx[4]; // PROBE-RD24
+
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
     bool hasNew2d = false; // FEAT-RD8
@@ -848,6 +873,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         {
             g_rdGpu.everUploaded = true;
             uploadRdSlot(g_rdGpu.slots[idx], g_rdGpu.pendingVerts[idx], g_rdGpu.pendingIndices[idx], g_rdGpu.slots[idx].batches);
+            if (g_rd24On) // PROBE-RD24: CPU copy of uploaded verts + final 16-bit indices (relative to batch.baseVertex)
+            {
+                g_rd24Verts[idx] = g_rdGpu.pendingVerts[idx];
+                if (g_rdGpu.slots[idx].indexCount != 0)
+                    g_rd24Idx[idx] = g_rdGpu.idx16Scratch;
+                else
+                    g_rd24Idx[idx].clear();
+            }
         }
     }
 
@@ -1048,6 +1081,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     uint64_t draws2dThisFrame = 0; // FEAT-RD8
     uint64_t ztested2dThisFrame = 0; // FEAT-RD11
     uint64_t zclears2dThisFrame = 0; // FEAT-RD20
+    struct RdPassEnt { uint32_t fbp, xo, yo, sx0, sy0, sx1, sy1; float vox, voy; uint32_t n; }; // FEAT-RD22
+    RdPassEnt passEnts[8]; // FEAT-RD22
+    int passN = 0;         // FEAT-RD22
+    static const bool s_passLog = []{ const char *e = std::getenv("PS2X_RD_PASSLOG"); return e && e[0] == '1'; }(); // FEAT-RD22
+    static uint64_t s_scissorSkipped = 0; // FEAT-RD22
+    static uint64_t s_noState3dTotal = 0, s_rtPass3dTotal = 0; // FEAT-RD23
     if ((!g_rdGpu.drawBatches.empty() || g_rdGpu.gpu2dVertCount > 0) && g_rdGpu.shader.id != 0) // FEAT-RD8 // FEAT-RD14
     {
         rlEnableShader(g_rdGpu.shader.id);
@@ -1067,6 +1106,54 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         int prevBlend = -1; // FEAT-RD2b
         size_t i2d = 0; // FEAT-RD8
         const size_t n2d = (s_draw2d && g_rdGpu.gpu2dVertCount > 0 && g_rdGpu.vao2d != 0) ? g_rdGpu.local2dBatches.size() : 0;
+
+        bool scisOn = false; // FEAT-RD22
+        int scisRect[4] = {0, 0, 0, 0};
+        auto applyScissor = [&](uint64_t packed, bool have) -> bool // FEAT-RD22: false = batch fully outside, skip
+        {
+            bool on = false;
+            int r[4] = {0, 0, 0, 0};
+            if (have && packed != 0ull && fbSize[0] > 0.0f && fbSize[1] > 0.0f)
+            {
+                const float x0 = static_cast<float>(packed & 0x7FFull);
+                const float x1 = static_cast<float>((packed >> 16) & 0x7FFull);
+                const float y0 = static_cast<float>((packed >> 32) & 0x7FFull);
+                const float y1 = static_cast<float>((packed >> 48) & 0x7FFull);
+                if (x0 >= fbSize[0] || y0 >= fbSize[1] || x1 < x0 || y1 < y0)
+                    return false;
+                const float k = (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f;
+                const float xe = std::min(x1 + 1.0f, fbSize[0]);
+                const float ye = std::min(y1 + 1.0f, fbSize[1]);
+                float l = static_cast<float>(vx), rr = static_cast<float>(vx + vw);
+                if (!(x0 <= 0.0f && xe >= fbSize[0])) // full-width scissor = whole box
+                {
+                    l = static_cast<float>(vx) + (((2.0f * x0 / fbSize[0] - 1.0f) / k + 1.0f) * 0.5f) * static_cast<float>(vw);
+                    rr = static_cast<float>(vx) + (((2.0f * xe / fbSize[0] - 1.0f) / k + 1.0f) * 0.5f) * static_cast<float>(vw);
+                }
+                const float bt = static_cast<float>(vy) + (1.0f - ye / fbSize[1]) * static_cast<float>(vh);
+                const float tp = static_cast<float>(vy) + (1.0f - y0 / fbSize[1]) * static_cast<float>(vh);
+                r[0] = static_cast<int>(std::floor(l));
+                r[1] = static_cast<int>(std::floor(bt));
+                r[2] = std::max(0, static_cast<int>(std::ceil(rr)) - r[0]);
+                r[3] = std::max(0, static_cast<int>(std::ceil(tp)) - r[1]);
+                on = true;
+            }
+            if (on != scisOn || (on && std::memcmp(r, scisRect, sizeof(r)) != 0))
+            {
+                if (on)
+                {
+                    if (!scisOn)
+                        rlEnableScissorTest();
+                    rlScissor(r[0], r[1], r[2], r[3]);
+                    std::memcpy(scisRect, r, sizeof(r));
+                }
+                else
+                    rlDisableScissorTest();
+                scisOn = on;
+                ++g_rdc.calls;
+            }
+            return true;
+        };
 
         auto draw2dUntil = [&](uint32_t maxSerial, bool drawAll) // FEAT-RD8
         {
@@ -1099,6 +1186,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const uint32_t ztst = static_cast<uint32_t>((b0.test >> 17) & 3ull);
                 if (zte && ztst == 0u)
                 {
+                    ++i2d;
+                    continue;
+                }
+                if (!applyScissor(b0.scissor, true)) // FEAT-RD22
+                {
+                    ++s_scissorSkipped;
                     ++i2d;
                     continue;
                 }
@@ -1139,7 +1232,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 #endif
                 applyRdFbmsk(b0.frame, true, partialMask); // FEAT-RD9
                 float fixAlpha = -1.0f;
-                const int blendState = computeRdBlend(b0.prim, b0.alpha, unsupBlend, approxAd, fixAlpha);
+                int blendState = computeRdBlend(b0.prim, b0.alpha, unsupBlend, approxAd, fixAlpha);
+                blendState = applyRdDate(b0.test, b0.prim, blendState); // FEAT-RD25
+                if (blendState >= 1 + 6 * 128 && g_rdMaskCur != (g_rdMaskCur & 7)) // FEAT-RD25: no alpha write
+                {
+                    g_rdMaskCur &= 7;
+                    rlColorMask((g_rdMaskCur & 1) != 0, (g_rdMaskCur & 2) != 0, (g_rdMaskCur & 4) != 0, false);
+                }
                 if (blendState != prevBlend)
                 {
                     applyRdBlend(blendState, g_rdGpu.vao2d);
@@ -1184,7 +1283,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     if (bn.first != b0.first + totalCount ||
                         bn.prim != b0.prim || bn.tex0 != b0.tex0 || bn.texa != b0.texa ||
                         bn.clamp != b0.clamp || bn.tex1 != b0.tex1 || bn.alpha != b0.alpha ||
-                        bn.test != b0.test || bn.frame != b0.frame || bn.zbuf != b0.zbuf)
+                        bn.test != b0.test || bn.frame != b0.frame || bn.zbuf != b0.zbuf || bn.scissor != b0.scissor) // FEAT-RD22
                         break;
                     if (texVal != 0 && ps2xRdGetTextureForBatch(bn.texSerial, bn.tex0, bn.texa) != texId)
                         break;
@@ -1215,6 +1314,19 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
         if (g_rdGpu.activeGMin > 0u) // FEAT-RD13: draw frame-start 2D draws (clears/backgrounds) first
             draw2dUntil(g_rdGpu.activeGMin, false);
+        bool rd24Dump = false; // PROBE-RD24
+        int rd24BigN = 0;
+        std::vector<std::string> rd24Ref;
+        if (g_rd24On)
+        {
+            static std::chrono::steady_clock::time_point s_rd24Last{};
+            const auto now24 = std::chrono::steady_clock::now();
+            if (s_rd24Last.time_since_epoch().count() == 0 || now24 - s_rd24Last >= std::chrono::seconds(5))
+            {
+                s_rd24Last = now24;
+                rd24Dump = true;
+            }
+        }
         for (const RdDrawBatch &db : g_rdGpu.drawBatches) // FEAT-RD2 // FEAT-RD14
         {
             const RdBatch &batch = db.batch;
@@ -1237,6 +1349,19 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             {
                 ++g_rdGpu.rtSkipped3d;
                 continue;
+            }
+            { // FEAT-RD23: only main-pass batches with GS-thread state are drawn
+                uint64_t xoMp = 0ull;
+                if (!gsOk || !ps2xRdLookupXyoff(batch.kickSerial, xoMp))
+                {
+                    ++s_noState3dTotal;
+                    continue;
+                }
+                if (!ps2xRdIsMainPass(static_cast<uint32_t>(frame & 0x1FFull), xoMp))
+                {
+                    ++s_rtPass3dTotal;
+                    continue;
+                }
             }
             const uint64_t alpha = gsOk ? gsAlpha : batch.alpha;
             constexpr uint64_t kPrimAbeTmeMask = (1ull << 6) | (1ull << 4);
@@ -1266,7 +1391,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             // FEAT-RD7: blendState 0 = off, else 1 + sfk*64 + dfk*16 + eqk (factor kinds: 0 ZERO, 1 ONE, 2 C, 3 1-C)
             applyRdFbmsk(frame, false, partialMask); // FEAT-RD9
             float fixAlpha = -1.0f;
-            const int blendState = computeRdBlend(prim, alpha, unsupBlend, approxAd, fixAlpha); // FEAT-RD8
+            int blendState = computeRdBlend(prim, alpha, unsupBlend, approxAd, fixAlpha); // FEAT-RD8
+            blendState = applyRdDate(test, prim, blendState); // FEAT-RD25
+            if (blendState >= 1 + 6 * 128 && g_rdMaskCur != (g_rdMaskCur & 7)) // FEAT-RD25: no alpha write
+            {
+                g_rdMaskCur &= 7;
+                rlColorMask((g_rdMaskCur & 1) != 0, (g_rdMaskCur & 2) != 0, (g_rdMaskCur & 4) != 0, false);
+            }
             if (blendState != prevBlend) // FEAT-RD2b: blend calls flush raylib batch and unbind shader/VAO
             {
                 applyRdBlend(blendState, slot.vao); // FEAT-RD8 // FEAT-RD14
@@ -1297,6 +1428,46 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (g_rdGpu.fixLoc >= 0) // FEAT-RD7
                 rdSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
 
+            { // FEAT-RD22
+                uint64_t sc = 0ull;
+                const bool scOk = ps2xRdLookupScissor(batch.kickSerial, sc);
+                if (!applyScissor(sc, scOk))
+                {
+                    ++s_scissorSkipped;
+                    continue;
+                }
+                if (s_passLog)
+                {
+                    uint64_t xo2 = 0ull;
+                    ps2xRdLookupXyoff(batch.kickSerial, xo2);
+                    RdPassEnt e{};
+                    e.fbp = static_cast<uint32_t>(frame & 0x1FFull);
+                    e.xo = static_cast<uint32_t>(xo2 & 0xFFFFull);
+                    e.yo = static_cast<uint32_t>((xo2 >> 32) & 0xFFFFull);
+                    e.sx0 = static_cast<uint32_t>(sc & 0x7FFull);
+                    e.sx1 = static_cast<uint32_t>((sc >> 16) & 0x7FFull);
+                    e.sy0 = static_cast<uint32_t>((sc >> 32) & 0x7FFull);
+                    e.sy1 = static_cast<uint32_t>((sc >> 48) & 0x7FFull);
+                    e.vox = batch.vpO[0];
+                    e.voy = batch.vpO[1];
+                    int found = -1;
+                    for (int pi = 0; pi < passN; ++pi)
+                        if (passEnts[pi].fbp == e.fbp && passEnts[pi].xo == e.xo && passEnts[pi].yo == e.yo &&
+                            passEnts[pi].sx0 == e.sx0 && passEnts[pi].sx1 == e.sx1 && passEnts[pi].sy0 == e.sy0 &&
+                            passEnts[pi].sy1 == e.sy1 && passEnts[pi].vox == e.vox && passEnts[pi].voy == e.voy)
+                        {
+                            found = pi;
+                            break;
+                        }
+                    if (found >= 0)
+                        ++passEnts[found].n;
+                    else if (passN < 8)
+                    {
+                        e.n = 1u;
+                        passEnts[passN++] = e;
+                    }
+                }
+            }
             if (g_rdGpu.vpALoc >= 0 && g_rdGpu.vpBLoc >= 0) // FEAT-RD21
             {
                 static float s_lastOfx = 0.0f, s_lastOfy = 0.0f;
@@ -1352,9 +1523,88 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (g_rdGpu.tccLoc >= 0)
                 rdSetUniform(g_rdGpu.tccLoc, &tccVal, RL_SHADER_UNIFORM_INT, 1);
 
+            if (rd24Dump) // PROBE-RD24
+            {
+                const std::vector<RdVert> &pv = g_rd24Verts[db.slotIdx];
+                const std::vector<uint16_t> &pi = g_rd24Idx[db.slotIdx];
+                const float fbWf = fbSize[0], fbHf = fbSize[1];
+                uint64_t xo24 = 0ull, sc24 = 0ull;
+                ps2xRdLookupXyoff(batch.kickSerial, xo24);
+                ps2xRdLookupScissor(batch.kickSerial, sc24);
+                const float offx = static_cast<float>(xo24 & 0xFFFFull);
+                const float offy = static_cast<float>((xo24 >> 32) & 0xFFFFull);
+                float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
+                float zmin = 1e30f, zmax = -1e30f, wmin = 1e30f;
+                uint32_t vmin = 0xFFFFFFFFu, vmax = 0u;
+                const size_t endI = static_cast<size_t>(batch.first) + batch.count;
+                if (endI <= pi.size() && batch.vpS[0] != 0.0f && batch.vpS[1] != 0.0f)
+                {
+                    for (size_t k = batch.first; k < endI; ++k)
+                    {
+                        const uint32_t vi = static_cast<uint32_t>(pi[k]) + batch.baseVertex;
+                        if (vi >= pv.size())
+                            continue;
+                        vmin = std::min(vmin, vi);
+                        vmax = std::max(vmax, vi);
+                        const float *p = pv[vi].pos;
+                        const float pw = p[3];
+                        if (pw <= 0.0f)
+                            continue;
+                        const float px = (p[0] * batch.vpS[0] + pw * batch.vpO[0] - pw * offx * (1.0f / 16.0f)) / pw;
+                        const float py = (p[1] * batch.vpS[1] + pw * batch.vpO[1] - pw * offy * (1.0f / 16.0f)) / pw;
+                        bx0 = std::min(bx0, px); bx1 = std::max(bx1, px);
+                        by0 = std::min(by0, py); by1 = std::max(by1, py);
+                        const float zw = p[2] / pw;
+                        zmin = std::min(zmin, zw); zmax = std::max(zmax, zw);
+                        wmin = std::min(wmin, pw);
+                    }
+                }
+                if (bx1 >= bx0 && by1 >= by0)
+                {
+                    bx0 = std::max(0.0f, std::min(bx0, fbWf)); bx1 = std::max(0.0f, std::min(bx1, fbWf));
+                    by0 = std::max(0.0f, std::min(by0, fbHf)); by1 = std::max(0.0f, std::min(by1, fbHf));
+                    const float area = (bx1 - bx0) * (by1 - by0);
+                    const bool big = area > 0.30f * fbWf * fbHf;
+                    char buf[512];
+                    std::snprintf(buf, sizeof(buf),
+                                  "[%s] serial=%08x verts=%u tris=%u bbox=%d,%d-%d,%d prim=%llx test=%llx alpha=%llx frame=%llx zbuf=%llx tex0=%llx xyoff=%llx scis=%llx zmin=%.4f zmax=%.4f wmin=%.3f\n",
+                                  big ? "rdbig" : "rdref", batch.kickSerial,
+                                  (vmax >= vmin && vmin != 0xFFFFFFFFu) ? (vmax - vmin + 1u) : 0u, batch.count / 3u,
+                                  static_cast<int>(bx0), static_cast<int>(by0), static_cast<int>(bx1), static_cast<int>(by1),
+                                  (unsigned long long)prim, (unsigned long long)test, (unsigned long long)alpha,
+                                  (unsigned long long)frame, (unsigned long long)zbuf, (unsigned long long)tex0,
+                                  (unsigned long long)xo24, (unsigned long long)sc24,
+                                  zmin, zmax, wmin);
+                    if (big)
+                    {
+                        if (rd24BigN < 12)
+                        {
+                            ++rd24BigN;
+                            ps2xSafeLog("%s", buf);
+                        }
+                    }
+                    else
+                        rd24Ref.emplace_back(buf);
+                }
+            }
             rlDrawVertexArrayElements(static_cast<int>(batch.first), static_cast<int>(batch.count), nullptr); // FEAT-RD14
         }
+        if (rd24Dump) // PROBE-RD24
+        {
+            const size_t nRef = std::min<size_t>(3u, rd24Ref.size());
+            for (size_t r = 0; r < nRef; ++r)
+            {
+                const size_t pick = r + static_cast<size_t>(std::rand()) % (rd24Ref.size() - r);
+                std::swap(rd24Ref[r], rd24Ref[pick]);
+                ps2xSafeLog("%s", rd24Ref[r].c_str());
+            }
+        }
         draw2dUntil(0u, true); // FEAT-RD8
+        if (scisOn) // FEAT-RD22
+        {
+            rlDisableScissorTest();
+            scisOn = false;
+        }
         rlActiveTextureSlot(0); // FEAT-RD3
         rlDisableTexture();     // FEAT-RD3
         g_rdc.bound = 0u; // FEAT-RD15
@@ -1371,6 +1621,24 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     rlDisableDepthTest();
     rlEnableBackfaceCulling();
     rlViewport(0, 0, rw, rh);
+
+    if (s_passLog) // FEAT-RD22
+    {
+        static std::chrono::steady_clock::time_point s_lastPass{};
+        const auto nowP = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(nowP - s_lastPass).count() >= 5000)
+        {
+            s_lastPass = nowP;
+            for (int pi = 0; pi < passN; ++pi)
+            {
+                const RdPassEnt &e = passEnts[pi];
+                ps2xSafeLog("[rdpass] fbp=%u xyoff=%u,%u scis=%u,%u-%u,%u vpo=%.1f,%.1f n=%u\n",
+                            e.fbp, e.xo, e.yo, e.sx0, e.sy0, e.sx1, e.sy1,
+                            static_cast<double>(e.vox), static_cast<double>(e.voy), e.n);
+            }
+            ps2xSafeLog("[rdpass] scissorSkipped(total)=%llu\n", static_cast<unsigned long long>(s_scissorSkipped));
+        }
+    }
 
     ++g_rdGpu.frames;
     if (g_rdGpu.curAligned) ++g_rdGpu.alignedFrames; // FEAT-RD13
@@ -1405,6 +1673,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     static_cast<double>(g_rdGpu.totalUnsupportedBlend) / fr,
                     static_cast<double>(g_rdGpu.totalApproxAd) / fr); // FEAT-RD7 // FEAT-RD14
         ps2xSafeLog("[rd] glcalls/frame=%.0f\n", static_cast<double>(g_rdc.totalCalls) / fr); // FEAT-RD15
+        ps2xSafeLog("[rd] date/frame=%.1f dateWithAbe/frame=%.1f\n", static_cast<double>(g_rdDateCount) / fr, static_cast<double>(g_rdDateAbeCount) / fr); // FEAT-RD25
+        { // FEAT-RD23
+            const uint64_t mx = ps2xRdMainXyoff();
+            ps2xSafeLog("[rd] noState3d/frame=%.1f rtPass3d/frame=%.1f mainXyoff=%lld,%lld\n",
+                        static_cast<double>(s_noState3dTotal) / fr, static_cast<double>(s_rtPass3dTotal) / fr,
+                        mx == ~0ull ? -1ll : static_cast<long long>(mx & 0xFFFFull),
+                        mx == ~0ull ? -1ll : static_cast<long long>((mx >> 32) & 0xFFFFull));
+        }
         ps2xSafeLog("[rd2d] draws/frame=%.1f tris/frame=%.1f rtSkipped=%.1f pointLineSkipped=%.1f\n",
                     static_cast<double>(g_rdGpu.total2dDraws) / fr,
                     static_cast<double>(g_rdGpu.total2dTris) / fr,
