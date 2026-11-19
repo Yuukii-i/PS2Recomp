@@ -3040,17 +3040,21 @@ void GS::refreshDrawBatch(int vertexCount)
 
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
-    if (s_rdCurSerial != 0u) // FEAT-RD8b
+    const bool isGeomKick = (s_rdCurSerial & 0x40000000u) != 0u; // FEAT-RD10
+    if (isGeomKick) // FEAT-RD8b // FEAT-RD10
         s_rdMainFbp = batch.state.context.frame.fbp;
-    if (ps2xRdViewOn() && s_rdCurSerial != 0u && s_rdCurSerial != s_rdLastNotedSerial && batch.state.prim.tme) // FEAT-RD5
+    if (ps2xRdViewOn() && isGeomKick) // FEAT-RD5 // FEAT-RD10
     {
-        s_rdLastNotedSerial = s_rdCurSerial;
-        const uint64_t rawTex0 = rdPackTex0(batch.state.context.tex0); // FEAT-RD8
-        const uint64_t rawTexa = rdPackTexa(batch.state.texa); // FEAT-RD8
-        RdpScope rdpS(0); // PROBE-RDP
-        ps2xRdNoteDraw(s_rdCurSerial, rawTex0, rawTexa, m_localMemoryStorage, ps2xRdActiveClut());
+        if (s_rdCurSerial != s_rdLastNotedSerial && batch.state.prim.tme)
+        {
+            s_rdLastNotedSerial = s_rdCurSerial;
+            const uint64_t rawTex0 = rdPackTex0(batch.state.context.tex0); // FEAT-RD8
+            const uint64_t rawTexa = rdPackTexa(batch.state.texa); // FEAT-RD8
+            RdpScope rdpS(0); // PROBE-RDP
+            ps2xRdNoteDraw(s_rdCurSerial, rawTex0, rawTexa, m_localMemoryStorage, ps2xRdActiveClut());
+        }
     }
-    else if (ps2xRdViewOn() && s_rdCurSerial == 0u) // FEAT-RD8
+    else if (ps2xRdViewOn()) // FEAT-RD8 // FEAT-RD10: s_rdCurSerial == 0 or bit 30 clear
     {
         const GSContext &ctx = batch.state.context;
         const GSPrimReg &prim = batch.state.prim;
@@ -3148,12 +3152,12 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             uint32_t texSerial = 0u;
             if (prim.tme)
             {
-                texSerial = (s_rd2dTexCounter++ & 0x7FFFFFFFu) | 0x80000000u;
+                texSerial = (s_rdCurSerial != 0u) ? s_rdCurSerial : ((s_rd2dTexCounter++ & 0x7FFFFFFFu) | 0x80000000u); // FEAT-RD10
                 ps2xRdNoteDraw(texSerial, rawTex0, rawTexa, m_localMemoryStorage, ps2xRdActiveClut());
             }
 
             Rd2DBatch b2d{};
-            b2d.afterSerial = s_rdLastNonZeroSerial;
+            b2d.afterSerial = (s_rdCurSerial != 0u) ? s_rdCurSerial : s_rdLastNonZeroSerial; // FEAT-RD10
             b2d.texSerial = texSerial;
             b2d.prim = rdPackPrim(prim);
             b2d.tex0 = rawTex0;

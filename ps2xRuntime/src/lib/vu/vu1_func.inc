@@ -999,9 +999,9 @@ static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_
     uint32_t start = static_cast<uint32_t>(gif.size());
     if (scene::on() && ::ps2xRdViewOn()) // FEAT-RD5
     {
-        uint32_t serial = g_rdKickSerial.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        uint32_t serial = (g_rdKickSerial.fetch_add(1u, std::memory_order_relaxed) + 1u) & 0x3FFFFFFFu; // FEAT-RD10
         if (serial == 0u)
-            serial = g_rdKickSerial.fetch_add(1u, std::memory_order_relaxed) + 1u;
+            serial = (g_rdKickSerial.fetch_add(1u, std::memory_order_relaxed) + 1u) & 0x3FFFFFFFu;
         scene::t_scene.curKickSerial = serial;
         gif.resize(start + 32u + total);
         const uint64_t mLo = 1ull | (1ull << 60); // NLOOP=1, EOP=0, FLG=0 (PACKED), NREG=1
@@ -1447,8 +1447,21 @@ inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t
     return f.draws.back();
 }
 
-inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen)
+inline void markGeometryKick(std::vector<uint8_t> &gif, uint32_t gifOff) // FEAT-RD10
 {
+    if (::ps2xRdViewOn() && gifOff >= 16u && t_scene.curKickSerial != 0u)
+    {
+        t_scene.curKickSerial |= 0x40000000u;
+        uint64_t dLo = 0ull;
+        std::memcpy(&dLo, gif.data() + gifOff - 16u, 8);
+        dLo |= 0x40000000ull;
+        std::memcpy(gif.data() + gifOff - 16u, &dLo, 8);
+    }
+}
+
+inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
+{
+    markGeometryKick(gif, gifOff); // FEAT-RD10
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     const SceneDraw &d = pushDraw(f, 0x2900u, gifOff, gifLen, static_cast<uint32_t>(polyCount), 0u, 4u | (copyS ? 2u : 0u), c1v, c2v);
     const size_t v0 = f.vertices.size();
@@ -1472,8 +1485,9 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
         checkDraw(d, f.vertices.data() + v0);
 }
 
-inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __m128 c2v, const __m128 *Ps, const int32_t *Wd, uint32_t e7, uint32_t gifOff, uint32_t gifLen)
+inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __m128 c2v, const __m128 *Ps, const int32_t *Wd, uint32_t e7, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
 {
+    markGeometryKick(gif, gifOff); // FEAT-RD10
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     const SceneDraw &d = pushDraw(f, 0x2440u, gifOff, gifLen, static_cast<uint32_t>(N), 0u, copyS ? 2u : 0u, c1v, c2v);
     const size_t v0 = f.vertices.size();
@@ -1498,8 +1512,9 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
         checkDraw(d, f.vertices.data() + v0);
 }
 
-inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, __m128 c2v, uint32_t i4base, uint32_t ubase, uint32_t gifOff, uint32_t gifLen)
+inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, __m128 c2v, uint32_t i4base, uint32_t ubase, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
 {
+    markGeometryKick(gif, gifOff); // FEAT-RD10
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     const SceneDraw &d = pushDraw(f, vi10 ? 0x1EF0u : 0x1EE0u, gifOff, gifLen, static_cast<uint32_t>(N), t_scene.curBoneCount, 1u | (vi10 ? 2u : 0u), c1v, c2v);
     const size_t v0 = f.vertices.size();
@@ -1704,7 +1719,7 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
     if (!kick(vu, 876u, kicks, gif))
         return false;
     if (scene::on()) // PERF-SA
-        scene::recordClipPolygon(vu, polyCount, copyS, c1v, c2v, kicks.back().first, kicks.back().second);
+        scene::recordClipPolygon(vu, polyCount, copyS, c1v, c2v, kicks.back().first, kicks.back().second, gif);
     return true;
 }
 
@@ -1837,7 +1852,7 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
     if (!kick(vu, e7, kicks, gif))
         return fb1EE0(kFbRigidKick);
     if (scene::on()) // PERF-SA
-        scene::recordRigid(vu, N, copyS, c1v, c2v, Ps, Wd, e7, kicks.back().first, kicks.back().second);
+        scene::recordRigid(vu, N, copyS, c1v, c2v, Ps, Wd, e7, kicks.back().first, kicks.back().second, gif);
     R.vi[12] = top; // XTOP vi12
     return true;
 }
@@ -2076,7 +2091,7 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
         return fb1EE0(kFbSkinKick);
     if (scene::on()) // PERF-SA
-        scene::recordSkinned(vu, N, vi10, vf3, vf4, i4base, ubase, kicks.back().first, kicks.back().second);
+        scene::recordSkinned(vu, N, vi10, vf3, vf4, i4base, ubase, kicks.back().first, kicks.back().second, gif);
     R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0)); // ILW.x vi12, 1(vi4) (read from VU mem: V[1] does not exist for N==1)
     return true;
 }

@@ -513,7 +513,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
         auto draw2dUntil = [&](uint32_t maxSerial, bool drawAll) // FEAT-RD8
         {
-            if (i2d >= n2d || (!drawAll && g_rdGpu.local2dBatches[i2d].afterSerial >= maxSerial))
+            const uint32_t maxS = maxSerial & 0x3FFFFFFFu; // FEAT-RD10
+            if (i2d >= n2d || (!drawAll && (g_rdGpu.local2dBatches[i2d].afterSerial & 0x3FFFFFFFu) >= maxS))
                 return;
             mode2d = 1;
             if (g_rdGpu.mode2dLoc >= 0)
@@ -522,7 +523,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             rlDisableDepthMask();
             rlEnableVertexArray(g_rdGpu.vao2d);
 
-            while (i2d < n2d && (drawAll || g_rdGpu.local2dBatches[i2d].afterSerial < maxSerial))
+            while (i2d < n2d && (drawAll || (g_rdGpu.local2dBatches[i2d].afterSerial & 0x3FFFFFFFu) < maxS))
             {
                 const Rd2DBatch &b0 = g_rdGpu.local2dBatches[i2d];
                 if (b0.count == 0u)
@@ -583,7 +584,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
                 uint32_t totalCount = b0.count;
                 size_t j = i2d + 1;
-                while (j < n2d && (drawAll || g_rdGpu.local2dBatches[j].afterSerial < maxSerial))
+                while (j < n2d && (drawAll || (g_rdGpu.local2dBatches[j].afterSerial & 0x3FFFFFFFu) < maxS)) // FEAT-RD10
                 {
                     const Rd2DBatch &bn = g_rdGpu.local2dBatches[j];
                     if (bn.first != b0.first + totalCount ||
