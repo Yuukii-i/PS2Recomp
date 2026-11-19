@@ -10,6 +10,8 @@
 #include <cfloat>
 #include <cstdlib> // PERF-V1G
 #include <filesystem> // PERF-SA
+#include <chrono> // FEAT-RD32
+#include <intrin.h> // FEAT-RD32
 #include <unordered_map>
 #include <utility>
 
@@ -582,6 +584,68 @@ inline bool leanRdOn() // FEAT-RD14
     return v;
 }
 
+// FEAT-RD32: recording timing probe (PS2X_RD_RECPROF=1), rdtsc per section
+inline bool recProfOn()
+{
+    static const bool v = []() { const char *e = std::getenv("PS2X_RD_RECPROF"); return e && e[0] == '1'; }();
+    return v;
+}
+enum RecSlot { kRpParse = 0, kRpMarker, kRpBegin, kRpRigid, kRpSkinned, kRpClip, kRpPush, kRpPublish, kRpCount };
+struct RecProf
+{
+    uint64_t cyc[kRpCount] = {};
+    uint64_t cnt[kRpCount] = {};
+    uint64_t verts = 0;
+    uint64_t frames = 0;
+    uint64_t t0Cyc = 0;
+    std::chrono::steady_clock::time_point t0{};
+};
+inline RecProf &recProf()
+{
+    static thread_local RecProf p;
+    return p;
+}
+struct RecScope
+{
+    int slot;
+    uint64_t start;
+    explicit RecScope(int s) : slot(s), start(recProfOn() ? __rdtsc() : 0ull) {}
+    ~RecScope()
+    {
+        if (start)
+        {
+            RecProf &p = recProf();
+            p.cyc[slot] += __rdtsc() - start;
+            ++p.cnt[slot];
+        }
+    }
+};
+inline void recProfFrame(uint64_t verts)
+{
+    RecProf &p = recProf();
+    ++p.frames;
+    p.verts += verts;
+    const auto now = std::chrono::steady_clock::now();
+    if (p.t0.time_since_epoch().count() == 0)
+    {
+        p.t0 = now;
+        p.t0Cyc = __rdtsc();
+        return;
+    }
+    const double sec = std::chrono::duration<double>(now - p.t0).count();
+    if (sec < 5.0)
+        return;
+    const double cps = static_cast<double>(__rdtsc() - p.t0Cyc) / sec;
+    const double fr = p.frames ? static_cast<double>(p.frames) : 1.0;
+    static const char *kNames[kRpCount] = {"parse", "marker", "begin", "rigid", "skinned", "clip", "push", "publish"};
+    char buf[512];
+    int n = std::snprintf(buf, sizeof(buf), "[rdrec] frames=%llu verts/frame=%.0f ms/frame:", static_cast<unsigned long long>(p.frames), static_cast<double>(p.verts) / fr);
+    for (int i = 0; i < kRpCount && n > 0 && n < 440; ++i)
+        n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %s=%.3f(n%.0f)", kNames[i], static_cast<double>(p.cyc[i]) / cps * 1000.0 / fr, static_cast<double>(p.cnt[i]) / fr);
+    ::ps2xSafeLog("%s\n", buf);
+    p = RecProf{};
+}
+
 struct SceneVertex // 80 bytes
 {
     float pos[4];
@@ -671,6 +735,7 @@ struct SceneFrame
     float curVpS[2] = {0.0f, 0.0f};   // FEAT-RD21
     float curVpO[2] = {0.0f, 0.0f};   // FEAT-RD21
     uint32_t curCamHash = 0u;         // PROBE-RD26
+    size_t hwVerts = 0, hwIdx = 0, hwBatches = 0; // FEAT-RD32: high-water marks so capacity survives swaps with the publish ring
     void clear()
     {
         frameIndex = 0;
@@ -682,6 +747,9 @@ struct SceneFrame
         rdVerts.clear();   // FEAT-RD14
         rdIndices.clear(); // FEAT-RD14
         rdBatches.clear(); // FEAT-RD14
+        if (hwVerts > rdVerts.capacity()) rdVerts.reserve(hwVerts + hwVerts / 8u); // FEAT-RD32
+        if (hwIdx > rdIndices.capacity()) rdIndices.reserve(hwIdx + hwIdx / 8u);   // FEAT-RD32
+        if (hwBatches > rdBatches.capacity()) rdBatches.reserve(hwBatches + hwBatches / 8u); // FEAT-RD32
         leanDraws = 0;     // FEAT-RD14
         maskedDraws = 0;   // FEAT-RD14
         bestVpVerts = 0;   // FEAT-RD14
@@ -1092,7 +1160,10 @@ static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_
         std::memcpy(gif.data() + start + i * 16u, vu + (((q0 + i) & 0x3FFu) << 4), 16);
     kicks.emplace_back(start, total);
     if (scene::on()) // FEAT-RD2
+    {
+        scene::RecScope rs(scene::kRpParse); // FEAT-RD32
         scene::parseChain(gif.data() + start, total);
+    }
     return true;
 }
 
@@ -1355,7 +1426,16 @@ inline void onFlush()
     {
         t_scene.totalDraws += cur.leanDraws;
         t_scene.totalVerts += cur.rdVerts.size();
-        ::ps2xRdPublishLean(cur.rdVerts, cur.rdIndices, cur.rdBatches, 0u, cur.maskedDraws, cur.vpScaleZ, cur.vpOffsetZ);
+        cur.hwVerts = std::max(cur.hwVerts, cur.rdVerts.size()); // FEAT-RD32
+        cur.hwIdx = std::max(cur.hwIdx, cur.rdIndices.size());
+        cur.hwBatches = std::max(cur.hwBatches, cur.rdBatches.size());
+        const size_t profVerts = cur.rdVerts.size();
+        {
+            RecScope rs(kRpPublish); // FEAT-RD32
+            ::ps2xRdPublishLean(cur.rdVerts, cur.rdIndices, cur.rdBatches, 0u, cur.maskedDraws, cur.vpScaleZ, cur.vpOffsetZ);
+        }
+        if (recProfOn())
+            recProfFrame(profVerts);
     }
     else
     {
@@ -1555,18 +1635,11 @@ inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba) // FEAT-RD14
     const __m128i p8 = _mm_packus_epi16(p16, p16);
     const uint32_t packed = static_cast<uint32_t>(_mm_cvtsi128_si32(p8));
     std::memcpy(rv.rgba, &packed, 4);
-    alignas(16) float s[4];
-    _mm_store_ps(s, stq);
-    if (s[2] != 0.0f)
-    {
-        rv.uv[0] = s[0] / s[2];
-        rv.uv[1] = s[1] / s[2];
-    }
-    else
-    {
-        rv.uv[0] = 0.0f;
-        rv.uv[1] = 0.0f;
-    }
+    // FEAT-RD32: SIMD divide (bit-identical to the scalar s/q), q==0 -> uv 0
+    const __m128 q = _mm_shuffle_ps(stq, stq, _MM_SHUFFLE(2, 2, 2, 2));
+    const __m128 d = _mm_div_ps(stq, q);
+    const __m128 nz = _mm_cmpneq_ps(q, _mm_setzero_ps());
+    _mm_storel_pi(reinterpret_cast<__m64 *>(rv.uv), _mm_and_ps(d, nz));
     return rv;
 }
 
@@ -1583,6 +1656,7 @@ inline bool beginLeanDraw(const uint8_t *vu, SceneFrame &f, uint32_t vertCount, 
         }
         f.curCamHash = h; // PROBE-RD26
     }
+    RecScope rs(kRpBegin); // FEAT-RD32
     ++f.leanDraws;
     alignas(16) float vps[4];
     _mm_store_ps(vps, c1v);
@@ -1605,8 +1679,15 @@ inline bool beginLeanDraw(const uint8_t *vu, SceneFrame &f, uint32_t vertCount, 
     return true;
 }
 
+template <class V> inline void reserveGrow(V &v, size_t need) // FEAT-RD32: geometric growth (plain reserve(need) reallocates to the exact size every draw)
+{
+    if (need > v.capacity())
+        v.reserve(std::max(need, v.capacity() * 2u));
+}
+
 inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCount) // FEAT-RD14
 {
+    RecScope rs(kRpPush); // FEAT-RD32
     if (indexCount == 0u)
         return;
     const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull);
@@ -1640,10 +1721,11 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
 
 inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
 {
-    markGeometryKick(gif, gifOff); // FEAT-RD10
+    { RecScope rm(kRpMarker); markGeometryKick(gif, gifOff); } // FEAT-RD10 // FEAT-RD32
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     if (leanRdOn()) // FEAT-RD14
     {
+        RecScope rs(kRpClip); // FEAT-RD32 (inclusive of begin/push)
         if (!beginLeanDraw(vu, f, static_cast<uint32_t>(polyCount), c1v, c2v))
             return;
         const size_t v0 = f.rdVerts.size();
@@ -1659,7 +1741,7 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
         }
         if (polyCount >= 3)
         {
-            f.rdIndices.reserve(i0 + static_cast<size_t>(polyCount - 2) * 3u);
+            reserveGrow(f.rdIndices, i0 + static_cast<size_t>(polyCount - 2) * 3u);
             const uint32_t base = static_cast<uint32_t>(v0);
             for (int32_t k = 2; k < polyCount; ++k)
             {
@@ -1695,17 +1777,18 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
 
 inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __m128 c2v, const __m128 *Ps, const int32_t *Wd, uint32_t e7, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
 {
-    markGeometryKick(gif, gifOff); // FEAT-RD10
+    { RecScope rm(kRpMarker); markGeometryKick(gif, gifOff); } // FEAT-RD10 // FEAT-RD32
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     if (leanRdOn()) // FEAT-RD14
     {
+        RecScope rs(kRpRigid); // FEAT-RD32 (inclusive of begin/push)
         if (!beginLeanDraw(vu, f, static_cast<uint32_t>(N), c1v, c2v))
             return;
         const size_t v0 = f.rdVerts.size();
         const size_t i0 = f.rdIndices.size();
         f.rdVerts.resize(v0 + static_cast<size_t>(N));
         if (N >= 3)
-            f.rdIndices.reserve(i0 + static_cast<size_t>(N - 2) * 3u);
+            reserveGrow(f.rdIndices, i0 + static_cast<size_t>(N - 2) * 3u);
         const uint32_t base = static_cast<uint32_t>(v0);
         for (int32_t j = 0; j < N; ++j)
         {
@@ -1753,17 +1836,18 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
 
 inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, __m128 c2v, uint32_t i4base, uint32_t ubase, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
 {
-    markGeometryKick(gif, gifOff); // FEAT-RD10
+    { RecScope rm(kRpMarker); markGeometryKick(gif, gifOff); } // FEAT-RD10 // FEAT-RD32
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     if (leanRdOn()) // FEAT-RD14
     {
+        RecScope rs(kRpSkinned); // FEAT-RD32 (inclusive of begin/push)
         if (!beginLeanDraw(vu, f, static_cast<uint32_t>(N), c1v, c2v))
             return;
         const size_t v0 = f.rdVerts.size();
         const size_t i0 = f.rdIndices.size();
         f.rdVerts.resize(v0 + static_cast<size_t>(N));
         if (N >= 3)
-            f.rdIndices.reserve(i0 + static_cast<size_t>(N - 2) * 3u);
+            reserveGrow(f.rdIndices, i0 + static_cast<size_t>(N - 2) * 3u);
         const uint32_t base = static_cast<uint32_t>(v0);
         for (int32_t v = 0; v < N; ++v)
         {
