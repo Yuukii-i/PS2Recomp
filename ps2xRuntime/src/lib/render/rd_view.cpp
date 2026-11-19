@@ -1,4 +1,6 @@
 // FEAT-RD1: Direct geometry view from the VU1 scene buffer via OpenGL/rlgl.
+#include <unordered_map>
+#include <cstring>
 #include "raylib.h"
 #include "rlgl.h"
 
@@ -252,6 +254,77 @@ int computeRdBlend(uint64_t prim, uint64_t alpha, uint64_t &unsupBlend, uint64_t
     return blendState;
 }
 
+// FEAT-RD15: GL state cache (redundant call elimination)
+struct RdGlCache
+{
+    std::unordered_map<unsigned int, uint32_t> texParams;
+    unsigned int bound = 0u;
+    int depthTest = -1, depthMask = -1;
+    uint64_t calls = 0, totalCalls = 0;
+    uint32_t uni[64][2];
+    bool uniValid[64];
+    uint32_t frame = 0;
+    void reset()
+    {
+        bound = 0u; depthTest = -1; depthMask = -1;
+        std::memset(uniValid, 0, sizeof(uniValid));
+        if ((++frame % 600u) == 0u)
+            texParams.clear();
+    }
+} g_rdc; // FEAT-RD15
+
+void rdSetUniform(int loc, const void *v, int type, int count) // FEAT-RD15
+{
+    uint32_t w[2] = {0u, 0u};
+    std::memcpy(w, v, (type == RL_SHADER_UNIFORM_VEC2) ? 8 : 4);
+    if (loc >= 0 && loc < 64)
+    {
+        if (g_rdc.uniValid[loc] && g_rdc.uni[loc][0] == w[0] && g_rdc.uni[loc][1] == w[1])
+            return;
+        g_rdc.uni[loc][0] = w[0]; g_rdc.uni[loc][1] = w[1]; g_rdc.uniValid[loc] = true;
+    }
+    ++g_rdc.calls;
+    rlSetUniform(loc, v, type, count);
+}
+void rdDepthTest(bool on) // FEAT-RD15
+{
+    if (g_rdc.depthTest == (on ? 1 : 0)) return;
+    g_rdc.depthTest = on ? 1 : 0; ++g_rdc.calls;
+    if (on) rlEnableDepthTest(); else rlDisableDepthTest();
+}
+void rdDepthMask(bool on) // FEAT-RD15
+{
+    if (g_rdc.depthMask == (on ? 1 : 0)) return;
+    g_rdc.depthMask = on ? 1 : 0; ++g_rdc.calls;
+    if (on) rlEnableDepthMask(); else rlDisableDepthMask();
+}
+void rdBindTex(unsigned int texId, uint32_t params) // FEAT-RD15
+{
+    uint32_t &cached = g_rdc.texParams[texId];
+    const uint32_t want = params | 0x80000000u;
+    if (cached != want)
+    {
+        const uint32_t old = cached;
+        const bool fresh = !(old & 0x80000000u);
+        const int wrapS = (params & 1u) ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT;
+        const int wrapT = (params & 2u) ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT;
+        const int mag = (params & 4u) ? RL_TEXTURE_FILTER_LINEAR : RL_TEXTURE_FILTER_NEAREST;
+        const int mn = (params & 8u) ? RL_TEXTURE_FILTER_LINEAR : RL_TEXTURE_FILTER_NEAREST;
+        if (fresh || ((old ^ want) & 1u)) { rlTextureParameters(texId, RL_TEXTURE_WRAP_S, wrapS); ++g_rdc.calls; }
+        if (fresh || ((old ^ want) & 2u)) { rlTextureParameters(texId, RL_TEXTURE_WRAP_T, wrapT); ++g_rdc.calls; }
+        if (fresh || ((old ^ want) & 4u)) { rlTextureParameters(texId, RL_TEXTURE_MAG_FILTER, mag); ++g_rdc.calls; }
+        if (fresh || ((old ^ want) & 8u)) { rlTextureParameters(texId, RL_TEXTURE_MIN_FILTER, mn); ++g_rdc.calls; }
+        cached = want;
+    }
+    if (g_rdc.bound != texId)
+    {
+        rlActiveTextureSlot(0);
+        rlEnableTexture(texId);
+        g_rdc.bound = texId;
+        g_rdc.calls += 2;
+    }
+}
+
 // FEAT-RD9: FBMSK (frame>>32) -> GL colour mask; logs first 8 distinct values per class
 int g_rdMaskCur = 15; // FEAT-RD9
 void applyRdFbmsk(uint64_t frame, bool is2d, uint64_t &partialMask)
@@ -284,6 +357,7 @@ void applyRdFbmsk(uint64_t frame, bool is2d, uint64_t &partialMask)
     if (packed != g_rdMaskCur)
     {
         rlColorMask(ch[0], ch[1], ch[2], ch[3]);
+        ++g_rdc.calls; // FEAT-RD15
         g_rdMaskCur = packed;
     }
 }
@@ -303,6 +377,8 @@ void applyRdBlend(int blendState, unsigned int vao) // FEAT-RD8
     }
     rlEnableShader(g_rdGpu.shader.id);
     rlEnableVertexArray(vao);
+    g_rdc.bound = 0u; // FEAT-RD15: raylib flush may rebind default texture
+    g_rdc.calls += 4;
 }
 
 void uploadRdVbo(unsigned int vao, unsigned int &vbo, size_t &capVerts, const std::vector<RdVert> &verts) // FEAT-RD8
@@ -893,6 +969,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         rlDisableScissorTest();
     }
     rlEnableDepthTest();
+    g_rdc.reset(); g_rdc.calls = 0; g_rdc.depthTest = 1; // FEAT-RD15
     rlDisableBackfaceCulling();
 
     uint64_t unsupBlend = 0; // FEAT-RD2
@@ -907,16 +984,16 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         rlEnableShader(g_rdGpu.shader.id);
         int mode2d = 0; // FEAT-RD8
         if (g_rdGpu.mode2dLoc >= 0)
-            rlSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+            rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
         const float fbSize[2] = {
             static_cast<float>(g_rdPresentW.load(std::memory_order_relaxed)),
             static_cast<float>(g_rdPresentH.load(std::memory_order_relaxed))
         };
         if (g_rdGpu.fbSizeLoc >= 0)
-            rlSetUniform(g_rdGpu.fbSizeLoc, fbSize, RL_SHADER_UNIFORM_VEC2, 1);
+            rdSetUniform(g_rdGpu.fbSizeLoc, fbSize, RL_SHADER_UNIFORM_VEC2, 1);
         const float vpZ[2] = { g_rdGpu.vpScaleZ, g_rdGpu.vpOffsetZ }; // FEAT-RD11
         if (g_rdGpu.vpZLoc >= 0)
-            rlSetUniform(g_rdGpu.vpZLoc, vpZ, RL_SHADER_UNIFORM_VEC2, 1);
+            rdSetUniform(g_rdGpu.vpZLoc, vpZ, RL_SHADER_UNIFORM_VEC2, 1);
         unsigned int curVao = 0u; // FEAT-RD14
         int prevBlend = -1; // FEAT-RD2b
         size_t i2d = 0; // FEAT-RD8
@@ -929,9 +1006,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 return;
             mode2d = 1;
             if (g_rdGpu.mode2dLoc >= 0)
-                rlSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
-            rlDisableDepthTest();
-            rlDisableDepthMask();
+                rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+            rdDepthTest(false);
+            rdDepthMask(false);
             rlEnableVertexArray(g_rdGpu.vao2d);
 
             while (i2d < n2d && (drawAll || (g_rdGpu.local2dBatches[i2d].afterSerial & 0x3FFFFFFFu) < maxS))
@@ -962,20 +1039,20 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 {
                     mode2d = wantMode2d;
                     if (g_rdGpu.mode2dLoc >= 0)
-                        rlSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+                        rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
                 }
                 if (use2dZ)
                 {
-                    rlEnableDepthTest();
+                    rdDepthTest(true);
                     if ((b0.zbuf >> 32) & 1ull)
-                        rlDisableDepthMask();
+                        rdDepthMask(false);
                     else
-                        rlEnableDepthMask();
+                        rdDepthMask(true);
                 }
                 else
                 {
-                    rlDisableDepthTest();
-                    rlDisableDepthMask();
+                    rdDepthTest(false);
+                    rdDepthMask(false);
                 }
                 applyRdFbmsk(b0.frame, true, partialMask); // FEAT-RD9
                 float fixAlpha = -1.0f;
@@ -988,11 +1065,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 int atstVal = static_cast<int>(atst);
                 int arefVal = static_cast<int>((b0.test >> 4) & 0xFFull);
                 if (g_rdGpu.atstLoc >= 0)
-                    rlSetUniform(g_rdGpu.atstLoc, &atstVal, RL_SHADER_UNIFORM_INT, 1);
+                    rdSetUniform(g_rdGpu.atstLoc, &atstVal, RL_SHADER_UNIFORM_INT, 1);
                 if (g_rdGpu.arefLoc >= 0)
-                    rlSetUniform(g_rdGpu.arefLoc, &arefVal, RL_SHADER_UNIFORM_INT, 1);
+                    rdSetUniform(g_rdGpu.arefLoc, &arefVal, RL_SHADER_UNIFORM_INT, 1);
                 if (g_rdGpu.fixLoc >= 0)
-                    rlSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
+                    rdSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
 
                 int texVal = 0, tfxVal = 0, tccVal = 0;
                 unsigned int texId = 0u;
@@ -1003,23 +1080,18 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     {
                         const uint32_t wms = static_cast<uint32_t>(b0.clamp & 3ull);
                         const uint32_t wmt = static_cast<uint32_t>((b0.clamp >> 2) & 3ull);
-                        rlTextureParameters(texId, RL_TEXTURE_WRAP_S, (wms == 0u) ? RL_TEXTURE_WRAP_REPEAT : RL_TEXTURE_WRAP_CLAMP);
-                        rlTextureParameters(texId, RL_TEXTURE_WRAP_T, (wmt == 0u) ? RL_TEXTURE_WRAP_REPEAT : RL_TEXTURE_WRAP_CLAMP);
-                        rlTextureParameters(texId, RL_TEXTURE_MAG_FILTER, (((b0.tex1 >> 5) & 1ull) == 0ull) ? RL_TEXTURE_FILTER_NEAREST : RL_TEXTURE_FILTER_LINEAR);
-                        rlTextureParameters(texId, RL_TEXTURE_MIN_FILTER, (((b0.tex1 >> 6) & 7ull) == 0ull) ? RL_TEXTURE_FILTER_NEAREST : RL_TEXTURE_FILTER_LINEAR);
-                        rlActiveTextureSlot(0);
-                        rlEnableTexture(texId);
+                        rdBindTex(texId, (wms != 0u ? 1u : 0u) | (wmt != 0u ? 2u : 0u) | ((((b0.tex1 >> 5) & 1ull) != 0ull) ? 4u : 0u) | ((((b0.tex1 >> 6) & 7ull) != 0ull) ? 8u : 0u)); // FEAT-RD15
                         texVal = 1;
                         tfxVal = static_cast<int>((b0.tex0 >> 35) & 3ull);
                         tccVal = static_cast<int>((b0.tex0 >> 34) & 1ull);
                     }
                 }
                 if (g_rdGpu.texLoc >= 0)
-                    rlSetUniform(g_rdGpu.texLoc, &texVal, RL_SHADER_UNIFORM_INT, 1);
+                    rdSetUniform(g_rdGpu.texLoc, &texVal, RL_SHADER_UNIFORM_INT, 1);
                 if (g_rdGpu.tfxLoc >= 0)
-                    rlSetUniform(g_rdGpu.tfxLoc, &tfxVal, RL_SHADER_UNIFORM_INT, 1);
+                    rdSetUniform(g_rdGpu.tfxLoc, &tfxVal, RL_SHADER_UNIFORM_INT, 1);
                 if (g_rdGpu.tccLoc >= 0)
-                    rlSetUniform(g_rdGpu.tccLoc, &tccVal, RL_SHADER_UNIFORM_INT, 1);
+                    rdSetUniform(g_rdGpu.tccLoc, &tccVal, RL_SHADER_UNIFORM_INT, 1);
 
                 uint32_t totalCount = b0.count;
                 size_t j = i2d + 1;
@@ -1045,7 +1117,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
             mode2d = 0;
             if (g_rdGpu.mode2dLoc >= 0)
-                rlSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+                rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
             curVao = 0u; // FEAT-RD14
         };
 
@@ -1068,13 +1140,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (zte && ztst == 0u)
                 continue;
             if (!zte || ztst == 1u)
-                rlDisableDepthTest();
+                rdDepthTest(false);
             else
-                rlEnableDepthTest();
+                rdDepthTest(true);
             if ((batch.zbuf >> 32) & 1ull)
-                rlDisableDepthMask();
+                rdDepthMask(false);
             else
-                rlEnableDepthMask();
+                rdDepthMask(true);
 
             // FEAT-RD7: blendState 0 = off, else 1 + sfk*64 + dfk*16 + eqk (factor kinds: 0 ZERO, 1 ONE, 2 C, 3 1-C)
             applyRdFbmsk(batch.frame, false, partialMask); // FEAT-RD9
@@ -1104,11 +1176,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             int atstVal = static_cast<int>(atst);
             int arefVal = static_cast<int>((test >> 4) & 0xFFull);
             if (g_rdGpu.atstLoc >= 0)
-                rlSetUniform(g_rdGpu.atstLoc, &atstVal, RL_SHADER_UNIFORM_INT, 1);
+                rdSetUniform(g_rdGpu.atstLoc, &atstVal, RL_SHADER_UNIFORM_INT, 1);
             if (g_rdGpu.arefLoc >= 0)
-                rlSetUniform(g_rdGpu.arefLoc, &arefVal, RL_SHADER_UNIFORM_INT, 1);
+                rdSetUniform(g_rdGpu.arefLoc, &arefVal, RL_SHADER_UNIFORM_INT, 1);
             if (g_rdGpu.fixLoc >= 0) // FEAT-RD7
-                rlSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
+                rdSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
 
             int texVal = 0; // FEAT-RD3
             int tfxVal = 0;
@@ -1120,33 +1192,25 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 {
                     const uint32_t wms = static_cast<uint32_t>(batch.clamp & 3ull);
                     const uint32_t wmt = static_cast<uint32_t>((batch.clamp >> 2) & 3ull);
-                    const int wrapS = (wms == 0u) ? RL_TEXTURE_WRAP_REPEAT : RL_TEXTURE_WRAP_CLAMP;
-                    const int wrapT = (wmt == 0u) ? RL_TEXTURE_WRAP_REPEAT : RL_TEXTURE_WRAP_CLAMP;
-                    const int magFilter = (((batch.tex1 >> 5) & 1ull) == 0ull) ? RL_TEXTURE_FILTER_NEAREST : RL_TEXTURE_FILTER_LINEAR;
-                    const int minFilter = (((batch.tex1 >> 6) & 7ull) == 0ull) ? RL_TEXTURE_FILTER_NEAREST : RL_TEXTURE_FILTER_LINEAR;
-                    rlTextureParameters(texId, RL_TEXTURE_WRAP_S, wrapS);
-                    rlTextureParameters(texId, RL_TEXTURE_WRAP_T, wrapT);
-                    rlTextureParameters(texId, RL_TEXTURE_MAG_FILTER, magFilter);
-                    rlTextureParameters(texId, RL_TEXTURE_MIN_FILTER, minFilter);
-                    rlActiveTextureSlot(0);
-                    rlEnableTexture(texId);
+                    rdBindTex(texId, (wms != 0u ? 1u : 0u) | (wmt != 0u ? 2u : 0u) | ((((batch.tex1 >> 5) & 1ull) != 0ull) ? 4u : 0u) | ((((batch.tex1 >> 6) & 7ull) != 0ull) ? 8u : 0u)); // FEAT-RD15
                     texVal = 1;
                     tfxVal = static_cast<int>((batch.tex0 >> 35) & 3ull);
                     tccVal = static_cast<int>((batch.tex0 >> 34) & 1ull);
                 }
             }
             if (g_rdGpu.texLoc >= 0)
-                rlSetUniform(g_rdGpu.texLoc, &texVal, RL_SHADER_UNIFORM_INT, 1);
+                rdSetUniform(g_rdGpu.texLoc, &texVal, RL_SHADER_UNIFORM_INT, 1);
             if (g_rdGpu.tfxLoc >= 0)
-                rlSetUniform(g_rdGpu.tfxLoc, &tfxVal, RL_SHADER_UNIFORM_INT, 1);
+                rdSetUniform(g_rdGpu.tfxLoc, &tfxVal, RL_SHADER_UNIFORM_INT, 1);
             if (g_rdGpu.tccLoc >= 0)
-                rlSetUniform(g_rdGpu.tccLoc, &tccVal, RL_SHADER_UNIFORM_INT, 1);
+                rdSetUniform(g_rdGpu.tccLoc, &tccVal, RL_SHADER_UNIFORM_INT, 1);
 
             rlDrawVertexArrayElements(static_cast<int>(batch.first), static_cast<int>(batch.count), nullptr); // FEAT-RD14
         }
         draw2dUntil(0u, true); // FEAT-RD8
         rlActiveTextureSlot(0); // FEAT-RD3
         rlDisableTexture();     // FEAT-RD3
+        g_rdc.bound = 0u; // FEAT-RD15
         rlDisableVertexArray();
         rlDisableShader();
     }
@@ -1177,6 +1241,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     g_rdGpu.total2dTris += static_cast<uint64_t>(g_rdGpu.gpu2dVertCount / 3u); // FEAT-RD8
     g_rdGpu.totalRtSkipped += static_cast<uint64_t>(g_rdGpu.lastRtSkipped); // FEAT-RD8
     g_rdGpu.totalPointLineSkipped += static_cast<uint64_t>(g_rdGpu.lastPointLineSkipped); // FEAT-RD8
+    g_rdc.totalCalls += g_rdc.calls; // FEAT-RD15
     const auto now = std::chrono::steady_clock::now();
     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_rdGpu.lastLog).count() >= 5000)
     {
@@ -1191,6 +1256,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     static_cast<double>(g_rdGpu.totalMaskedDraws) / fr,
                     static_cast<double>(g_rdGpu.totalUnsupportedBlend) / fr,
                     static_cast<double>(g_rdGpu.totalApproxAd) / fr); // FEAT-RD7 // FEAT-RD14
+        ps2xSafeLog("[rd] glcalls/frame=%.0f\n", static_cast<double>(g_rdc.totalCalls) / fr); // FEAT-RD15
         ps2xSafeLog("[rd2d] draws/frame=%.1f tris/frame=%.1f rtSkipped=%.1f pointLineSkipped=%.1f\n",
                     static_cast<double>(g_rdGpu.total2dDraws) / fr,
                     static_cast<double>(g_rdGpu.total2dTris) / fr,
