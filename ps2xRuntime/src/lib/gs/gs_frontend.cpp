@@ -35,6 +35,8 @@ struct RdpScope // PROBE-RDP
     ~RdpScope() { if (g_rdpOn) { g_rdpCyc[id] += __rdtsc() - t0; ++g_rdpCnt[id]; } } // PROBE-RDP
 };
 extern void ps2xSafeLog(const char *fmt, ...); // PROBE-RDP
+extern uint64_t g_rdpNoteSubCyc[6]; // FEAT-RD45: 0=rt, 1=fast, 2=clut, 3=quickKey, 4=rawCrc, 5=decode
+extern uint64_t g_rdpRtSubCyc[4];   // FEAT-RD46: 0=rt_a(fb), 1=rt_b(mask), 2=rt_c(mutex), 3=rt_d(sync)
 static void rdpMaybeReport() // PROBE-RDP
 {
     static uint64_t s_cyc0 = 0, s_seq0 = 0;
@@ -55,14 +57,21 @@ static void rdpMaybeReport() // PROBE-RDP
     const double cpm = static_cast<double>(cyc) / dms; // cycles per ms
     auto ms = [&](int i) { return static_cast<double>(g_rdpCyc[i]) / cpm / frames; };
     auto cn = [&](int i) { return static_cast<unsigned>(static_cast<double>(g_rdpCnt[i]) / frames); };
-    ps2xSafeLog("[rdprof] per-frame ms: noteDraw=%.2f(%u) noteClut=%.2f(%u) markDest=%.2f(%u) nop=%.2f(%u) queueDraws=%u\n",
+    auto subMs = [&](int i) { return static_cast<double>(g_rdpNoteSubCyc[i]) / cpm / frames; }; // FEAT-RD45
+    auto rtSubMs = [&](int i) { return static_cast<double>(g_rdpRtSubCyc[i]) / cpm / frames; }; // FEAT-RD46
+    ps2xSafeLog("[rdprof] per-frame ms: noteDraw=%.2f(%u) noteClut=%.2f(%u) markDest=%.2f(%u) nop=%.2f(%u) queueDraws=%u noteSub[rt=%.2f(rt_a=%.2f rt_b=%.2f rt_c=%.2f rt_d=%.2f) fast=%.2f clut=%.2f qk=%.2f crc=%.2f dec=%.2f]\n",
                 ms(0), cn(0), ms(1), cn(1), ms(2), cn(2), ms(3), cn(3),
-                static_cast<unsigned>(static_cast<double>(s_rdpQueueDraws) / frames));
+                static_cast<unsigned>(static_cast<double>(s_rdpQueueDraws) / frames),
+                subMs(0), rtSubMs(0), rtSubMs(1), rtSubMs(2), rtSubMs(3), subMs(1), subMs(2), subMs(3), subMs(4), subMs(5));
     for (int i = 0; i < 4; ++i) { g_rdpCyc[i] = 0; g_rdpCnt[i] = 0; }
+    for (int i = 0; i < 6; ++i) { g_rdpNoteSubCyc[i] = 0; } // FEAT-RD45
+    for (int i = 0; i < 4; ++i) { g_rdpRtSubCyc[i] = 0; }   // FEAT-RD46
     s_rdpQueueDraws = 0u; s_t0 = now; s_cyc0 = __rdtsc(); s_seq0 = seq;
 }
 extern bool ps2xRdViewOn(); // FEAT-RD5
+extern bool ps2xRdActive(); // FEAT-RD49
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
+extern void ps2xRdResetState(); // FEAT-RD49
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD12
 extern void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t *vram, const uint16_t *clut512); // FEAT-RD5
 extern void ps2xRdNoteState(uint32_t serial, uint64_t prim, uint64_t alpha, uint64_t test, uint64_t frame,
@@ -82,6 +91,26 @@ static uint32_t s_rdLastNonZeroSerial = 0u; // FEAT-RD8
 static uint32_t s_rdMainFbp = 0xFFFFFFFFu;  // FEAT-RD8b
 static uint32_t s_rd2dTexCounter = 1u;      // FEAT-RD8
 bool g_rdCurDrawIsGeom = false;             // FEAT-RD18
+std::atomic<bool> g_rdForceClassic{false};  // FEAT-RD48
+std::atomic<uint64_t> g_rdFrameRtSyncCyc{0ull}; // FEAT-RD48
+static std::atomic<uint32_t> s_rdLatchPrims{0u}; // FEAT-RD50
+static int rdForceClassicMode() // FEAT-RD48: 0=never, 1=always, 2=auto
+{
+    static const int mode = []() {
+        const char *e = std::getenv("PS2X_RD_FORCECLASSIC");
+        if (e && e[0] == '0') return 0;
+        if (e && e[0] == '1') return 1;
+        return 2;
+    }();
+    return mode;
+}
+bool ps2xRdForceClassic() // FEAT-RD48
+{
+    const int mode = rdForceClassicMode();
+    if (mode == 0) return false;
+    if (mode == 1) return true;
+    return g_rdForceClassic.load(std::memory_order_acquire);
+}
 static std::atomic<uint64_t> s_rdFastGeomQwords{0ull}; // FEAT-RD38
 static uint32_t s_rdFastGeomLastSerial = 0u;           // FEAT-RD38
 static inline bool rdFastGeomOn()                      // FEAT-RD38
@@ -90,7 +119,7 @@ static inline bool rdFastGeomOn()                      // FEAT-RD38
         const char *e = std::getenv("PS2X_RD_FASTGEOM");
         return !(e && e[0] == '0'); // FEAT-RD38: default ON, PS2X_RD_FASTGEOM=0 disables
     }();
-    return enabled && ps2xRdTakeoverOn();
+    return enabled && ps2xRdTakeoverOn() && !ps2xRdForceClassic(); // FEAT-RD48
 }
 bool ps2xRdFastGeomOn() // FEAT-RD40
 {
@@ -1420,8 +1449,81 @@ void GS::latchHostPresentationFrame()
     rdRollPassFrame(); // FEAT-RD23
     static uint32_t s_rdEmptyLatches = 0u; // FEAT-RD33c
     if (frameHasGeom) s_rdEmptyLatches = 0u; else if (s_rdEmptyLatches < 1000000u) ++s_rdEmptyLatches; // FEAT-RD33c
-    const bool useRepeat = takeover && !frameHasGeom && s_rdEmptyLatches < 8u; // FEAT-RD33c
-    const bool useClassic = takeover && !frameHasGeom && !useRepeat; // FEAT-RD18 // FEAT-RD33c
+    const uint32_t latchPrims = s_rdLatchPrims.exchange(0u, std::memory_order_acq_rel); // FEAT-RD50
+    static uint32_t s_rdLowPrimLatches = 0u; // FEAT-RD50
+    if (latchPrims < 64u) { if (s_rdLowPrimLatches < 1000000u) ++s_rdLowPrimLatches; } // FEAT-RD50
+    else s_rdLowPrimLatches = 0u; // FEAT-RD50
+    static uint32_t s_rdResetCooldown = 0u; // FEAT-RD50
+    if (s_rdResetCooldown > 0u) --s_rdResetCooldown; // FEAT-RD50
+    static double s_rdRtSyncEma = 0.0;       // FEAT-RD48
+    static uint32_t s_rdRtSyncHighCnt = 0u;  // FEAT-RD48
+    static uint32_t s_rdForceWarmup = 0u;    // FEAT-RD48
+    static double s_rdSyncCpm = 0.0;         // FEAT-RD48
+    static uint64_t s_rdSyncTsc0 = 0ull;     // FEAT-RD48
+    static std::chrono::steady_clock::time_point s_rdSyncT0; // FEAT-RD48
+    static bool s_rdSyncInit = false;        // FEAT-RD48
+    const auto rdSyncNow = std::chrono::steady_clock::now(); // FEAT-RD48
+    if (!s_rdSyncInit) { s_rdSyncInit = true; s_rdSyncT0 = rdSyncNow; s_rdSyncTsc0 = pjStart; } // FEAT-RD48
+    else {
+        const double dms = std::chrono::duration<double, std::milli>(rdSyncNow - s_rdSyncT0).count();
+        if (dms >= 50.0) { s_rdSyncCpm = static_cast<double>(pjStart - s_rdSyncTsc0) / dms; s_rdSyncT0 = rdSyncNow; s_rdSyncTsc0 = pjStart; }
+    }
+    const uint64_t frameSyncCyc = g_rdFrameRtSyncCyc.exchange(0ull, std::memory_order_acq_rel); // FEAT-RD48
+    const double rtSyncMs = (s_rdSyncCpm > 0.0) ? (static_cast<double>(frameSyncCyc) / s_rdSyncCpm) : 0.0; // FEAT-RD48
+    const bool wasForced = g_rdForceClassic.load(std::memory_order_acquire); // FEAT-RD49 // FEAT-RD50
+    const bool doStageReset = wasForced ? (s_rdLowPrimLatches >= 8u) // FEAT-RD50: never use s_rdEmptyLatches while forced
+                                        : (s_rdEmptyLatches >= 8u && (s_rdRtSyncEma != 0.0 || s_rdRtSyncHighCnt != 0u)); // FEAT-RD48
+    if (doStageReset) // FEAT-RD48 // FEAT-RD50: stage-transition reset
+    {
+        g_rdForceClassic.store(false, std::memory_order_release);
+        s_rdRtSyncEma = 0.0;
+        s_rdRtSyncHighCnt = 0u;
+        s_rdForceWarmup = 0u;
+        if (wasForced) // FEAT-RD49 // FEAT-RD50: clear stale per-frame & rd_view state before resuming
+        {
+            s_rdLowPrimLatches = 0u;
+            s_rdResetCooldown = 120u;
+            {
+                std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+                s_rd2dVerts.clear();
+                s_rd2dBatches.clear();
+                s_rdKickRecs.clear();
+                s_rdLastKickRecSerial = 0u;
+                s_rdCurSerial = 0u;
+                s_rdLastNotedSerial = 0u;
+                s_rdLastStateSerial = 0u;
+                ps2xRdResetState();
+            }
+            ps2xSafeLog("[rd] forceClassic OFF (stage transition, prims/latch=%u)\n", latchPrims);
+        }
+    }
+    const bool forcedNow = ps2xRdForceClassic(); // FEAT-RD48
+    const bool useClassicForced = forcedNow && (s_rdForceWarmup == 0u); // FEAT-RD48
+    if (s_rdForceWarmup > 0u) --s_rdForceWarmup; // FEAT-RD48
+    const bool useRepeat = takeover && !useClassicForced && !frameHasGeom && s_rdEmptyLatches < 8u; // FEAT-RD33c // FEAT-RD48
+    const bool useClassic = takeover && (useClassicForced || (!frameHasGeom && !useRepeat)); // FEAT-RD18 // FEAT-RD33c // FEAT-RD48
+    if (takeover && rdForceClassicMode() == 2 && !forcedNow) // FEAT-RD48
+    {
+        s_rdRtSyncEma = 0.9 * s_rdRtSyncEma + 0.1 * rtSyncMs;
+        if (s_rdRtSyncEma > 6.0) ++s_rdRtSyncHighCnt; else s_rdRtSyncHighCnt = 0u;
+        if (s_rdRtSyncHighCnt >= 30u && s_rdResetCooldown == 0u) // FEAT-RD50
+        {
+            g_rdForceClassic.store(true, std::memory_order_release);
+            s_rdForceWarmup = 1u; // FEAT-RD48: wait 1 latch for in-flight kicks to finish full raster
+            {
+                std::lock_guard<std::mutex> capLock(s_rd2dCapMutex); // FEAT-RD49
+                s_rd2dVerts.clear();
+                s_rd2dBatches.clear();
+                s_rdKickRecs.clear();
+                s_rdLastKickRecSerial = 0u;
+                s_rdCurSerial = 0u;
+                s_rdLastNotedSerial = 0u;
+                s_rdLastStateSerial = 0u;
+                ps2xRdResetState();
+            }
+            ps2xSafeLog("[rd] forceClassic ON (rtSync ema=%.1f ms)\n", s_rdRtSyncEma);
+        }
+    }
     if (useRepeat) g_rdRepeatFrames.fetch_add(1, std::memory_order_relaxed); // FEAT-RD33c
     if (useClassic) g_rdClassicFramesTotal.fetch_add(1, std::memory_order_relaxed); // FEAT-RD33c
     const uint32_t frameGeomFbp = s_rdFrameGeomFbp.exchange(0xFFFFFFFFu, std::memory_order_acq_rel); // FEAT-RD18b
@@ -1510,7 +1612,7 @@ void GS::latchHostPresentationFrame()
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp != 0xFFFFFFFFu ? displayFbp : 0u, sourceFbp, width, height, usedPreferred);
         g_hostPresentSeq.fetch_add(1, std::memory_order_release);
-        if (ps2xRdViewOn() && !useRepeat) // FEAT-RD8 // FEAT-RD18 // FEAT-RD33c: repeat frames publish nothing (previous composition + 2D list redrawn)
+        if (ps2xRdActive() && !useRepeat) // FEAT-RD8 // FEAT-RD18 // FEAT-RD33c // FEAT-RD49: repeat frames publish nothing (previous composition + 2D list redrawn)
         {
             static std::vector<RdVert> s_pubVerts;
             static std::vector<Rd2DBatch> s_pubBatches;
@@ -1652,12 +1754,14 @@ void GS::latchHostPresentationFrame()
                 const uint32_t totF = s_rdClassicFrames + s_rdRdFrames;
                 const double fr = totF ? static_cast<double>(totF) : 1.0;
                 const uint32_t fgQwords = static_cast<uint32_t>(s_rdFastGeomQwords.exchange(0ull, std::memory_order_relaxed)); // FEAT-RD38
-                ps2xSafeLog("[rd] classicFrames=%u rdFrames=%u 2dKeptAtFlip=%.1f 2dDroppedAtFlip=%.1f fastGeomQwords=%u\n",
+                ps2xSafeLog("[rd] classicFrames=%u rdFrames=%u 2dKeptAtFlip=%.1f 2dDroppedAtFlip=%.1f fastGeomQwords=%u forceClassic=%d rtSyncEma=%.2f\n",
                             s_rdClassicFrames,
                             s_rdRdFrames,
                             static_cast<double>(s_rd2dKeptAtFlip) / fr,
                             static_cast<double>(s_rd2dDroppedAtFlip) / fr,
-                            fgQwords);
+                            fgQwords,
+                            forcedNow ? 1 : 0,
+                            s_rdRtSyncEma); // FEAT-RD48
             }
         }
         ps2_gt_count(4, 1); // PROBE-GT: latched
@@ -2319,7 +2423,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             offset += imageBytes;
         }
 
-        if (ps2xRdViewOn() && ((tagLo >> 15) & 1ull) != 0ull) // FEAT-RD5
+        if (ps2xRdActive() && ((tagLo >> 15) & 1ull) != 0ull) // FEAT-RD5 // FEAT-RD49
         {
             s_rdCurSerial = 0u;
             s_rdFastGeomLastSerial = 0u; // FEAT-RD38
@@ -2365,7 +2469,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             }
         }
 
-        if (ps2xRdViewOn() && ((tag.lo >> 15u) & 1ull) != 0ull) // FEAT-RD5
+        if (ps2xRdActive() && ((tag.lo >> 15u) & 1ull) != 0ull) // FEAT-RD5 // FEAT-RD49
             s_rdCurSerial = 0u;
 
         return true; });
@@ -3033,7 +3137,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     case GS_REG_TRXDIR:
     {
         m_trxdir = static_cast<uint32_t>(value & 0x3);
-        if ((m_trxdir == 0u || m_trxdir == 2u) && ps2xRdViewOn()) // FEAT-RD5b host->local and local->local (covers uploadImageNativeUnlocked + BeginTransfer)
+        if ((m_trxdir == 0u || m_trxdir == 2u) && ps2xRdActive()) // FEAT-RD5b // FEAT-RD49 host->local and local->local (covers uploadImageNativeUnlocked + BeginTransfer)
         {
             RdpScope rdpS(2); // PROBE-RDP
             rdMarkDest(m_bitbltbuf.dpsm, m_bitbltbuf.dbp, m_bitbltbuf.dbw, m_trxpos.dsax, m_trxpos.dsay, m_trxreg.rrw, m_trxreg.rrh);
@@ -3198,12 +3302,18 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             m_privRegs->bgcolor = value;
         break;
     case 0x7f: // FEAT-RD5
-        if (ps2xRdViewOn())
+        if (ps2xRdActive()) // FEAT-RD49
         {
             RdpScope rdpS(3); // PROBE-RDP
             s_rdCurSerial = static_cast<uint32_t>(value & 0xFFFFFFFFull);
             if (s_rdCurSerial != 0u) // FEAT-RD8
                 s_rdLastNonZeroSerial = s_rdCurSerial;
+        }
+        else
+        {
+            s_rdCurSerial = 0u; // FEAT-RD49
+            if (ps2xRdViewOn() && (value & 0x40000000ull) != 0ull) // FEAT-RD49: keep stage-transition detector alive while forced
+                s_rdFrameHasGeom.store(true, std::memory_order_relaxed);
         }
         break;
     default:
@@ -3563,7 +3673,9 @@ void GS::refreshDrawBatch(int vertexCount)
 
 static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, const GSTexaReg &texa, const uint8_t *localMem) // FEAT-RD42
 {
-    if (ps2xRdViewOn()) // FEAT-RD13
+    if (!ps2xRdActive()) // FEAT-RD49: zero bookkeeping while forced classic
+        return false;
+    if (ps2xRdActive()) // FEAT-RD13 // FEAT-RD49
     {
         const uint32_t maskedS = s_rdCurSerial & 0x3FFFFFFFu;
         if (maskedS != 0u)
@@ -3649,7 +3761,7 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
     const bool isGeomKick = rdNoteKickBookkeeping(batch.state.context, batch.state.prim, batch.state.texa, m_localMemoryStorage); // FEAT-RD42
-    if (ps2xRdViewOn() && !isGeomKick) // FEAT-RD8 // FEAT-RD10 // FEAT-RD18: capture all 2D candidates; FBP filtered at flip time
+    if (ps2xRdActive() && !isGeomKick) // FEAT-RD8 // FEAT-RD10 // FEAT-RD18 // FEAT-RD49: capture all 2D candidates; FBP filtered at flip time
     {
         const GSContext &ctx = batch.state.context;
         const GSPrimReg &prim = batch.state.prim;
@@ -3752,6 +3864,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
     }
     if (g_rdpOn) { ++s_rdpQueueDraws; if ((s_rdpQueueDraws & 1023u) == 0u) rdpMaybeReport(); } // PROBE-RDP
     GwScope gwS(5); // PROBE-GW primbuild
+    s_rdLatchPrims.fetch_add(1u, std::memory_order_relaxed); // FEAT-RD50
     if (g_gwOn) ps2_gw_count(0, 1); // PROBE-GW prims
     if (!m_runPrims.empty() && (m_runSerial != m_stateSerial || s_rdRunIsGeom != isGeomKick)) // FEAT-RD18
     {
@@ -3784,7 +3897,7 @@ void GS::flushPendingDraws() const
     if (g_gwOn) ps2_gw_count(2, 1); // PROBE-GW
     if (m_backend)
     {
-        g_rdCurDrawIsGeom = s_rdRunIsGeom && (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(m_runState.context.frame.fbp)) &&
+        g_rdCurDrawIsGeom = ps2xRdActive() && s_rdRunIsGeom && (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(m_runState.context.frame.fbp)) && // FEAT-RD48 // FEAT-RD49
             rdScissorQualifies(static_cast<uint32_t>(m_runState.context.scissor.x1) + 1u - m_runState.context.scissor.x0, static_cast<uint32_t>(m_runState.context.scissor.y1) + 1u - m_runState.context.scissor.y0) && // FEAT-RD33b
             ps2xRdIsMainPass(m_runState.context.frame.fbp, static_cast<uint64_t>(m_runState.context.xyoffset.ofx) | (static_cast<uint64_t>(m_runState.context.xyoffset.ofy) << 32)); // FEAT-RD23 // FEAT-RD18 // FEAT-RD19: off-screen RT draws still rasterised
         const uint64_t gqS0 = __rdtsc(); // PROBE-GQ2

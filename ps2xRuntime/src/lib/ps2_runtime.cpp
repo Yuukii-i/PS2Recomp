@@ -9,6 +9,7 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 extern void ps2xEeGfxDecompInstall(PS2Runtime &); // DECOMP-BM
 extern void ps2xDevConsoleInstall(PS2Runtime &); // FEAT-DF
 extern bool ps2xRdViewOn(); // FEAT-RD1
+extern bool ps2xRdActive(); // FEAT-RD49
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
 extern "C" __declspec(dllimport) void __stdcall glReadPixels(int, int, int, int, unsigned int, unsigned int, void *); // PROBE-RD35
@@ -6524,7 +6525,7 @@ void PS2Runtime::run()
             else
             {
                 UploadFrame(frameTex, this, presentWidth, presentHeight, tick);
-                if (ps2xRdViewOn()) // FEAT-RD8
+                if (ps2xRdActive()) // FEAT-RD8 // FEAT-RD49
                     ps2xRdSetPresentSize(presentWidth, presentHeight);
             }
 
@@ -6593,11 +6594,11 @@ void PS2Runtime::run()
                 dstWidth,
                 dstHeight};
             static bool s_rdShow = true; // FEAT-RD1
-            if (ps2xRdViewOn() && IsKeyPressed(KEY_F11)) // FEAT-RD1
+            if (ps2xRdActive() && IsKeyPressed(KEY_F11)) // FEAT-RD1 // FEAT-RD49
                 s_rdShow = !s_rdShow;
             char rd35Path = 'd'; // PROBE-RD35
             const bool rd35Upload = rdClassic || !ps2xRdTakeoverOn(); // UploadFrame ran this frame
-            if (ps2xRdViewOn() && (s_rdShow || ps2xRdTakeoverOn()) && !rdClassic) // FEAT-RD1 // FEAT-RD12 // FEAT-RD18
+            if (ps2xRdActive() && (s_rdShow || ps2xRdTakeoverOn()) && !rdClassic) // FEAT-RD1 // FEAT-RD12 // FEAT-RD18 // FEAT-RD49
             {
                 rlClearScreenBuffers();
                 if (!ps2xRdDraw(dstRect.x, dstRect.y, dstRect.width, dstRect.height))
@@ -6613,7 +6614,7 @@ void PS2Runtime::run()
                 DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
                 rd35Path = rdClassic ? 'c' : 'd'; // PROBE-RD35
             }
-            if (ps2xRdViewOn()) // PROBE-RD35
+            if (ps2xRdActive()) // PROBE-RD35 // FEAT-RD49
             {
                 extern void ps2xRd35Describe(char *buf, size_t cap);
                 static uint32_t s_rb35Frames = 0u, s_rb35Black = 0u, s_rb35A = 0u, s_rb35B = 0u, s_rb35C = 0u, s_rb35Detail = 0u;

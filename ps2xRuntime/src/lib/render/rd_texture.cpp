@@ -19,12 +19,17 @@
 #include <unordered_map>
 #include <vector>
 #include <nmmintrin.h> // FEAT-RD5d
+#include <intrin.h>    // FEAT-RD45
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD3
-extern bool ps2xRdViewOn(); // FEAT-RD28
+extern bool ps2xRdActive(); // FEAT-RD49
 extern bool ps2xVkSyncPagesForCpu(uint32_t firstPage, uint32_t lastPage, uint32_t *outBytes = nullptr); // FEAT-RD28
+extern bool g_rdpOn; // FEAT-RD45
+uint64_t g_rdpNoteSubCyc[6] = {0, 0, 0, 0, 0, 0}; // FEAT-RD45: 0=rt, 1=fast, 2=clut, 3=quickKey, 4=rawCrc, 5=decode
+uint64_t g_rdpRtSubCyc[4] = {0, 0, 0, 0}; // FEAT-RD46: 0=rt_a(fb), 1=rt_b(mask), 2=rt_c(mutex), 3=rt_d(sync)
 std::atomic<uint32_t> g_rdKickSerial{0};     // FEAT-RD5
 uint32_t g_rdPageGen[512];                   // FEAT-RD5b VRAM 8 KB page write generations (GS thread)
+uint32_t g_rdVramGen = 1;                    // FEAT-RD45 coarse global VRAM write generation (GS thread)
 std::atomic<uint32_t> g_rdNoteCalls{0};      // FEAT-RD5b
 std::atomic<uint32_t> g_rdFullDecodes{0};    // FEAT-RD5b
 uint32_t g_rdClutGen = 0;                    // FEAT-RD5c bumped on every CLUT load (GS thread)
@@ -33,12 +38,15 @@ std::atomic<uint32_t> g_rdFastHits{0};     // FEAT-RD5c
 std::atomic<uint32_t> g_rdStateChangesInKick{0}; // FEAT-RD17
 std::atomic<uint32_t> g_rdMergedSpan{0};         // FEAT-RD17
 std::atomic<uint32_t> g_rdRtSyncs{0};            // FEAT-RD28
+std::atomic<uint32_t> g_rdRtAsyncSkips{0};       // FEAT-RD47
+std::atomic<uint32_t> g_rdRtForced{0};           // FEAT-RD47
 extern uint32_t ps2xRdFbPageRanges(uint32_t *first, uint32_t *last); // FEAT-RD28b
 std::atomic<uint64_t> g_rdRtBytes{0};            // FEAT-RD28
 void ps2xRdMarkVramWrite(uint32_t firstByte, uint32_t byteCount) // FEAT-RD5b
 {
     if (byteCount == 0u || firstByte >= 0x400000u)
         return;
+    ++g_rdVramGen; // FEAT-RD45
     const uint64_t end = std::min<uint64_t>(static_cast<uint64_t>(firstByte) + byteCount, 0x400000ull);
     for (uint32_t p = firstByte / 8192u; p <= static_cast<uint32_t>((end - 1u) / 8192u) && p < 512u; ++p)
         ++g_rdPageGen[p];
@@ -370,13 +378,40 @@ uint32_t decodeTexel(uint32_t raw, uint8_t psm, uint64_t texa, bool indexed, con
     return applyTexa(texa, psm, raw);
 }
 
-struct RdFastEntry // FEAT-RD5c
+constexpr uint32_t kFastSets = 2048u; // FEAT-RD45: 2-way set-associative (4096 entries)
+struct RdFastEntry // FEAT-RD5c / FEAT-RD45
 {
-    uint64_t tex0Key = 0, texa = 0, contentId = 0;
-    uint32_t pageSum = 0, clutGen = 0, first = 0, last = 0, cp = 0;
+    uint64_t tex0Key = 0, texa = 0, contentId = 0, clutHash = 0;
+    uint32_t vramGen = 0, pageSum = 0, clutGen = 0, first = 0, last = 0, cp = 0;
     bool indexed = false, valid = false;
 };
-RdFastEntry g_fastCache[1024]; // FEAT-RD5c GS thread only
+RdFastEntry g_fastCache[kFastSets][2]; // FEAT-RD45 GS thread only
+uint8_t g_fastRepl[kFastSets] = {};    // FEAT-RD45
+
+inline uint64_t getClutHashFast(const uint16_t *clut512) // FEAT-RD45: O(1) cached CRC32 of clut512 per g_rdClutGen
+{
+    if (!clut512)
+        return 0ull;
+    static const uint16_t *s_lastPtr = nullptr;
+    static uint32_t s_lastGen = 0xFFFFFFFFu;
+    static uint64_t s_lastHash = 0ull;
+    if (clut512 == s_lastPtr && g_rdClutGen == s_lastGen)
+        return s_lastHash;
+    uint64_t c0 = 0xFFFFFFFFull, c1 = 0x12345678ull;
+    const uint8_t *cp8 = reinterpret_cast<const uint8_t *>(clut512);
+    for (uint32_t i = 0; i < 1024u; i += 16u)
+    {
+        uint64_t a, b;
+        std::memcpy(&a, cp8 + i, 8);
+        std::memcpy(&b, cp8 + i + 8, 8);
+        c0 = _mm_crc32_u64(c0, a);
+        c1 = _mm_crc32_u64(c1, b);
+    }
+    s_lastPtr = clut512;
+    s_lastGen = g_rdClutGen;
+    s_lastHash = (c0 << 32) | (c1 & 0xFFFFFFFFull);
+    return s_lastHash;
+}
 
 void writeSerialRing(uint32_t serial, uint64_t contentId) // FEAT-RD5
 {
@@ -385,11 +420,25 @@ void writeSerialRing(uint32_t serial, uint64_t contentId) // FEAT-RD5
     slot.contentId.store(contentId, std::memory_order_relaxed);
     slot.serial.store(serial, std::memory_order_release);
 }
-void storeFast(uint32_t idx, uint64_t tex0Key, uint64_t texa, uint64_t cid, uint32_t first, uint32_t last, uint32_t cp, bool indexed) // FEAT-RD5c
+void storeFast(uint32_t setIdx, uint64_t tex0Key, uint64_t texa, uint64_t cid, uint32_t first, uint32_t last, uint32_t cp, bool indexed, uint64_t clutHash) // FEAT-RD5c / FEAT-RD45
 {
-    RdFastEntry &e = g_fastCache[idx];
-    e.tex0Key = tex0Key; e.texa = texa; e.contentId = cid;
-    e.first = first; e.last = last; e.cp = cp; e.indexed = indexed; e.clutGen = g_rdClutGen;
+    uint32_t way = 0u;
+    if (g_fastCache[setIdx][0].valid && g_fastCache[setIdx][0].tex0Key == tex0Key && g_fastCache[setIdx][0].texa == texa)
+        way = 0u;
+    else if (g_fastCache[setIdx][1].valid && g_fastCache[setIdx][1].tex0Key == tex0Key && g_fastCache[setIdx][1].texa == texa)
+        way = 1u;
+    else if (!g_fastCache[setIdx][0].valid)
+        way = 0u;
+    else if (!g_fastCache[setIdx][1].valid)
+        way = 1u;
+    else
+    {
+        way = g_fastRepl[setIdx] & 1u;
+        g_fastRepl[setIdx] ^= 1u;
+    }
+    RdFastEntry &e = g_fastCache[setIdx][way];
+    e.tex0Key = tex0Key; e.texa = texa; e.contentId = cid; e.clutHash = clutHash;
+    e.first = first; e.last = last; e.cp = cp; e.indexed = indexed; e.clutGen = g_rdClutGen; e.vramGen = g_rdVramGen;
     uint32_t sum = 0;
     for (uint32_t p = first; p <= last; ++p)
         sum += g_rdPageGen[p];
@@ -457,7 +506,9 @@ void ps2xRdTexTickFrame() // FEAT-RD3
         const double fr = g_texFramesSinceLog ? static_cast<double>(g_texFramesSinceLog) : 1.0; // FEAT-RD5
         const uint32_t rtSyncs = g_rdRtSyncs.exchange(0u, std::memory_order_relaxed); // FEAT-RD28
         const uint64_t rtBytes = g_rdRtBytes.exchange(0ull, std::memory_order_relaxed); // FEAT-RD28
-        ps2xSafeLog("[rdtex] live=%u decodes/s=%.1f unsupported=%u notedClut=%u fallbackClut=%u exact=%u fallback=%u noteCalls=%u fullDecodes=%u fastHits=%u rawHits=%u replaced=%u rtSyncs=%u rtKB=%u\n",
+        const uint32_t rtAsyncSkips = g_rdRtAsyncSkips.exchange(0u, std::memory_order_relaxed); // FEAT-RD47
+        const uint32_t rtForced = g_rdRtForced.exchange(0u, std::memory_order_relaxed); // FEAT-RD47
+        ps2xSafeLog("[rdtex] live=%u decodes/s=%.1f unsupported=%u notedClut=%u fallbackClut=%u exact=%u fallback=%u noteCalls=%u fullDecodes=%u fastHits=%u rawHits=%u replaced=%u rtSyncs=%u rtKB=%u rtAsyncSkips=%u rtForced=%u\n",
                     static_cast<unsigned>(g_texCache.size() + g_glByContentId.size()),
                     static_cast<double>(g_decodesSinceLog) / secs,
                     g_unsupportedSinceLog, g_notedClutSinceLog, g_fallbackClutSinceLog,
@@ -465,7 +516,9 @@ void ps2xRdTexTickFrame() // FEAT-RD3
                     static_cast<unsigned>(static_cast<double>(g_fallbackSinceLog) / fr),
                     static_cast<unsigned>(g_rdNoteCalls.exchange(0u)), static_cast<unsigned>(g_rdFullDecodes.exchange(0u)), static_cast<unsigned>(g_rdFastHits.exchange(0u)), static_cast<unsigned>(g_rdRawHits.exchange(0u)), static_cast<unsigned>(g_replacedSinceLog),
                     static_cast<unsigned>(static_cast<double>(rtSyncs) / fr),
-                    static_cast<unsigned>(static_cast<double>(rtBytes) / (1024.0 * fr))); // FEAT-RD5 FEAT-RD5b FEAT-RD6 FEAT-RD28
+                    static_cast<unsigned>(static_cast<double>(rtBytes) / (1024.0 * fr)),
+                    static_cast<unsigned>(rtAsyncSkips),
+                    static_cast<unsigned>(rtForced)); // FEAT-RD5 FEAT-RD5b FEAT-RD6 FEAT-RD28 FEAT-RD47
         g_replacedSinceLog = 0; // FEAT-RD6
         g_notedClutSinceLog = 0;                                                         // FEAT-RD3c
         g_fallbackClutSinceLog = 0;                                                    // FEAT-RD3c
@@ -724,43 +777,66 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
         fpCp = std::min<uint32_t>((cbp * 256u) / 8192u, 511u);
     }
 
-    if (ps2xRdViewOn()) // FEAT-RD28b: texture inside a display/main framebuffer = screen feedback, skip (no sync, no decode)
+    struct RdpSubScope // FEAT-RD45
     {
-        uint32_t fbF[8], fbL[8];
-        const uint32_t nfb = ps2xRdFbPageRanges(fbF, fbL);
-        for (uint32_t i = 0; i < nfb; ++i)
-        {
-            if (fpFirst <= fbL[i] && fpLast >= fbF[i])
-            {
-                g_fbFeedbackRing[serial & (kRdRingSize - 1u)].store(serial, std::memory_order_release);
-                return;
-            }
-        }
-    }
+        int id;
+        uint64_t t0;
+        explicit RdpSubScope(int i) : id(i), t0(g_rdpOn ? __rdtsc() : 0ull) {}
+        ~RdpSubScope() { if (g_rdpOn) g_rdpNoteSubCyc[id] += __rdtsc() - t0; }
+    };
 
     bool syncedFromGpu = false; // FEAT-RD28
-    if (ps2xRdViewOn()) // FEAT-RD28
     {
-        uint32_t syncedBytes = 0u;
-        if (ps2xVkSyncPagesForCpu(fpFirst, fpLast, &syncedBytes))
+        RdpSubScope subRt(0); // FEAT-RD45: RT checks
+        if (ps2xRdActive()) // FEAT-RD28b // FEAT-RD46 // FEAT-RD49
         {
-            for (uint32_t p = fpFirst; p <= fpLast; ++p)
-                ++g_rdPageGen[p];
-            g_rdRtSyncs.fetch_add(1u, std::memory_order_relaxed);
-            g_rdRtBytes.fetch_add(syncedBytes, std::memory_order_relaxed);
-            syncedFromGpu = true;
-        }
-        if (isIndexedPsm(psm) && (fpCp < fpFirst || fpCp > fpLast))
-        {
-            uint32_t clutBytes = 0u;
-            if (ps2xVkSyncPagesForCpu(fpCp, fpCp, &clutBytes))
             {
-                ++g_rdPageGen[fpCp];
+                const uint64_t rtA0 = g_rdpOn ? __rdtsc() : 0ull; // FEAT-RD46
+                uint32_t fbF[8], fbL[8];
+                const uint32_t nfb = ps2xRdFbPageRanges(fbF, fbL);
+                for (uint32_t i = 0; i < nfb; ++i)
+                {
+                    if (fpFirst <= fbL[i] && fpLast >= fbF[i])
+                    {
+                        g_fbFeedbackRing[serial & (kRdRingSize - 1u)].store(serial, std::memory_order_release);
+                        if (g_rdpOn) g_rdpRtSubCyc[0] += __rdtsc() - rtA0; // FEAT-RD46
+                        return;
+                    }
+                }
+                if (g_rdpOn) g_rdpRtSubCyc[0] += __rdtsc() - rtA0; // FEAT-RD46
+            }
+
+            uint32_t syncedBytes = 0u;
+            if (ps2xVkSyncPagesForCpu(fpFirst, fpLast, &syncedBytes))
+            {
+                for (uint32_t p = fpFirst; p <= fpLast; ++p)
+                    ++g_rdPageGen[p];
                 g_rdRtSyncs.fetch_add(1u, std::memory_order_relaxed);
-                g_rdRtBytes.fetch_add(clutBytes, std::memory_order_relaxed);
+                g_rdRtBytes.fetch_add(syncedBytes, std::memory_order_relaxed);
                 syncedFromGpu = true;
             }
+            if (isIndexedPsm(psm) && (fpCp < fpFirst || fpCp > fpLast))
+            {
+                uint32_t clutBytes = 0u;
+                if (ps2xVkSyncPagesForCpu(fpCp, fpCp, &clutBytes))
+                {
+                    ++g_rdPageGen[fpCp];
+                    g_rdRtSyncs.fetch_add(1u, std::memory_order_relaxed);
+                    g_rdRtBytes.fetch_add(clutBytes, std::memory_order_relaxed);
+                    syncedFromGpu = true;
+                }
+            }
         }
+        if (syncedFromGpu)
+            ++g_rdVramGen; // FEAT-RD45
+    }
+
+    const bool indexed = isIndexedPsm(psm); // FEAT-RD45
+    uint64_t curClutHash = 0ull;            // FEAT-RD45
+    if (indexed)
+    {
+        RdpSubScope subClut(2); // FEAT-RD45: CLUT key
+        curClutHash = getClutHashFast(clut512);
     }
 
     const uint64_t tex0Key = tex0 & (0x3FFFFFFFFull | (0xFFFFFFull << 37));
@@ -770,22 +846,44 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
     static thread_local uint64_t t_lastContentId = 0ull;
     if (syncedFromGpu) // FEAT-RD28
         t_lastContentId = 0ull;
-    const uint32_t fastIdx = static_cast<uint32_t>(((tex0Key * 0x9E3779B97F4A7C15ull) ^ (texa * 0xC2B2AE3D27D4EB4Full)) >> 54) & 1023u; // FEAT-RD5c
+    const uint32_t fastIdx = static_cast<uint32_t>(((tex0Key * 0x9E3779B97F4A7C15ull) ^ (texa * 0xC2B2AE3D27D4EB4Full)) >> 53) & (kFastSets - 1u); // FEAT-RD5c / FEAT-RD45
     {
-        const RdFastEntry &fe = g_fastCache[fastIdx]; // FEAT-RD5c
-        if (fe.valid && fe.tex0Key == tex0Key && fe.texa == texa && (!fe.indexed || fe.clutGen == g_rdClutGen))
+        RdpSubScope subFast(1); // FEAT-RD45: fast cache lookup
+        for (uint32_t w = 0u; w < 2u; ++w)
         {
-            uint32_t sum = 0;
-            for (uint32_t p = fe.first; p <= fe.last; ++p)
-                sum += g_rdPageGen[p];
-            if (fe.indexed)
-                sum += g_rdPageGen[fe.cp];
-            if (sum == fe.pageSum)
+            RdFastEntry &fe = g_fastCache[fastIdx][w]; // FEAT-RD5c / FEAT-RD45
+            if (fe.valid && fe.tex0Key == tex0Key && fe.texa == texa)
             {
-                g_rdNoteCalls.fetch_add(1u, std::memory_order_relaxed);
-                g_rdFastHits.fetch_add(1u, std::memory_order_relaxed);
-                writeSerialRing(serial, fe.contentId);
-                return;
+                bool clutOk = !fe.indexed || (fe.clutGen == g_rdClutGen);
+                if (!clutOk && fe.clutHash == curClutHash)
+                {
+                    fe.clutGen = g_rdClutGen;
+                    clutOk = true;
+                }
+                if (clutOk)
+                {
+                    bool pageOk = (fe.vramGen == g_rdVramGen); // FEAT-RD45: O(1) when no VRAM write occurred
+                    if (!pageOk)
+                    {
+                        uint32_t sum = 0;
+                        for (uint32_t p = fe.first; p <= fe.last; ++p)
+                            sum += g_rdPageGen[p];
+                        if (fe.indexed)
+                            sum += g_rdPageGen[fe.cp];
+                        if (sum == fe.pageSum)
+                        {
+                            fe.vramGen = g_rdVramGen;
+                            pageOk = true;
+                        }
+                    }
+                    if (pageOk)
+                    {
+                        g_rdNoteCalls.fetch_add(1u, std::memory_order_relaxed);
+                        g_rdFastHits.fetch_add(1u, std::memory_order_relaxed);
+                        writeSerialRing(serial, fe.contentId);
+                        return;
+                    }
+                }
             }
         }
     }
@@ -797,18 +895,19 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
 
     g_rdNoteCalls.fetch_add(1u, std::memory_order_relaxed); // FEAT-RD5b
 
-    // FEAT-RD5b: cheap key from VRAM page write generations + CLUT bytes; full decode only when unseen.
+    // FEAT-RD5b: cheap key from VRAM page write generations + CLUT hash; full decode only when unseen.
     static std::unordered_map<uint64_t, uint64_t> s_keyToContent; // GS thread only
     uint64_t quickKey = 0ull;
     {
+        RdpSubScope subQk(3); // FEAT-RD45: quick key
         uint64_t gh = 0xcbf29ce484222325ull;
         for (uint32_t p = fpFirst; p <= fpLast; ++p)
             gh = (gh ^ g_rdPageGen[p]) * 0x100000001b3ull;
-        if (isIndexedPsm(psm))
+        if (indexed)
         {
             gh = (gh ^ g_rdPageGen[fpCp]) * 0x100000001b3ull;
             if (clut512)
-                gh = fnv1a64(clut512, 512u * sizeof(uint16_t), gh);
+                gh = fnv1a64(&curClutHash, sizeof(curClutHash), gh); // FEAT-RD45: O(1) cached CLUT hash
         }
         quickKey = fnv1a64(&tex0Key, sizeof(tex0Key), gh);
         quickKey = fnv1a64(&texa, sizeof(texa), quickKey);
@@ -819,7 +918,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
             t_lastTex0Key = tex0Key;
             t_lastTexa = texa;
             t_lastContentId = itKey->second;
-            storeFast(fastIdx, tex0Key, texa, itKey->second, fpFirst, fpLast, fpCp, isIndexedPsm(psm)); // FEAT-RD5c
+            storeFast(fastIdx, tex0Key, texa, itKey->second, fpFirst, fpLast, fpCp, indexed, curClutHash); // FEAT-RD5c / FEAT-RD45
             writeSerialRing(serial, itKey->second);
             return;
         }
@@ -828,6 +927,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
     static std::unordered_map<uint64_t, uint64_t> s_rawToContent; // GS thread only
     uint64_t rawKey = 0ull;
     {
+        RdpSubScope subCrc(4); // FEAT-RD45: raw VRAM CRC
         const uint64_t vramSize = 4ull * 1024ull * 1024ull;
         const uint64_t b0 = static_cast<uint64_t>(fpFirst) * 8192ull;
         uint64_t b1 = (static_cast<uint64_t>(fpLast) + 1ull) * 8192ull;
@@ -856,7 +956,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
         k = fnv1a64(&tex0Key, sizeof(tex0Key), k);
         k = fnv1a64(&texa, sizeof(texa), k);
         k = fnv1a64(fields2, sizeof(fields2), k);
-        if (isIndexedPsm(psm))
+        if (indexed)
         {
             if (clut512)
             {
@@ -889,17 +989,17 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
             t_lastTex0Key = tex0Key;
             t_lastTexa = texa;
             t_lastContentId = itRaw->second;
-            storeFast(fastIdx, tex0Key, texa, itRaw->second, fpFirst, fpLast, fpCp, isIndexedPsm(psm));
+            storeFast(fastIdx, tex0Key, texa, itRaw->second, fpFirst, fpLast, fpCp, indexed, curClutHash); // FEAT-RD45
             writeSerialRing(serial, itRaw->second);
             return;
         }
     }
+    RdpSubScope subDec(5); // FEAT-RD45: full decode + other
     g_rdFullDecodes.fetch_add(1u, std::memory_order_relaxed);
 
     GSMem::TexturePageCache pageCache;
     uint32_t clut[256] = {};
     uint64_t clutHash = 0ull;
-    const bool indexed = isIndexedPsm(psm);
     if (indexed)
     {
         const bool fourBit = isFourBitPsm(psm);
@@ -969,7 +1069,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
     t_lastTex0Key = tex0Key;
     t_lastTexa = texa;
     t_lastContentId = contentId;
-    storeFast(fastIdx, tex0Key, texa, contentId, fpFirst, fpLast, fpCp, indexed); // FEAT-RD5c
+    storeFast(fastIdx, tex0Key, texa, contentId, fpFirst, fpLast, fpCp, indexed, curClutHash); // FEAT-RD5c / FEAT-RD45
     writeSerialRing(serial, contentId);
 }
 

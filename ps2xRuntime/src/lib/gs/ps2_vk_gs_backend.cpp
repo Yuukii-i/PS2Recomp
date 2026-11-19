@@ -39,6 +39,8 @@ namespace GSMem
 {
     const uint16_t *ExportPageTable(int idx, size_t *entries);
 }
+extern std::atomic<uint32_t> g_rdRtAsyncSkips; // FEAT-RD47
+extern std::atomic<uint32_t> g_rdRtForced;     // FEAT-RD47
 
 #include "vk/ps2_vk_shaders.inc"
 #include "vk/ps2_vk_present_shader.inc" // PERF-PG
@@ -52,10 +54,13 @@ extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.
 extern "C" void ps2_iu_gpu(uint64_t bytes, uint64_t ticks); // PROBE-IU, defined in gs_frontend.cpp
 extern void ps2xRdNoteClut(uint32_t tbp0, uint32_t tbw, uint32_t psm, uint32_t tw, uint32_t th, uint32_t cpsm, uint32_t csa, const uint16_t *clut512); // FEAT-RD3c
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
+extern bool ps2xRdActive();     // FEAT-RD49
 extern bool g_rdCurDrawIsGeom;  // FEAT-RD18
 extern bool g_rdClassicPresentRequested; // FEAT-RD18
 #include <intrin.h> // PROBE-RDP
 extern bool g_rdpOn; extern uint64_t g_rdpCyc[4]; extern uint32_t g_rdpCnt[4]; // PROBE-RDP
+extern uint64_t g_rdpRtSubCyc[4]; // FEAT-RD46: 0=rt_a(fb), 1=rt_b(mask), 2=rt_c(mutex), 3=rt_d(sync)
+extern std::atomic<uint64_t> g_rdFrameRtSyncCyc; // FEAT-RD48
 struct RdpScopeVk // PROBE-RDP
 {
     uint64_t t0;
@@ -714,6 +719,7 @@ namespace
                 vkFailed_ = true;
             gpuColor_.clear();
             gpuZ_.clear();
+            publishGpuDirtyMask(); // FEAT-RD45
             hostNewer_.setAll();
         }
 
@@ -1168,6 +1174,8 @@ namespace
                 g_presTicks[5].fetch_add(__rdtsc() - lk0, std::memory_order_relaxed); // shown as "deswizzle": wait for the backend mutex
                 if (vkReady_)
                 {
+                    if (rtAsyncPending_) // FEAT-RD47
+                        completeRtAsync(true);
                     const uint64_t gqP0 = __rdtsc(), pj0 = gqP0;
                     const int doneKind = asyncKind_;
                     const GpuPlan donePlan = gpuPlan_;
@@ -1346,10 +1354,36 @@ namespace
 
         bool syncPageRangeForCpu(uint32_t firstPage, uint32_t lastPage, uint32_t *outBytes) // FEAT-RD28
         {
-            std::lock_guard<std::mutex> lk(m_);
-            if (!vkReady_ || firstPage > lastPage || firstPage >= 512u)
+            if (firstPage > lastPage || firstPage >= 512u) // FEAT-RD45: lock-free dirty-page pre-check
                 return false;
             const uint32_t clampedLast = std::min<uint32_t>(lastPage, 511u);
+            {
+                const uint64_t rtB0 = g_rdpOn ? __rdtsc() : 0ull; // FEAT-RD46
+                const uint32_t w0 = firstPage >> 6u;
+                const uint32_t w1 = clampedLast >> 6u;
+                bool maybeDirty = false;
+                for (uint32_t wi = w0; wi <= w1; ++wi)
+                {
+                    uint64_t mask = ~0ull;
+                    if (wi == w0)
+                        mask &= (~0ull << (firstPage & 63u));
+                    if (wi == w1)
+                        mask &= (~0ull >> (63u - (clampedLast & 63u)));
+                    if (gpuDirtyMask_[wi].load(std::memory_order_acquire) & mask)
+                    {
+                        maybeDirty = true;
+                        break;
+                    }
+                }
+                if (g_rdpOn) g_rdpRtSubCyc[1] += __rdtsc() - rtB0; // FEAT-RD46
+                if (!maybeDirty)
+                    return false;
+            }
+            const uint64_t rtC0 = g_rdpOn ? __rdtsc() : 0ull; // FEAT-RD46
+            std::lock_guard<std::mutex> lk(m_);
+            if (g_rdpOn) g_rdpRtSubCyc[2] += __rdtsc() - rtC0; // FEAT-RD46
+            if (!vkReady_)
+                return false;
             PageSet need;
             for (uint32_t p = firstPage; p <= clampedLast; ++p)
                 need.set(p);
@@ -1358,13 +1392,81 @@ namespace
             dirty.andWith(need);
             if (!dirty.any())
                 return false;
+            const uint64_t rdSyncT0 = __rdtsc(); // FEAT-RD48
+            const uint64_t rtD0 = g_rdpOn ? rdSyncT0 : 0ull; // FEAT-RD46
             const uint64_t beforeBytes = downloadBytes_;
-            syncPages(need, 6);
+            const uint32_t rangeKey = (firstPage << 16u) | clampedLast; // FEAT-RD47
+            const bool useAsyncRt = asyncRtWanted() && asyncOk_ && !asyncPending_ && !compare_ && !ref_; // FEAT-RD47
+            if (!useAsyncRt)
+            {
+                syncPages(dirty, 6); // FEAT-RD46: pass exact dirty intersection
+            }
+            else
+            {
+                bool didSync = false;
+                if (rtAsyncPending_)
+                {
+                    if (completeRtAsync(false))
+                    {
+                        dirty = gpuColor_;
+                        dirty.orWith(gpuZ_);
+                        dirty.andWith(need);
+                        PageSet hit = rtAsyncLastCompleted_;
+                        hit.andWith(need);
+                        if (!dirty.any() || (downloadBytes_ > beforeBytes && hit.any()))
+                        {
+                            rtStale_.erase(rangeKey);
+                            didSync = true;
+                        }
+                    }
+                    else if (handleRtAsyncNotReady(rangeKey, need, dirty))
+                    {
+                        didSync = true;
+                    }
+                    else
+                    {
+                        if (g_rdpOn) g_rdpRtSubCyc[3] += __rdtsc() - rtD0;
+                        g_rdFrameRtSyncCyc.fetch_add(__rdtsc() - rdSyncT0, std::memory_order_relaxed); // FEAT-RD48
+                        return false;
+                    }
+                }
+                if (!didSync)
+                {
+                    if (!recording_)
+                    {
+                        // GPU work that wrote these pages already finished: immediate sync
+                        rtStale_.erase(rangeKey);
+                        syncPages(dirty, 6);
+                    }
+                    else
+                    {
+                        PageSet toCopy = gpuColor_;
+                        toCopy.orWith(dirty);
+                        if (!startRtAsync(toCopy))
+                        {
+                            rtStale_.erase(rangeKey);
+                            syncPages(dirty, 6);
+                        }
+                        else if (completeRtAsync(false))
+                        {
+                            rtStale_.erase(rangeKey);
+                        }
+                        else if (!handleRtAsyncNotReady(rangeKey, need, dirty))
+                        {
+                            if (g_rdpOn) g_rdpRtSubCyc[3] += __rdtsc() - rtD0;
+                            g_rdFrameRtSyncCyc.fetch_add(__rdtsc() - rdSyncT0, std::memory_order_relaxed); // FEAT-RD48
+                            return false;
+                        }
+                    }
+                }
+            }
             if (outBytes)
             {
                 const uint64_t diff = downloadBytes_ - beforeBytes;
                 *outBytes = static_cast<uint32_t>(std::min<uint64_t>(diff, 0xFFFFFFFFull));
             }
+            if (g_rdpOn) g_rdpRtSubCyc[3] += __rdtsc() - rtD0; // FEAT-RD46
+            g_rdFrameRtSyncCyc.fetch_add(__rdtsc() - rdSyncT0, std::memory_order_relaxed); // FEAT-RD48
             return true;
         }
 
@@ -1885,6 +1987,8 @@ namespace
         // submit everything recorded; optionally download the given GPU-newer pages into the host VRAM
         void flush(const PageSet *down, FlushReason reason = FLUSH_REASON_OTHER)
         {
+            if (rtAsyncPending_) // FEAT-RD47
+                completeRtAsync(true);
             if (!recording_ && !down)
                 return;
             if (!down)
@@ -1963,6 +2067,7 @@ namespace
                 }
                 gpuColor_.andNot(*down);
                 gpuZ_.andNot(*down);
+                publishGpuDirtyMask(); // FEAT-RD45
             }
             syncMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             ++submits_;
@@ -1974,6 +2079,8 @@ namespace
         {
             if (!vkReady_)
                 return;
+            if (rtAsyncPending_) // FEAT-RD47
+                completeRtAsync(true);
             PageSet todo = gpuColor_;
             todo.orWith(gpuZ_);
             todo.andWith(need);
@@ -1993,10 +2100,13 @@ namespace
 
         void discardGpu()
         {
+            if (rtAsyncPending_) // FEAT-RD47
+                completeRtAsync(true);
             if (recording_)
                 flush(nullptr);
             gpuColor_.clear();
             gpuZ_.clear();
+            publishGpuDirtyMask(); // FEAT-RD45
         }
 
         // copy host-newer pages into the GPU VRAM (inside the command stream, before the next draw)
@@ -2248,6 +2358,8 @@ namespace
             static const bool s_on = []() { const char *e = std::getenv("PS2X_RD_VIEW"); return e && e[0] == '1'; }(); // FEAT-RD3c
             if (!s_on || !st.prim.tme || !isIndexedPsm(st.context.tex0.psm))
                 return;
+            if (!ps2xRdActive()) // FEAT-RD49
+                return;
             RdpScopeVk rdpS; // PROBE-RDP
             const GSTex0Reg &t = st.context.tex0;
             struct Last { uint32_t tbp0, tbw, psm, tw, th, csa, cpsm; int32_t slot; };
@@ -2344,17 +2456,21 @@ namespace
                 pagesForRects(drawPg, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, runBboxes_);
             gpuColor_.orWith(drawPg);
             presDirty_.orWith(drawPg);
+            if (rtAsyncPending_) // FEAT-RD47
+                rtAsyncRedirtiedColor_.orWith(drawPg);
 
             PageSet runZPg;
             if (!ctx.zbuf.zmask)
             {
-                if (gaCheck_)
+                if (gaCheck_ || rtAsyncPending_) // FEAT-RD47
                 {
                     if (!exactUnion)
                         pagesForRect(runZPg, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, uMinX, uMaxX, uMinY, uMaxY);
                     else
                         pagesForRects(runZPg, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, runBboxes_);
                     gpuZ_.orWith(runZPg);
+                    if (rtAsyncPending_)
+                        rtAsyncRedirtiedZ_.orWith(runZPg);
                 }
                 else
                 {
@@ -2364,6 +2480,7 @@ namespace
                         pagesForRects(gpuZ_, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, runBboxes_);
                 }
             }
+            publishGpuDirtyMask(); // FEAT-RD45
             unfenced_.add(flo, fhi);
             unfenced_.add(zlo, zhi);
 
@@ -2513,6 +2630,8 @@ namespace
             pagesForRect(drawPg, ctx.frame.fbp << 5u, ctx.frame.fbw, ctx.frame.psm, bminX, bmaxX, bminY, bmaxY);
             gpuColor_.orWith(drawPg);
             presDirty_.orWith(drawPg);
+            if (rtAsyncPending_) // FEAT-RD47
+                rtAsyncRedirtiedColor_.orWith(drawPg);
             if (compare_)
             {
                 ++primSerial_;
@@ -2537,7 +2656,20 @@ namespace
                     }
             }
             if (!ctx.zbuf.zmask)
-                pagesForRect(gpuZ_, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, bminX, bmaxX, bminY, bmaxY);
+            {
+                if (rtAsyncPending_) // FEAT-RD47
+                {
+                    PageSet zPg;
+                    pagesForRect(zPg, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, bminX, bmaxX, bminY, bmaxY);
+                    gpuZ_.orWith(zPg);
+                    rtAsyncRedirtiedZ_.orWith(zPg);
+                }
+                else
+                {
+                    pagesForRect(gpuZ_, ctx.zbuf.zbp << 5u, ctx.frame.fbw, ctx.zbuf.psm, bminX, bmaxX, bminY, bmaxY);
+                }
+            }
+            publishGpuDirtyMask(); // FEAT-RD45
             unfenced_.add(flo, fhi);
             unfenced_.add(zlo, zhi);
             return 0;
@@ -2674,6 +2806,142 @@ namespace
         PageSet asyncPages_;
         GSPresentationRequest asyncReq_{};
         bool asyncOk_ = false, asyncPending_ = false, orderAfterAsync_ = false;
+        // FEAT-RD47: bounded-staleness async render-target sync
+        bool rtAsyncPending_ = false;
+        PageSet rtAsyncPages_, rtAsyncLastCompleted_, rtAsyncRedirtiedColor_, rtAsyncRedirtiedZ_;
+        struct RtStaleState
+        {
+            uint32_t skippedFrames = 0;
+            uint32_t lastSkipPresent = 0xFFFFFFFFu;
+        };
+        std::unordered_map<uint32_t, RtStaleState> rtStale_;
+
+        static bool asyncRtWanted() // FEAT-RD47
+        {
+            static const bool on = []() { const char *e = std::getenv("PS2X_RD_ASYNCRT"); return !e || e[0] != '0'; }();
+            return on;
+        }
+
+        bool completeRtAsync(bool wait) // FEAT-RD47
+        {
+            if (!rtAsyncPending_)
+                return false;
+            VkResult r = wait ? vkWaitForFences(g_vk.dev, 1, &alt_.fence, VK_TRUE, ~0ull)
+                              : vkGetFenceStatus(g_vk.dev, alt_.fence);
+            if (r == VK_NOT_READY)
+                return false;
+            vkResetFences(g_vk.dev, 1, &alt_.fence);
+            rtAsyncPending_ = false;
+            if (r != VK_SUCCESS)
+            {
+                vkReady_ = false;
+                vkFailed_ = true;
+                rtAsyncPages_.clear();
+                rtAsyncRedirtiedColor_.clear();
+                rtAsyncRedirtiedZ_.clear();
+                return false;
+            }
+            std::vector<std::pair<uint32_t, uint32_t>> runs;
+            pageRuns(rtAsyncPages_, runs);
+            for (const auto &run : runs)
+            {
+                const size_t off = static_cast<size_t>(run.first) * 8192u, len = static_cast<size_t>(run.second) * 8192u;
+                std::memcpy(host_ + off, snap_.map + off, len);
+                downloadBytes_ += len;
+            }
+            rtAsyncLastCompleted_ = rtAsyncPages_;
+            PageSet clearColor = rtAsyncPages_;
+            clearColor.andNot(rtAsyncRedirtiedColor_);
+            gpuColor_.andNot(clearColor);
+            PageSet clearZ = rtAsyncPages_;
+            clearZ.andNot(rtAsyncRedirtiedZ_);
+            gpuZ_.andNot(clearZ);
+            publishGpuDirtyMask();
+            rtAsyncPages_.clear();
+            rtAsyncRedirtiedColor_.clear();
+            rtAsyncRedirtiedZ_.clear();
+            return true;
+        }
+
+        bool startRtAsync(const PageSet &pages) // FEAT-RD47
+        {
+            if (!ensureUpload())
+                return false;
+            std::vector<std::pair<uint32_t, uint32_t>> runs;
+            pageRuns(pages, runs);
+            if (runs.empty())
+                return false;
+            beginRecording();
+            endPass();
+            std::vector<VkBufferCopy> regions;
+            regions.reserve(runs.size());
+            for (const auto &run : runs)
+                regions.push_back(VkBufferCopy{static_cast<VkDeviceSize>(run.first) * 8192u, static_cast<VkDeviceSize>(run.first) * 8192u,
+                                               static_cast<VkDeviceSize>(run.second) * 8192u});
+            bufBarrier(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            vkCmdCopyBuffer(cb_, vram_.b, snap_.b, static_cast<uint32_t>(regions.size()), regions.data());
+            VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            hb.buffer = snap_.b;
+            hb.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cb_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
+            if (gtCbActive_)
+            {
+                vkCmdWriteTimestamp(cb_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gtQueryPool_, gtCbSlot_ * 2u + 1u);
+                gtCbActive_ = false;
+                ++gtCbWriteIdx_;
+            }
+            vkEndCommandBuffer(cb_);
+            recording_ = false;
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &cb_;
+            GwScope gwSub(8);
+            if (vkQueueSubmit(g_vk.queue, 1, &si, fence_) == VK_SUCCESS)
+            {
+                rtAsyncPending_ = true;
+                rtAsyncPages_ = pages;
+                rtAsyncRedirtiedColor_.clear();
+                rtAsyncRedirtiedZ_.clear();
+                orderAfterAsync_ = true;
+                ++submits_;
+                resetRings();
+                swapSlot();
+                return true;
+            }
+            vkResetFences(g_vk.dev, 1, &fence_);
+            vkReady_ = false;
+            vkFailed_ = true;
+            resetRings();
+            return false;
+        }
+
+        // Returns true if forced blocking sync ran (staleness > 3 consecutive frames), false if skipped
+        bool handleRtAsyncNotReady(uint32_t rangeKey, const PageSet &need, PageSet &dirty) // FEAT-RD47
+        {
+            RtStaleState &st = rtStale_[rangeKey];
+            if (st.lastSkipPresent != presents_)
+            {
+                if (st.lastSkipPresent != 0xFFFFFFFFu && (presents_ - st.lastSkipPresent) == 1u && st.skippedFrames >= 3u)
+                {
+                    g_rdRtForced.fetch_add(1u, std::memory_order_relaxed);
+                    rtStale_.erase(rangeKey);
+                    completeRtAsync(true);
+                    dirty = gpuColor_;
+                    dirty.orWith(gpuZ_);
+                    dirty.andWith(need);
+                    if (dirty.any())
+                        syncPages(dirty, 6);
+                    return true;
+                }
+                st.skippedFrames = (st.lastSkipPresent != 0xFFFFFFFFu && (presents_ - st.lastSkipPresent) == 1u) ? (st.skippedFrames + 1u) : 1u;
+                st.lastSkipPresent = presents_;
+            }
+            g_rdRtAsyncSkips.fetch_add(1u, std::memory_order_relaxed);
+            return false;
+        }
         VkDescriptorPool descPool_ = VK_NULL_HANDLE;
         VkDescriptorSet desc_ = VK_NULL_HANDLE;
         VkCommandBuffer cb_ = VK_NULL_HANDLE;
@@ -2683,6 +2951,12 @@ namespace
 
         Range unfenced_;
         PageSet gpuColor_, gpuZ_, hostNewer_;
+        std::atomic<uint64_t> gpuDirtyMask_[8]{}; // FEAT-RD45: lock-free mirror of (gpuColor_ | gpuZ_)
+        void publishGpuDirtyMask() // FEAT-RD45
+        {
+            for (int i = 0; i < 8; ++i)
+                gpuDirtyMask_[i].store(gpuColor_.w[i] | gpuZ_.w[i], std::memory_order_release);
+        }
         PageSet presDirty_; // PERF-AP: pages changed in vram_ (GPU colour writes, host uploads) since the last async present snapshot
         // PERF-PG: GPU display conversion
         Buf presOut_;
@@ -2781,6 +3055,8 @@ std::unique_ptr<GSRasterBackend> ps2x_vk_make_backend()
 
 bool ps2xVkSyncPagesForCpu(uint32_t firstPage, uint32_t lastPage, uint32_t *outBytes) // FEAT-RD28
 {
+    if (!ps2xRdActive()) // FEAT-RD49
+        return false;
     GSVulkanBackend *backend = g_activeVkBackend.load(std::memory_order_acquire);
     if (!backend)
         return false;

@@ -46,6 +46,7 @@ struct RdBatch // FEAT-RD2 // FEAT-RD14
     uint32_t camHash; // PROBE-RD26
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
+extern bool ps2xRdActive(); // FEAT-RD49
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
 extern void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD14
 extern std::atomic<uint32_t> g_rdKickSerial; // FEAT-RD5
@@ -57,6 +58,7 @@ extern bool ps2xRdTakeoverOn(); // FEAT-RD40
 extern bool ps2xRdFastGeomOn(); // FEAT-RD40
 extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD40
 extern bool ps2xRdHasDisplayFbp(); // FEAT-RD40
+extern bool ps2xRdForceClassic(); // FEAT-RD48
 
 static inline bool rdSerialsCanMerge(uint32_t s0, uint32_t s1) // FEAT-RD17
 {
@@ -689,7 +691,7 @@ namespace scene
 inline bool on()
 {
     static const bool v = []() { const char *e = std::getenv("PS2X_SCENE"); return e && e[0] == '1'; }();
-    return v || ::ps2xRdViewOn(); // FEAT-RD1
+    return v || ::ps2xRdActive(); // FEAT-RD1 // FEAT-RD49
 }
 inline bool checkOn()
 {
@@ -711,7 +713,7 @@ inline int64_t dumpFrame()
 inline bool leanRdOn() // FEAT-RD14
 {
     static const bool v = ::ps2xRdViewOn() && !checkOn() && dumpFrame() < 0;
-    return v;
+    return v && ::ps2xRdActive(); // FEAT-RD49
 }
 inline bool leanSkinOn() // FEAT-RD40
 {
@@ -719,7 +721,7 @@ inline bool leanSkinOn() // FEAT-RD40
         const char *e = std::getenv("PS2X_RD_LEANSKIN");
         return !(e && e[0] == '0') && ::ps2xRdTakeoverOn() && leanRdOn() && ::ps2xRdFastGeomOn();
     }();
-    return v;
+    return v && !::ps2xRdForceClassic(); // FEAT-RD48
 }
 inline bool leanSkinCheckOn() // FEAT-RD40
 {
@@ -727,7 +729,7 @@ inline bool leanSkinCheckOn() // FEAT-RD40
         const char *e = std::getenv("PS2X_RD_LEANSKIN_CHECK");
         return e && e[0] == '1' && ::ps2xRdTakeoverOn() && leanRdOn() && ::ps2xRdFastGeomOn();
     }();
-    return v;
+    return v && !::ps2xRdForceClassic(); // FEAT-RD48
 }
 inline bool leanKickOn() // FEAT-RD42
 {
@@ -735,7 +737,7 @@ inline bool leanKickOn() // FEAT-RD42
         const char *e = std::getenv("PS2X_RD_LEANKICK");
         return !(e && e[0] == '0');
     }();
-    return v;
+    return v && ::ps2xRdActive(); // FEAT-RD48 // FEAT-RD49
 }
 inline void leanSkinNoteDraw(bool isLean, bool mismatch, bool isLeanKick = false) // FEAT-RD40 // FEAT-RD42
 {
@@ -1330,7 +1332,7 @@ static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_
         }
     }
     uint32_t start = static_cast<uint32_t>(gif.size());
-    if (scene::on() && ::ps2xRdViewOn()) // FEAT-RD5
+    if (scene::on() && ::ps2xRdActive()) // FEAT-RD5 // FEAT-RD49
     {
         uint32_t serial = (g_rdKickSerial.fetch_add(1u, std::memory_order_relaxed) + 1u) & 0x3FFFFFFFu; // FEAT-RD10
         if (serial == 0u)
@@ -1670,7 +1672,7 @@ inline void onFlush()
         }
     }
 
-    if (!lean && ::ps2xRdViewOn()) // FEAT-RD1
+    if (!lean && ::ps2xRdActive()) // FEAT-RD1 // FEAT-RD49
     {
         static thread_local std::vector<::RdVert> t_rdTris;
         static thread_local std::vector<::RdBatch> t_rdBatches; // FEAT-RD2
@@ -1822,7 +1824,7 @@ inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t
 
 inline void markGeometryKick(std::vector<uint8_t> &gif, uint32_t gifOff) // FEAT-RD10
 {
-    if (::ps2xRdViewOn() && gifOff >= 16u && t_scene.curKickSerial != 0u)
+    if (::ps2xRdActive() && gifOff >= 16u && t_scene.curKickSerial != 0u) // FEAT-RD49
     {
         t_scene.curKickSerial |= 0x40000000u;
         uint64_t dLo = 0ull;
@@ -4952,7 +4954,7 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
     }
     {
         // PERF: kicks are normally appended back to back in `gif`; then submit the whole stream once (one arbiter pass instead of one per kick).
-        const uint32_t prefixBytes = (!capture && scene::on() && ::ps2xRdViewOn()) ? 32u : 0u; // FEAT-RD5
+        const uint32_t prefixBytes = (!capture && scene::on() && ::ps2xRdActive()) ? 32u : 0u; // FEAT-RD5 // FEAT-RD49
         uint32_t expect = 0u;
         bool contiguous = true;
         for (const auto &k : kicks)
@@ -4980,7 +4982,7 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
             return true;
         }
     }
-    const uint32_t prefixBytes = (!capture && scene::on() && ::ps2xRdViewOn()) ? 32u : 0u; // FEAT-RD5
+    const uint32_t prefixBytes = (!capture && scene::on() && ::ps2xRdActive()) ? 32u : 0u; // FEAT-RD5 // FEAT-RD49
     for (const auto &k : kicks)
     {
         if (k.second == 0u)

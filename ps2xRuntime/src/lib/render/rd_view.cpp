@@ -640,6 +640,37 @@ bool ps2xRdViewOn() // FEAT-RD1
     return v;
 }
 
+extern bool ps2xRdForceClassic(); // FEAT-RD49
+
+bool ps2xRdActive() // FEAT-RD49
+{
+    return ps2xRdViewOn() && !ps2xRdForceClassic();
+}
+
+static std::atomic<bool> g_rdNeedGpuReset{false}; // FEAT-RD49
+
+void ps2xRdResetState() // FEAT-RD49
+{
+    std::lock_guard<std::mutex> lock(g_rdMutex);
+    for (size_t i = 0; i < kRdSlotCount; ++i)
+    {
+        g_rdPinnedSlots[i] = false;
+        g_rd3dRing[i].seq = 0u;
+        g_rd3dRing[i].sMin = 0u;
+        g_rd3dRing[i].sMax = 0u;
+        g_rd3dRing[i].verts.clear();
+        g_rd3dRing[i].indices.clear();
+        g_rd3dRing[i].batches.clear();
+    }
+    g_rd3dEvictedMaxSerial = 0u;
+    g_rd3dWriteIdx = 0u;
+    g_rd3dCount = 0u;
+    g_rdEverPublished = false;
+    g_rd2dFrames[0] = Rd2DFrame{};
+    g_rd2dFrames[1] = Rd2DFrame{};
+    g_rdNeedGpuReset.store(true, std::memory_order_release);
+}
+
 float g_rdAspectK = 1.0f; // FEAT-RD16: published each frame by present loop when PS2X_ASPECT=fill & takeover
 
 bool ps2xRdTakeoverOn() // FEAT-RD12
@@ -655,7 +686,7 @@ bool ps2xRdTakeoverOn() // FEAT-RD12
         }
         return false;
     }();
-    return v;
+    return v && ps2xRdActive(); // FEAT-RD49: takeover implies active
 }
 
 void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ) // FEAT-RD14
@@ -1242,6 +1273,31 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     static double s_avgMainSerials = 0.0; // FEAT-RD37
     static uint32_t s_consecPartial = 0u; // FEAT-RD37
     static uint32_t s_partialFrames = 0u; // FEAT-RD37
+    if (g_rdNeedGpuReset.exchange(false, std::memory_order_acq_rel)) // FEAT-RD49: clear stale composition/EMA/slot state after reset
+    {
+        s_avgMainSerials = 0.0;
+        s_consecPartial = 0u;
+        g_rdGpu.hasCompleteComposition = false;
+        g_rdGpu.prevDrawn3dCount = 0u;
+        g_rdGpu.lastMainSerialCount = 0u;
+        g_rdGpu.activeGMin = 0u;
+        g_rdGpu.ring3dCount = 0u;
+        g_rdGpu.last3dSeq = 0u;
+        g_rdGpu.last2dSeq = 0u;
+        g_rdGpu.everUploaded = false;
+        g_rdGpu.drawBatches.clear();
+        g_rdGpu.local2dScratch.clear();
+        g_rdGpu.local2dBatches.clear();
+        g_rdGpu.frames2d[0] = Rd2DFrame{};
+        g_rdGpu.frames2d[1] = Rd2DFrame{};
+        for (size_t i = 0; i < kRdSlotCount; ++i)
+        {
+            g_rdGpu.slots[i].seq = 0u;
+            g_rdGpu.slots[i].batches.clear();
+            g_rdGpu.pendingVerts[i].clear();
+            g_rdGpu.pendingIndices[i].clear();
+        }
+    }
     if (needRealign && chosen2dIdx >= 0) // FEAT-RD13 // FEAT-RD14 // FEAT-RD33
     {
         const Rd2DFrame &chosen2d = g_rdGpu.frames2d[chosen2dIdx];
