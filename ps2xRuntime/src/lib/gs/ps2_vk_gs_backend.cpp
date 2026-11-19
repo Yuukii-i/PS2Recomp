@@ -647,6 +647,9 @@ namespace
     };
 
     // ---------------------------------------------------------------- the backend
+    class GSVulkanBackend; // FEAT-RD28
+    static std::atomic<GSVulkanBackend *> g_activeVkBackend{nullptr}; // FEAT-RD28
+
     class GSVulkanBackend final : public GSRasterBackend
     {
     public:
@@ -680,9 +683,12 @@ namespace
             if (maxPrims_ != kDefaultMaxPrims || maxClutSlots_ != kDefaultMaxClutSlots)
                 std::printf("[vk] capacities prims=%u clut=%u\n", maxPrims_, maxClutSlots_);
             (void)ps2xRdTakeoverOn(); // FEAT-RD12: log startup banner once
+            g_activeVkBackend.store(this, std::memory_order_release); // FEAT-RD28
         }
         ~GSVulkanBackend() override // PROBE-GT
         {
+            GSVulkanBackend *expected = this; // FEAT-RD28
+            g_activeVkBackend.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel); // FEAT-RD28
             if (gtQueryPool_ != VK_NULL_HANDLE && g_vk.dev != VK_NULL_HANDLE)
             {
                 vkDeviceWaitIdle(g_vk.dev);
@@ -1336,6 +1342,30 @@ namespace
                 hostNewer_.orWith(pg);
             }
             cpu_->WriteVram(psm, base, bw, x, y, value);
+        }
+
+        bool syncPageRangeForCpu(uint32_t firstPage, uint32_t lastPage, uint32_t *outBytes) // FEAT-RD28
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            if (!vkReady_ || firstPage > lastPage || firstPage >= 512u)
+                return false;
+            const uint32_t clampedLast = std::min<uint32_t>(lastPage, 511u);
+            PageSet need;
+            for (uint32_t p = firstPage; p <= clampedLast; ++p)
+                need.set(p);
+            PageSet dirty = gpuColor_;
+            dirty.orWith(gpuZ_);
+            dirty.andWith(need);
+            if (!dirty.any())
+                return false;
+            const uint64_t beforeBytes = downloadBytes_;
+            syncPages(need, 6);
+            if (outBytes)
+            {
+                const uint64_t diff = downloadBytes_ - beforeBytes;
+                *outBytes = static_cast<uint32_t>(std::min<uint64_t>(diff, 0xFFFFFFFFull));
+            }
+            return true;
         }
 
         void SnapshotVram(std::vector<uint8_t> &out) const override
@@ -2747,4 +2777,12 @@ namespace
 std::unique_ptr<GSRasterBackend> ps2x_vk_make_backend()
 {
     return std::make_unique<GSVulkanBackend>();
+}
+
+bool ps2xVkSyncPagesForCpu(uint32_t firstPage, uint32_t lastPage, uint32_t *outBytes) // FEAT-RD28
+{
+    GSVulkanBackend *backend = g_activeVkBackend.load(std::memory_order_acquire);
+    if (!backend)
+        return false;
+    return backend->syncPageRangeForCpu(firstPage, lastPage, outBytes);
 }

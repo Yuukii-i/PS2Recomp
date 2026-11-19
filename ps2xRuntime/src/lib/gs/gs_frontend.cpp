@@ -88,6 +88,7 @@ static std::atomic<bool> s_rdFrameHasGeom{false}; // FEAT-RD18
 static std::atomic<uint32_t> s_rdFrameGeomFbp{0xFFFFFFFFu}; // FEAT-RD18b
 static std::atomic<uint32_t> s_rdDispFbps[4] = {{0xFFFFFFFFu}, {0xFFFFFFFFu}, {0xFFFFFFFFu}, {0xFFFFFFFFu}}; // FEAT-RD19
 static std::atomic<uint32_t> s_rdDispFbpNext{0u}; // FEAT-RD19
+static std::atomic<uint32_t> s_rdDispFbw[4] = {{10u}, {10u}, {10u}, {10u}}; // FEAT-RD28b
 static void rdNoteDispFbp(uint64_t dispfb) // FEAT-RD19
 {
     const uint32_t fbp = static_cast<uint32_t>(dispfb & 0x1FFull);
@@ -95,6 +96,7 @@ static void rdNoteDispFbp(uint64_t dispfb) // FEAT-RD19
         if (s_rdDispFbps[i].load(std::memory_order_relaxed) == fbp)
             return;
     const uint32_t slot = s_rdDispFbpNext.fetch_add(1u, std::memory_order_relaxed) & 3u;
+    s_rdDispFbw[slot].store(static_cast<uint32_t>((dispfb >> 9) & 0x3Full), std::memory_order_relaxed); // FEAT-RD28b
     s_rdDispFbps[slot].store(fbp, std::memory_order_relaxed);
 }
 bool ps2xRdIsDisplayFbp(uint32_t fbp) // FEAT-RD19
@@ -173,6 +175,37 @@ uint64_t ps2xRdMainXyoff() // FEAT-RD23: ofx | ofy<<32, or ~0 if unknown
     if (m == ~0ull)
         return ~0ull;
     return ((m >> 16) & 0xFFFFull) | ((m & 0xFFFFull) << 32);
+}
+uint32_t ps2xRdFbPageRanges(uint32_t *first, uint32_t *last) // FEAT-RD28b: up to 5 framebuffer page ranges (display FBPs + main pass FBP)
+{
+    uint32_t n = 0u;
+    auto add = [&](uint32_t fbp, uint32_t fbw)
+    {
+        if (fbw == 0u)
+            fbw = 10u;
+        first[n] = fbp;
+        last[n] = fbp + fbw * 16u - 1u; // fbw*64 px * 512 rows * 4 B / 8192
+        if (last[n] > 511u)
+            last[n] = 511u;
+        ++n;
+    };
+    for (int i = 0; i < 4; ++i)
+    {
+        const uint32_t f = s_rdDispFbps[i].load(std::memory_order_relaxed);
+        if (f != 0xFFFFFFFFu)
+            add(f, s_rdDispFbw[i].load(std::memory_order_relaxed));
+    }
+    const uint64_t m = s_rdMainKey.load(std::memory_order_relaxed);
+    if (m != ~0ull)
+    {
+        const uint32_t mf = static_cast<uint32_t>((m >> 32) & 0x1FFull);
+        bool have = false;
+        for (uint32_t i = 0; i < n; ++i)
+            have = have || first[i] == mf;
+        if (!have)
+            add(mf, 10u);
+    }
+    return n;
 }
 
 struct RdVert // FEAT-RD8

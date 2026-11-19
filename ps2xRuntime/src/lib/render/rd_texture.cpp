@@ -21,6 +21,8 @@
 #include <nmmintrin.h> // FEAT-RD5d
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD3
+extern bool ps2xRdViewOn(); // FEAT-RD28
+extern bool ps2xVkSyncPagesForCpu(uint32_t firstPage, uint32_t lastPage, uint32_t *outBytes = nullptr); // FEAT-RD28
 std::atomic<uint32_t> g_rdKickSerial{0};     // FEAT-RD5
 uint32_t g_rdPageGen[512];                   // FEAT-RD5b VRAM 8 KB page write generations (GS thread)
 std::atomic<uint32_t> g_rdNoteCalls{0};      // FEAT-RD5b
@@ -30,6 +32,9 @@ std::atomic<uint32_t> g_rdRawHits{0};        // FEAT-RD5d
 std::atomic<uint32_t> g_rdFastHits{0};     // FEAT-RD5c
 std::atomic<uint32_t> g_rdStateChangesInKick{0}; // FEAT-RD17
 std::atomic<uint32_t> g_rdMergedSpan{0};         // FEAT-RD17
+std::atomic<uint32_t> g_rdRtSyncs{0};            // FEAT-RD28
+extern uint32_t ps2xRdFbPageRanges(uint32_t *first, uint32_t *last); // FEAT-RD28b
+std::atomic<uint64_t> g_rdRtBytes{0};            // FEAT-RD28
 void ps2xRdMarkVramWrite(uint32_t firstByte, uint32_t byteCount) // FEAT-RD5b
 {
     if (byteCount == 0u || firstByte >= 0x400000u)
@@ -50,6 +55,7 @@ struct RdSerialSlot                      // FEAT-RD5
     std::atomic<uint64_t> contentId{0};
 };
 RdSerialSlot g_serialRing[kRdRingSize]; // FEAT-RD5
+std::atomic<uint32_t> g_fbFeedbackRing[kRdRingSize]; // FEAT-RD28b
 
 struct RdStateSlot // FEAT-RD17
 {
@@ -449,13 +455,17 @@ void ps2xRdTexTickFrame() // FEAT-RD3
     {
         const double secs = static_cast<double>(elapsedMs) / 1000.0;
         const double fr = g_texFramesSinceLog ? static_cast<double>(g_texFramesSinceLog) : 1.0; // FEAT-RD5
-        ps2xSafeLog("[rdtex] live=%u decodes/s=%.1f unsupported=%u notedClut=%u fallbackClut=%u exact=%u fallback=%u noteCalls=%u fullDecodes=%u fastHits=%u rawHits=%u replaced=%u\n",
+        const uint32_t rtSyncs = g_rdRtSyncs.exchange(0u, std::memory_order_relaxed); // FEAT-RD28
+        const uint64_t rtBytes = g_rdRtBytes.exchange(0ull, std::memory_order_relaxed); // FEAT-RD28
+        ps2xSafeLog("[rdtex] live=%u decodes/s=%.1f unsupported=%u notedClut=%u fallbackClut=%u exact=%u fallback=%u noteCalls=%u fullDecodes=%u fastHits=%u rawHits=%u replaced=%u rtSyncs=%u rtKB=%u\n",
                     static_cast<unsigned>(g_texCache.size() + g_glByContentId.size()),
                     static_cast<double>(g_decodesSinceLog) / secs,
                     g_unsupportedSinceLog, g_notedClutSinceLog, g_fallbackClutSinceLog,
                     static_cast<unsigned>(static_cast<double>(g_exactSinceLog) / fr),
                     static_cast<unsigned>(static_cast<double>(g_fallbackSinceLog) / fr),
-                    static_cast<unsigned>(g_rdNoteCalls.exchange(0u)), static_cast<unsigned>(g_rdFullDecodes.exchange(0u)), static_cast<unsigned>(g_rdFastHits.exchange(0u)), static_cast<unsigned>(g_rdRawHits.exchange(0u)), static_cast<unsigned>(g_replacedSinceLog)); // FEAT-RD5 FEAT-RD5b FEAT-RD6
+                    static_cast<unsigned>(g_rdNoteCalls.exchange(0u)), static_cast<unsigned>(g_rdFullDecodes.exchange(0u)), static_cast<unsigned>(g_rdFastHits.exchange(0u)), static_cast<unsigned>(g_rdRawHits.exchange(0u)), static_cast<unsigned>(g_replacedSinceLog),
+                    static_cast<unsigned>(static_cast<double>(rtSyncs) / fr),
+                    static_cast<unsigned>(static_cast<double>(rtBytes) / (1024.0 * fr))); // FEAT-RD5 FEAT-RD5b FEAT-RD6 FEAT-RD28
         g_replacedSinceLog = 0; // FEAT-RD6
         g_notedClutSinceLog = 0;                                                         // FEAT-RD3c
         g_fallbackClutSinceLog = 0;                                                    // FEAT-RD3c
@@ -692,11 +702,74 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
     if (!isSupportedTex(psm, cpsm, csm))
         return;
 
+    const uint32_t w = 1u << std::min<uint32_t>(tw, 10u);
+    const uint32_t h = 1u << std::min<uint32_t>(th, 10u);
+    uint32_t fpFirst = 0u, fpLast = 0u, fpCp = 0u; // FEAT-RD5c FEAT-RD28
+    {
+        uint32_t pageH = 32u, bppNum = 4u, bppDen = 1u;
+        switch (psm)
+        {
+        case GS_PSM_CT16: case GS_PSM_CT16S: pageH = 64u; bppNum = 2u; break;
+        case GS_PSM_T8: pageH = 64u; bppNum = 1u; break;
+        case GS_PSM_T4: pageH = 128u; bppNum = 1u; bppDen = 2u; break;
+        default: break;
+        }
+        const uint32_t rows = ((h + pageH - 1u) / pageH) * pageH;
+        const uint32_t widthPx = std::max<uint32_t>(std::max<uint32_t>(tbw, 1u) * 64u, w);
+        const uint64_t bytes = (static_cast<uint64_t>(widthPx) * rows * bppNum + bppDen - 1u) / bppDen;
+        fpFirst = std::min<uint32_t>((tbp0 * 256u) / 8192u, 511u);
+        fpLast = std::min<uint32_t>(static_cast<uint32_t>((static_cast<uint64_t>(tbp0) * 256u + bytes - 1u) / 8192u), 511u);
+        if (fpLast < fpFirst)
+            fpLast = fpFirst;
+        fpCp = std::min<uint32_t>((cbp * 256u) / 8192u, 511u);
+    }
+
+    if (ps2xRdViewOn()) // FEAT-RD28b: texture inside a display/main framebuffer = screen feedback, skip (no sync, no decode)
+    {
+        uint32_t fbF[8], fbL[8];
+        const uint32_t nfb = ps2xRdFbPageRanges(fbF, fbL);
+        for (uint32_t i = 0; i < nfb; ++i)
+        {
+            if (fpFirst <= fbL[i] && fpLast >= fbF[i])
+            {
+                g_fbFeedbackRing[serial & (kRdRingSize - 1u)].store(serial, std::memory_order_release);
+                return;
+            }
+        }
+    }
+
+    bool syncedFromGpu = false; // FEAT-RD28
+    if (ps2xRdViewOn()) // FEAT-RD28
+    {
+        uint32_t syncedBytes = 0u;
+        if (ps2xVkSyncPagesForCpu(fpFirst, fpLast, &syncedBytes))
+        {
+            for (uint32_t p = fpFirst; p <= fpLast; ++p)
+                ++g_rdPageGen[p];
+            g_rdRtSyncs.fetch_add(1u, std::memory_order_relaxed);
+            g_rdRtBytes.fetch_add(syncedBytes, std::memory_order_relaxed);
+            syncedFromGpu = true;
+        }
+        if (isIndexedPsm(psm) && (fpCp < fpFirst || fpCp > fpLast))
+        {
+            uint32_t clutBytes = 0u;
+            if (ps2xVkSyncPagesForCpu(fpCp, fpCp, &clutBytes))
+            {
+                ++g_rdPageGen[fpCp];
+                g_rdRtSyncs.fetch_add(1u, std::memory_order_relaxed);
+                g_rdRtBytes.fetch_add(clutBytes, std::memory_order_relaxed);
+                syncedFromGpu = true;
+            }
+        }
+    }
+
     const uint64_t tex0Key = tex0 & (0x3FFFFFFFFull | (0xFFFFFFull << 37));
     static thread_local uint32_t t_lastSerial = 0u;
     static thread_local uint64_t t_lastTex0Key = 0ull;
     static thread_local uint64_t t_lastTexa = 0ull;
     static thread_local uint64_t t_lastContentId = 0ull;
+    if (syncedFromGpu) // FEAT-RD28
+        t_lastContentId = 0ull;
     const uint32_t fastIdx = static_cast<uint32_t>(((tex0Key * 0x9E3779B97F4A7C15ull) ^ (texa * 0xC2B2AE3D27D4EB4Full)) >> 54) & 1023u; // FEAT-RD5c
     {
         const RdFastEntry &fe = g_fastCache[fastIdx]; // FEAT-RD5c
@@ -722,38 +795,18 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
         return;
     }
 
-    const uint32_t w = 1u << std::min<uint32_t>(tw, 10u);
-    const uint32_t h = 1u << std::min<uint32_t>(th, 10u);
     g_rdNoteCalls.fetch_add(1u, std::memory_order_relaxed); // FEAT-RD5b
 
     // FEAT-RD5b: cheap key from VRAM page write generations + CLUT bytes; full decode only when unseen.
     static std::unordered_map<uint64_t, uint64_t> s_keyToContent; // GS thread only
     uint64_t quickKey = 0ull;
-    uint32_t fpFirst = 0u, fpLast = 0u, fpCp = 0u; // FEAT-RD5c
     {
-        uint32_t pageH = 32u, bppNum = 4u, bppDen = 1u;
-        switch (psm)
-        {
-        case GS_PSM_CT16: case GS_PSM_CT16S: pageH = 64u; bppNum = 2u; break;
-        case GS_PSM_T8: pageH = 64u; bppNum = 1u; break;
-        case GS_PSM_T4: pageH = 128u; bppNum = 1u; bppDen = 2u; break;
-        default: break;
-        }
-        const uint32_t rows = ((h + pageH - 1u) / pageH) * pageH;
-        const uint32_t widthPx = std::max<uint32_t>(std::max<uint32_t>(tbw, 1u) * 64u, w);
-        const uint64_t bytes = (static_cast<uint64_t>(widthPx) * rows * bppNum + bppDen - 1u) / bppDen;
-        const uint32_t first = (tbp0 * 256u) / 8192u;
-        const uint32_t last = std::min<uint32_t>(static_cast<uint32_t>((static_cast<uint64_t>(tbp0) * 256u + bytes - 1u) / 8192u), 511u);
-        fpFirst = std::min<uint32_t>(first, 511u);
-        fpLast = std::min<uint32_t>(last, 511u);
-        fpCp = std::min<uint32_t>((cbp * 256u) / 8192u, 511u);
         uint64_t gh = 0xcbf29ce484222325ull;
-        for (uint32_t p = first; p <= last && p < 512u; ++p)
+        for (uint32_t p = fpFirst; p <= fpLast; ++p)
             gh = (gh ^ g_rdPageGen[p]) * 0x100000001b3ull;
         if (isIndexedPsm(psm))
         {
-            const uint32_t cp = std::min<uint32_t>((cbp * 256u) / 8192u, 511u);
-            gh = (gh ^ g_rdPageGen[cp]) * 0x100000001b3ull;
+            gh = (gh ^ g_rdPageGen[fpCp]) * 0x100000001b3ull;
             if (clut512)
                 gh = fnv1a64(clut512, 512u * sizeof(uint16_t), gh);
         }
@@ -918,6 +971,13 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
     t_lastContentId = contentId;
     storeFast(fastIdx, tex0Key, texa, contentId, fpFirst, fpLast, fpCp, indexed); // FEAT-RD5c
     writeSerialRing(serial, contentId);
+}
+
+bool ps2xRdIsFbFeedback(uint32_t serial) // FEAT-RD28b
+{
+    if (serial == 0u)
+        return false;
+    return g_fbFeedbackRing[serial & (kRdRingSize - 1u)].load(std::memory_order_acquire) == serial;
 }
 
 uint64_t ps2xRdLookupContentId(uint32_t serial) // FEAT-RD5

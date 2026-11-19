@@ -30,6 +30,8 @@ extern bool ps2xRdLookupXyoff(uint32_t serial, uint64_t &xyoff); // FEAT-RD21
 extern bool ps2xRdLookupScissor(uint32_t serial, uint64_t &scis); // FEAT-RD22
 extern bool ps2xRdIsMainPass(uint32_t fbp, uint64_t xyoffset); // FEAT-RD23
 extern uint64_t ps2xRdMainXyoff(); // FEAT-RD23
+extern bool ps2xRdIsFbFeedback(uint32_t serial); // FEAT-RD28b
+static uint32_t s_fbFeedbackSkipped = 0u; // FEAT-RD28b
 extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
 extern std::atomic<uint32_t> g_rdMergedSpan;        // FEAT-RD17
 extern void ps2xRdTexTickFrame(); // FEAT-RD3
@@ -1249,6 +1251,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     ++i2d;
                     continue;
                 }
+                if (((b0.prim >> 4) & 1ull) && ps2xRdIsFbFeedback(b0.texSerial)) // FEAT-RD28b
+                {
+                    ++s_fbFeedbackSkipped;
+                    ++i2d;
+                    continue;
+                }
                 const uint32_t ate = static_cast<uint32_t>(b0.test & 1ull);
                 const uint32_t atst = ate ? static_cast<uint32_t>((b0.test >> 1) & 7ull) : 1u;
                 if (atst == 0u)
@@ -1455,6 +1463,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             const uint64_t alpha = gsOk ? gsAlpha : batch.alpha;
             constexpr uint64_t kPrimAbeTmeMask = (1ull << 6) | (1ull << 4);
             const uint64_t prim = gsOk ? ((batch.prim & ~kPrimAbeTmeMask) | (gsPrim & kPrimAbeTmeMask)) : batch.prim;
+            if (((prim >> 4) & 1ull) && ps2xRdIsFbFeedback(batch.kickSerial)) // FEAT-RD28b
+            {
+                ++s_fbFeedbackSkipped;
+                continue;
+            }
             const uint64_t tex0 = gsOk ? gsTex0 : batch.tex0;
             const uint64_t tex1 = gsOk ? gsTex1 : batch.tex1;
             const uint64_t clamp = gsOk ? gsClamp : batch.clamp;
@@ -1827,6 +1840,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     g_rdStateChangesInKick.exchange(0u, std::memory_order_relaxed),
                     g_rdMergedSpan.exchange(0u, std::memory_order_relaxed)); // FEAT-RD17
         ps2xSafeLog("[rd] rtSkipped3d/frame=%.1f\n", static_cast<double>(g_rdGpu.rtSkipped3d) / fr); // FEAT-RD19
+        ps2xSafeLog("[rd] fbFeedbackSkipped/frame=%.1f\n", static_cast<double>(s_fbFeedbackSkipped) / fr); // FEAT-RD28b
+        s_fbFeedbackSkipped = 0u;
         g_rdGpu.rtSkipped3d = 0u;
         g_rdGpu.gsStateCount = 0u;
         g_rdGpu.parsedFallbackCount = 0u;
