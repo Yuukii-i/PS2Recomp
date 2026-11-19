@@ -52,6 +52,8 @@ extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.
 extern "C" void ps2_iu_gpu(uint64_t bytes, uint64_t ticks); // PROBE-IU, defined in gs_frontend.cpp
 extern void ps2xRdNoteClut(uint32_t tbp0, uint32_t tbw, uint32_t psm, uint32_t tw, uint32_t th, uint32_t cpsm, uint32_t csa, const uint16_t *clut512); // FEAT-RD3c
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
+extern bool g_rdCurDrawIsGeom;  // FEAT-RD18
+extern bool g_rdClassicPresentRequested; // FEAT-RD18
 #include <intrin.h> // PROBE-RDP
 extern bool g_rdpOn; extern uint64_t g_rdpCyc[4]; extern uint32_t g_rdpCnt[4]; // PROBE-RDP
 struct RdpScopeVk // PROBE-RDP
@@ -729,7 +731,7 @@ namespace
             g_gqLockWaits.fetch_add(1, std::memory_order_relaxed);
             if (ref_)
                 ref_->Submit(batch);
-            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip GPU + CPU raster, keep CLUT notes
+            if (ps2xRdTakeoverOn() && g_rdCurDrawIsGeom) // FEAT-RD12 // FEAT-RD18: skip GPU + CPU raster for geometry kicks, keep CLUT notes
             {
                 if (clutChanged_ || curClutSlot_ < 0)
                 {
@@ -785,7 +787,7 @@ namespace
             g_gqLockWaits.fetch_add(1, std::memory_order_relaxed);
             if (count == 0u)
                 return;
-            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip GPU + CPU raster, keep CLUT notes
+            if (ps2xRdTakeoverOn() && g_rdCurDrawIsGeom) // FEAT-RD12 // FEAT-RD18: skip GPU + CPU raster for geometry kicks, keep CLUT notes
             {
                 if (clutChanged_ || curClutSlot_ < 0)
                 {
@@ -1146,7 +1148,7 @@ namespace
         PresentationFrame Present(const GSPresentationRequest &request) override
         {
             GwScope gwS(10); // PROBE-GW present
-            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip GS frame readback/conversion
+            if (ps2xRdTakeoverOn() && !g_rdClassicPresentRequested) // FEAT-RD12 // FEAT-RD18: skip GS frame readback/conversion unless classic fallback
             {
                 std::lock_guard<std::mutex> lk(m_);
                 ++presents_;
@@ -2008,7 +2010,7 @@ namespace
         // ------------------------------------------------------------ CPU path
         void cpuDraw(const GSPrimitiveBatch &batch)
         {
-            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip CPU fallback rasteriser
+            if (ps2xRdTakeoverOn() && g_rdCurDrawIsGeom) // FEAT-RD12 // FEAT-RD18: skip CPU fallback rasteriser for geometry kicks
                 return;
             if (vkReady_)
             {
@@ -2266,7 +2268,7 @@ namespace
                 clutChanged_ = false;
             }
             noteRdClut(st); // FEAT-RD3c
-            if (ps2xRdTakeoverOn()) // FEAT-RD12
+            if (ps2xRdTakeoverOn() && g_rdCurDrawIsGeom) // FEAT-RD12 // FEAT-RD18
                 return 0;
             if (!vkReady_)
                 return 8;
@@ -2439,7 +2441,7 @@ namespace
                 clutChanged_ = false;
             }
             noteRdClut(st); // FEAT-RD3c
-            if (ps2xRdTakeoverOn()) // FEAT-RD12
+            if (ps2xRdTakeoverOn() && g_rdCurDrawIsGeom) // FEAT-RD12 // FEAT-RD18
                 return 0;
             if (!vkReady_)
                 return 8;

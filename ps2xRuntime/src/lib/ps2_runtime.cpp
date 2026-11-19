@@ -13,6 +13,7 @@ extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
 extern void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h); // FEAT-RD12
+extern std::atomic<bool> g_rdFrameIsClassic; // FEAT-RD18
 extern void ps2xPadMarker(); // PROBE-MK
 extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
 extern void ps2xMcInit(); // FEAT-DE
@@ -851,7 +852,7 @@ static bool isVblankLatchEnabled()
     return s_enabled;
 }
 
-static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight, uint64_t renderTick = 0u)
+static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight, uint64_t renderTick = 0u, bool skipLatch = false) // FEAT-RD18
 {
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
     static bool s_hasLatchedInitialFrame = false;
@@ -954,7 +955,18 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static uint64_t s_lastUploadedSeq = ~0ull;
     const bool vblankLatchOn = isVblankLatchEnabled();
 
-    if (vblankLatchOn)
+    if (skipLatch) // FEAT-RD18: caller already latched (takeover classic fallback)
+    {
+        uint64_t curSeq = g_hostPresentSeq.load(std::memory_order_acquire);
+        if (curSeq == s_lastUploadedSeq && s_hasUploadedFrame)
+        {
+            outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
+            outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
+            return;
+        }
+        s_lastUploadedSeq = curSeq;
+    }
+    else if (vblankLatchOn)
     {
         if (!s_hasLatchedInitialFrame)
         {
@@ -6462,6 +6474,7 @@ void PS2Runtime::run()
             const auto presT0 = std::chrono::steady_clock::now();
             uint32_t presentWidth = FB_WIDTH;
             uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+            bool rdClassic = false; // FEAT-RD18
             if (ps2xRdTakeoverOn()) // FEAT-RD12: skip UploadFrame / GS readback
             {
                 if (!vblankLatchOn)
@@ -6474,9 +6487,17 @@ void PS2Runtime::run()
                         s_takeoverLastTick = curTick;
                     }
                 }
-                ps2xRdGetPresentSize(presentWidth, presentHeight);
-                if (presentWidth == 0u) presentWidth = 640u;
-                if (presentHeight == 0u) presentHeight = 448u;
+                rdClassic = g_rdFrameIsClassic.load(std::memory_order_acquire); // FEAT-RD18
+                if (rdClassic) // FEAT-RD18: classic fallback for non-geometry frames
+                {
+                    UploadFrame(frameTex, this, presentWidth, presentHeight, tick, true);
+                }
+                else
+                {
+                    ps2xRdGetPresentSize(presentWidth, presentHeight);
+                    if (presentWidth == 0u) presentWidth = 640u;
+                    if (presentHeight == 0u) presentHeight = 448u;
+                }
             }
             else
             {
@@ -6552,7 +6573,7 @@ void PS2Runtime::run()
             static bool s_rdShow = true; // FEAT-RD1
             if (ps2xRdViewOn() && IsKeyPressed(KEY_F11)) // FEAT-RD1
                 s_rdShow = !s_rdShow;
-            if (ps2xRdViewOn() && (s_rdShow || ps2xRdTakeoverOn())) // FEAT-RD1 // FEAT-RD12
+            if (ps2xRdViewOn() && (s_rdShow || ps2xRdTakeoverOn()) && !rdClassic) // FEAT-RD1 // FEAT-RD12 // FEAT-RD18
             {
                 rlClearScreenBuffers();
                 if (!ps2xRdDraw(dstRect.x, dstRect.y, dstRect.width, dstRect.height))
