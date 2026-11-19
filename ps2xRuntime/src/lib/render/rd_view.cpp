@@ -97,10 +97,18 @@ struct Rd3DFrame // FEAT-RD13 // FEAT-RD14
     uint32_t sMax = 0;
 };
 
+struct RdSerialRange // FEAT-RD33
+{
+    uint32_t first = 0;
+    uint32_t last = 0;
+};
+
 struct Rd2DFrame // FEAT-RD13
 {
     std::vector<RdVert> verts;
     std::vector<Rd2DBatch> batches;
+    std::vector<RdSerialRange> mainRanges; // FEAT-RD33
+    uint32_t mainSerialCount = 0;          // FEAT-RD33
     uint32_t rtSkipped = 0;
     uint32_t pointLineSkipped = 0;
     uint32_t gMin = 0;
@@ -110,8 +118,11 @@ struct Rd2DFrame // FEAT-RD13
 
 namespace
 {
+constexpr size_t kRdSlotCount = 6u; // FEAT-RD34
 std::mutex g_rdMutex;
-Rd3DFrame g_rd3dRing[4]; // FEAT-RD13
+Rd3DFrame g_rd3dRing[kRdSlotCount]; // FEAT-RD13 // FEAT-RD34
+bool g_rdPinnedSlots[kRdSlotCount] = {}; // FEAT-RD34
+uint32_t g_rd3dEvictedMaxSerial = 0u; // FEAT-RD34
 size_t g_rd3dWriteIdx = 0; // FEAT-RD13
 size_t g_rd3dCount = 0; // FEAT-RD13
 uint64_t g_rd3dSeq = 0; // FEAT-RD13
@@ -154,10 +165,10 @@ struct RdGpuState
 {
     bool init = false;
     bool everUploaded = false;
-    RdGpuSlot slots[4]; // FEAT-RD14
-    size_t activeOrder[4] = {0, 1, 2, 3}; // FEAT-RD14
-    std::vector<RdVert> pendingVerts[4]; // FEAT-RD14
-    std::vector<uint32_t> pendingIndices[4]; // FEAT-RD14
+    RdGpuSlot slots[kRdSlotCount]; // FEAT-RD14 // FEAT-RD34
+    size_t activeOrder[kRdSlotCount] = {0, 1, 2, 3, 4, 5}; // FEAT-RD14 // FEAT-RD34
+    std::vector<RdVert> pendingVerts[kRdSlotCount]; // FEAT-RD14 // FEAT-RD34
+    std::vector<uint32_t> pendingIndices[kRdSlotCount]; // FEAT-RD14 // FEAT-RD34
     std::vector<uint16_t> idx16Scratch; // FEAT-RD14
     std::vector<RdBatch> splitBatchScratch; // FEAT-RD14
     unsigned int vao2d = 0; // FEAT-RD8
@@ -190,12 +201,22 @@ struct RdGpuState
     Rd2DFrame frames2d[2]; // FEAT-RD13
     uint64_t last2dSeq = 0; // FEAT-RD13
     uint32_t activeGMin = 0; // FEAT-RD13
-    bool curAligned = false; // FEAT-RD13
-    bool curFallbackPrev = false; // FEAT-RD13
-    bool curSpanned2 = false; // FEAT-RD13
-    uint32_t alignedFrames = 0; // FEAT-RD13
-    uint32_t fallbackPrevFrames = 0; // FEAT-RD13
-    uint32_t spanned2Frames = 0; // FEAT-RD13
+    bool hasCompleteComposition = false; // FEAT-RD33
+    uint32_t lastMainSerialCount = 0;    // FEAT-RD33
+    uint32_t composedFrames = 0;         // FEAT-RD33
+    uint32_t redrawPrevFrames = 0;       // FEAT-RD33
+    uint32_t noMainFrames = 0;           // FEAT-RD33b
+    uint32_t usedPrev2dFrames = 0;       // FEAT-RD33
+    uint64_t totalMainSerials = 0;       // FEAT-RD33
+    uint32_t prevDrawn3dCount = 0;       // FEAT-RD34
+    int lastEmptyReason = 0;             // FEAT-RD34: 1=Sempty, 2=missing, 3=overwritten, 4=skipped
+    uint32_t drawsNew = 0;               // FEAT-RD34
+    uint32_t drawsPrev = 0;              // FEAT-RD34
+    uint32_t drawsEmpty = 0;             // FEAT-RD34
+    uint32_t drawsEmptySempty = 0;       // FEAT-RD34
+    uint32_t drawsEmptyMissing = 0;      // FEAT-RD34
+    uint32_t drawsEmptyOverwritten = 0;  // FEAT-RD34
+    uint32_t drawsEmptySkipped = 0;      // FEAT-RD34
     uint32_t gsStateCount = 0;        // FEAT-RD17
     uint32_t rtSkipped3d = 0;         // FEAT-RD19
     uint32_t parsedFallbackCount = 0; // FEAT-RD17
@@ -659,7 +680,33 @@ void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indice
         g_rdLastVpScaleZ = vpScaleZ;
         g_rdLastVpOffsetZ = vpOffsetZ;
     }
-    Rd3DFrame &slot = g_rd3dRing[g_rd3dWriteIdx]; // FEAT-RD13
+    size_t chosen = kRdSlotCount; // FEAT-RD34: never overwrite a pinned slot
+    for (size_t step = 0; step < kRdSlotCount; ++step)
+    {
+        const size_t cand = (g_rd3dWriteIdx + step) % kRdSlotCount;
+        if (!g_rdPinnedSlots[cand] && g_rd3dRing[cand].seq == 0u)
+        {
+            chosen = cand;
+            break;
+        }
+    }
+    if (chosen == kRdSlotCount)
+    {
+        uint64_t bestSeq = ~0ull;
+        for (size_t cand = 0; cand < kRdSlotCount; ++cand)
+        {
+            if (!g_rdPinnedSlots[cand] && g_rd3dRing[cand].seq < bestSeq)
+            {
+                bestSeq = g_rd3dRing[cand].seq;
+                chosen = cand;
+            }
+        }
+    }
+    if (chosen == kRdSlotCount) // FEAT-RD34: all slots pinned/busy -> drop incoming 3D frame
+        return;
+    Rd3DFrame &slot = g_rd3dRing[chosen]; // FEAT-RD13 // FEAT-RD34
+    if (slot.seq != 0u && slot.sMax > g_rd3dEvictedMaxSerial)
+        g_rd3dEvictedMaxSerial = slot.sMax;
     slot.verts.swap(verts);
     slot.indices.swap(indices);
     slot.batches.swap(batches);
@@ -670,8 +717,8 @@ void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indice
     slot.sMin = sMin;
     slot.sMax = sMax;
     slot.seq = ++g_rd3dSeq;
-    g_rd3dWriteIdx = (g_rd3dWriteIdx + 1u) % 4u;
-    if (g_rd3dCount < 4u)
+    g_rd3dWriteIdx = (chosen + 1u) % kRdSlotCount;
+    if (g_rd3dCount < kRdSlotCount)
         ++g_rd3dCount;
     g_rdEverPublished = true;
 }
@@ -700,10 +747,38 @@ void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint3
     ps2xRdPublishLean(t_staging, t_idxStaging, t_batchStaging, skippedDraws, maskedDraws, vpScaleZ, vpOffsetZ);
 }
 
-void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped, uint32_t gMin, uint32_t gMax) // FEAT-RD8 // FEAT-RD13
+static bool rdSerialInRanges(uint32_t s, const std::vector<RdSerialRange> &ranges) // FEAT-RD33
+{
+    if (s == 0u || ranges.empty())
+        return false;
+    size_t lo = 0u, hi = ranges.size();
+    while (lo < hi)
+    {
+        const size_t mid = lo + (hi - lo) / 2u;
+        if (ranges[mid].last < s)
+            lo = mid + 1u;
+        else if (ranges[mid].first > s)
+            hi = mid;
+        else
+            return true;
+    }
+    return false;
+}
+
+static bool rdRingCoversRanges(uint32_t ringMin, uint32_t ringMax, const std::vector<RdSerialRange> &ranges) // FEAT-RD33
+{
+    if (ranges.empty())
+        return true;
+    if (ringMin == 0u)
+        return false;
+    return ringMin <= ranges.front().first && ranges.back().last <= ringMax;
+}
+
+void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped, uint32_t gMin, uint32_t gMax, const uint32_t *mainRangePairs, size_t numMainRanges) // FEAT-RD8 // FEAT-RD13 // FEAT-RD33
 {
     static thread_local std::vector<RdVert> t_staging2d;
     static thread_local std::vector<Rd2DBatch> t_batchStaging2d;
+    static thread_local std::vector<RdSerialRange> t_rangeStaging; // FEAT-RD33
     if (v && n > 0)
         t_staging2d.assign(v, v + n);
     else
@@ -712,11 +787,28 @@ void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, u
         t_batchStaging2d.assign(b, b + nb);
     else
         t_batchStaging2d.clear();
+    t_rangeStaging.clear();
+    uint32_t serialCnt = 0u;
+    if (mainRangePairs && numMainRanges > 0)
+    {
+        t_rangeStaging.reserve(numMainRanges);
+        for (size_t i = 0; i < numMainRanges; ++i)
+        {
+            const uint32_t a = mainRangePairs[i * 2u];
+            const uint32_t bEnd = mainRangePairs[i * 2u + 1u];
+            t_rangeStaging.push_back(RdSerialRange{a, bEnd});
+            if (bEnd >= a)
+                serialCnt += (bEnd - a + 1u);
+        }
+    }
 
     std::lock_guard<std::mutex> lock(g_rdMutex);
+    if (serialCnt == 0u) ++g_rdGpu.noMainFrames; // FEAT-RD33b
     std::swap(g_rd2dFrames[1], g_rd2dFrames[0]); // FEAT-RD13: previous <- newest
     g_rd2dFrames[0].verts.swap(t_staging2d);
     g_rd2dFrames[0].batches.swap(t_batchStaging2d);
+    g_rd2dFrames[0].mainRanges.swap(t_rangeStaging); // FEAT-RD33
+    g_rd2dFrames[0].mainSerialCount = serialCnt;     // FEAT-RD33
     g_rd2dFrames[0].rtSkipped = rtSkipped;
     g_rd2dFrames[0].pointLineSkipped = pointLineSkipped;
     g_rd2dFrames[0].gMin = gMin;
@@ -800,8 +892,8 @@ struct RdCamTl // PROBE-RD26
 };
 static RdCamTl g_camTl; // PROBE-RD26
 static const bool g_rd24On = []{ const char *e = std::getenv("PS2X_RD_BIGLOG"); return e && e[0] == '1'; }(); // PROBE-RD24
-static std::vector<RdVert> g_rd24Verts[4]; // PROBE-RD24
-static std::vector<uint16_t> g_rd24Idx[4]; // PROBE-RD24
+static std::vector<RdVert> g_rd24Verts[kRdSlotCount]; // PROBE-RD24 // FEAT-RD34
+static std::vector<uint16_t> g_rd24Idx[kRdSlotCount]; // PROBE-RD24 // FEAT-RD34
 static const bool g_rdBlendOn = []{ const char *e = std::getenv("PS2X_RD_BLENDLOG"); return e && e[0] == '1'; }(); // PROBE-RD29
 struct RdBlendCensus // PROBE-RD29
 {
@@ -846,53 +938,168 @@ struct RdBlendCensus // PROBE-RD29
 };
 static RdBlendCensus g_rdbCensus; // PROBE-RD29
 
+std::atomic<uint32_t> g_rdRepeatFrames{0};       // FEAT-RD33c
+std::atomic<uint32_t> g_rdClassicFramesTotal{0}; // FEAT-RD33c
+
+bool isRdScissorVisible(uint64_t packed, bool have, float fbW, float fbH) // FEAT-RD34
+{
+    if (have && packed != 0ull && fbW > 0.0f && fbH > 0.0f)
+    {
+        const float x0 = static_cast<float>(packed & 0x7FFull);
+        const float x1 = static_cast<float>((packed >> 16) & 0x7FFull);
+        const float y0 = static_cast<float>((packed >> 32) & 0x7FFull);
+        const float y1 = static_cast<float>((packed >> 48) & 0x7FFull);
+        if (x0 >= fbW || y0 >= fbH || x1 < x0 || y1 < y0)
+            return false;
+    }
+    return true;
+}
+
+struct Rd35Rec { uint64_t prim, alpha, frame, tex0; float bb[4]; }; // PROBE-RD35
+extern "C" __declspec(dllimport) unsigned int __stdcall glGetError(void); // PROBE-RD35
+struct Rd35Stats { Rd35Rec last[3]; uint32_t n2d = 0, n3d = 0; bool usedNew = false, valid = false; int chosen2d = -1; uint32_t draws2d = 0, mainSerials = 0, glErr = 0; }; // PROBE-RD35
+extern Rd35Stats g_rd35;
+
+bool isRd3dBatchDrawable(const RdBatch &batch, const RdGpuSlot &slot, float fbW, float fbH) // FEAT-RD34
+{
+    if (batch.count == 0u || slot.vao == 0u)
+        return false;
+    uint64_t gsPrim = 0ull, gsAlpha = 0ull, gsTest = 0ull, gsFrame = 0ull, gsZbuf = 0ull;
+    uint64_t gsTex0 = 0ull, gsTex1 = 0ull, gsClamp = 0ull, gsTexa = 0ull, gsFba = 0ull;
+    const bool gsOk = ps2xRdLookupState(batch.kickSerial, gsPrim, gsAlpha, gsTest, gsFrame,
+                                        gsZbuf, gsTex0, gsTex1, gsClamp, gsTexa, gsFba);
+    uint64_t xoMp = 0ull;
+    if (!gsOk || !ps2xRdLookupXyoff(batch.kickSerial, xoMp))
+        return false;
+    const uint64_t frame = gsFrame;
+    if (ps2xRdHasDisplayFbp() && !ps2xRdIsDisplayFbp(static_cast<uint32_t>(frame & 0x1FFull)))
+        return false;
+    constexpr uint64_t kPrimAbeTmeMask = (1ull << 6) | (1ull << 4);
+    const uint64_t prim = (batch.prim & ~kPrimAbeTmeMask) | (gsPrim & kPrimAbeTmeMask);
+    if (((prim >> 4) & 1ull) && ps2xRdIsFbFeedback(batch.kickSerial))
+        return false;
+    const uint32_t ate = static_cast<uint32_t>(gsTest & 1ull);
+    const uint32_t atst = ate ? static_cast<uint32_t>((gsTest >> 1) & 7ull) : 1u;
+    const int afail = (ate && atst != 1u) ? static_cast<int>((gsTest >> 12) & 3ull) : 0;
+    if (atst == 0u && afail == 0)
+        return false;
+    const uint32_t zte = static_cast<uint32_t>((gsTest >> 16) & 1ull);
+    const uint32_t ztst = static_cast<uint32_t>((gsTest >> 17) & 3ull);
+    if (zte && ztst == 0u)
+        return false;
+    uint64_t sc = 0ull;
+    const bool scOk = ps2xRdLookupScissor(batch.kickSerial, sc);
+    return isRdScissorVisible(sc, scOk, fbW, fbH);
+}
+
+Rd35Stats g_rd35; // PROBE-RD35
+
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
+    g_rd35.valid = false; // PROBE-RD35
+    g_rd35.n2d = 0u;
+    g_rd35.n3d = 0u;
+    g_rd35.usedNew = false;
+    g_rd35.chosen2d = -1;
     bool hasNew2d = false; // FEAT-RD8
     bool needRealign = false; // FEAT-RD13
-    bool pendingUpload[4] = {}; // FEAT-RD14
+    int chosen2dIdx = -1;     // FEAT-RD33
+    bool pendingUpload[kRdSlotCount] = {}; // FEAT-RD14 // FEAT-RD34
+    uint32_t evictedMaxSnap = 0u; // FEAT-RD34
     {
         std::lock_guard<std::mutex> lock(g_rdMutex);
         if (!g_rdEverPublished && !g_rdGpu.everUploaded)
         {
+            ++g_rdGpu.drawsEmpty;
+            ++g_rdGpu.drawsEmptySempty;
             if (ps2xRdTakeoverOn()) // FEAT-RD12: clear to black instead of drawing stale GS texture
                 return true;
             return false;
         }
-        if (g_rd3dSeq != g_rdGpu.last3dSeq) // FEAT-RD13 // FEAT-RD14
+        evictedMaxSnap = g_rd3dEvictedMaxSerial;
+        if (g_rd3dSeq != g_rdGpu.last3dSeq || g_rd2dSeq != g_rdGpu.last2dSeq) // FEAT-RD13 // FEAT-RD33
         {
-            g_rdGpu.ring3dCount = g_rd3dCount;
-            const size_t oldest = (g_rd3dWriteIdx + 4u - g_rd3dCount) % 4u;
-            for (size_t i = 0; i < g_rd3dCount; ++i)
+            uint32_t ringMin = 0u;
+            uint32_t ringMax = 0u;
+            for (size_t idx = 0; idx < kRdSlotCount; ++idx) // FEAT-RD34
             {
-                const size_t idx = (oldest + i) % 4u;
-                g_rdGpu.activeOrder[i] = idx;
-                Rd3DFrame &rf = g_rd3dRing[idx];
-                RdGpuSlot &gs = g_rdGpu.slots[idx];
-                if (rf.seq != 0u && rf.seq != gs.seq)
-                {
-                    g_rdGpu.pendingVerts[idx].swap(rf.verts);
-                    g_rdGpu.pendingIndices[idx].swap(rf.indices);
-                    gs.batches = rf.batches;
-                    gs.seq = rf.seq;
-                    gs.skipped = rf.skipped;
-                    gs.masked = rf.masked;
-                    gs.vpScaleZ = rf.vpScaleZ;
-                    gs.vpOffsetZ = rf.vpOffsetZ;
-                    gs.sMin = rf.sMin;
-                    gs.sMax = rf.sMax;
-                    pendingUpload[idx] = true;
-                }
+                const Rd3DFrame &rf = g_rd3dRing[idx];
+                const RdGpuSlot &gs = g_rdGpu.slots[idx];
+                if (rf.seq == 0u && gs.seq == 0u)
+                    continue;
+                const uint32_t sMin = (rf.seq != 0u) ? rf.sMin : gs.sMin;
+                const uint32_t sMax = (rf.seq != 0u) ? rf.sMax : gs.sMax;
+                if (sMin == 0u)
+                    continue;
+                if (ringMin == 0u || sMin < ringMin)
+                    ringMin = sMin;
+                if (sMax > ringMax)
+                    ringMax = sMax;
             }
-            g_rdGpu.last3dSeq = g_rd3dSeq;
-            needRealign = true;
-        }
-        if (g_rd2dSeq != g_rdGpu.last2dSeq) // FEAT-RD13
-        {
-            g_rdGpu.frames2d[0] = g_rd2dFrames[0];
-            g_rdGpu.frames2d[1] = g_rd2dFrames[1];
-            g_rdGpu.last2dSeq = g_rd2dSeq;
-            needRealign = true;
+            if (g_rd2dFrames[0].valid && rdRingCoversRanges(ringMin, ringMax, g_rd2dFrames[0].mainRanges))
+                chosen2dIdx = 0;
+            else if (g_rd2dFrames[1].valid && rdRingCoversRanges(ringMin, ringMax, g_rd2dFrames[1].mainRanges))
+                chosen2dIdx = 1;
+
+            if (chosen2dIdx >= 0)
+            {
+                if (g_rd3dSeq != g_rdGpu.last3dSeq) // FEAT-RD13 // FEAT-RD14
+                {
+                    size_t orderCount = 0u;
+                    uint64_t orderSeq[kRdSlotCount] = {};
+                    for (size_t idx = 0; idx < kRdSlotCount; ++idx) // FEAT-RD34
+                    {
+                        const uint64_t s = (g_rd3dRing[idx].seq != 0u) ? g_rd3dRing[idx].seq : g_rdGpu.slots[idx].seq;
+                        if (s == 0u)
+                            continue;
+                        size_t pos = orderCount;
+                        while (pos > 0u && orderSeq[pos - 1u] > s)
+                        {
+                            g_rdGpu.activeOrder[pos] = g_rdGpu.activeOrder[pos - 1u];
+                            orderSeq[pos] = orderSeq[pos - 1u];
+                            --pos;
+                        }
+                        g_rdGpu.activeOrder[pos] = idx;
+                        orderSeq[pos] = s;
+                        ++orderCount;
+                    }
+                    g_rdGpu.ring3dCount = orderCount;
+                    for (size_t i = 0; i < orderCount; ++i)
+                    {
+                        const size_t idx = g_rdGpu.activeOrder[i];
+                        Rd3DFrame &rf = g_rd3dRing[idx];
+                        RdGpuSlot &gs = g_rdGpu.slots[idx];
+                        if (!g_rdPinnedSlots[idx] && rf.seq != 0u && rf.seq != gs.seq) // FEAT-RD34
+                        {
+                            g_rdGpu.pendingVerts[idx].swap(rf.verts);
+                            g_rdGpu.pendingIndices[idx].swap(rf.indices);
+                            gs.batches = rf.batches;
+                            gs.seq = rf.seq;
+                            gs.skipped = rf.skipped;
+                            gs.masked = rf.masked;
+                            gs.vpScaleZ = rf.vpScaleZ;
+                            gs.vpOffsetZ = rf.vpOffsetZ;
+                            gs.sMin = rf.sMin;
+                            gs.sMax = rf.sMax;
+                            pendingUpload[idx] = true;
+                        }
+                    }
+                    g_rdGpu.last3dSeq = g_rd3dSeq;
+                }
+                if (g_rd2dSeq != g_rdGpu.last2dSeq) // FEAT-RD13
+                {
+                    g_rdGpu.frames2d[0] = g_rd2dFrames[0];
+                    g_rdGpu.frames2d[1] = g_rd2dFrames[1];
+                    g_rdGpu.last2dSeq = g_rd2dSeq;
+                }
+                needRealign = true;
+            }
+            else if (!g_rdGpu.hasCompleteComposition)
+            {
+                ++g_rdGpu.drawsEmpty;
+                ++g_rdGpu.drawsEmptyMissing;
+                return ps2xRdTakeoverOn();
+            }
         }
     }
 
@@ -1006,12 +1213,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         g_rdGpu.flip[2] = (flipBits & 2) ? -1.0f : 1.0f;
         if (g_rdGpu.flipLoc >= 0)
             SetShaderValue(g_rdGpu.shader, g_rdGpu.flipLoc, g_rdGpu.flip, SHADER_UNIFORM_VEC3);
-        for (size_t i = 0; i < 4u; ++i) // FEAT-RD14
+        for (size_t i = 0; i < kRdSlotCount; ++i) // FEAT-RD14 // FEAT-RD34
             g_rdGpu.slots[i].vao = rlLoadVertexArray();
         g_rdGpu.vao2d = rlLoadVertexArray(); // FEAT-RD8
     }
 
-    for (size_t idx = 0; idx < 4u; ++idx) // FEAT-RD14
+    for (size_t idx = 0; idx < kRdSlotCount; ++idx) // FEAT-RD14 // FEAT-RD34
     {
         if (pendingUpload[idx])
         {
@@ -1028,128 +1235,135 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         }
     }
 
-    if (needRealign) // FEAT-RD13 // FEAT-RD14
+    const float fbW = static_cast<float>(g_rdPresentW.load(std::memory_order_relaxed)); // FEAT-RD34
+    const float fbH = static_cast<float>(g_rdPresentH.load(std::memory_order_relaxed)); // FEAT-RD34
+    bool usedNewComposition = false; // FEAT-RD34
+    uint32_t candDrawable3d = 0u;    // FEAT-RD34
+    static double s_avgMainSerials = 0.0; // FEAT-RD37
+    static uint32_t s_consecPartial = 0u; // FEAT-RD37
+    static uint32_t s_partialFrames = 0u; // FEAT-RD37
+    if (needRealign && chosen2dIdx >= 0) // FEAT-RD13 // FEAT-RD14 // FEAT-RD33
     {
-        uint32_t ringMin = 0u;
-        uint32_t ringMax = 0u;
-        for (size_t i = 0; i < g_rdGpu.ring3dCount; ++i)
-        {
-            const RdGpuSlot &f = g_rdGpu.slots[g_rdGpu.activeOrder[i]];
-            if (f.sMin == 0u)
-                continue;
-            if (ringMin == 0u || f.sMin < ringMin)
-                ringMin = f.sMin;
-            if (f.sMax > ringMax)
-                ringMax = f.sMax;
-        }
-
-        const Rd2DFrame *chosen2d = nullptr;
-        bool usedFallbackPrev = false;
-        const Rd2DFrame &newest2d = g_rdGpu.frames2d[0];
-        const Rd2DFrame &prev2d = g_rdGpu.frames2d[1];
-        if (newest2d.valid)
-        {
-            const bool covered = (newest2d.gMin == 0u) ||
-                                 (ringMin != 0u && ringMin <= newest2d.gMin && newest2d.gMax <= ringMax);
-            if (covered)
-            {
-                chosen2d = &newest2d;
-            }
-            else if (prev2d.valid)
-            {
-                chosen2d = &prev2d;
-                usedFallbackPrev = true;
-            }
-            else
-            {
-                chosen2d = &newest2d;
-            }
-        }
-
-        if (chosen2d != nullptr)
-        {
-            g_rdGpu.local2dScratch = chosen2d->verts;
-            g_rdGpu.local2dBatches = chosen2d->batches;
-            g_rdGpu.lastRtSkipped = chosen2d->rtSkipped;
-            g_rdGpu.lastPointLineSkipped = chosen2d->pointLineSkipped;
-            g_rdGpu.activeGMin = chosen2d->gMin;
-            hasNew2d = true;
-        }
-
-        g_rdGpu.drawBatches.clear();
-        uint32_t framesUsed = 0u;
+        const Rd2DFrame &chosen2d = g_rdGpu.frames2d[chosen2dIdx];
+        std::vector<RdDrawBatch> candBatches; // FEAT-RD34
         uint64_t fVerts = 0u;
         uint64_t fIndices = 0u;
-        if (chosen2d == nullptr)
+        uint32_t candSkipped = g_rdGpu.lastSkippedDraws;
+        uint32_t candMasked = g_rdGpu.lastMaskedDraws;
+        float candVpScaleZ = g_rdGpu.vpScaleZ;
+        float candVpOffsetZ = g_rdGpu.vpOffsetZ;
+        if (!chosen2d.mainRanges.empty())
         {
-            if (g_rdGpu.ring3dCount > 0u)
-            {
-                const uint32_t slotIdx = static_cast<uint32_t>(g_rdGpu.activeOrder[g_rdGpu.ring3dCount - 1u]);
-                const RdGpuSlot &f3 = g_rdGpu.slots[slotIdx];
-                g_rdGpu.drawBatches.reserve(f3.batches.size());
-                for (const RdBatch &b : f3.batches)
-                    g_rdGpu.drawBatches.push_back(RdDrawBatch{b, slotIdx});
-                fVerts = f3.vertCount;
-                fIndices = f3.indexCount;
-                g_rdGpu.lastSkippedDraws = f3.skipped;
-                g_rdGpu.lastMaskedDraws = f3.masked;
-                if (f3.vpScaleZ != 0.0f)
-                {
-                    g_rdGpu.vpScaleZ = f3.vpScaleZ;
-                    g_rdGpu.vpOffsetZ = f3.vpOffsetZ;
-                }
-                framesUsed = 1u;
-            }
-        }
-        else if (chosen2d->gMin > 0u)
-        {
-            const uint32_t gMin = chosen2d->gMin;
-            const uint32_t gMax = chosen2d->gMax;
+            const uint32_t sFirst = chosen2d.mainRanges.front().first;
+            const uint32_t sLast = chosen2d.mainRanges.back().last;
             for (size_t i = 0; i < g_rdGpu.ring3dCount; ++i)
             {
                 const uint32_t slotIdx = static_cast<uint32_t>(g_rdGpu.activeOrder[i]);
                 const RdGpuSlot &f3 = g_rdGpu.slots[slotIdx];
-                if (f3.batches.empty() || f3.sMin == 0u || f3.sMax < gMin || f3.sMin > gMax)
+                if (f3.batches.empty() || f3.sMin == 0u || f3.sMax < sFirst || f3.sMin > sLast)
                     continue;
                 bool anyFromFrame = false;
                 for (const RdBatch &b : f3.batches)
                 {
                     const uint32_t ms = b.kickSerial & 0x3FFFFFFFu;
-                    if (ms >= gMin && ms <= gMax)
+                    if (rdSerialInRanges(ms, chosen2d.mainRanges))
                     {
                         if (!anyFromFrame)
                         {
                             anyFromFrame = true;
                             fVerts += f3.vertCount;
-                            g_rdGpu.lastSkippedDraws = f3.skipped;
-                            g_rdGpu.lastMaskedDraws = f3.masked;
+                            candSkipped = f3.skipped;
+                            candMasked = f3.masked;
                             if (f3.vpScaleZ != 0.0f)
                             {
-                                g_rdGpu.vpScaleZ = f3.vpScaleZ;
-                                g_rdGpu.vpOffsetZ = f3.vpOffsetZ;
+                                candVpScaleZ = f3.vpScaleZ;
+                                candVpOffsetZ = f3.vpOffsetZ;
                             }
                         }
-                        g_rdGpu.drawBatches.push_back(RdDrawBatch{b, slotIdx});
+                        candBatches.push_back(RdDrawBatch{b, slotIdx});
                         fIndices += b.count;
                     }
                 }
-                if (anyFromFrame)
-                    ++framesUsed;
             }
         }
-        g_rdGpu.frameVerts = fVerts;
-        g_rdGpu.frameIndices = fIndices;
-        g_rdGpu.frameTris = fIndices / 3u;
-        g_rdGpu.curAligned = (chosen2d != nullptr && !usedFallbackPrev);
-        g_rdGpu.curFallbackPrev = usedFallbackPrev;
-        g_rdGpu.curSpanned2 = (framesUsed >= 2u);
+
+        int candEmptyReason = 0; // FEAT-RD34: 1=Sempty, 2=missing, 3=overwritten, 4=skipped
+        if (chosen2d.mainRanges.empty())
+            candEmptyReason = 1;
+        else if (candBatches.empty())
+            candEmptyReason = (evictedMaxSnap >= chosen2d.mainRanges.front().first) ? 3 : 2;
+        else
+        {
+            for (const RdDrawBatch &db : candBatches)
+            {
+                if (isRd3dBatchDrawable(db.batch, g_rdGpu.slots[db.slotIdx], fbW, fbH))
+                    ++candDrawable3d;
+            }
+            if (candDrawable3d == 0u)
+                candEmptyReason = 4;
+        }
+
+        // FEAT-RD37: reject partially captured compositions (< 0.6 * exponential average), adapting after 4 consecutive
+        const uint32_t candSerials = chosen2d.mainSerialCount; // FEAT-RD37
+        bool rejectPartial = false; // FEAT-RD37
+        if (!(candDrawable3d == 0u && g_rdGpu.prevDrawn3dCount > 0u) &&
+            g_rdGpu.hasCompleteComposition && s_avgMainSerials > 0.0 &&
+            static_cast<double>(candSerials) < 0.6 * s_avgMainSerials) // FEAT-RD37
+        {
+            ++s_consecPartial; // FEAT-RD37
+            if (s_consecPartial < 4u) // FEAT-RD37
+                rejectPartial = true; // FEAT-RD37
+        }
+
+        // FEAT-RD34(b): if a composition would draw 0 3D batches while the previous had > 0, present the previous instead
+        if ((candDrawable3d == 0u && g_rdGpu.prevDrawn3dCount > 0u) || rejectPartial) // FEAT-RD34 // FEAT-RD37
+        {
+            if (rejectPartial) // FEAT-RD37
+                ++s_partialFrames; // FEAT-RD37
+            needRealign = false;
+        }
+        else
+        {
+            if (!g_rdGpu.hasCompleteComposition || s_avgMainSerials <= 0.0 || s_consecPartial >= 4u) // FEAT-RD37
+                s_avgMainSerials = static_cast<double>(candSerials); // FEAT-RD37
+            else // FEAT-RD37
+                s_avgMainSerials = 0.1 * static_cast<double>(candSerials) + 0.9 * s_avgMainSerials; // FEAT-RD37
+            s_consecPartial = 0u; // FEAT-RD37
+
+            usedNewComposition = true;
+            g_rdGpu.lastEmptyReason = candEmptyReason;
+            g_rdGpu.local2dScratch = chosen2d.verts;
+            g_rdGpu.local2dBatches = chosen2d.batches;
+            g_rdGpu.lastRtSkipped = chosen2d.rtSkipped;
+            g_rdGpu.lastPointLineSkipped = chosen2d.pointLineSkipped;
+            g_rdGpu.activeGMin = chosen2d.mainRanges.empty() ? 0u : chosen2d.mainRanges.front().first;
+            hasNew2d = true;
+
+            g_rdGpu.drawBatches.swap(candBatches);
+            g_rdGpu.frameVerts = fVerts;
+            g_rdGpu.frameIndices = fIndices;
+            g_rdGpu.frameTris = fIndices / 3u;
+            g_rdGpu.lastSkippedDraws = candSkipped;
+            g_rdGpu.lastMaskedDraws = candMasked;
+            g_rdGpu.vpScaleZ = candVpScaleZ;
+            g_rdGpu.vpOffsetZ = candVpOffsetZ;
+            g_rdGpu.lastMainSerialCount = chosen2d.mainSerialCount;
+            g_rdGpu.hasCompleteComposition = true;
+
+            std::lock_guard<std::mutex> lock(g_rdMutex); // FEAT-RD34(a): pin slots referenced by last presented composition
+            for (size_t i = 0; i < kRdSlotCount; ++i)
+                g_rdPinnedSlots[i] = false;
+            for (const RdDrawBatch &db : g_rdGpu.drawBatches)
+            {
+                if (db.slotIdx < kRdSlotCount)
+                    g_rdPinnedSlots[db.slotIdx] = true;
+            }
+        }
     }
 
     if (hasNew2d) // FEAT-RD8
     {
         // FEAT-RD16: Hor+ 2D HUD layout when PS2X_ASPECT=fill (g_rdAspectK > 1)
-        const float fbW = static_cast<float>(g_rdPresentW.load(std::memory_order_relaxed));
-        const float fbH = static_cast<float>(g_rdPresentH.load(std::memory_order_relaxed));
         if (g_rdAspectK > 1.0f && fbW > 0.0f && fbH > 0.0f && w > 0.0f && h > 0.0f)
         {
             const float s = h / fbH;
@@ -1189,6 +1403,20 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         uploadRdVbo(g_rdGpu.vao2d, g_rdGpu.vbo2d, g_rdGpu.vbo2dCapVerts, g_rdGpu.local2dScratch);
     }
 
+    static const bool s_draw2d = []{ const char *e = std::getenv("PS2X_RD_2D"); return !(e && e[0] == '0'); }(); // FEAT-RD9
+    const bool hasDrawable3d = usedNewComposition ? (candDrawable3d > 0u) : (g_rdGpu.prevDrawn3dCount > 0u); // FEAT-RD34
+    const bool hasDrawable2d = (s_draw2d && g_rdGpu.gpu2dVertCount > 0 && g_rdGpu.vao2d != 0 && !g_rdGpu.local2dBatches.empty()); // FEAT-RD34
+    if (g_rdGpu.shader.id == 0 || (!hasDrawable3d && !hasDrawable2d)) // FEAT-RD34(c): never call the clear without drawing something
+    {
+        ++g_rdGpu.drawsEmpty;
+        if (g_rdGpu.lastEmptyReason == 1) ++g_rdGpu.drawsEmptySempty;
+        else if (g_rdGpu.lastEmptyReason == 2) ++g_rdGpu.drawsEmptyMissing;
+        else if (g_rdGpu.lastEmptyReason == 3) ++g_rdGpu.drawsEmptyOverwritten;
+        else if (g_rdGpu.lastEmptyReason == 4) ++g_rdGpu.drawsEmptySkipped;
+        else ++g_rdGpu.drawsEmptySempty;
+        return ps2xRdTakeoverOn();
+    }
+
     rlDrawRenderBatchActive();
     ps2xRdTexTickFrame(); // FEAT-RD3
 
@@ -1204,6 +1432,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     const int vh = static_cast<int>(h * scaleY);
 
     rlViewport(vx, vy, vw, vh);
+    // FEAT-RD34b: force known GL state (raylib/ImGui may have changed it since our last frame)
+    rlDisableScissorTest();
+    rlColorMask(true, true, true, true);
+    g_rdMaskCur = 15;
+    rlEnableDepthMask();
+    rlEnableColorBlend();
+    rlSetBlendMode(RL_BLEND_ALPHA);
+    rlDisableVertexArray();
     { // FEAT-RD9: clear box alpha to 0 (colour untouched via mask)
         rlEnableScissorTest();
         rlScissor(vx, vy, vw, vh);
@@ -1214,15 +1450,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         rlDisableScissorTest();
     }
     rlEnableDepthTest();
-    g_rdc.reset(); g_rdc.calls = 0; g_rdc.depthTest = 1; // FEAT-RD15
+    g_rdc.reset(); g_rdc.calls = 0; g_rdc.depthTest = 1; g_rdc.depthMask = 1; // FEAT-RD15 // FEAT-RD34b
     rlDisableBackfaceCulling();
 
     uint64_t unsupBlend = 0; // FEAT-RD2
     uint64_t approxAd = 0;   // FEAT-RD7
     uint64_t partialMask = 0; // FEAT-RD9
-    static const bool s_draw2d = []{ const char *e = std::getenv("PS2X_RD_2D"); return !(e && e[0] == '0'); }(); // FEAT-RD9
     static const bool s_2dDepth = []{ const char *e = std::getenv("PS2X_RD_2DZ"); return !(e && e[0] == '0'); }(); // FEAT-RD11
     uint64_t draws2dThisFrame = 0; // FEAT-RD8
+    uint32_t drawn3dThisFrame = 0u; // FEAT-RD34
     uint64_t ztested2dThisFrame = 0; // FEAT-RD11
     uint64_t zclears2dThisFrame = 0; // FEAT-RD20
     struct RdPassEnt { uint32_t fbp, xo, yo, sx0, sy0, sx1, sy1; float vox, voy; uint32_t n; }; // FEAT-RD22
@@ -1231,6 +1467,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     static const bool s_passLog = []{ const char *e = std::getenv("PS2X_RD_PASSLOG"); return e && e[0] == '1'; }(); // FEAT-RD22
     static uint64_t s_scissorSkipped = 0; // FEAT-RD22
     static uint64_t s_noState3dTotal = 0, s_rtPass3dTotal = 0; // FEAT-RD23
+    static uint32_t s_tailClearsDropped = 0u; // FEAT-RD36
     if ((!g_rdGpu.drawBatches.empty() || g_rdGpu.gpu2dVertCount > 0) && g_rdGpu.shader.id != 0) // FEAT-RD8 // FEAT-RD14
     {
         rlEnableShader(g_rdGpu.shader.id);
@@ -1249,12 +1486,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         unsigned int curVao = 0u; // FEAT-RD14
         int prevBlend = -1; // FEAT-RD2b
         size_t i2d = 0; // FEAT-RD8
-        const size_t n2d = (s_draw2d && g_rdGpu.gpu2dVertCount > 0 && g_rdGpu.vao2d != 0) ? g_rdGpu.local2dBatches.size() : 0;
+        size_t n2d = (s_draw2d && g_rdGpu.gpu2dVertCount > 0 && g_rdGpu.vao2d != 0) ? g_rdGpu.local2dBatches.size() : 0; // FEAT-RD36
 
         bool scisOn = false; // FEAT-RD22
         int scisRect[4] = {0, 0, 0, 0};
         auto applyScissor = [&](uint64_t packed, bool have) -> bool // FEAT-RD22: false = batch fully outside, skip
         {
+            if (!isRdScissorVisible(packed, have, fbSize[0], fbSize[1])) // FEAT-RD34
+                return false;
             bool on = false;
             int r[4] = {0, 0, 0, 0};
             if (have && packed != 0ull && fbSize[0] > 0.0f && fbSize[1] > 0.0f)
@@ -1263,8 +1502,6 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const float x1 = static_cast<float>((packed >> 16) & 0x7FFull);
                 const float y0 = static_cast<float>((packed >> 32) & 0x7FFull);
                 const float y1 = static_cast<float>((packed >> 48) & 0x7FFull);
-                if (x0 >= fbSize[0] || y0 >= fbSize[1] || x1 < x0 || y1 < y0)
-                    return false;
                 const float k = (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f;
                 const float xe = std::min(x1 + 1.0f, fbSize[0]);
                 const float ye = std::min(y1 + 1.0f, fbSize[1]);
@@ -1288,6 +1525,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 {
                     if (!scisOn)
                         rlEnableScissorTest();
+                    // FEAT-RD34b: always issue the rectangle
                     rlScissor(r[0], r[1], r[2], r[3]);
                     std::memcpy(scisRect, r, sizeof(r));
                 }
@@ -1529,6 +1767,20 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 else
                     rlDrawVertexArray(static_cast<int>(b0.first), static_cast<int>(totalCount));
                 ++draws2dThisFrame;
+                { // PROBE-RD35
+                    Rd35Rec &r = g_rd35.last[g_rd35.n2d % 3u];
+                    r.prim = b0.prim; r.alpha = b0.alpha; r.frame = b0.frame; r.tex0 = b0.tex0;
+                    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+                    const size_t e = std::min<size_t>(g_rdGpu.local2dScratch.size(), static_cast<size_t>(b0.first) + b0.count);
+                    for (size_t vi = b0.first; vi < e; ++vi)
+                    {
+                        const RdVert &v = g_rdGpu.local2dScratch[vi];
+                        x0 = std::min(x0, v.pos[0]); x1 = std::max(x1, v.pos[0]);
+                        y0 = std::min(y0, v.pos[1]); y1 = std::max(y1, v.pos[1]);
+                    }
+                    r.bb[0] = x0; r.bb[1] = y0; r.bb[2] = x1; r.bb[3] = y1;
+                    ++g_rd35.n2d;
+                }
                 if (use2dZ) // FEAT-RD11
                     ++ztested2dThisFrame;
                 if (zWrite2d) // FEAT-RD20
@@ -1624,18 +1876,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 ++g_rdGpu.rtSkipped3d;
                 continue;
             }
-            { // FEAT-RD23: only main-pass batches with GS-thread state are drawn
+            { // FEAT-RD23 // FEAT-RD33: only batches with GS-thread state are drawn (S already encodes main pass)
                 uint64_t xoMp = 0ull;
                 if (!gsOk || !ps2xRdLookupXyoff(batch.kickSerial, xoMp))
                 {
                     if (rdbDump) rdb3d(3); // PROBE-RD29
                     ++s_noState3dTotal;
-                    continue;
-                }
-                if (!ps2xRdIsMainPass(static_cast<uint32_t>(frame & 0x1FFull), xoMp))
-                {
-                    if (rdbDump) rdb3d(2); // PROBE-RD29
-                    ++s_rtPass3dTotal;
                     continue;
                 }
             }
@@ -1913,6 +2159,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 }
                 g_camTl.add3d(batch.camHash, batch.kickSerial, batch.count / 3u, x0, y0, x1, y1, hb);
             }
+            ++drawn3dThisFrame; // FEAT-RD34
             if (afail != 0) // FEAT-RD30
             {
                 const int sMask = g_rdMaskCur;
@@ -1952,6 +2199,49 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 ps2xSafeLog("%s", rd24Ref[r].c_str());
             }
         }
+        { // FEAT-RD36: drop next frame's full-screen clear from the 2D tail
+            const float vpW = (fbSize[0] > 0.0f) ? fbSize[0] : 512.0f;
+            const float vpH = (fbSize[1] > 0.0f) ? fbSize[1] : 448.0f;
+            for (size_t k = i2d; k < n2d; ++k)
+            {
+                const Rd2DBatch &b = g_rdGpu.local2dBatches[k];
+                if (b.count == 0u)
+                    continue;
+                if (((b.prim >> 4) & 1ull) != 0ull)
+                    continue;
+                const uint64_t ptype = b.prim & 7ull;
+                if (ptype != 6ull && ptype != 3ull && ptype != 4ull && ptype != 5ull)
+                    continue;
+                if (((b.frame >> 32) & 0xFFFFFFull) != 0ull)
+                    continue;
+                const bool abeOff = ((b.prim >> 6) & 1ull) == 0ull;
+                const bool alphaReplace = (b.alpha & 0xFFull) == 0x44ull;
+                if (!abeOff && !alphaReplace)
+                    continue;
+                float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+                uint8_t maxA = 0u;
+                const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size());
+                for (size_t vi = b.first; vi < e2; ++vi)
+                {
+                    const RdVert &v = g_rdGpu.local2dScratch[vi];
+                    x0 = std::min(x0, v.pos[0]); x1 = std::max(x1, v.pos[0]);
+                    y0 = std::min(y0, v.pos[1]); y1 = std::max(y1, v.pos[1]);
+                    if (v.rgba[3] > maxA)
+                        maxA = v.rgba[3];
+                }
+                if (x1 < x0 || y1 < y0)
+                    continue;
+                x0 = std::max(0.0f, std::min(x0, vpW)); x1 = std::max(0.0f, std::min(x1, vpW));
+                y0 = std::max(0.0f, std::min(y0, vpH)); y1 = std::max(0.0f, std::min(y1, vpH));
+                if ((x1 - x0) * (y1 - y0) < 0.90f * vpW * vpH)
+                    continue;
+                if (!abeOff && maxA < 0x80u)
+                    continue;
+                n2d = k;
+                ++s_tailClearsDropped;
+                break;
+            }
+        }
         draw2dUntil(0u, true); // FEAT-RD8
         if (rdbDump) // PROBE-RD29
             g_rdbCensus.dump();
@@ -1969,6 +2259,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         rlDisableShader();
     }
 
+    rlDisableScissorTest(); // FEAT-RD34b
     rlColorMask(true, true, true, true); // FEAT-RD9
     g_rdMaskCur = 15;
     (void)partialMask;
@@ -1997,10 +2288,45 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         }
     }
 
+    g_rd35.n3d = drawn3dThisFrame; // PROBE-RD35
+    g_rd35.usedNew = usedNewComposition;
+    g_rd35.chosen2d = chosen2dIdx;
+    g_rd35.draws2d = draws2dThisFrame; // PROBE-RD35
+    g_rd35.mainSerials = 0u;
+    if (chosen2dIdx >= 0)
+        for (const auto &mr : g_rdGpu.frames2d[chosen2dIdx].mainRanges)
+            g_rd35.mainSerials += mr.last - mr.first + 1u;
+    g_rd35.glErr = glGetError();
+    g_rd35.valid = true;
     ++g_rdGpu.frames;
-    if (g_rdGpu.curAligned) ++g_rdGpu.alignedFrames; // FEAT-RD13
-    if (g_rdGpu.curFallbackPrev) ++g_rdGpu.fallbackPrevFrames; // FEAT-RD13
-    if (g_rdGpu.curSpanned2) ++g_rdGpu.spanned2Frames; // FEAT-RD13
+    if (drawn3dThisFrame > 0u) // FEAT-RD34
+    {
+        g_rdGpu.prevDrawn3dCount = drawn3dThisFrame;
+        if (usedNewComposition)
+            ++g_rdGpu.drawsNew;
+        else
+            ++g_rdGpu.drawsPrev;
+    }
+    else
+    {
+        ++g_rdGpu.drawsEmpty;
+        if (g_rdGpu.lastEmptyReason == 1) ++g_rdGpu.drawsEmptySempty;
+        else if (g_rdGpu.lastEmptyReason == 2) ++g_rdGpu.drawsEmptyMissing;
+        else if (g_rdGpu.lastEmptyReason == 3) ++g_rdGpu.drawsEmptyOverwritten;
+        else if (g_rdGpu.lastEmptyReason == 4) ++g_rdGpu.drawsEmptySkipped;
+        else ++g_rdGpu.drawsEmptySempty;
+    }
+    if (usedNewComposition && chosen2dIdx >= 0) // FEAT-RD33 // FEAT-RD34
+    {
+        ++g_rdGpu.composedFrames;
+        if (chosen2dIdx == 1)
+            ++g_rdGpu.usedPrev2dFrames;
+    }
+    else
+    {
+        ++g_rdGpu.redrawPrevFrames;
+    }
+    g_rdGpu.totalMainSerials += static_cast<uint64_t>(g_rdGpu.lastMainSerialCount); // FEAT-RD33
     g_rdGpu.totalTris += g_rdGpu.frameTris; // FEAT-RD14
     g_rdGpu.totalVerts += g_rdGpu.frameVerts; // FEAT-RD14
     g_rdGpu.totalIndices += g_rdGpu.frameIndices; // FEAT-RD14
@@ -2049,10 +2375,24 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     static_cast<double>(g_rdGpu.total2dZclears) / fr, // FEAT-RD20
                     g_rdGpu.vpScaleZ,
                     g_rdGpu.vpOffsetZ); // FEAT-RD11
-        ps2xSafeLog("[rd] aligned=%u fallbackPrev=%u spanned2=%u\n",
-                    g_rdGpu.alignedFrames,
-                    g_rdGpu.fallbackPrevFrames,
-                    g_rdGpu.spanned2Frames); // FEAT-RD13
+        ps2xSafeLog("[rd] composed=%u redrawPrev=%u usedPrev2d=%u mainSerials/frame=%.0f noMainFrames=%u repeatFrames=%u classicFrames=%u tailClears=%u partial=%u\n",
+                    g_rdGpu.composedFrames,
+                    g_rdGpu.redrawPrevFrames,
+                    g_rdGpu.usedPrev2dFrames,
+                    static_cast<double>(g_rdGpu.totalMainSerials) / fr,
+                    g_rdGpu.noMainFrames,
+                    g_rdRepeatFrames.load(std::memory_order_relaxed),
+                    g_rdClassicFramesTotal.load(std::memory_order_relaxed),
+                    s_tailClearsDropped,
+                    s_partialFrames); // FEAT-RD33 // FEAT-RD33b // FEAT-RD33c // FEAT-RD36 // FEAT-RD37
+        ps2xSafeLog("[rd] draws: new=%u prev=%u empty=%u (Sempty=%u missing=%u overwritten=%u skipped=%u)\n",
+                    g_rdGpu.drawsNew,
+                    g_rdGpu.drawsPrev,
+                    g_rdGpu.drawsEmpty,
+                    g_rdGpu.drawsEmptySempty,
+                    g_rdGpu.drawsEmptyMissing,
+                    g_rdGpu.drawsEmptyOverwritten,
+                    g_rdGpu.drawsEmptySkipped); // FEAT-RD34
         ps2xSafeLog("[rd] gsState=%u parsedFallback=%u stateChangesInKick=%u mergedSpan=%u\n",
                     g_rdGpu.gsStateCount,
                     g_rdGpu.parsedFallbackCount,
@@ -2066,4 +2406,20 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         g_rdGpu.parsedFallbackCount = 0u;
     }
     return true;
+}
+
+void ps2xRd35Describe(char *buf, size_t cap) // PROBE-RD35
+{
+    int o = std::snprintf(buf, cap, "valid=%d drawn3d=%u drawn2d=%u n2d=%u usedNewComp=%d redrawPrev=%d chosen2d=%d mainSerials=%u glErr=0x%x",
+                          g_rd35.valid ? 1 : 0, g_rd35.n3d, g_rd35.draws2d, g_rd35.n2d, g_rd35.usedNew ? 1 : 0, g_rd35.usedNew ? 0 : 1, g_rd35.chosen2d,
+                          g_rd35.mainSerials, g_rd35.glErr);
+    const uint32_t cnt = g_rd35.n2d < 3u ? g_rd35.n2d : 3u;
+    for (uint32_t k = 0; k < cnt && o > 0 && static_cast<size_t>(o) < cap; ++k)
+    {
+        const Rd35Rec &r = g_rd35.last[(g_rd35.n2d - 1u - k) % 3u];
+        o += std::snprintf(buf + o, cap - static_cast<size_t>(o), " | 2d[-%u] prim=%llx alpha=%llx frame=%llx tex0=%llx bb=%.0f,%.0f-%.0f,%.0f",
+                           k, static_cast<unsigned long long>(r.prim), static_cast<unsigned long long>(r.alpha),
+                           static_cast<unsigned long long>(r.frame), static_cast<unsigned long long>(r.tex0),
+                           static_cast<double>(r.bb[0]), static_cast<double>(r.bb[1]), static_cast<double>(r.bb[2]), static_cast<double>(r.bb[3]));
+    }
 }

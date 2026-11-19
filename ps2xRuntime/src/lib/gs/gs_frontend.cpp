@@ -84,6 +84,8 @@ static uint32_t s_rd2dTexCounter = 1u;      // FEAT-RD8
 bool g_rdCurDrawIsGeom = false;             // FEAT-RD18
 bool g_rdClassicPresentRequested = false;   // FEAT-RD18
 std::atomic<bool> g_rdFrameIsClassic{false}; // FEAT-RD18
+extern std::atomic<uint32_t> g_rdRepeatFrames;       // FEAT-RD33c
+extern std::atomic<uint32_t> g_rdClassicFramesTotal; // FEAT-RD33c
 static std::atomic<bool> s_rdFrameHasGeom{false}; // FEAT-RD18
 static std::atomic<uint32_t> s_rdFrameGeomFbp{0xFFFFFFFFu}; // FEAT-RD18b
 static std::atomic<uint32_t> s_rdDispFbps[4] = {{0xFFFFFFFFu}, {0xFFFFFFFFu}, {0xFFFFFFFFu}, {0xFFFFFFFFu}}; // FEAT-RD19
@@ -233,7 +235,20 @@ struct Rd2DBatch // FEAT-RD8
     uint64_t scissor; // FEAT-RD22
 };
 
-extern void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped, uint32_t gMin, uint32_t gMax); // FEAT-RD8 // FEAT-RD13
+extern void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped, uint32_t gMin, uint32_t gMax, const uint32_t *mainRangePairs, size_t numMainRanges); // FEAT-RD8 // FEAT-RD13 // FEAT-RD33
+
+struct RdKickRec // FEAT-RD33
+{
+    uint32_t serial;
+    uint32_t fbp;
+    uint64_t xyoff;
+    uint32_t scW; // FEAT-RD33b
+    uint32_t scH; // FEAT-RD33b
+};
+static bool rdScissorQualifies(uint32_t w, uint32_t h) // FEAT-RD33b: >=90% of 512x448 (fallback thresholds 500x400)
+{
+    return w >= 500u && h >= 400u;
+}
 
 static std::mutex s_rd2dCapMutex; // FEAT-RD8
 static std::vector<RdVert> s_rd2dVerts; // FEAT-RD8
@@ -242,6 +257,8 @@ static uint32_t s_rd2dRtSkipped = 0u; // FEAT-RD8
 static uint32_t s_rd2dPointLineSkipped = 0u; // FEAT-RD8
 static uint32_t s_rd2dGMin = 0u; // FEAT-RD13
 static uint32_t s_rd2dGMax = 0u; // FEAT-RD13
+static std::vector<RdKickRec> s_rdKickRecs; // FEAT-RD33
+static uint32_t s_rdLastKickRecSerial = 0u; // FEAT-RD33
 
 static uint64_t rdPackTex0(const GSTex0Reg &t) // FEAT-RD8
 {
@@ -1382,7 +1399,12 @@ void GS::latchHostPresentationFrame()
     const bool takeover = ps2xRdTakeoverOn(); // FEAT-RD12
     const bool frameHasGeom = s_rdFrameHasGeom.exchange(false, std::memory_order_acq_rel); // FEAT-RD18
     rdRollPassFrame(); // FEAT-RD23
-    const bool useClassic = takeover && !frameHasGeom; // FEAT-RD18
+    static uint32_t s_rdEmptyLatches = 0u; // FEAT-RD33c
+    if (frameHasGeom) s_rdEmptyLatches = 0u; else if (s_rdEmptyLatches < 1000000u) ++s_rdEmptyLatches; // FEAT-RD33c
+    const bool useRepeat = takeover && !frameHasGeom && s_rdEmptyLatches < 8u; // FEAT-RD33c
+    const bool useClassic = takeover && !frameHasGeom && !useRepeat; // FEAT-RD18 // FEAT-RD33c
+    if (useRepeat) g_rdRepeatFrames.fetch_add(1, std::memory_order_relaxed); // FEAT-RD33c
+    if (useClassic) g_rdClassicFramesTotal.fetch_add(1, std::memory_order_relaxed); // FEAT-RD33c
     const uint32_t frameGeomFbp = s_rdFrameGeomFbp.exchange(0xFFFFFFFFu, std::memory_order_acq_rel); // FEAT-RD18b
     if (!takeover || useClassic) // FEAT-RD18
     {
@@ -1469,16 +1491,21 @@ void GS::latchHostPresentationFrame()
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp != 0xFFFFFFFFu ? displayFbp : 0u, sourceFbp, width, height, usedPreferred);
         g_hostPresentSeq.fetch_add(1, std::memory_order_release);
-        if (ps2xRdViewOn()) // FEAT-RD8 // FEAT-RD18
+        if (ps2xRdViewOn() && !useRepeat) // FEAT-RD8 // FEAT-RD18 // FEAT-RD33c: repeat frames publish nothing (previous composition + 2D list redrawn)
         {
             static std::vector<RdVert> s_pubVerts;
             static std::vector<Rd2DBatch> s_pubBatches;
+            static std::vector<RdKickRec> s_pubKickRecs; // FEAT-RD33
+            static std::vector<uint32_t> s_pubSerials;   // FEAT-RD33
+            static std::vector<uint32_t> s_pubRanges;    // FEAT-RD33
             uint32_t rtSk = 0u, plSk = 0u;
             uint32_t gMin = 0u, gMax = 0u; // FEAT-RD13
             {
                 std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
                 s_pubVerts.swap(s_rd2dVerts);
                 s_pubBatches.swap(s_rd2dBatches);
+                s_pubKickRecs.swap(s_rdKickRecs); // FEAT-RD33
+                s_rdLastKickRecSerial = 0u;       // FEAT-RD33
                 rtSk = s_rd2dRtSkipped;
                 plSk = s_rd2dPointLineSkipped;
                 gMin = s_rd2dGMin; // FEAT-RD13
@@ -1487,6 +1514,75 @@ void GS::latchHostPresentationFrame()
                 s_rd2dPointLineSkipped = 0u;
                 s_rd2dGMin = 0u; // FEAT-RD13
                 s_rd2dGMax = 0u; // FEAT-RD13
+            }
+            // FEAT-RD33: pick main pass of THIS frame = (display FBP, XYOFFSET) with most draws
+            s_pubSerials.clear();
+            s_pubRanges.clear();
+            if (!s_pubKickRecs.empty())
+            {
+                const bool hasDisp = ps2xRdHasDisplayFbp();
+                struct PassCnt { uint64_t key; uint32_t count; };
+                std::vector<PassCnt> counts;
+                counts.reserve(8);
+                for (const RdKickRec &rec : s_pubKickRecs)
+                {
+                    if (hasDisp && !ps2xRdIsDisplayFbp(rec.fbp))
+                        continue;
+                    if (!rdScissorQualifies(rec.scW, rec.scH)) // FEAT-RD33b
+                        continue;
+                    const uint64_t k = rdPassKey(rec.fbp, rec.xyoff & 0xFFFFull, (rec.xyoff >> 32) & 0xFFFFull);
+                    bool found = false;
+                    for (PassCnt &pc : counts)
+                    {
+                        if (pc.key == k)
+                        {
+                            ++pc.count;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found)
+                        counts.push_back({k, 1u});
+                }
+                uint64_t bestKey = ~0ull;
+                uint32_t bestCnt = 0u;
+                for (const PassCnt &pc : counts)
+                {
+                    if (pc.count > bestCnt)
+                    {
+                        bestCnt = pc.count;
+                        bestKey = pc.key;
+                    }
+                }
+                if (bestCnt > 0u)
+                {
+                    s_pubSerials.reserve(s_pubKickRecs.size());
+                    for (const RdKickRec &rec : s_pubKickRecs)
+                    {
+                        if (hasDisp && !ps2xRdIsDisplayFbp(rec.fbp))
+                            continue;
+                        if (!rdScissorQualifies(rec.scW, rec.scH)) // FEAT-RD33b
+                            continue;
+                        const uint64_t k = rdPassKey(rec.fbp, rec.xyoff & 0xFFFFull, (rec.xyoff >> 32) & 0xFFFFull);
+                        if (k == bestKey)
+                            s_pubSerials.push_back(rec.serial);
+                    }
+                    std::sort(s_pubSerials.begin(), s_pubSerials.end());
+                    s_pubSerials.erase(std::unique(s_pubSerials.begin(), s_pubSerials.end()), s_pubSerials.end());
+                    for (uint32_t s : s_pubSerials)
+                    {
+                        if (s_pubRanges.empty() || s > s_pubRanges.back() + 1u)
+                        {
+                            s_pubRanges.push_back(s);
+                            s_pubRanges.push_back(s);
+                        }
+                        else
+                        {
+                            s_pubRanges.back() = s;
+                        }
+                    }
+                }
+                s_pubKickRecs.clear();
             }
             const uint32_t filterFbp = (frameHasGeom && frameGeomFbp != 0xFFFFFFFFu) ? frameGeomFbp : ((displayFbp != 0xFFFFFFFFu) ? displayFbp : s_rdMainFbp); // FEAT-RD18b
             size_t keptVerts = 0u;
@@ -1514,9 +1610,10 @@ void GS::latchHostPresentationFrame()
             }
             s_pubVerts.resize(keptVerts);
             s_pubBatches.resize(keptBatches);
-            ps2xRdPublish2D(s_pubVerts.data(), s_pubVerts.size(), s_pubBatches.data(), s_pubBatches.size(), rtSk, plSk, gMin, gMax); // FEAT-RD13
+            ps2xRdPublish2D(s_pubVerts.data(), s_pubVerts.size(), s_pubBatches.data(), s_pubBatches.size(), rtSk, plSk, gMin, gMax, s_pubRanges.data(), s_pubRanges.size() / 2u); // FEAT-RD13 // FEAT-RD33
             s_pubVerts.clear();
             s_pubBatches.clear();
+            s_pubRanges.clear();
 
             static uint32_t s_rdClassicFrames = 0u;
             static uint32_t s_rdRdFrames = 0u;
@@ -3315,6 +3412,23 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
     const bool isGeomKick = (s_rdCurSerial & 0x40000000u) != 0u; // FEAT-RD10
     if (isGeomKick) // FEAT-RD8b // FEAT-RD10 // FEAT-RD18
     {
+        if (ps2xRdViewOn()) // FEAT-RD33: record (serial masked, FBP, XYOFFSET) once per serial
+        {
+            const uint32_t maskedS = s_rdCurSerial & 0x3FFFFFFFu;
+            if (maskedS != 0u)
+            {
+                const uint32_t fbp = batch.state.context.frame.fbp & 0x1FFu;
+                const uint64_t xyoff = static_cast<uint64_t>(batch.state.context.xyoffset.ofx & 0xFFFFu) |
+                                       (static_cast<uint64_t>(batch.state.context.xyoffset.ofy & 0xFFFFu) << 32);
+                std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+                if (maskedS != s_rdLastKickRecSerial)
+                {
+                    s_rdLastKickRecSerial = maskedS;
+                    const GSScissorReg &sc = batch.state.context.scissor; // FEAT-RD33b
+                    s_rdKickRecs.push_back({maskedS, fbp, xyoff, static_cast<uint32_t>(sc.x1) + 1u - sc.x0, static_cast<uint32_t>(sc.y1) + 1u - sc.y0});
+                }
+            }
+        }
         s_rdMainFbp = batch.state.context.frame.fbp;
         rdNotePassKick(batch.state.context.frame.fbp, static_cast<uint64_t>(batch.state.context.xyoffset.ofx), static_cast<uint64_t>(batch.state.context.xyoffset.ofy)); // FEAT-RD23
         s_rdFrameHasGeom.store(true, std::memory_order_relaxed);
@@ -3500,6 +3614,7 @@ void GS::flushPendingDraws() const
     if (m_backend)
     {
         g_rdCurDrawIsGeom = s_rdRunIsGeom && (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(m_runState.context.frame.fbp)) &&
+            rdScissorQualifies(static_cast<uint32_t>(m_runState.context.scissor.x1) + 1u - m_runState.context.scissor.x0, static_cast<uint32_t>(m_runState.context.scissor.y1) + 1u - m_runState.context.scissor.y0) && // FEAT-RD33b
             ps2xRdIsMainPass(m_runState.context.frame.fbp, static_cast<uint64_t>(m_runState.context.xyoffset.ofx) | (static_cast<uint64_t>(m_runState.context.xyoffset.ofy) << 32)); // FEAT-RD23 // FEAT-RD18 // FEAT-RD19: off-screen RT draws still rasterised
         const uint64_t gqS0 = __rdtsc(); // PROBE-GQ2
         m_backend->SubmitRun(m_runState, m_runPrims.data(), m_runPrims.size());

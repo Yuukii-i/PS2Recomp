@@ -11,6 +11,7 @@ extern void ps2xDevConsoleInstall(PS2Runtime &); // FEAT-DF
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
+extern "C" __declspec(dllimport) void __stdcall glReadPixels(int, int, int, int, unsigned int, unsigned int, void *); // PROBE-RD35
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
 extern void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h); // FEAT-RD12
 extern std::atomic<bool> g_rdFrameIsClassic; // FEAT-RD18
@@ -6594,15 +6595,62 @@ void PS2Runtime::run()
             static bool s_rdShow = true; // FEAT-RD1
             if (ps2xRdViewOn() && IsKeyPressed(KEY_F11)) // FEAT-RD1
                 s_rdShow = !s_rdShow;
+            char rd35Path = 'd'; // PROBE-RD35
+            const bool rd35Upload = rdClassic || !ps2xRdTakeoverOn(); // UploadFrame ran this frame
             if (ps2xRdViewOn() && (s_rdShow || ps2xRdTakeoverOn()) && !rdClassic) // FEAT-RD1 // FEAT-RD12 // FEAT-RD18
             {
                 rlClearScreenBuffers();
                 if (!ps2xRdDraw(dstRect.x, dstRect.y, dstRect.width, dstRect.height))
+                {
                     DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+                    rd35Path = 'b'; // PROBE-RD35
+                }
+                else
+                    rd35Path = 'a'; // PROBE-RD35
             }
             else
             {
                 DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+                rd35Path = rdClassic ? 'c' : 'd'; // PROBE-RD35
+            }
+            if (ps2xRdViewOn()) // PROBE-RD35
+            {
+                extern void ps2xRd35Describe(char *buf, size_t cap);
+                static uint32_t s_rb35Frames = 0u, s_rb35Black = 0u, s_rb35A = 0u, s_rb35B = 0u, s_rb35C = 0u, s_rb35Detail = 0u;
+                static auto s_rb35Last = std::chrono::steady_clock::now();
+                rlDrawRenderBatchActive();
+                ++s_rb35Frames;
+                if (rd35Path == 'a') ++s_rb35A; else if (rd35Path == 'b') ++s_rb35B; else if (rd35Path == 'c') ++s_rb35C;
+                unsigned sum = 0u;
+                unsigned maxv = 0u;
+                for (int gy = 0; gy < 8; ++gy)
+                    for (int gx = 0; gx < 8; ++gx)
+                    {
+                        unsigned char px[4] = {0, 0, 0, 0};
+                        const int sx = static_cast<int>(dstRect.x + dstRect.width * ((static_cast<float>(gx) + 0.5f) / 8.0f));
+                        const int sy = static_cast<int>(screenHeight - (dstRect.y + dstRect.height * ((static_cast<float>(gy) + 0.5f) / 8.0f)));
+                        glReadPixels(sx, sy, 1, 1, 0x1908u, 0x1401u, px);
+                        sum += px[0] + px[1] + px[2];
+                        maxv = std::max<unsigned>(maxv, std::max<unsigned>(px[0], std::max<unsigned>(px[1], px[2])));
+                    }
+                if (maxv < 12u)
+                {
+                    ++s_rb35Black;
+                    if (s_rb35Frames > 600u && s_rb35Detail < 8u)
+                    {
+                        ++s_rb35Detail;
+                        char d[1024];
+                        ps2xRd35Describe(d, sizeof(d));
+                        ps2xSafeLog("[rdblack] #%u path=%c uploadFrame=%d classic=%d takeover=%d sum=%u max=%u frame=%u %s\n", s_rb35Black, rd35Path,
+                                    rd35Upload ? 1 : 0, rdClassic ? 1 : 0, ps2xRdTakeoverOn() ? 1 : 0, sum, maxv, s_rb35Frames, d);
+                    }
+                }
+                const auto nowRb = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(nowRb - s_rb35Last).count() >= 5000)
+                {
+                    s_rb35Last = nowRb;
+                    ps2xSafeLog("[rdblack] frames=%u black=%u pathA=%u pathB=%u pathC=%u\n", s_rb35Frames, s_rb35Black, s_rb35A, s_rb35B, s_rb35C);
+                }
             }
             if (m_debugUiInitialized && m_debugUiDrawCallback)
             {
