@@ -1698,33 +1698,41 @@ void GS::latchHostPresentationFrame()
                         s_rdCutHoldStreak = 0u;
                         ++s_rdCutPub;
                         const size_t splitVert = (kb < s_rd2dBatches.size()) ? static_cast<size_t>(s_rd2dBatches[kb].first) : s_rd2dVerts.size();
-                        s_pubVerts.assign(s_rd2dVerts.begin(), s_rd2dVerts.begin() + splitVert);
-                        s_pubBatches.assign(s_rd2dBatches.begin(), s_rd2dBatches.begin() + kb);
-
-                        const size_t keptVertCnt = s_rd2dVerts.size() - splitVert;
-                        if (keptVertCnt > 0u && splitVert > 0u)
-                            std::memmove(s_rd2dVerts.data(), s_rd2dVerts.data() + splitVert, keptVertCnt * sizeof(RdVert));
-                        s_rd2dVerts.resize(keptVertCnt);
-
-                        const size_t keptBatchCnt = s_rd2dBatches.size() - kb;
-                        for (size_t i = 0u; i < keptBatchCnt; ++i)
+                        // FEAT-RD55: swap buffers and copy only the kept tail back (avoids double-copying the published prefix)
+                        s_pubVerts.swap(s_rd2dVerts);
+                        const size_t keptVertCnt = s_pubVerts.size() - splitVert;
+                        if (keptVertCnt > 0u)
                         {
-                            Rd2DBatch b = s_rd2dBatches[kb + i];
-                            b.first -= static_cast<uint32_t>(splitVert);
-                            s_rd2dBatches[i] = b;
+                            s_rd2dVerts.resize(keptVertCnt);
+                            std::memcpy(s_rd2dVerts.data(), s_pubVerts.data() + splitVert, keptVertCnt * sizeof(RdVert));
                         }
-                        s_rd2dBatches.resize(keptBatchCnt);
+                        s_pubVerts.resize(splitVert);
 
-                        s_pubKickRecs.clear();
-                        size_t keptKickCnt = 0u;
-                        for (size_t i = 0u; i < s_rdKickRecs.size(); ++i)
+                        s_pubBatches.swap(s_rd2dBatches);
+                        const size_t keptBatchCnt = s_pubBatches.size() - kb;
+                        if (keptBatchCnt > 0u)
                         {
-                            if (s_rdKickRecs[i].serial < sb)
-                                s_pubKickRecs.push_back(s_rdKickRecs[i]);
+                            s_rd2dBatches.resize(keptBatchCnt);
+                            for (size_t i = 0u; i < keptBatchCnt; ++i)
+                            {
+                                Rd2DBatch b = s_pubBatches[kb + i];
+                                b.first -= static_cast<uint32_t>(splitVert);
+                                s_rd2dBatches[i] = b;
+                            }
+                        }
+                        s_pubBatches.resize(kb);
+
+                        s_pubKickRecs.swap(s_rdKickRecs);
+                        s_rdKickRecs.clear();
+                        size_t pubKickCnt = 0u;
+                        for (size_t i = 0u; i < s_pubKickRecs.size(); ++i)
+                        {
+                            if (s_pubKickRecs[i].serial < sb)
+                                s_pubKickRecs[pubKickCnt++] = s_pubKickRecs[i];
                             else
-                                s_rdKickRecs[keptKickCnt++] = s_rdKickRecs[i];
+                                s_rdKickRecs.push_back(s_pubKickRecs[i]);
                         }
-                        s_rdKickRecs.resize(keptKickCnt);
+                        s_pubKickRecs.resize(pubKickCnt);
                         if (s_rdKickRecs.empty())
                             s_rdLastKickRecSerial = 0u;
 
@@ -1775,8 +1783,11 @@ void GS::latchHostPresentationFrame()
             {
                 const bool hasDisp = ps2xRdHasDisplayFbp();
                 struct PassCnt { uint64_t key; uint32_t count; };
-                std::vector<PassCnt> counts;
-                counts.reserve(8);
+                static std::vector<PassCnt> s_pubPassCounts; // FEAT-RD55: reuse static vectors
+                static std::vector<std::pair<uint32_t, uint32_t>> s_pubKickPassSerials; // FEAT-RD55: (passIdx, serial)
+                s_pubPassCounts.clear();
+                s_pubKickPassSerials.clear();
+                s_pubKickPassSerials.reserve(s_pubKickRecs.size());
                 for (const RdKickRec &rec : s_pubKickRecs)
                 {
                     if (hasDisp && !ps2xRdIsDisplayFbp(rec.fbp))
@@ -1784,41 +1795,40 @@ void GS::latchHostPresentationFrame()
                     if (!rdScissorQualifies(rec.scW, rec.scH)) // FEAT-RD33b
                         continue;
                     const uint64_t k = rdPassKey(rec.fbp, rec.xyoff & 0xFFFFull, (rec.xyoff >> 32) & 0xFFFFull);
-                    bool found = false;
-                    for (PassCnt &pc : counts)
+                    uint32_t passIdx = UINT32_MAX;
+                    for (uint32_t p = 0u; p < static_cast<uint32_t>(s_pubPassCounts.size()); ++p)
                     {
-                        if (pc.key == k)
+                        if (s_pubPassCounts[p].key == k)
                         {
-                            ++pc.count;
-                            found = true;
+                            ++s_pubPassCounts[p].count;
+                            passIdx = p;
                             break;
                         }
                     }
-                    if (!found)
-                        counts.push_back({k, 1u});
-                }
-                uint64_t bestKey = ~0ull;
-                uint32_t bestCnt = 0u;
-                for (const PassCnt &pc : counts)
-                {
-                    if (pc.count > bestCnt)
+                    if (passIdx == UINT32_MAX)
                     {
-                        bestCnt = pc.count;
-                        bestKey = pc.key;
+                        passIdx = static_cast<uint32_t>(s_pubPassCounts.size());
+                        s_pubPassCounts.push_back({k, 1u});
+                    }
+                    s_pubKickPassSerials.push_back({passIdx, rec.serial});
+                }
+                uint32_t bestIdx = 0u;
+                uint32_t bestCnt = 0u;
+                for (uint32_t p = 0u; p < static_cast<uint32_t>(s_pubPassCounts.size()); ++p)
+                {
+                    if (s_pubPassCounts[p].count > bestCnt)
+                    {
+                        bestCnt = s_pubPassCounts[p].count;
+                        bestIdx = p;
                     }
                 }
                 if (bestCnt > 0u)
                 {
-                    s_pubSerials.reserve(s_pubKickRecs.size());
-                    for (const RdKickRec &rec : s_pubKickRecs)
+                    s_pubSerials.reserve(bestCnt);
+                    for (const auto &ps : s_pubKickPassSerials)
                     {
-                        if (hasDisp && !ps2xRdIsDisplayFbp(rec.fbp))
-                            continue;
-                        if (!rdScissorQualifies(rec.scW, rec.scH)) // FEAT-RD33b
-                            continue;
-                        const uint64_t k = rdPassKey(rec.fbp, rec.xyoff & 0xFFFFull, (rec.xyoff >> 32) & 0xFFFFull);
-                        if (k == bestKey)
-                            s_pubSerials.push_back(rec.serial);
+                        if (ps.first == bestIdx)
+                            s_pubSerials.push_back(ps.second);
                     }
                     std::sort(s_pubSerials.begin(), s_pubSerials.end());
                     s_pubSerials.erase(std::unique(s_pubSerials.begin(), s_pubSerials.end()), s_pubSerials.end());
@@ -3811,38 +3821,32 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
 {
     if (!ps2xRdActive()) // FEAT-RD49: zero bookkeeping while forced classic
         return false;
-    if (ps2xRdActive()) // FEAT-RD13 // FEAT-RD49
+    const bool isGeomKick = (s_rdCurSerial & 0x40000000u) != 0u; // FEAT-RD10
+    const uint32_t maskedS = s_rdCurSerial & 0x3FFFFFFFu; // FEAT-RD13 // FEAT-RD55
+    if (maskedS != 0u) // FEAT-RD13 // FEAT-RD55: single capLock for GMin/GMax + KickRecs
     {
-        const uint32_t maskedS = s_rdCurSerial & 0x3FFFFFFFu;
-        if (maskedS != 0u)
+        const bool recordKick = isGeomKick && ps2xRdViewOn();
+        const GSScissorReg &sc = ctx.scissor; // FEAT-RD33b
+        const uint32_t scW = (sc.x1 >= sc.x0) ? (static_cast<uint32_t>(sc.x1) + 1u - sc.x0) : 0u;
+        const uint32_t scH = (sc.y1 >= sc.y0) ? (static_cast<uint32_t>(sc.y1) + 1u - sc.y0) : 0u;
+        const bool scOk = recordKick && rdScissorQualifies(scW, scH);
+        const uint32_t fbp = ctx.frame.fbp & 0x1FFu;
+        const uint64_t xyoff = scOk ? (static_cast<uint64_t>(ctx.xyoffset.ofx & 0xFFFFu) |
+                                       (static_cast<uint64_t>(ctx.xyoffset.ofy & 0xFFFFu) << 32)) : 0ull;
+        std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+        if (s_rd2dGMin == 0u || maskedS < s_rd2dGMin)
+            s_rd2dGMin = maskedS;
+        if (maskedS > s_rd2dGMax)
+            s_rd2dGMax = maskedS;
+        if (recordKick && maskedS != s_rdLastKickRecSerial)
         {
-            std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
-            if (s_rd2dGMin == 0u || maskedS < s_rd2dGMin)
-                s_rd2dGMin = maskedS;
-            if (maskedS > s_rd2dGMax)
-                s_rd2dGMax = maskedS;
+            s_rdLastKickRecSerial = maskedS;
+            if (scOk)
+                s_rdKickRecs.push_back({maskedS, fbp, xyoff, scW, scH});
         }
     }
-    const bool isGeomKick = (s_rdCurSerial & 0x40000000u) != 0u; // FEAT-RD10
     if (isGeomKick) // FEAT-RD8b // FEAT-RD10 // FEAT-RD18
     {
-        if (ps2xRdViewOn()) // FEAT-RD33: record (serial masked, FBP, XYOFFSET) once per serial
-        {
-            const uint32_t maskedS = s_rdCurSerial & 0x3FFFFFFFu;
-            if (maskedS != 0u)
-            {
-                const uint32_t fbp = ctx.frame.fbp & 0x1FFu;
-                const uint64_t xyoff = static_cast<uint64_t>(ctx.xyoffset.ofx & 0xFFFFu) |
-                                       (static_cast<uint64_t>(ctx.xyoffset.ofy & 0xFFFFu) << 32);
-                std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
-                if (maskedS != s_rdLastKickRecSerial)
-                {
-                    s_rdLastKickRecSerial = maskedS;
-                    const GSScissorReg &sc = ctx.scissor; // FEAT-RD33b
-                    s_rdKickRecs.push_back({maskedS, fbp, xyoff, static_cast<uint32_t>(sc.x1) + 1u - sc.x0, static_cast<uint32_t>(sc.y1) + 1u - sc.y0});
-                }
-            }
-        }
         s_rdMainFbp = ctx.frame.fbp;
         rdNotePassKick(ctx.frame.fbp, static_cast<uint64_t>(ctx.xyoffset.ofx), static_cast<uint64_t>(ctx.xyoffset.ofy)); // FEAT-RD23
         s_rdFrameHasGeom.store(true, std::memory_order_relaxed);
@@ -3991,48 +3995,56 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             b2d.zbuf = rdPackZbuf(ctx.zbuf);
             b2d.scissor = rdPackScissor(ctx); // FEAT-RD22
 
-            const uint32_t scW = (ctx.scissor.x1 >= ctx.scissor.x0) ? (static_cast<uint32_t>(ctx.scissor.x1) + 1u - ctx.scissor.x0) : 0u; // FEAT-RD54
-            const uint32_t scH = (ctx.scissor.y1 >= ctx.scissor.y0) ? (static_cast<uint32_t>(ctx.scissor.y1) + 1u - ctx.scissor.y0) : 0u;
             bool isFullScreenClear = false;
-            if (!prim.tme && (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
-                ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull && rdScissorQualifies(scW, scH))
+            if (rdFrameCutOn() && !prim.tme && addCount > 0u && // FEAT-RD55: O(1) early-out when FRAMECUT=0, TME=1, or count==0
+                (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
+                ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull)
             {
-                float minX = triVerts[0].pos[0], maxX = triVerts[0].pos[0];
-                float minY = triVerts[0].pos[1], maxY = triVerts[0].pos[1];
-                for (uint32_t k = 1u; k < addCount; ++k)
+                const uint32_t scW = (ctx.scissor.x1 >= ctx.scissor.x0) ? (static_cast<uint32_t>(ctx.scissor.x1) + 1u - ctx.scissor.x0) : 0u; // FEAT-RD54
+                const uint32_t scH = (ctx.scissor.y1 >= ctx.scissor.y0) ? (static_cast<uint32_t>(ctx.scissor.y1) + 1u - ctx.scissor.y0) : 0u;
+                if (rdScissorQualifies(scW, scH)) // FEAT-RD55: scissor test before bbox
                 {
-                    minX = std::min(minX, triVerts[k].pos[0]);
-                    maxX = std::max(maxX, triVerts[k].pos[0]);
-                    minY = std::min(minY, triVerts[k].pos[1]);
-                    maxY = std::max(maxY, triVerts[k].pos[1]);
+                    float minX = triVerts[0].pos[0], maxX = triVerts[0].pos[0];
+                    float minY = triVerts[0].pos[1], maxY = triVerts[0].pos[1];
+                    for (uint32_t k = 1u; k < addCount; ++k)
+                    {
+                        minX = std::min(minX, triVerts[k].pos[0]);
+                        maxX = std::max(maxX, triVerts[k].pos[0]);
+                        minY = std::min(minY, triVerts[k].pos[1]);
+                        maxY = std::max(maxY, triVerts[k].pos[1]);
+                    }
+                    const float cMinX = std::max(minX, static_cast<float>(ctx.scissor.x0));
+                    const float cMaxX = std::min(maxX, static_cast<float>(ctx.scissor.x1 + 1u));
+                    const float cMinY = std::max(minY, static_cast<float>(ctx.scissor.y0));
+                    const float cMaxY = std::min(maxY, static_cast<float>(ctx.scissor.y1 + 1u));
+                    const float bboxArea = (cMaxX > cMinX && cMaxY > cMinY) ? ((cMaxX - cMinX) * (cMaxY - cMinY)) : 0.0f;
+                    const float scArea = static_cast<float>(scW) * static_cast<float>(scH);
+                    isFullScreenClear = (bboxArea >= 0.9f * scArea);
                 }
-                const float cMinX = std::max(minX, static_cast<float>(ctx.scissor.x0));
-                const float cMaxX = std::min(maxX, static_cast<float>(ctx.scissor.x1 + 1u));
-                const float cMinY = std::max(minY, static_cast<float>(ctx.scissor.y0));
-                const float cMaxY = std::min(maxY, static_cast<float>(ctx.scissor.y1 + 1u));
-                const float bboxArea = (cMaxX > cMinX && cMaxY > cMinY) ? ((cMaxX - cMinX) * (cMaxY - cMinY)) : 0.0f;
-                const float scArea = static_cast<float>(scW) * static_cast<float>(scH);
-                isFullScreenClear = (scArea > 0.0f) && (bboxArea >= 0.9f * scArea);
             }
 
             std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
             b2d.first = static_cast<uint32_t>(s_rd2dVerts.size());
             b2d.count = addCount;
-            if (isFullScreenClear) // FEAT-RD54: record frame boundary with hysteresis
+            if (isFullScreenClear) // FEAT-RD54 // FEAT-RD55: record frame boundary with stricter hysteresis
             {
                 const uint32_t bSerial = b2d.afterSerial & 0x3FFFFFFFu;
                 const uint32_t bIdx = static_cast<uint32_t>(s_rd2dBatches.size());
+                const bool isOpaque = !prim.abe; // FEAT-RD55: ABE=0 strictly opaque
                 bool acceptBoundary = false;
                 if (!s_rdHasLastBoundary)
                 {
-                    acceptBoundary = true;
-                    s_rdHasLastBoundary = true;
-                    s_rdLastBoundarySerial = bSerial;
+                    if (isOpaque)
+                    {
+                        acceptBoundary = true;
+                        s_rdHasLastBoundary = true;
+                        s_rdLastBoundarySerial = bSerial;
+                    }
                 }
                 else if (bSerial >= s_rdLastBoundarySerial)
                 {
                     const uint32_t gap = bSerial - s_rdLastBoundarySerial;
-                    const double minGap = std::max(300.0, 0.5 * s_rdBoundaryEma);
+                    const double minGap = std::max(300.0, (isOpaque ? 0.75 : 0.9) * s_rdBoundaryEma); // FEAT-RD55
                     if (static_cast<double>(gap) >= minGap)
                     {
                         acceptBoundary = true;
@@ -4042,8 +4054,11 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                 }
                 else
                 {
-                    acceptBoundary = true;
-                    s_rdLastBoundarySerial = bSerial;
+                    if (isOpaque)
+                    {
+                        acceptBoundary = true;
+                        s_rdLastBoundarySerial = bSerial;
+                    }
                 }
                 if (acceptBoundary)
                 {
