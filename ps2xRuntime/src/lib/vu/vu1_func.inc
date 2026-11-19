@@ -8,6 +8,7 @@
 // whenever a lane of the result or of the product leaves the exponent window [2,253]. (vu1_hot_ops.h itself cannot be included in this TU: its fmacR
 // touches private VU1Interpreter members and needs `#define private public`.)
 #include <cfloat>
+#include <cmath> // FEAT-RD40
 #include <cstdlib> // PERF-V1G
 #include <filesystem> // PERF-SA
 #include <chrono> // FEAT-RD32
@@ -52,6 +53,10 @@ extern std::atomic<uint32_t> g_rdMergedSpan; // FEAT-RD17
 extern uint64_t ps2xRdLookupContentId(uint32_t serial); // FEAT-RD5
 extern bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_t &test, uint64_t &frame,
                               uint64_t &zbuf, uint64_t &tex0, uint64_t &tex1, uint64_t &clamp, uint64_t &texa, uint64_t &fba); // FEAT-RD17
+extern bool ps2xRdTakeoverOn(); // FEAT-RD40
+extern bool ps2xRdFastGeomOn(); // FEAT-RD40
+extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD40
+extern bool ps2xRdHasDisplayFbp(); // FEAT-RD40
 
 static inline bool rdSerialsCanMerge(uint32_t s0, uint32_t s1) // FEAT-RD17
 {
@@ -265,6 +270,127 @@ struct HScope // PROBE-VX: per-handler timing at the dispatch site; clip time is
     ~HScope() { end(__rdtsc()); }
 };
 } // namespace vx
+
+namespace hprof // PROBE-RD39
+{
+inline bool on() // PROBE-RD39
+{
+    static const bool v = []() { const char *e = std::getenv("PS2X_VU1_HPROF"); return e && e[0] == '1'; }();
+    return v;
+}
+inline double msPerTick() // PROBE-RD39
+{
+    static const double v = []() {
+        const auto t0 = std::chrono::steady_clock::now();
+        const uint64_t c0 = __rdtsc();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() < 20) {}
+        const auto t1 = std::chrono::steady_clock::now();
+        const uint64_t c1 = __rdtsc();
+        const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        return (c1 > c0) ? (ms / static_cast<double>(c1 - c0)) : 0.0;
+    }();
+    return v;
+}
+struct Entry // PROBE-RD39
+{
+    uint16_t pc = 0;
+    uint64_t ticks = 0;
+    uint64_t calls = 0;
+};
+struct St // PROBE-RD39
+{
+    uint64_t totalT = 0, takenT = 0, fallbackT = 0, recT = 0, undoT = 0, frames = 0;
+    Entry entries[64] = {};
+    uint32_t nEntries = 0;
+    uint32_t tick = 0;
+    std::chrono::steady_clock::time_point lastPrint{};
+    bool init = false;
+};
+static St g_st; // PROBE-RD39
+inline void addHandler(uint16_t pc, uint64_t ticks) // PROBE-RD39
+{
+    for (uint32_t i = 0; i < g_st.nEntries; ++i)
+    {
+        if (g_st.entries[i].pc == pc)
+        {
+            g_st.entries[i].ticks += ticks;
+            ++g_st.entries[i].calls;
+            return;
+        }
+    }
+    if (g_st.nEntries < 64u)
+    {
+        g_st.entries[g_st.nEntries++] = Entry{pc, ticks, 1ull};
+    }
+}
+inline void subtractHandler(uint16_t pc, uint64_t ticks) // PROBE-RD39
+{
+    for (uint32_t i = 0; i < g_st.nEntries; ++i)
+    {
+        if (g_st.entries[i].pc == pc)
+        {
+            g_st.entries[i].ticks = (g_st.entries[i].ticks > ticks) ? (g_st.entries[i].ticks - ticks) : 0ull;
+            return;
+        }
+    }
+}
+struct HScope // PROBE-RD39
+{
+    uint64_t t0 = 0;
+    uint16_t pc = 0;
+    void end()
+    {
+        if (t0)
+        {
+            addHandler(pc, __rdtsc() - t0);
+            t0 = 0;
+        }
+    }
+    void begin(uint16_t p)
+    {
+        end();
+        pc = p;
+        t0 = __rdtsc();
+    }
+    ~HScope() { end(); }
+};
+inline void maybeReport() // PROBE-RD39
+{
+    if ((++g_st.tick & 63u) != 0u)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    if (!g_st.init)
+    {
+        g_st.init = true;
+        g_st.lastPrint = now;
+        (void)msPerTick();
+        return;
+    }
+    const double sec = std::chrono::duration<double>(now - g_st.lastPrint).count();
+    if (sec < 5.0)
+        return;
+    const double fr = sec * 60.0; // PROBE-RD39: always ms per 1/60 s
+    const double k = msPerTick() / fr;
+    Entry sorted[64];
+    const uint32_t n = g_st.nEntries;
+    for (uint32_t i = 0; i < n; ++i)
+        sorted[i] = g_st.entries[i];
+    std::sort(sorted, sorted + n, [](const Entry &a, const Entry &b) { return a.ticks > b.ticks; });
+    char topBuf[512];
+    int pos = 0;
+    topBuf[0] = '\0';
+    for (uint32_t i = 0; i < n && i < 10u && pos < 460; ++i)
+    {
+        pos += std::snprintf(topBuf + pos, sizeof(topBuf) - static_cast<size_t>(pos), "%s%04X:%.2f/%.1f",
+                             i ? " " : "", sorted[i].pc, sorted[i].ticks * k, static_cast<double>(sorted[i].calls) / fr);
+    }
+    ::ps2xSafeLog("[vu1h] total=%.2f taken=%.2f fallback=%.2f rec=%.2f undo=%.2f | top: %s\n",
+                  g_st.totalT * k, g_st.takenT * k, g_st.fallbackT * k, g_st.recT * k, g_st.undoT * k, topBuf);
+    g_st.totalT = g_st.takenT = g_st.fallbackT = g_st.recT = g_st.undoT = g_st.frames = 0;
+    g_st.nEntries = 0;
+    g_st.lastPrint = now;
+}
+} // namespace hprof
 
 inline __m128 norm4(__m128 v) // vuhot::N4 (normalizeOperand on 4 lanes)
 {
@@ -583,6 +709,44 @@ inline bool leanRdOn() // FEAT-RD14
     static const bool v = ::ps2xRdViewOn() && !checkOn() && dumpFrame() < 0;
     return v;
 }
+inline bool leanSkinOn() // FEAT-RD40
+{
+    static const bool v = []() {
+        const char *e = std::getenv("PS2X_RD_LEANSKIN");
+        return !(e && e[0] == '0') && ::ps2xRdTakeoverOn() && leanRdOn() && ::ps2xRdFastGeomOn();
+    }();
+    return v;
+}
+inline bool leanSkinCheckOn() // FEAT-RD40
+{
+    static const bool v = []() {
+        const char *e = std::getenv("PS2X_RD_LEANSKIN_CHECK");
+        return e && e[0] == '1' && ::ps2xRdTakeoverOn() && leanRdOn() && ::ps2xRdFastGeomOn();
+    }();
+    return v;
+}
+inline void leanSkinNoteDraw(bool isLean, bool mismatch) // FEAT-RD40
+{
+    struct Stat
+    {
+        uint32_t draws = 0, lean = 0, exact = 0, mism = 0;
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    };
+    static thread_local Stat s;
+    ++s.draws;
+    if (isLean) ++s.lean; else ++s.exact;
+    if (mismatch) ++s.mism;
+    if ((s.draws & 0xFFu) == 0u)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - s.t0).count() >= 5.0)
+        {
+            ::ps2xSafeLog("[leanskin] draws=%u lean=%u exact=%u mism=%u\n", s.draws, s.lean, s.exact, s.mism);
+            s.draws = s.lean = s.exact = s.mism = 0u;
+            s.t0 = now;
+        }
+    }
+}
 
 // FEAT-RD32: recording timing probe (PS2X_RD_RECPROF=1), rdtsc per section
 inline bool recProfOn()
@@ -712,6 +876,8 @@ struct GsShadow // FEAT-RD2
     uint64_t frame[2] = {};
     uint64_t zbuf[2] = {};
     uint64_t fba[2] = {};
+    uint64_t scissor[2] = {}; // FEAT-RD40
+    uint64_t xyoffset[2] = {}; // FEAT-RD40
     uint64_t texa = 0;
     uint64_t texclut = 0;
 };
@@ -797,6 +963,7 @@ inline void applyAD(uint64_t data, uint8_t reg) // FEAT-RD2
     case 0x06u: case 0x07u: g.tex0[reg - 0x06u] = data; t_scene.curOwnTex0 = true; break;
     case 0x08u: case 0x09u: g.clamp[reg - 0x08u] = data; break;
     case 0x14u: case 0x15u: g.tex1[reg - 0x14u] = data; break;
+    case 0x18u: case 0x19u: g.xyoffset[reg - 0x18u] = data; break; // FEAT-RD40
     case 0x16u: case 0x17u:
     {
         constexpr uint64_t kTex2Mask = 0xFFFFFFE003F00000ull; // PSM, CBP, CPSM, CSM, CSA, CLD
@@ -807,6 +974,7 @@ inline void applyAD(uint64_t data, uint8_t reg) // FEAT-RD2
     }
     case 0x1Cu: g.texclut = data; break;
     case 0x3Bu: g.texa = data; break;
+    case 0x40u: case 0x41u: g.scissor[reg - 0x40u] = data; break; // FEAT-RD40
     case 0x42u: case 0x43u: g.alpha[reg - 0x42u] = data; break;
     case 0x47u: case 0x48u: g.test[reg - 0x47u] = data; break;
     case 0x4Au: case 0x4Bu: g.fba[reg - 0x4Au] = data; break;
@@ -1834,6 +2002,25 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
         checkDraw(d, f.vertices.data() + v0);
 }
 
+inline bool isMainPassSkinned(uint32_t vf27y) // FEAT-RD40
+{
+    if (!::ps2xRdHasDisplayFbp())
+        return false;
+    const uint64_t prim = ((vf27y >> 14) & 1u) ? ((vf27y >> 15) & 0x7FFull) : t_scene.gs.prim;
+    const uint32_t ctxt = static_cast<uint32_t>((prim >> 9) & 1ull);
+    const uint32_t fbp = static_cast<uint32_t>(t_scene.gs.frame[ctxt] & 0x1FFull);
+    if (!::ps2xRdIsDisplayFbp(fbp))
+        return false;
+    const uint64_t scis = t_scene.gs.scissor[ctxt];
+    const uint32_t x0 = static_cast<uint32_t>(scis & 0x7FFull);
+    const uint32_t x1 = static_cast<uint32_t>((scis >> 16) & 0x7FFull);
+    const uint32_t y0 = static_cast<uint32_t>((scis >> 32) & 0x7FFull);
+    const uint32_t y1 = static_cast<uint32_t>((scis >> 48) & 0x7FFull);
+    if (x1 < x0 || y1 < y0)
+        return false;
+    return (x1 + 1u - x0) >= 500u && (y1 + 1u - y0) >= 400u;
+}
+
 inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, __m128 c2v, uint32_t i4base, uint32_t ubase, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
 {
     { RecScope rm(kRpMarker); markGeometryKick(gif, gifOff); } // FEAT-RD10 // FEAT-RD32
@@ -2147,9 +2334,11 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
             {
                 // FIX-BJ: 25B0/27D8 MADD.xyzw vf13 (Lit[j]) -> 24E0/2708 LOI 255.0 -> 24E8/2710 MINIi.xyzw vf13, vf13, I before BAL 28A0->2900; 2978 MAXx.xyzw vf13, vf13, vf0 completes clampI(Lit[j]).
                 const uint64_t vxClip0 = vx::act() ? __rdtsc() : 0ull; // PROBE-VX
+                const uint64_t hpClip0 = hprof::on() ? __rdtsc() : 0ull; // PROBE-RD39
                 const bool vxClipOk = clipPolygon(vu, vi13, vi5, vi6, Wd[j], vi8, vi9, vi10, copyS, c1v, c2v, c5v,
                                  Ps[j - 2], Ps[j - 1], Ps[j], fmacV<0>(V7(Ss[j - 2]), zero, zero), V7(Ss[j - 1]), V7(Ss[j]),
                                  clampI(Lit[j - 2]), clampI(Lit[j - 1]), clampI(Lit[j]), kicks, gif); // PROBE-VX // FIX-BJ
+                if (hpClip0) { const uint64_t dt = __rdtsc() - hpClip0; hprof::addHandler(0x2900u, dt); hprof::subtractHandler(0x2440u, dt); } // PROBE-RD39
                 if (vxClip0) { vx::g_vx.hT[vx::kHClip] += __rdtsc() - vxClip0; ++vx::g_vx.hN[vx::kHClip]; } // PROBE-VX
                 if (!vxClipOk) // PROBE-VX
                     return fb1EE0(kFbRigidClip);
@@ -2217,6 +2406,83 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
 // the caller restores the undo log) for every case lbFull declines or that it does not model: N outside 4..67, DIV by zero, any aliasing between the output
 // buffer and anything the real (software-pipelined) routine reads after its first stores, kick failure.
 // 1EE0 (vi10 = 0) and 1EF0 (vi10 = 1: reads S from 796+idx in both skinned 2210 and rigid 2670).
+static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t s2base, uint32_t s3base, const int32_t *idxs,
+                               __m128 vf2, __m128 vf16, const Fv8V &k2, const Fv8V &k16,
+                               ::RdVert *outVerts, uint32_t *outIndices, uint32_t baseIndex, uint32_t &outIdxCount) // FEAT-RD40
+{
+    const __m128 zero = _mm_setzero_ps();
+    const __m128i v255 = _mm_set1_epi32(255);
+    uint32_t ic = 0u;
+    for (int32_t t0 = 0; t0 < N; t0 += 8)
+    {
+        const int32_t n = (N - t0 < 8) ? (N - t0) : 8;
+        __m128 gA[8], gB[8], gS3[8], gS2[8];
+        for (int j = 0; j < 8; ++j)
+        {
+            const int32_t s = t0 + (j < n ? j : n - 1);
+            const int32_t idx = idxs[s];
+            gA[j] = ldq(vu, static_cast<uint32_t>(636 + idx));
+            gB[j] = ldq(vu, static_cast<uint32_t>(716 + idx));
+            gS3[j] = ldq(vu, s3base + static_cast<uint32_t>(s));
+            gS2[j] = vi10 ? ldq(vu, static_cast<uint32_t>(796 + idx)) : ldq(vu, s2base + static_cast<uint32_t>(s));
+        }
+        Fv8V B = fv8FromRows(gB), S3 = fv8FromRows(gS3), S2 = fv8FromRows(gS2);
+        for (int c = 0; c < 4; ++c)
+        {
+            B.c[c] = fv8N(B.c[c]);
+            S3.c[c] = fv8N(S3.c[c]);
+            S2.c[c] = fv8N(S2.c[c]);
+        }
+        Fv8V z8;
+        z8.c[0] = z8.c[1] = z8.c[2] = z8.c[3] = _mm256_setzero_ps();
+        __m256i bad = _mm256_setzero_si256();
+        const Fv8V bv = fv8Op<15, false>(B, k16, z8, bad);
+        const Fv8V in = fv8Op<15, true>(k2, k16, bv, bad);
+        const Fv8V pr = fv8Op<15, false>(S3, in, z8, bad);
+        __m128 oPr[8], oS2[8];
+        fv8ToRows(S2, oS2);
+        if (!fv8Any(bad))
+        {
+            Fv8V prOut;
+            for (int c = 0; c < 4; ++c)
+                prOut.c[c] = _mm256_castsi256_ps(fv8FtoiS<1>(fv8ClampI(pr.c[c])));
+            fv8ToRows(prOut, oPr);
+        }
+        else
+        {
+            for (int j = 0; j < n; ++j)
+            {
+                const __m128 sbv = fmacV<4>(gB[j], vf16, zero);
+                const __m128 sin = fmacV<2>(vf2, vf16, sbv);
+                const __m128 sprod = fmacV<4>(gS3[j], sin, zero);
+                oPr[j] = _mm_castsi128_ps(ftoiS<1>(clampI(sprod)));
+            }
+        }
+        for (int j = 0; j < n; ++j)
+        {
+            const int32_t v = t0 + j;
+            ::RdVert &rv = outVerts[v];
+            _mm_storeu_ps(rv.pos, gA[j]);
+            const __m128i clamped = _mm_min_epu32(_mm_castps_si128(oPr[j]), v255);
+            const __m128i p16 = _mm_packus_epi32(clamped, clamped);
+            const __m128i p8 = _mm_packus_epi16(p16, p16);
+            const uint32_t packed = static_cast<uint32_t>(_mm_cvtsi128_si32(p8));
+            std::memcpy(rv.rgba, &packed, 4);
+            const __m128 q = _mm_shuffle_ps(oS2[j], oS2[j], _MM_SHUFFLE(2, 2, 2, 2));
+            const __m128 d = _mm_div_ps(oS2[j], q);
+            const __m128 nz = _mm_cmpneq_ps(q, zero);
+            _mm_storel_pi(reinterpret_cast<__m64 *>(rv.uv), _mm_and_ps(d, nz));
+            if (v >= 2 && !(static_cast<uint32_t>(idxs[v]) & 0x8000u))
+            {
+                outIndices[ic++] = baseIndex + static_cast<uint32_t>(v - 2);
+                outIndices[ic++] = baseIndex + static_cast<uint32_t>(v - 1);
+                outIndices[ic++] = baseIndex + static_cast<uint32_t>(v);
+            }
+        }
+    }
+    outIdxCount = ic;
+}
+
 static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool vi10, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
 {
     const int32_t vi1s = static_cast<int16_t>(ilw(vu, 1011, 1)); // 1F00 ILW.y vi1, 1011 (< 0: rigid path at 2440 / 2670)
@@ -2334,6 +2600,41 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
 
     const uint32_t m1012z = ldw(vu, 1012, 2), m1012w = ldw(vu, 1012, 3);
     const uint32_t ctlOld = ldw(vu, 1023, 3) & 0xFFFFu;
+    const bool leanSkinEnabled = scene::leanSkinOn(); // FEAT-RD40
+    const bool leanSkinCheck = scene::leanSkinCheckOn(); // FEAT-RD40
+    const bool leanMainPass = (leanSkinEnabled || leanSkinCheck) && scene::isMainPassSkinned(vf27y); // FEAT-RD40
+    if (leanSkinEnabled && leanMainPass && !leanSkinCheck) // FEAT-RD40
+    {
+        logRange(vu, ubase, 1u);
+        stqRaw(vu, ubase, _mm_castsi128_ps(_mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))));
+        stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3));
+        if (!kick(vu, ubase, kicks, gif))
+            return fb1EE0(kFbSkinKick);
+        { scene::RecScope rm(scene::kRpMarker); scene::markGeometryKick(gif, kicks.back().first); }
+        {
+            scene::RecScope rs(scene::kRpSkinned);
+            scene::SceneFrame &f = scene::t_scene.bufs[scene::t_scene.writeIdx];
+            if (scene::beginLeanDraw(vu, f, static_cast<uint32_t>(N), vf3, vf4))
+            {
+                const size_t v0 = f.rdVerts.size();
+                const size_t i0 = f.rdIndices.size();
+                f.rdVerts.resize(v0 + static_cast<size_t>(N));
+                if (N >= 3)
+                {
+                    scene::reserveGrow(f.rdIndices, i0 + static_cast<size_t>(N - 2) * 3u);
+                    f.rdIndices.resize(i0 + static_cast<size_t>(N - 2) * 3u);
+                }
+                uint32_t ic = 0u;
+                buildLeanSkinVerts(vu, N, vi10, s2base, s3base, idxs, vf2, vf16, k2, k16,
+                                   f.rdVerts.data() + v0, N >= 3 ? f.rdIndices.data() + i0 : nullptr, static_cast<uint32_t>(v0), ic);
+                f.rdIndices.resize(i0 + ic);
+                scene::pushLeanBatch(f, static_cast<uint32_t>(i0), ic);
+            }
+        }
+        scene::leanSkinNoteDraw(true, false);
+        R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0));
+        return true;
+    }
     // The whole output span [ubase, ubase + 4N] is logged once (if any block falls back to interpreter, undoLog restores it), then written raw.
     logRange(vu, ubase, span);
     stqRaw(vu, ubase, _mm_castsi128_ps(_mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))));
@@ -2446,7 +2747,43 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
         return fb1EE0(kFbSkinKick);
     if (scene::on()) // PERF-SA
+    {
+        scene::SceneFrame &f = scene::t_scene.bufs[scene::t_scene.writeIdx];
+        const size_t v0Chk = f.rdVerts.size();
+        const size_t i0Chk = f.rdIndices.size();
         scene::recordSkinned(vu, N, vi10, vf3, vf4, i4base, ubase, kicks.back().first, kicks.back().second, gif);
+        if (leanSkinCheck) // FEAT-RD40
+        {
+            bool mism = false;
+            if (leanMainPass && f.rdVerts.size() - v0Chk == static_cast<size_t>(N))
+            {
+                ::RdVert chkVerts[kMaxSkinN];
+                uint32_t chkIdx[kMaxSkinN * 3u];
+                uint32_t chkIc = 0u;
+                buildLeanSkinVerts(vu, N, vi10, s2base, s3base, idxs, vf2, vf16, k2, k16,
+                                   chkVerts, chkIdx, static_cast<uint32_t>(v0Chk), chkIc);
+                if (chkIc != f.rdIndices.size() - i0Chk)
+                    mism = true;
+                else if (chkIc > 0u && std::memcmp(chkIdx, f.rdIndices.data() + i0Chk, chkIc * sizeof(uint32_t)) != 0)
+                    mism = true;
+                for (int32_t v = 0; v < N && !mism; ++v)
+                {
+                    const ::RdVert &ref = f.rdVerts[v0Chk + static_cast<size_t>(v)];
+                    if (std::memcmp(chkVerts[v].rgba, ref.rgba, 4) != 0)
+                        mism = true;
+                    for (int c = 0; c < 2 && !mism; ++c)
+                    {
+                        const float a = chkVerts[v].uv[c], b = ref.uv[c];
+                        if (std::fabs(a - b) > 1e-5f * std::max(std::fabs(b), 1e-6f))
+                            mism = true;
+                    }
+                }
+            }
+            scene::leanSkinNoteDraw(leanMainPass, mism);
+        }
+        else if (leanSkinEnabled) // FEAT-RD40
+            scene::leanSkinNoteDraw(false, false);
+    }
     R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0)); // ILW.x vi12, 1(vi4) (read from VU mem: V[1] does not exist for N==1)
     return true;
 }
@@ -3423,6 +3760,8 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
     const uint64_t imgMask = (t_curSlot >= 0) ? s_imgCache[t_curSlot].mask : ~0ull; // PERF-BE
     const uint8_t *const rowIdx = pcToRow(); // PERF-BE
     vx::HScope vxHs; // PROBE-VX
+    hprof::HScope hpHs; // PROBE-RD39
+    const bool hpOn = hprof::on(); // PROBE-RD39
     for (uint32_t step = 0; step < 100000u; ++step)
     {
         vi13 = static_cast<uint16_t>(vi13 + 1u);                      // 0028 IADDIU vi13, vi13, 1
@@ -3438,6 +3777,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             } // PERF-BE
         } // PERF-BE
         if (vxA) { if (h) vxHs.begin(vx::slotOf(h, vu), __rdtsc()); else vxHs.end(__rdtsc()); } // PROBE-VX
+        if (hpOn) { if (h) { uint16_t hpc = static_cast<uint16_t>(h); if ((h == 0x1EE0u || h == 0x1EF0u) && static_cast<int16_t>(ilw(vu, 1011, 1)) < 0) hpc = 0x2440u; hpHs.begin(hpc); } else hpHs.end(); } // PROBE-RD39
         if (t_seqN < 64u) t_seq[t_seqN++] = static_cast<uint16_t>(h); // PROBE-BG
         switch (h)
         {
@@ -4242,6 +4582,8 @@ static bool fxProgram0A18(uint8_t *vu, uint32_t top, std::vector<std::pair<uint3
 static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t itop, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool vxA)
 {
     (void)itop;
+    const bool hpOn = hprof::on(); // PROBE-RD39
+    const uint64_t hpRun0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
     kicks.clear();
     gif.clear();
     s_fbPc = 0u;
@@ -4253,12 +4595,18 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
         log.clear(); // PERF-BK
         const bool fxOk = (pc == 0x0000u) ? fxProgram0000(vu, top, kicks, gif) : (pc == 0x04A0u) ? fxProgram04A0(vu, top, kicks, gif) : fxProgram0A18(vu, top, kicks, gif); // PERF-BK
         if (fxOk) // PERF-BK
+        {
+            if (hpRun0) hprof::g_st.takenT += __rdtsc() - hpRun0; // PROBE-RD39
             return true; // PERF-BK
+        }
+        const uint64_t hpUndo0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
         for (uint32_t i = log.size; i-- > 0;) // PERF-BK
             std::memcpy(vu + (static_cast<uint32_t>(log.data[i].qword) << 4), log.data[i].old, 16); // PERF-BK
         log.clear(); // PERF-BK
+        if (hpUndo0) hprof::g_st.undoT += __rdtsc() - hpUndo0; // PROBE-RD39
         kicks.clear(); // PERF-BK
         gif.clear(); // PERF-BK
+        if (hpRun0) hprof::g_st.fallbackT += __rdtsc() - hpRun0; // PROBE-RD39
         return false; // PERF-BK
     } // PERF-BK
     const bool oneShot = (startPC & 0xFFFFu) == 0x40u; // 0040: vi15 := 0, then entry at 0010; one handler, then END
@@ -4266,6 +4614,7 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     {
         s_fbPc = 0xF001u;
         ++s_startPcs[startPC & 0xFFFFu];
+        if (hpRun0) hprof::g_st.fallbackT += __rdtsc() - hpRun0; // PROBE-RD39
         return false;
     }
     // Learned skip: 256-entry direct-mapped memo keyed by the first vi1 (ILW.x at TOP); 4+ consecutive fallbacks -> skip, every 64th still tries.
@@ -4290,6 +4639,7 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
         if (m->streak >= 4u && (++skipCount & 63u) != 0u)
         {
             s_fbPc = 0xF040u;
+            if (hpRun0) hprof::g_st.fallbackT += __rdtsc() - hpRun0; // PROBE-RD39
             return false;
         }
     }
@@ -4297,24 +4647,36 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     log.clear();
     size_t sceneD0 = 0, sceneV0 = 0; // PERF-SA
     if (scene::on()) // PERF-SA
+    {
+        const uint64_t hpRec0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
         scene::beginMscal(vu, sceneD0, sceneV0);
+        if (hpRec0) hprof::g_st.recT += __rdtsc() - hpRec0; // PROBE-RD39
+    }
     if (vu1FuncRunInner(vu, top, kicks, gif, oneShot, vxA))
     {
         if (scene::on()) // PERF-SA
+        {
+            const uint64_t hpRec0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
             scene::commitMscal(static_cast<uint32_t>(gif.size()));
+            if (hpRec0) hprof::g_st.recT += __rdtsc() - hpRec0; // PROBE-RD39
+        }
         if (m)
             m->streak = 0;
+        if (hpRun0) hprof::g_st.takenT += __rdtsc() - hpRun0; // PROBE-RD39
         return true;
     }
     if (scene::on()) // PERF-SA
         scene::rollbackMscal(sceneD0, sceneV0);
     if (m)
         ++m->streak;
+    const uint64_t hpUndo0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
     for (uint32_t i = log.size; i-- > 0;)
         std::memcpy(vu + (static_cast<uint32_t>(log.data[i].qword) << 4), log.data[i].old, 16);
     log.clear();
+    if (hpUndo0) hprof::g_st.undoT += __rdtsc() - hpUndo0; // PROBE-RD39
     kicks.clear();
     gif.clear();
+    if (hpRun0) hprof::g_st.fallbackT += __rdtsc() - hpRun0; // PROBE-RD39
     return false;
 }
 
@@ -4573,6 +4935,8 @@ void ps2xVu1FlushPath1() // PERF-V1I
     vu1func::flushPath1Pending(true);
     if (vu1func::scene::on()) // PERF-SA
         vu1func::scene::onFlush();
+    if (vu1func::hprof::on()) // PROBE-RD39
+        ++vu1func::hprof::g_st.frames; // PROBE-RD39
 }
 
 // PROBE-VX: entry points used by vpExecThreadFunc (ps2_vif1_interpreter.cpp, declared extern there)

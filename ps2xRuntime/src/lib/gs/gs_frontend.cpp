@@ -92,6 +92,10 @@ static inline bool rdFastGeomOn()                      // FEAT-RD38
     }();
     return enabled && ps2xRdTakeoverOn();
 }
+bool ps2xRdFastGeomOn() // FEAT-RD40
+{
+    return rdFastGeomOn();
+}
 static inline bool rdIsPureVertexPackedReg(uint8_t reg) // FEAT-RD38
 {
     return (reg >= 0x01u && reg <= 0x05u) || reg == 0x0Au || reg == 0x0Cu || reg == 0x0Du || reg == 0x0Fu;

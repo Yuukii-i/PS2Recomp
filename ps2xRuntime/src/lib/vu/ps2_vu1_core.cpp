@@ -3579,6 +3579,12 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint32_t startPC, uint32_t top, uint32_t itop,
                              uint32_t maxCycles)
 {
+    struct HpExecGuard // PROBE-RD39
+    {
+        uint64_t t0;
+        explicit HpExecGuard(bool on) : t0(on ? __rdtsc() : 0ull) {}
+        ~HpExecGuard() { if (t0) { vu1func::hprof::g_st.totalT += __rdtsc() - t0; vu1func::hprof::maybeReport(); } }
+    } hpExecGuard(m_unit == Unit::VU1 && vu1func::hprof::on()); // PROBE-RD39
     // FEAT-RD16: Hor+ widescreen: scale x lane of VU1 view-projection quads 998..1001 by 1/k when k > 1
     if (m_unit == Unit::VU1 && vuData != nullptr && dataSize == 16384u)
     {
@@ -3744,6 +3750,13 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
             fbCapTick();
         }
     }
+
+    struct HpFbGuard // PROBE-RD39: exact path after vu1FuncRun fallback (or unaccelerated startPC)
+    {
+        uint64_t t0;
+        explicit HpFbGuard(bool on) : t0(on ? __rdtsc() : 0ull) {}
+        ~HpFbGuard() { if (t0) vu1func::hprof::g_st.fallbackT += __rdtsc() - t0; }
+    } hpFbGuard(m_unit == Unit::VU1 && vu1func::hprof::on()); // PROBE-RD39
 
     if (m_unit == Unit::VU1 && !s_capFirstRunInit)
     {
