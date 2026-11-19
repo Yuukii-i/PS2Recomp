@@ -6504,14 +6504,41 @@ void PS2Runtime::run()
                 return 0.0f;
             }();
             float dstWidth, dstHeight;
+            extern float g_rdAspectK; // FEAT-RD16
             if (s_aspect > 0.0f || s_aspect < 0.0f)
             {
-                const float boxAspect = (s_aspect > 0.0f) ? s_aspect : (screenWidth / screenHeight);
+                const float winAspect = (screenHeight > 0.0f) ? (screenWidth / screenHeight) : (4.0f / 3.0f);
+                const float k = winAspect / (4.0f / 3.0f);
+                float boxAspect = (s_aspect > 0.0f) ? s_aspect : winAspect;
+                if (s_aspect < 0.0f && ps2xRdTakeoverOn()) // FEAT-RD16
+                {
+                    if (k >= 1.0f)
+                    {
+                        boxAspect = winAspect;
+                        g_rdAspectK = k;
+                    }
+                    else
+                    {
+                        boxAspect = 4.0f / 3.0f;
+                        g_rdAspectK = 1.0f;
+                    }
+                    static bool s_aspectLogged = false;
+                    if (!s_aspectLogged)
+                    {
+                        s_aspectLogged = true;
+                        ps2xSafeLog("[aspect] fill k=%.3f\n", k);
+                    }
+                }
+                else
+                {
+                    g_rdAspectK = 1.0f;
+                }
                 dstWidth = std::min(screenWidth, screenHeight * boxAspect);
                 dstHeight = dstWidth / boxAspect;
             }
             else
             {
+                g_rdAspectK = 1.0f; // FEAT-RD16
                 const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
                 dstWidth = srcWidth * scale;
                 dstHeight = srcHeight * scale;

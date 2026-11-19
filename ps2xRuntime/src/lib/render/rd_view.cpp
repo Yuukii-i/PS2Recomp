@@ -540,6 +540,8 @@ bool ps2xRdViewOn() // FEAT-RD1
     return v;
 }
 
+float g_rdAspectK = 1.0f; // FEAT-RD16: published each frame by present loop when PS2X_ASPECT=fill & takeover
+
 bool ps2xRdTakeoverOn() // FEAT-RD12
 {
     static const bool v = []() {
@@ -939,6 +941,43 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
     if (hasNew2d) // FEAT-RD8
     {
+        // FEAT-RD16: Hor+ 2D HUD layout when PS2X_ASPECT=fill (g_rdAspectK > 1)
+        const float fbW = static_cast<float>(g_rdPresentW.load(std::memory_order_relaxed));
+        const float fbH = static_cast<float>(g_rdPresentH.load(std::memory_order_relaxed));
+        if (g_rdAspectK > 1.0f && fbW > 0.0f && fbH > 0.0f && w > 0.0f && h > 0.0f)
+        {
+            const float s = h / fbH;
+            const float scaleToShader = (s * fbW) / w;
+            for (const Rd2DBatch &b : g_rdGpu.local2dBatches)
+            {
+                if (b.count == 0u || static_cast<size_t>(b.first) + b.count > g_rdGpu.local2dScratch.size())
+                    continue;
+                float minX = g_rdGpu.local2dScratch[b.first].pos[0];
+                float maxX = minX;
+                for (uint32_t k = 1u; k < b.count; ++k)
+                {
+                    const float vx2 = g_rdGpu.local2dScratch[b.first + k].pos[0];
+                    if (vx2 < minX) minX = vx2;
+                    if (vx2 > maxX) maxX = vx2;
+                }
+                if (maxX - minX >= 0.8f * fbW)
+                    continue; // full-width draw stretches to full window
+                const float cx = 0.5f * (minX + maxX);
+                if (cx < 0.5f * fbW)
+                {
+                    for (uint32_t k = 0u; k < b.count; ++k)
+                        g_rdGpu.local2dScratch[b.first + k].pos[0] *= scaleToShader;
+                }
+                else
+                {
+                    for (uint32_t k = 0u; k < b.count; ++k)
+                    {
+                        float &vx2 = g_rdGpu.local2dScratch[b.first + k].pos[0];
+                        vx2 = fbW - (fbW - vx2) * scaleToShader;
+                    }
+                }
+            }
+        }
         g_rdGpu.everUploaded = true;
         g_rdGpu.gpu2dVertCount = g_rdGpu.local2dScratch.size();
         uploadRdVbo(g_rdGpu.vao2d, g_rdGpu.vbo2d, g_rdGpu.vbo2dCapVerts, g_rdGpu.local2dScratch);

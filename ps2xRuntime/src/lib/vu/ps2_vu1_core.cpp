@@ -3571,12 +3571,47 @@ template <class T> static T rpGet(const uint8_t *&p)
 
 #include "vu1_func.inc" // Task F1: functional VU1 engine (PS2X_VU1_FUNC=1 / PS2X_VU1_REPLAY_FUNC=1)
 
+extern float g_rdAspectK; // FEAT-RD16
+
 void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint8_t *vuData, uint32_t dataSize,
                              GS &gs, PS2Memory *memory,
                              uint32_t startPC, uint32_t top, uint32_t itop,
                              uint32_t maxCycles)
 {
+    // FEAT-RD16: Hor+ widescreen: scale x lane of VU1 view-projection quads 998..1001 by 1/k when k > 1
+    if (m_unit == Unit::VU1 && vuData != nullptr && dataSize == 16384u)
+    {
+        static float s_lastScaled998[4][4] = {};
+        static float s_lastOrig998[4][4] = {};
+        static float s_lastK = 1.0f;
+        static bool s_hasScaled998 = false;
+        const float k = g_rdAspectK;
+        if (k > 1.0f)
+        {
+            const bool memChanged = !s_hasScaled998 || std::memcmp(vuData + 998u * 16u, s_lastScaled998, sizeof(s_lastScaled998)) != 0;
+            if (memChanged || k != s_lastK)
+            {
+                if (memChanged)
+                    std::memcpy(s_lastOrig998, vuData + 998u * 16u, sizeof(s_lastOrig998));
+                else
+                    std::memcpy(vuData + 998u * 16u, s_lastOrig998, sizeof(s_lastOrig998));
+                const float invK = 1.0f / k;
+                for (uint32_t q = 0; q < 4u; ++q)
+                {
+                    float *qf = reinterpret_cast<float *>(vuData + (998u + q) * 16u);
+                    qf[0] *= invK;
+                }
+                std::memcpy(s_lastScaled998, vuData + 998u * 16u, sizeof(s_lastScaled998));
+                s_lastK = k;
+                s_hasScaled998 = true;
+            }
+        }
+        else
+        {
+            s_hasScaled998 = false;
+        }
+    }
     // PERF-KL: everything up to the handleMovieHleMscal call below is per-run state of the PROBE-DY/DZ/VD/EE/EG/EM/EL/EK/EI probes (~40 thread_local
     // stores + memset + vector clears per call, ~40 ns x 445k VU0 calls/s). Their consumers (tail statistics, native-path gating flags) are all behind
     // the same four conditions, so skip the whole block when none of them is enabled.

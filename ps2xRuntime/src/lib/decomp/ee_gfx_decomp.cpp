@@ -25,6 +25,7 @@ extern "C" float ps2x_vu0_rsqrt(float, float); // DECOMP-BP
 extern "C" void ps2x_vu0_flags(R5900Context *ctx, __m128 res, int laneMask); // DECOMP-BQ
 extern thread_local bool g_ps2xSuppressCheckpoint; // DECOMP-CM
 extern thread_local uint64_t g_ps2xCheckpointYields; // DECOMP-CT
+extern float g_rdAspectK; // FEAT-RD16
 
 namespace
 {
@@ -2913,11 +2914,13 @@ void sub_003BA898_decomp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t frustum = GPR_U32(ctx, 4);
     const uint32_t box = GPR_U32(ctx, 5);
     const uint32_t mat1 = frustum + 0x260u;
+    const float rdK = g_rdAspectK; // FEAT-RD16
+    const __m128 scaleX = (rdK > 1.0f) ? _mm_set_ps(1.0f, 1.0f, 1.0f, 1.0f / rdK) : _mm_set1_ps(1.0f); // FEAT-RD16
 
-    ctx->vu0_vf[4] = _mm_castsi128_ps(READ128(mat1 + 0u));
-    ctx->vu0_vf[5] = _mm_castsi128_ps(READ128(mat1 + 16u));
-    ctx->vu0_vf[6] = _mm_castsi128_ps(READ128(mat1 + 32u));
-    ctx->vu0_vf[7] = _mm_castsi128_ps(READ128(mat1 + 48u));
+    ctx->vu0_vf[4] = _mm_mul_ps(_mm_castsi128_ps(READ128(mat1 + 0u)), scaleX); // FEAT-RD16
+    ctx->vu0_vf[5] = _mm_mul_ps(_mm_castsi128_ps(READ128(mat1 + 16u)), scaleX);
+    ctx->vu0_vf[6] = _mm_mul_ps(_mm_castsi128_ps(READ128(mat1 + 32u)), scaleX);
+    ctx->vu0_vf[7] = _mm_mul_ps(_mm_castsi128_ps(READ128(mat1 + 48u)), scaleX);
     ctx->vu0_vf[8] = _mm_castsi128_ps(READ128(box + 0u));
     ctx->vu0_vf[9] = _mm_castsi128_ps(READ128(box + 16u));
     ctx->vu0_vf[10] = _mm_castsi128_ps(READ128(box + 32u));
@@ -2934,10 +2937,10 @@ void sub_003BA898_decomp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     const uint32_t mat0 = frustum + 0x1A0u;
-    ctx->vu0_vf[4] = _mm_castsi128_ps(READ128(mat0 + 0u));
-    ctx->vu0_vf[5] = _mm_castsi128_ps(READ128(mat0 + 16u));
-    ctx->vu0_vf[6] = _mm_castsi128_ps(READ128(mat0 + 32u));
-    ctx->vu0_vf[7] = _mm_castsi128_ps(READ128(mat0 + 48u));
+    ctx->vu0_vf[4] = _mm_mul_ps(_mm_castsi128_ps(READ128(mat0 + 0u)), scaleX); // FEAT-RD16
+    ctx->vu0_vf[5] = _mm_mul_ps(_mm_castsi128_ps(READ128(mat0 + 16u)), scaleX);
+    ctx->vu0_vf[6] = _mm_mul_ps(_mm_castsi128_ps(READ128(mat0 + 32u)), scaleX);
+    ctx->vu0_vf[7] = _mm_mul_ps(_mm_castsi128_ps(READ128(mat0 + 48u)), scaleX);
 
     ctx->vu0_tpc = 0x348u;
     runtime->executeVU0Microprogram(rdram, ctx, 0x348u);
