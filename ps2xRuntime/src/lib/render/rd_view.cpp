@@ -55,23 +55,42 @@ struct Rd2DBatch // FEAT-RD8
     uint64_t zbuf;
 };
 
+struct Rd3DFrame // FEAT-RD13
+{
+    std::vector<RdVert> verts;
+    std::vector<RdBatch> batches;
+    uint32_t skipped = 0;
+    uint32_t masked = 0;
+    float vpScaleZ = 0.0f;
+    float vpOffsetZ = 0.0f;
+    uint32_t sMin = 0;
+    uint32_t sMax = 0;
+};
+
+struct Rd2DFrame // FEAT-RD13
+{
+    std::vector<RdVert> verts;
+    std::vector<Rd2DBatch> batches;
+    uint32_t rtSkipped = 0;
+    uint32_t pointLineSkipped = 0;
+    uint32_t gMin = 0;
+    uint32_t gMax = 0;
+    bool valid = false;
+};
+
 namespace
 {
 std::mutex g_rdMutex;
-std::vector<RdVert> g_rdPending;
-std::vector<RdBatch> g_rdPendingBatches; // FEAT-RD2
-uint32_t g_rdPendingSkipped = 0;
-uint32_t g_rdPendingMasked = 0; // FEAT-RD2
-float g_rdPendingVpScaleZ = 0.0f;  // FEAT-RD11
-float g_rdPendingVpOffsetZ = 0.0f; // FEAT-RD11
-bool g_rdHasPending = false;
+Rd3DFrame g_rd3dRing[4]; // FEAT-RD13
+size_t g_rd3dWriteIdx = 0; // FEAT-RD13
+size_t g_rd3dCount = 0; // FEAT-RD13
+uint64_t g_rd3dSeq = 0; // FEAT-RD13
+float g_rdLastVpScaleZ = 0.0f;  // FEAT-RD11
+float g_rdLastVpOffsetZ = 0.0f; // FEAT-RD11
 bool g_rdEverPublished = false;
 
-std::vector<RdVert> g_rdPending2D; // FEAT-RD8
-std::vector<Rd2DBatch> g_rdPending2DBatches; // FEAT-RD8
-uint32_t g_rdPendingRtSkipped = 0; // FEAT-RD8
-uint32_t g_rdPendingPointLineSkipped = 0; // FEAT-RD8
-bool g_rdHasPending2D = false; // FEAT-RD8
+Rd2DFrame g_rd2dFrames[2]; // FEAT-RD13: [0]=newest, [1]=previous
+uint64_t g_rd2dSeq = 0; // FEAT-RD13
 std::atomic<uint32_t> g_rdPresentW{640u}; // FEAT-RD8
 std::atomic<uint32_t> g_rdPresentH{448u}; // FEAT-RD8
 
@@ -107,6 +126,18 @@ struct RdGpuState
     std::vector<RdBatch> localBatches; // FEAT-RD2
     std::vector<RdVert> local2dScratch; // FEAT-RD8
     std::vector<Rd2DBatch> local2dBatches; // FEAT-RD8
+    Rd3DFrame ring3d[4]; // FEAT-RD13
+    size_t ring3dCount = 0; // FEAT-RD13
+    uint64_t last3dSeq = 0; // FEAT-RD13
+    Rd2DFrame frames2d[2]; // FEAT-RD13
+    uint64_t last2dSeq = 0; // FEAT-RD13
+    uint32_t activeGMin = 0; // FEAT-RD13
+    bool curAligned = false; // FEAT-RD13
+    bool curFallbackPrev = false; // FEAT-RD13
+    bool curSpanned2 = false; // FEAT-RD13
+    uint32_t alignedFrames = 0; // FEAT-RD13
+    uint32_t fallbackPrevFrames = 0; // FEAT-RD13
+    uint32_t spanned2Frames = 0; // FEAT-RD13
     uint32_t frames = 0;
     uint64_t totalTris = 0;
     uint64_t totalSkippedDraws = 0;
@@ -306,21 +337,43 @@ void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint3
     else
         t_batchStaging.clear();
 
+    uint32_t sMin = 0u; // FEAT-RD13
+    uint32_t sMax = 0u; // FEAT-RD13
+    for (const RdBatch &batch : t_batchStaging)
+    {
+        const uint32_t ms = batch.kickSerial & 0x3FFFFFFFu;
+        if (ms != 0u)
+        {
+            if (sMin == 0u || ms < sMin)
+                sMin = ms;
+            if (ms > sMax)
+                sMax = ms;
+        }
+    }
+
     std::lock_guard<std::mutex> lock(g_rdMutex);
-    g_rdPending.swap(t_staging);
-    g_rdPendingBatches.swap(t_batchStaging);
-    g_rdPendingSkipped = skippedDraws;
-    g_rdPendingMasked = maskedDraws;
     if (vpScaleZ != 0.0f) // FEAT-RD11
     {
-        g_rdPendingVpScaleZ = vpScaleZ;
-        g_rdPendingVpOffsetZ = vpOffsetZ;
+        g_rdLastVpScaleZ = vpScaleZ;
+        g_rdLastVpOffsetZ = vpOffsetZ;
     }
-    g_rdHasPending = true;
+    Rd3DFrame &slot = g_rd3dRing[g_rd3dWriteIdx]; // FEAT-RD13
+    slot.verts.swap(t_staging);
+    slot.batches.swap(t_batchStaging);
+    slot.skipped = skippedDraws;
+    slot.masked = maskedDraws;
+    slot.vpScaleZ = g_rdLastVpScaleZ;
+    slot.vpOffsetZ = g_rdLastVpOffsetZ;
+    slot.sMin = sMin;
+    slot.sMax = sMax;
+    g_rd3dWriteIdx = (g_rd3dWriteIdx + 1u) % 4u;
+    if (g_rd3dCount < 4u)
+        ++g_rd3dCount;
+    ++g_rd3dSeq;
     g_rdEverPublished = true;
 }
 
-void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped) // FEAT-RD8
+void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped, uint32_t gMin, uint32_t gMax) // FEAT-RD8 // FEAT-RD13
 {
     static thread_local std::vector<RdVert> t_staging2d;
     static thread_local std::vector<Rd2DBatch> t_batchStaging2d;
@@ -334,11 +387,15 @@ void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, u
         t_batchStaging2d.clear();
 
     std::lock_guard<std::mutex> lock(g_rdMutex);
-    g_rdPending2D.swap(t_staging2d);
-    g_rdPending2DBatches.swap(t_batchStaging2d);
-    g_rdPendingRtSkipped = rtSkipped;
-    g_rdPendingPointLineSkipped = pointLineSkipped;
-    g_rdHasPending2D = true;
+    std::swap(g_rd2dFrames[1], g_rd2dFrames[0]); // FEAT-RD13: previous <- newest
+    g_rd2dFrames[0].verts.swap(t_staging2d);
+    g_rd2dFrames[0].batches.swap(t_batchStaging2d);
+    g_rd2dFrames[0].rtSkipped = rtSkipped;
+    g_rd2dFrames[0].pointLineSkipped = pointLineSkipped;
+    g_rd2dFrames[0].gMin = gMin;
+    g_rd2dFrames[0].gMax = gMax;
+    g_rd2dFrames[0].valid = true;
+    ++g_rd2dSeq;
     g_rdEverPublished = true;
 }
 
@@ -360,6 +417,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
     bool hasNew = false;
     bool hasNew2d = false; // FEAT-RD8
+    bool needRealign = false; // FEAT-RD13
     {
         std::lock_guard<std::mutex> lock(g_rdMutex);
         if (!g_rdEverPublished && !g_rdGpu.everUploaded)
@@ -368,26 +426,133 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 return true;
             return false;
         }
-        if (g_rdHasPending)
+        if (g_rd3dSeq != g_rdGpu.last3dSeq) // FEAT-RD13
         {
-            g_rdGpu.localScratch.swap(g_rdPending);
-            g_rdGpu.localBatches.swap(g_rdPendingBatches); // FEAT-RD2
-            g_rdGpu.lastSkippedDraws = g_rdPendingSkipped;
-            g_rdGpu.lastMaskedDraws = g_rdPendingMasked; // FEAT-RD2
-            g_rdGpu.vpScaleZ = g_rdPendingVpScaleZ;      // FEAT-RD11
-            g_rdGpu.vpOffsetZ = g_rdPendingVpOffsetZ;    // FEAT-RD11
-            g_rdHasPending = false;
-            hasNew = true;
+            g_rdGpu.ring3dCount = g_rd3dCount;
+            const size_t oldest = (g_rd3dWriteIdx + 4u - g_rd3dCount) % 4u;
+            for (size_t i = 0; i < g_rd3dCount; ++i)
+                g_rdGpu.ring3d[i] = g_rd3dRing[(oldest + i) % 4u];
+            g_rdGpu.last3dSeq = g_rd3dSeq;
+            needRealign = true;
         }
-        if (g_rdHasPending2D) // FEAT-RD8
+        if (g_rd2dSeq != g_rdGpu.last2dSeq) // FEAT-RD13
         {
-            g_rdGpu.local2dScratch.swap(g_rdPending2D);
-            g_rdGpu.local2dBatches.swap(g_rdPending2DBatches);
-            g_rdGpu.lastRtSkipped = g_rdPendingRtSkipped;
-            g_rdGpu.lastPointLineSkipped = g_rdPendingPointLineSkipped;
-            g_rdHasPending2D = false;
+            g_rdGpu.frames2d[0] = g_rd2dFrames[0];
+            g_rdGpu.frames2d[1] = g_rd2dFrames[1];
+            g_rdGpu.last2dSeq = g_rd2dSeq;
+            needRealign = true;
+        }
+    }
+
+    if (needRealign) // FEAT-RD13
+    {
+        uint32_t ringMin = 0u;
+        uint32_t ringMax = 0u;
+        for (size_t i = 0; i < g_rdGpu.ring3dCount; ++i)
+        {
+            const Rd3DFrame &f = g_rdGpu.ring3d[i];
+            if (f.sMin == 0u)
+                continue;
+            if (ringMin == 0u || f.sMin < ringMin)
+                ringMin = f.sMin;
+            if (f.sMax > ringMax)
+                ringMax = f.sMax;
+        }
+
+        const Rd2DFrame *chosen2d = nullptr;
+        bool usedFallbackPrev = false;
+        const Rd2DFrame &newest2d = g_rdGpu.frames2d[0];
+        const Rd2DFrame &prev2d = g_rdGpu.frames2d[1];
+        if (newest2d.valid)
+        {
+            const bool covered = (newest2d.gMin == 0u) ||
+                                 (ringMin != 0u && ringMin <= newest2d.gMin && newest2d.gMax <= ringMax);
+            if (covered)
+            {
+                chosen2d = &newest2d;
+            }
+            else if (prev2d.valid)
+            {
+                chosen2d = &prev2d;
+                usedFallbackPrev = true;
+            }
+            else
+            {
+                chosen2d = &newest2d;
+            }
+        }
+
+        if (chosen2d != nullptr)
+        {
+            g_rdGpu.local2dScratch = chosen2d->verts;
+            g_rdGpu.local2dBatches = chosen2d->batches;
+            g_rdGpu.lastRtSkipped = chosen2d->rtSkipped;
+            g_rdGpu.lastPointLineSkipped = chosen2d->pointLineSkipped;
+            g_rdGpu.activeGMin = chosen2d->gMin;
             hasNew2d = true;
         }
+
+        g_rdGpu.localScratch.clear();
+        g_rdGpu.localBatches.clear();
+        uint32_t framesUsed = 0u;
+        if (chosen2d == nullptr)
+        {
+            if (g_rdGpu.ring3dCount > 0u)
+            {
+                const Rd3DFrame &f3 = g_rdGpu.ring3d[g_rdGpu.ring3dCount - 1u];
+                g_rdGpu.localScratch = f3.verts;
+                g_rdGpu.localBatches = f3.batches;
+                g_rdGpu.lastSkippedDraws = f3.skipped;
+                g_rdGpu.lastMaskedDraws = f3.masked;
+                if (f3.vpScaleZ != 0.0f)
+                {
+                    g_rdGpu.vpScaleZ = f3.vpScaleZ;
+                    g_rdGpu.vpOffsetZ = f3.vpOffsetZ;
+                }
+                framesUsed = 1u;
+            }
+        }
+        else if (chosen2d->gMin > 0u)
+        {
+            const uint32_t gMin = chosen2d->gMin;
+            const uint32_t gMax = chosen2d->gMax;
+            for (size_t i = 0; i < g_rdGpu.ring3dCount; ++i)
+            {
+                const Rd3DFrame &f3 = g_rdGpu.ring3d[i];
+                if (f3.batches.empty() || f3.sMin == 0u || f3.sMax < gMin || f3.sMin > gMax)
+                    continue;
+                bool anyFromFrame = false;
+                const uint32_t baseVert = static_cast<uint32_t>(g_rdGpu.localScratch.size());
+                for (const RdBatch &b : f3.batches)
+                {
+                    const uint32_t ms = b.kickSerial & 0x3FFFFFFFu;
+                    if (ms >= gMin && ms <= gMax)
+                    {
+                        if (!anyFromFrame)
+                        {
+                            anyFromFrame = true;
+                            g_rdGpu.localScratch.insert(g_rdGpu.localScratch.end(), f3.verts.begin(), f3.verts.end());
+                            g_rdGpu.lastSkippedDraws = f3.skipped;
+                            g_rdGpu.lastMaskedDraws = f3.masked;
+                            if (f3.vpScaleZ != 0.0f)
+                            {
+                                g_rdGpu.vpScaleZ = f3.vpScaleZ;
+                                g_rdGpu.vpOffsetZ = f3.vpOffsetZ;
+                            }
+                        }
+                        RdBatch nb = b;
+                        nb.first += baseVert;
+                        g_rdGpu.localBatches.push_back(nb);
+                    }
+                }
+                if (anyFromFrame)
+                    ++framesUsed;
+            }
+        }
+        hasNew = true;
+        g_rdGpu.curAligned = (chosen2d != nullptr && !usedFallbackPrev);
+        g_rdGpu.curFallbackPrev = usedFallbackPrev;
+        g_rdGpu.curSpanned2 = (framesUsed >= 2u);
     }
 
     if (!g_rdGpu.init)
@@ -685,6 +850,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             rlEnableVertexArray(g_rdGpu.vao);
         };
 
+        if (g_rdGpu.activeGMin > 0u) // FEAT-RD13: draw frame-start 2D draws (clears/backgrounds) first
+            draw2dUntil(g_rdGpu.activeGMin, false);
         for (const RdBatch &batch : g_rdGpu.localBatches) // FEAT-RD2
         {
             draw2dUntil(batch.kickSerial, false); // FEAT-RD8
@@ -778,6 +945,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     rlViewport(0, 0, rw, rh);
 
     ++g_rdGpu.frames;
+    if (g_rdGpu.curAligned) ++g_rdGpu.alignedFrames; // FEAT-RD13
+    if (g_rdGpu.curFallbackPrev) ++g_rdGpu.fallbackPrevFrames; // FEAT-RD13
+    if (g_rdGpu.curSpanned2) ++g_rdGpu.spanned2Frames; // FEAT-RD13
     g_rdGpu.totalTris += static_cast<uint64_t>(g_rdGpu.gpuVertCount / 3u);
     g_rdGpu.totalSkippedDraws += static_cast<uint64_t>(g_rdGpu.lastSkippedDraws);
     g_rdGpu.totalMaskedDraws += static_cast<uint64_t>(g_rdGpu.lastMaskedDraws); // FEAT-RD2
@@ -809,6 +979,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     static_cast<double>(g_rdGpu.total2dZtested) / fr,
                     g_rdGpu.vpScaleZ,
                     g_rdGpu.vpOffsetZ); // FEAT-RD11
+        ps2xSafeLog("[rd] aligned=%u fallbackPrev=%u spanned2=%u\n",
+                    g_rdGpu.alignedFrames,
+                    g_rdGpu.fallbackPrevFrames,
+                    g_rdGpu.spanned2Frames); // FEAT-RD13
     }
     return true;
 }

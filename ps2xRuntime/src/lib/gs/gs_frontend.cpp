@@ -96,13 +96,15 @@ struct Rd2DBatch // FEAT-RD8
     uint64_t zbuf;
 };
 
-extern void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped); // FEAT-RD8
+extern void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped, uint32_t gMin, uint32_t gMax); // FEAT-RD8 // FEAT-RD13
 
 static std::mutex s_rd2dCapMutex; // FEAT-RD8
 static std::vector<RdVert> s_rd2dVerts; // FEAT-RD8
 static std::vector<Rd2DBatch> s_rd2dBatches; // FEAT-RD8
 static uint32_t s_rd2dRtSkipped = 0u; // FEAT-RD8
 static uint32_t s_rd2dPointLineSkipped = 0u; // FEAT-RD8
+static uint32_t s_rd2dGMin = 0u; // FEAT-RD13
+static uint32_t s_rd2dGMax = 0u; // FEAT-RD13
 
 static uint64_t rdPackTex0(const GSTex0Reg &t) // FEAT-RD8
 {
@@ -1312,16 +1314,21 @@ void GS::latchHostPresentationFrame()
             static std::vector<RdVert> s_pubVerts;
             static std::vector<Rd2DBatch> s_pubBatches;
             uint32_t rtSk = 0u, plSk = 0u;
+            uint32_t gMin = 0u, gMax = 0u; // FEAT-RD13
             {
                 std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
                 s_pubVerts.swap(s_rd2dVerts);
                 s_pubBatches.swap(s_rd2dBatches);
                 rtSk = s_rd2dRtSkipped;
                 plSk = s_rd2dPointLineSkipped;
+                gMin = s_rd2dGMin; // FEAT-RD13
+                gMax = s_rd2dGMax; // FEAT-RD13
                 s_rd2dRtSkipped = 0u;
                 s_rd2dPointLineSkipped = 0u;
+                s_rd2dGMin = 0u; // FEAT-RD13
+                s_rd2dGMax = 0u; // FEAT-RD13
             }
-            ps2xRdPublish2D(s_pubVerts.data(), s_pubVerts.size(), s_pubBatches.data(), s_pubBatches.size(), rtSk, plSk);
+            ps2xRdPublish2D(s_pubVerts.data(), s_pubVerts.size(), s_pubBatches.data(), s_pubBatches.size(), rtSk, plSk, gMin, gMax); // FEAT-RD13
             s_pubVerts.clear();
             s_pubBatches.clear();
         }
@@ -3081,6 +3088,18 @@ void GS::refreshDrawBatch(int vertexCount)
 
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
+    if (ps2xRdViewOn()) // FEAT-RD13
+    {
+        const uint32_t maskedS = s_rdCurSerial & 0x3FFFFFFFu;
+        if (maskedS != 0u)
+        {
+            std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+            if (s_rd2dGMin == 0u || maskedS < s_rd2dGMin)
+                s_rd2dGMin = maskedS;
+            if (maskedS > s_rd2dGMax)
+                s_rd2dGMax = maskedS;
+        }
+    }
     const bool isGeomKick = (s_rdCurSerial & 0x40000000u) != 0u; // FEAT-RD10
     if (isGeomKick) // FEAT-RD8b // FEAT-RD10
         s_rdMainFbp = batch.state.context.frame.fbp;
