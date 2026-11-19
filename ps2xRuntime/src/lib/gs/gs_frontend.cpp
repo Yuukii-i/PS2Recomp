@@ -125,6 +125,14 @@ bool ps2xRdFastGeomOn() // FEAT-RD40
 {
     return rdFastGeomOn();
 }
+static inline bool rdFrameCutOn() // FEAT-RD54: frame-boundary aware 2D publishing (PS2X_RD_FRAMECUT=0 disables)
+{
+    static const bool enabled = []() {
+        const char *e = std::getenv("PS2X_RD_FRAMECUT");
+        return !(e && e[0] == '0');
+    }();
+    return enabled;
+}
 static inline bool rdIsPureVertexPackedReg(uint8_t reg) // FEAT-RD38
 {
     return (reg >= 0x01u && reg <= 0x05u) || reg == 0x0Au || reg == 0x0Cu || reg == 0x0Du || reg == 0x0Fu;
@@ -306,6 +314,23 @@ static uint32_t s_rd2dGMin = 0u; // FEAT-RD13
 static uint32_t s_rd2dGMax = 0u; // FEAT-RD13
 static std::vector<RdKickRec> s_rdKickRecs; // FEAT-RD33
 static uint32_t s_rdLastKickRecSerial = 0u; // FEAT-RD33
+static std::vector<std::pair<uint32_t, uint32_t>> s_rdBoundaries; // FEAT-RD54: (batchIdx, serial)
+static uint32_t s_rdLastBoundarySerial = 0u; // FEAT-RD54
+static bool s_rdHasLastBoundary = false; // FEAT-RD54
+static double s_rdBoundaryEma = 1500.0; // FEAT-RD54
+static uint32_t s_rdBoundariesTotal = 0u; // FEAT-RD54
+static uint32_t s_rdCutHoldStreak = 0u; // FEAT-RD54
+static uint32_t s_rdCutPub = 0u; // FEAT-RD54
+static uint32_t s_rdCutHold = 0u; // FEAT-RD54
+static uint32_t s_rdCutFlush = 0u; // FEAT-RD54
+static void rdResetBoundariesLocked() // FEAT-RD54
+{
+    s_rdBoundaries.clear();
+    s_rdLastBoundarySerial = 0u;
+    s_rdHasLastBoundary = false;
+    s_rdBoundaryEma = 1500.0;
+    s_rdCutHoldStreak = 0u;
+}
 static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, const GSTexaReg &texa, const uint8_t *localMem); // FEAT-RD42
 
 static uint64_t rdPackTex0(const GSTex0Reg &t) // FEAT-RD8
@@ -1492,6 +1517,7 @@ void GS::latchHostPresentationFrame()
                 s_rdCurSerial = 0u;
                 s_rdLastNotedSerial = 0u;
                 s_rdLastStateSerial = 0u;
+                rdResetBoundariesLocked(); // FEAT-RD54
                 ps2xRdResetState();
             }
             ps2xSafeLog("[rd] forceClassic OFF (stage transition, prims/latch=%u)\n", latchPrims);
@@ -1519,13 +1545,19 @@ void GS::latchHostPresentationFrame()
                 s_rdCurSerial = 0u;
                 s_rdLastNotedSerial = 0u;
                 s_rdLastStateSerial = 0u;
+                rdResetBoundariesLocked(); // FEAT-RD54
                 ps2xRdResetState();
             }
             ps2xSafeLog("[rd] forceClassic ON (rtSync ema=%.1f ms)\n", s_rdRtSyncEma);
         }
     }
     if (useRepeat) g_rdRepeatFrames.fetch_add(1, std::memory_order_relaxed); // FEAT-RD33c
-    if (useClassic) g_rdClassicFramesTotal.fetch_add(1, std::memory_order_relaxed); // FEAT-RD33c
+    if (useClassic) // FEAT-RD33c // FEAT-RD54
+    {
+        g_rdClassicFramesTotal.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+        rdResetBoundariesLocked();
+    }
     const uint32_t frameGeomFbp = s_rdFrameGeomFbp.exchange(0xFFFFFFFFu, std::memory_order_acq_rel); // FEAT-RD18b
     if (!takeover || useClassic) // FEAT-RD18
     {
@@ -1621,21 +1653,121 @@ void GS::latchHostPresentationFrame()
             static std::vector<uint32_t> s_pubRanges;    // FEAT-RD33
             uint32_t rtSk = 0u, plSk = 0u;
             uint32_t gMin = 0u, gMax = 0u; // FEAT-RD13
+            bool skipPublishHold = false; // FEAT-RD54
+            uint32_t logBoundariesTotal = 0u; // FEAT-RD54
+            double logEmaSpacing = 1500.0; // FEAT-RD54
             {
                 std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
-                s_pubVerts.swap(s_rd2dVerts);
-                s_pubBatches.swap(s_rd2dBatches);
-                s_pubKickRecs.swap(s_rdKickRecs); // FEAT-RD33
-                s_rdLastKickRecSerial = 0u;       // FEAT-RD33
-                rtSk = s_rd2dRtSkipped;
-                plSk = s_rd2dPointLineSkipped;
-                gMin = s_rd2dGMin; // FEAT-RD13
-                gMax = s_rd2dGMax; // FEAT-RD13
-                s_rd2dRtSkipped = 0u;
-                s_rd2dPointLineSkipped = 0u;
-                s_rd2dGMin = 0u; // FEAT-RD13
-                s_rd2dGMax = 0u; // FEAT-RD13
+                logBoundariesTotal = s_rdBoundariesTotal; // FEAT-RD54
+                logEmaSpacing = s_rdBoundaryEma; // FEAT-RD54
+                if (rdFrameCutOn()) // FEAT-RD54: frame-boundary aware publishing
+                {
+                    const bool noCut = s_rdBoundaries.empty() ||
+                                       (s_rdBoundaries.back().first == 0u && s_rdBoundaries.size() == 1u);
+                    if (noCut)
+                    {
+                        ++s_rdCutHoldStreak;
+                        if (s_rdCutHoldStreak < 4u)
+                        {
+                            ++s_rdCutHold;
+                            skipPublishHold = true;
+                        }
+                        else
+                        {
+                            ++s_rdCutFlush;
+                            s_rdCutHoldStreak = 0u;
+                            s_rdBoundaries.clear();
+                            s_pubVerts.swap(s_rd2dVerts);
+                            s_pubBatches.swap(s_rd2dBatches);
+                            s_pubKickRecs.swap(s_rdKickRecs);
+                            s_rdLastKickRecSerial = 0u;
+                            rtSk = s_rd2dRtSkipped;
+                            plSk = s_rd2dPointLineSkipped;
+                            gMin = s_rd2dGMin;
+                            gMax = s_rd2dGMax;
+                            s_rd2dRtSkipped = 0u;
+                            s_rd2dPointLineSkipped = 0u;
+                            s_rd2dGMin = 0u;
+                            s_rd2dGMax = 0u;
+                        }
+                    }
+                    else
+                    {
+                        const uint32_t kb = s_rdBoundaries.back().first;
+                        const uint32_t sb = s_rdBoundaries.back().second;
+                        s_rdCutHoldStreak = 0u;
+                        ++s_rdCutPub;
+                        const size_t splitVert = (kb < s_rd2dBatches.size()) ? static_cast<size_t>(s_rd2dBatches[kb].first) : s_rd2dVerts.size();
+                        s_pubVerts.assign(s_rd2dVerts.begin(), s_rd2dVerts.begin() + splitVert);
+                        s_pubBatches.assign(s_rd2dBatches.begin(), s_rd2dBatches.begin() + kb);
+
+                        const size_t keptVertCnt = s_rd2dVerts.size() - splitVert;
+                        if (keptVertCnt > 0u && splitVert > 0u)
+                            std::memmove(s_rd2dVerts.data(), s_rd2dVerts.data() + splitVert, keptVertCnt * sizeof(RdVert));
+                        s_rd2dVerts.resize(keptVertCnt);
+
+                        const size_t keptBatchCnt = s_rd2dBatches.size() - kb;
+                        for (size_t i = 0u; i < keptBatchCnt; ++i)
+                        {
+                            Rd2DBatch b = s_rd2dBatches[kb + i];
+                            b.first -= static_cast<uint32_t>(splitVert);
+                            s_rd2dBatches[i] = b;
+                        }
+                        s_rd2dBatches.resize(keptBatchCnt);
+
+                        s_pubKickRecs.clear();
+                        size_t keptKickCnt = 0u;
+                        for (size_t i = 0u; i < s_rdKickRecs.size(); ++i)
+                        {
+                            if (s_rdKickRecs[i].serial < sb)
+                                s_pubKickRecs.push_back(s_rdKickRecs[i]);
+                            else
+                                s_rdKickRecs[keptKickCnt++] = s_rdKickRecs[i];
+                        }
+                        s_rdKickRecs.resize(keptKickCnt);
+                        if (s_rdKickRecs.empty())
+                            s_rdLastKickRecSerial = 0u;
+
+                        s_rdBoundaries.clear();
+                        s_rdBoundaries.push_back({0u, sb});
+
+                        rtSk = s_rd2dRtSkipped;
+                        plSk = s_rd2dPointLineSkipped;
+                        s_rd2dRtSkipped = 0u;
+                        s_rd2dPointLineSkipped = 0u;
+                        gMin = s_rd2dGMin;
+                        gMax = (sb > 0u && s_rd2dGMax >= sb) ? (sb - 1u) : s_rd2dGMax;
+                        if (gMin > gMax) gMin = gMax;
+                        if (s_rd2dGMax >= sb)
+                            s_rd2dGMin = sb;
+                        else
+                        {
+                            s_rd2dGMin = 0u;
+                            s_rd2dGMax = 0u;
+                        }
+                    }
+                }
+                else
+                {
+                    s_rdBoundaries.clear();
+                    s_pubVerts.swap(s_rd2dVerts);
+                    s_pubBatches.swap(s_rd2dBatches);
+                    s_pubKickRecs.swap(s_rdKickRecs); // FEAT-RD33
+                    s_rdLastKickRecSerial = 0u;       // FEAT-RD33
+                    rtSk = s_rd2dRtSkipped;
+                    plSk = s_rd2dPointLineSkipped;
+                    gMin = s_rd2dGMin; // FEAT-RD13
+                    gMax = s_rd2dGMax; // FEAT-RD13
+                    s_rd2dRtSkipped = 0u;
+                    s_rd2dPointLineSkipped = 0u;
+                    s_rd2dGMin = 0u; // FEAT-RD13
+                    s_rd2dGMax = 0u; // FEAT-RD13
+                }
             }
+            uint32_t keptAtFlip = 0u;
+            uint32_t droppedAtFlip = 0u;
+            if (!skipPublishHold) // FEAT-RD54
+            {
             // FEAT-RD33: pick main pass of THIS frame = (display FBP, XYOFFSET) with most draws
             s_pubSerials.clear();
             s_pubRanges.clear();
@@ -1708,8 +1840,6 @@ void GS::latchHostPresentationFrame()
             const uint32_t filterFbp = (frameHasGeom && frameGeomFbp != 0xFFFFFFFFu) ? frameGeomFbp : ((displayFbp != 0xFFFFFFFFu) ? displayFbp : s_rdMainFbp); // FEAT-RD18b
             size_t keptVerts = 0u;
             size_t keptBatches = 0u;
-            uint32_t keptAtFlip = 0u;
-            uint32_t droppedAtFlip = 0u;
             for (size_t i = 0u; i < s_pubBatches.size(); ++i)
             {
                 Rd2DBatch b = s_pubBatches[i];
@@ -1735,6 +1865,7 @@ void GS::latchHostPresentationFrame()
             s_pubVerts.clear();
             s_pubBatches.clear();
             s_pubRanges.clear();
+            } // FEAT-RD54: end if (!skipPublishHold)
 
             static uint32_t s_rdClassicFrames = 0u;
             static uint32_t s_rdRdFrames = 0u;
@@ -1754,14 +1885,19 @@ void GS::latchHostPresentationFrame()
                 const uint32_t totF = s_rdClassicFrames + s_rdRdFrames;
                 const double fr = totF ? static_cast<double>(totF) : 1.0;
                 const uint32_t fgQwords = static_cast<uint32_t>(s_rdFastGeomQwords.exchange(0ull, std::memory_order_relaxed)); // FEAT-RD38
-                ps2xSafeLog("[rd] classicFrames=%u rdFrames=%u 2dKeptAtFlip=%.1f 2dDroppedAtFlip=%.1f fastGeomQwords=%u forceClassic=%d rtSyncEma=%.2f\n",
+                ps2xSafeLog("[rd] classicFrames=%u rdFrames=%u 2dKeptAtFlip=%.1f 2dDroppedAtFlip=%.1f fastGeomQwords=%u forceClassic=%d rtSyncEma=%.2f cutPub=%u cutHold=%u cutFlush=%u boundaries=%u emaSpacing=%.0f\n",
                             s_rdClassicFrames,
                             s_rdRdFrames,
                             static_cast<double>(s_rd2dKeptAtFlip) / fr,
                             static_cast<double>(s_rd2dDroppedAtFlip) / fr,
                             fgQwords,
                             forcedNow ? 1 : 0,
-                            s_rdRtSyncEma); // FEAT-RD48
+                            s_rdRtSyncEma,
+                            s_rdCutPub,
+                            s_rdCutHold,
+                            s_rdCutFlush,
+                            logBoundariesTotal,
+                            logEmaSpacing); // FEAT-RD48 // FEAT-RD54
             }
         }
         ps2_gt_count(4, 1); // PROBE-GT: latched
@@ -3855,9 +3991,66 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             b2d.zbuf = rdPackZbuf(ctx.zbuf);
             b2d.scissor = rdPackScissor(ctx); // FEAT-RD22
 
+            const uint32_t scW = (ctx.scissor.x1 >= ctx.scissor.x0) ? (static_cast<uint32_t>(ctx.scissor.x1) + 1u - ctx.scissor.x0) : 0u; // FEAT-RD54
+            const uint32_t scH = (ctx.scissor.y1 >= ctx.scissor.y0) ? (static_cast<uint32_t>(ctx.scissor.y1) + 1u - ctx.scissor.y0) : 0u;
+            bool isFullScreenClear = false;
+            if (!prim.tme && (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
+                ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull && rdScissorQualifies(scW, scH))
+            {
+                float minX = triVerts[0].pos[0], maxX = triVerts[0].pos[0];
+                float minY = triVerts[0].pos[1], maxY = triVerts[0].pos[1];
+                for (uint32_t k = 1u; k < addCount; ++k)
+                {
+                    minX = std::min(minX, triVerts[k].pos[0]);
+                    maxX = std::max(maxX, triVerts[k].pos[0]);
+                    minY = std::min(minY, triVerts[k].pos[1]);
+                    maxY = std::max(maxY, triVerts[k].pos[1]);
+                }
+                const float cMinX = std::max(minX, static_cast<float>(ctx.scissor.x0));
+                const float cMaxX = std::min(maxX, static_cast<float>(ctx.scissor.x1 + 1u));
+                const float cMinY = std::max(minY, static_cast<float>(ctx.scissor.y0));
+                const float cMaxY = std::min(maxY, static_cast<float>(ctx.scissor.y1 + 1u));
+                const float bboxArea = (cMaxX > cMinX && cMaxY > cMinY) ? ((cMaxX - cMinX) * (cMaxY - cMinY)) : 0.0f;
+                const float scArea = static_cast<float>(scW) * static_cast<float>(scH);
+                isFullScreenClear = (scArea > 0.0f) && (bboxArea >= 0.9f * scArea);
+            }
+
             std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
             b2d.first = static_cast<uint32_t>(s_rd2dVerts.size());
             b2d.count = addCount;
+            if (isFullScreenClear) // FEAT-RD54: record frame boundary with hysteresis
+            {
+                const uint32_t bSerial = b2d.afterSerial & 0x3FFFFFFFu;
+                const uint32_t bIdx = static_cast<uint32_t>(s_rd2dBatches.size());
+                bool acceptBoundary = false;
+                if (!s_rdHasLastBoundary)
+                {
+                    acceptBoundary = true;
+                    s_rdHasLastBoundary = true;
+                    s_rdLastBoundarySerial = bSerial;
+                }
+                else if (bSerial >= s_rdLastBoundarySerial)
+                {
+                    const uint32_t gap = bSerial - s_rdLastBoundarySerial;
+                    const double minGap = std::max(300.0, 0.5 * s_rdBoundaryEma);
+                    if (static_cast<double>(gap) >= minGap)
+                    {
+                        acceptBoundary = true;
+                        s_rdBoundaryEma = 0.8 * s_rdBoundaryEma + 0.2 * static_cast<double>(gap);
+                        s_rdLastBoundarySerial = bSerial;
+                    }
+                }
+                else
+                {
+                    acceptBoundary = true;
+                    s_rdLastBoundarySerial = bSerial;
+                }
+                if (acceptBoundary)
+                {
+                    s_rdBoundaries.push_back({bIdx, bSerial});
+                    ++s_rdBoundariesTotal;
+                }
+            }
             s_rd2dVerts.insert(s_rd2dVerts.end(), triVerts, triVerts + addCount);
             s_rd2dBatches.push_back(b2d);
         }
