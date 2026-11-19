@@ -9,8 +9,10 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 extern void ps2xEeGfxDecompInstall(PS2Runtime &); // DECOMP-BM
 extern void ps2xDevConsoleInstall(PS2Runtime &); // FEAT-DF
 extern bool ps2xRdViewOn(); // FEAT-RD1
+extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
+extern void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h); // FEAT-RD12
 extern void ps2xPadMarker(); // PROBE-MK
 extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
 extern void ps2xMcInit(); // FEAT-DE
@@ -6460,9 +6462,28 @@ void PS2Runtime::run()
             const auto presT0 = std::chrono::steady_clock::now();
             uint32_t presentWidth = FB_WIDTH;
             uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-            UploadFrame(frameTex, this, presentWidth, presentHeight, tick);
-            if (ps2xRdViewOn()) // FEAT-RD8
-                ps2xRdSetPresentSize(presentWidth, presentHeight);
+            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip UploadFrame / GS readback
+            {
+                if (!vblankLatchOn)
+                {
+                    static uint64_t s_takeoverLastTick = std::numeric_limits<uint64_t>::max();
+                    const uint64_t curTick = eeScheduler().currentVSyncTick();
+                    if (curTick != s_takeoverLastTick)
+                    {
+                        gs().latchHostPresentationFrame();
+                        s_takeoverLastTick = curTick;
+                    }
+                }
+                ps2xRdGetPresentSize(presentWidth, presentHeight);
+                if (presentWidth == 0u) presentWidth = 640u;
+                if (presentHeight == 0u) presentHeight = 448u;
+            }
+            else
+            {
+                UploadFrame(frameTex, this, presentWidth, presentHeight, tick);
+                if (ps2xRdViewOn()) // FEAT-RD8
+                    ps2xRdSetPresentSize(presentWidth, presentHeight);
+            }
 
             BeginDrawing();
             ClearBackground(BLACK);
@@ -6504,7 +6525,7 @@ void PS2Runtime::run()
             static bool s_rdShow = true; // FEAT-RD1
             if (ps2xRdViewOn() && IsKeyPressed(KEY_F11)) // FEAT-RD1
                 s_rdShow = !s_rdShow;
-            if (ps2xRdViewOn() && s_rdShow) // FEAT-RD1
+            if (ps2xRdViewOn() && (s_rdShow || ps2xRdTakeoverOn())) // FEAT-RD1 // FEAT-RD12
             {
                 rlClearScreenBuffers();
                 if (!ps2xRdDraw(dstRect.x, dstRect.y, dstRect.width, dstRect.height))

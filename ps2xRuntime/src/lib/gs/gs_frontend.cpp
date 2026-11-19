@@ -62,6 +62,8 @@ static void rdpMaybeReport() // PROBE-RDP
     s_rdpQueueDraws = 0u; s_t0 = now; s_cyc0 = __rdtsc(); s_seq0 = seq;
 }
 extern bool ps2xRdViewOn(); // FEAT-RD5
+extern bool ps2xRdTakeoverOn(); // FEAT-RD12
+extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD12
 extern void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t *vram, const uint16_t *clut512); // FEAT-RD5
 extern const uint16_t *ps2xRdActiveClut(); // FEAT-RD5
 static uint32_t s_rdCurSerial = 0u;       // FEAT-RD5
@@ -1231,6 +1233,8 @@ void GS::latchHostPresentationFrame()
     PresentationFrame frame{};
     const uint64_t pjStart = __rdtsc(); // PERF-JD
     struct GwPres { uint64_t t0; ~GwPres() { if (g_gwOn) { g_gwPresentT.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); g_gwFrames.fetch_add(1, std::memory_order_relaxed); } } } gwPres{pjStart}; // PROBE-GW
+    const bool takeover = ps2xRdTakeoverOn(); // FEAT-RD12
+    if (!takeover)
     {
         std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
         if (m_backend)
@@ -1244,12 +1248,49 @@ void GS::latchHostPresentationFrame()
         }
     }
 
-    const bool hasFrame = static_cast<bool>(frame);
+    bool hasFrame = static_cast<bool>(frame);
     const uint32_t displayFbp = frame.displayFbp;
     const uint32_t sourceFbp = frame.sourceFbp;
-    const uint32_t width = frame.width;
-    const uint32_t height = frame.height;
+    uint32_t width = frame.width;
+    uint32_t height = frame.height;
     const bool usedPreferred = frame.usedPreferred;
+    if (takeover) // FEAT-RD12: compute display size from DISPLAY1/2 without GPU/CPU readback
+    {
+        auto circuitValid = [](uint64_t disp, uint64_t fb) -> bool {
+            const uint32_t dw = static_cast<uint32_t>((disp >> 32) & 0x0FFFu);
+            const uint32_t dh = static_cast<uint32_t>((disp >> 44) & 0x07FFu);
+            const uint32_t magh = static_cast<uint32_t>((disp >> 23) & 0x0Fu);
+            return ((fb >> 9) & 0x3Fu) != 0u || dw != 0u || dh != 0u || magh != 0u;
+        };
+        const bool v1 = (request.pmode & 1ull) != 0ull && circuitValid(request.display1, request.dispfb1);
+        const bool v2 = (request.pmode & 2ull) != 0ull && circuitValid(request.display2, request.dispfb2);
+        if (v1 || v2)
+        {
+            const uint64_t d = v1 ? request.display1 : request.display2;
+            const uint32_t dw = static_cast<uint32_t>((d >> 32) & 0x0FFFu);
+            const uint32_t dh = static_cast<uint32_t>((d >> 44) & 0x07FFu);
+            const uint32_t magh = static_cast<uint32_t>((d >> 23) & 0x0Fu);
+            width = (dw + 1u) / (magh + 1u);
+            height = dh + 1u;
+            if (height > 448u && height <= 896u)
+                height = (height + 1u) / 2u;
+            if (width < 64u || height < 64u)
+            {
+                width = 640u;
+                height = 448u;
+            }
+            width = std::min<uint32_t>(width, 640u);
+            height = std::min<uint32_t>(height, 512u);
+        }
+        else
+        {
+            std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
+            width = (m_hostPresentationWidth != 0u) ? m_hostPresentationWidth : 640u;
+            height = (m_hostPresentationHeight != 0u) ? m_hostPresentationHeight : 448u;
+        }
+        ps2xRdSetPresentSize(width, height);
+        hasFrame = true;
+    }
     {
         std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
         m_hostPresentationFrame = std::move(frame.pixels);

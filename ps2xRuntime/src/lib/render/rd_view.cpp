@@ -277,6 +277,22 @@ bool ps2xRdViewOn() // FEAT-RD1
     return v;
 }
 
+bool ps2xRdTakeoverOn() // FEAT-RD12
+{
+    static const bool v = []() {
+        if (!ps2xRdViewOn())
+            return false;
+        const char *e = std::getenv("PS2X_RD_TAKEOVER");
+        if (e && e[0] == '1')
+        {
+            ps2xSafeLog("[rd] TAKEOVER on: GS raster + readback skipped\n");
+            return true;
+        }
+        return false;
+    }();
+    return v;
+}
+
 void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ) // FEAT-RD2 // FEAT-RD11
 {
     static thread_local std::vector<RdVert> t_staging;
@@ -334,6 +350,12 @@ void ps2xRdSetPresentSize(uint32_t w, uint32_t h) // FEAT-RD8
         g_rdPresentH.store(h, std::memory_order_relaxed);
 }
 
+void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h) // FEAT-RD12
+{
+    w = g_rdPresentW.load(std::memory_order_relaxed);
+    h = g_rdPresentH.load(std::memory_order_relaxed);
+}
+
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
     bool hasNew = false;
@@ -341,7 +363,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     {
         std::lock_guard<std::mutex> lock(g_rdMutex);
         if (!g_rdEverPublished && !g_rdGpu.everUploaded)
+        {
+            if (ps2xRdTakeoverOn()) // FEAT-RD12: clear to black instead of drawing stale GS texture
+                return true;
             return false;
+        }
         if (g_rdHasPending)
         {
             g_rdGpu.localScratch.swap(g_rdPending);

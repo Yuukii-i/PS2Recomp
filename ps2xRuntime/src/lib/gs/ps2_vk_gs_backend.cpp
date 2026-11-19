@@ -51,6 +51,7 @@ extern "C" void ps2_gs_vk_stats(uint64_t *out) { out[0] = g_gqLockWait.exchange(
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
 extern "C" void ps2_iu_gpu(uint64_t bytes, uint64_t ticks); // PROBE-IU, defined in gs_frontend.cpp
 extern void ps2xRdNoteClut(uint32_t tbp0, uint32_t tbw, uint32_t psm, uint32_t tw, uint32_t th, uint32_t cpsm, uint32_t csa, const uint16_t *clut512); // FEAT-RD3c
+extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 #include <intrin.h> // PROBE-RDP
 extern bool g_rdpOn; extern uint64_t g_rdpCyc[4]; extern uint32_t g_rdpCnt[4]; // PROBE-RDP
 struct RdpScopeVk // PROBE-RDP
@@ -676,6 +677,7 @@ namespace
             }
             if (maxPrims_ != kDefaultMaxPrims || maxClutSlots_ != kDefaultMaxClutSlots)
                 std::printf("[vk] capacities prims=%u clut=%u\n", maxPrims_, maxClutSlots_);
+            (void)ps2xRdTakeoverOn(); // FEAT-RD12: log startup banner once
         }
         ~GSVulkanBackend() override // PROBE-GT
         {
@@ -727,6 +729,16 @@ namespace
             g_gqLockWaits.fetch_add(1, std::memory_order_relaxed);
             if (ref_)
                 ref_->Submit(batch);
+            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip GPU + CPU raster, keep CLUT notes
+            {
+                if (clutChanged_ || curClutSlot_ < 0)
+                {
+                    curClutSlot_ = (curClutSlot_ + 1) & 0x7FFFFFFF;
+                    clutChanged_ = false;
+                }
+                noteRdClut(batch.state);
+                return;
+            }
             if (!vkReady_ || batch.vertexCount == 0u)
             {
                 cpuDraw(batch);
@@ -773,6 +785,16 @@ namespace
             g_gqLockWaits.fetch_add(1, std::memory_order_relaxed);
             if (count == 0u)
                 return;
+            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip GPU + CPU raster, keep CLUT notes
+            {
+                if (clutChanged_ || curClutSlot_ < 0)
+                {
+                    curClutSlot_ = (curClutSlot_ + 1) & 0x7FFFFFFF;
+                    clutChanged_ = false;
+                }
+                noteRdClut(state);
+                return;
+            }
             // PERF-GA: fall back to per-prim when Vulkan is not ready, compare/ref is active,
             // run would cross ring/frame prim limits, or any prim has an invalid vertex count.
             if (!vkReady_ || compare_ || ref_ != nullptr ||
@@ -1124,6 +1146,13 @@ namespace
         PresentationFrame Present(const GSPresentationRequest &request) override
         {
             GwScope gwS(10); // PROBE-GW present
+            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip GS frame readback/conversion
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                ++presents_;
+                primsThisFrame_ = 0;
+                return {};
+            }
             if (asyncOk_ && asyncPresentWanted() && !compare_ && !ref_)
             {
                 const uint64_t lk0 = __rdtsc();
@@ -1979,6 +2008,8 @@ namespace
         // ------------------------------------------------------------ CPU path
         void cpuDraw(const GSPrimitiveBatch &batch)
         {
+            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip CPU fallback rasteriser
+                return;
             if (vkReady_)
             {
                 // the CPU draw reads/writes frame, Z and textures: simplest safe rule is a full sync
@@ -2235,6 +2266,8 @@ namespace
                 clutChanged_ = false;
             }
             noteRdClut(st); // FEAT-RD3c
+            if (ps2xRdTakeoverOn()) // FEAT-RD12
+                return 0;
             if (!vkReady_)
                 return 8;
 
@@ -2406,6 +2439,8 @@ namespace
                 clutChanged_ = false;
             }
             noteRdClut(st); // FEAT-RD3c
+            if (ps2xRdTakeoverOn()) // FEAT-RD12
+                return 0;
             if (!vkReady_)
                 return 8;
 
