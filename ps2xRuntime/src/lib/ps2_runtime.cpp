@@ -1359,8 +1359,10 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     }
 }
 
+extern void ps2xLoadConfig(); // FEAT-CFG
 PS2Runtime::PS2Runtime()
 {
+    ps2xLoadConfig(); // FEAT-CFG
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
 
@@ -1757,7 +1759,26 @@ bool PS2Runtime::initialize(const char *title)
         {
             SetConfigFlags(FLAG_WINDOW_RESIZABLE);
         }
-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+        { // FEAT-CFG
+            int msaaReq = 0;
+            if (const char *m = std::getenv("PS2X_MSAA"))
+                msaaReq = std::atoi(m);
+            const int msaaEff = (msaaReq >= 2) ? 4 : 0;
+            if (msaaEff)
+                SetConfigFlags(FLAG_MSAA_4X_HINT);
+            std::cerr << "[cfg] msaa requested=" << msaaReq << " effective=" << msaaEff << std::endl;
+        }
+        int winW = HOST_WINDOW_WIDTH, winH = HOST_WINDOW_HEIGHT; // FEAT-CFG
+        if (const char *ws = std::getenv("PS2X_WINDOW_SIZE"))    // FEAT-CFG
+        {
+            int w = 0, h = 0;
+            if (std::sscanf(ws, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
+            {
+                winW = w;
+                winH = h;
+            }
+        }
+        InitWindow(winW, winH, title); // FEAT-CFG
 #ifdef _WIN32
         if (bgWin) // FEAT-BGWIN
         {

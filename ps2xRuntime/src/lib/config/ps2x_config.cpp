@@ -1,0 +1,170 @@
+// FEAT-CFG: user settings file (ps2x.ini) mapped onto the PS2X_* env vars
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <string>
+
+namespace
+{
+std::string trim(const std::string &s)
+{
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos)
+        return "";
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+std::string lower(std::string s)
+{
+    for (auto &c : s)
+        c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+bool envSet(const char *name)
+{
+    const char *v = std::getenv(name);
+    return v && v[0];
+}
+
+void setEnvDefault(const char *name, const std::string &val)
+{
+    if (envSet(name))
+        return;
+#ifdef _WIN32
+    _putenv_s(name, val.c_str());
+#else
+    setenv(name, val.c_str(), 0);
+#endif
+}
+
+const char *kDefaultIni =
+    "# Ape Escape 3 recomp settings. Environment variables (PS2X_*) override this file.\n"
+    "[graphics]\n"
+    "# renderer: classic or new\n"
+    "renderer = classic\n"
+    "# aspect: 4:3, fill, 16:9 or native (fill needs renderer = new)\n"
+    "aspect = 4:3\n"
+    "# msaa: 0, 2, 4 or 8 (new renderer)\n"
+    "msaa = 4\n"
+    "# texture_pack: directory with replacement textures\n"
+    "texture_pack = mods/textures\n"
+    "# window: initial window size WxH\n"
+    "window = 1280x960\n"
+    "\n"
+    "[debug]\n"
+    "# background_window: 1 keeps the window behind others\n"
+    "background_window = 0\n";
+} // namespace
+
+void ps2xLoadConfig()
+{
+    static bool done = false;
+    if (done)
+        return;
+    done = true;
+    if (const char *nc = std::getenv("PS2X_NO_CONFIG"))
+        if (nc[0] == '1')
+            return;
+
+    std::map<std::string, std::string> kv; // "section.key" -> value
+    std::ifstream in("ps2x.ini");
+    if (!in)
+    {
+        std::ofstream out("ps2x.ini");
+        if (out)
+            out << kDefaultIni;
+        std::cerr << "[cfg] ps2x.ini missing, wrote defaults" << std::endl;
+        // parse the defaults
+        std::string text = kDefaultIni;
+        std::string sec;
+        size_t pos = 0;
+        while (pos < text.size())
+        {
+            size_t nl = text.find('\n', pos);
+            std::string line = trim(text.substr(pos, nl - pos));
+            pos = (nl == std::string::npos) ? text.size() : nl + 1;
+            if (line.empty() || line[0] == '#' || line[0] == ';')
+                continue;
+            if (line[0] == '[')
+            {
+                sec = lower(trim(line.substr(1, line.find(']') - 1)));
+                continue;
+            }
+            size_t eq = line.find('=');
+            if (eq == std::string::npos)
+                continue;
+            kv[sec + "." + lower(trim(line.substr(0, eq)))] = trim(line.substr(eq + 1));
+        }
+    }
+    else
+    {
+        std::string line, sec;
+        while (std::getline(in, line))
+        {
+            line = trim(line);
+            if (line.empty() || line[0] == '#' || line[0] == ';')
+                continue;
+            if (line[0] == '[')
+            {
+                size_t e = line.find(']');
+                sec = lower(trim(line.substr(1, e == std::string::npos ? std::string::npos : e - 1)));
+                continue;
+            }
+            size_t eq = line.find('=');
+            if (eq == std::string::npos)
+                continue;
+            kv[sec + "." + lower(trim(line.substr(0, eq)))] = trim(line.substr(eq + 1));
+        }
+    }
+
+    auto get = [&](const char *k) -> std::string {
+        auto it = kv.find(k);
+        return it == kv.end() ? std::string() : it->second;
+    };
+
+    std::string renderer = lower(get("graphics.renderer"));
+    const bool isNew = (renderer == "new");
+    if (isNew)
+    {
+        setEnvDefault("PS2X_RD_VIEW", "1");
+        setEnvDefault("PS2X_RD_TAKEOVER", "1");
+    }
+
+    std::string aspect = lower(get("graphics.aspect"));
+    if (!aspect.empty())
+    {
+        if (aspect == "fill" && !isNew)
+            std::cerr << "[cfg] aspect=fill ignored: requires renderer=new" << std::endl;
+        else
+            setEnvDefault("PS2X_ASPECT", aspect);
+    }
+
+    std::string msaa = get("graphics.msaa");
+    if (isNew && !msaa.empty())
+        setEnvDefault("PS2X_MSAA", msaa);
+
+    std::string tex = get("graphics.texture_pack");
+    if (!tex.empty())
+        setEnvDefault("PS2X_TEX_REPLACE_DIR", tex);
+
+    std::string win = get("graphics.window");
+    if (isNew && !win.empty())
+        setEnvDefault("PS2X_WINDOW_SIZE", win);
+
+    std::string bg = get("debug.background_window");
+    if (!bg.empty())
+        setEnvDefault("PS2X_WINDOW_BACKGROUND", bg);
+
+    auto eff = [](const char *n) {
+        const char *v = std::getenv(n);
+        return std::string(v ? v : "(unset)");
+    };
+    std::cerr << "[cfg] ps2x.ini: renderer=" << (isNew ? "new" : "classic")
+              << " aspect=" << eff("PS2X_ASPECT")
+              << " msaa=" << eff("PS2X_MSAA")
+              << " window=" << eff("PS2X_WINDOW_SIZE") << std::endl;
+}
