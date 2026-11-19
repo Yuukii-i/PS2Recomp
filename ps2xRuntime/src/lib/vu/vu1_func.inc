@@ -8,14 +8,80 @@
 // whenever a lane of the result or of the product leaves the exponent window [2,253]. (vu1_hot_ops.h itself cannot be included in this TU: its fmacR
 // touches private VU1Interpreter members and needs `#define private public`.)
 #include <cfloat>
+#include <cmath> // FEAT-RD40
 #include <cstdlib> // PERF-V1G
 #include <filesystem> // PERF-SA
+#include <chrono> // FEAT-RD32
+#include <intrin.h> // FEAT-RD32
 #include <unordered_map>
 #include <utility>
 
 extern void ps2xSafeLog(const char *fmt, ...);
 #include <atomic>
 extern std::atomic<uint64_t> g_hostPresentSeq; // PERF-SA: per presented frame (gs_frontend.cpp)
+
+struct RdVert // FEAT-RD1
+{
+    float pos[4];
+    uint8_t rgba[4];
+    float uv[2]; // FEAT-RD3
+};
+struct RdBatch // FEAT-RD2 // FEAT-RD14
+{
+    uint32_t first;
+    uint32_t count;
+    uint32_t baseVertex; // FEAT-RD14
+    uint64_t alpha;
+    uint64_t test;
+    uint64_t frame;
+    uint64_t zbuf;
+    uint64_t prim;
+    uint64_t tex0;  // FEAT-RD3
+    uint64_t clamp; // FEAT-RD3
+    uint64_t tex1;  // FEAT-RD3
+    uint64_t texa;  // FEAT-RD3
+    uint32_t kickSerial; // FEAT-RD5
+    float vpS[2]; // FEAT-RD21
+    float vpO[2]; // FEAT-RD21
+    uint32_t camHash; // PROBE-RD26
+};
+extern bool ps2xRdViewOn(); // FEAT-RD1
+extern bool ps2xRdActive(); // FEAT-RD49
+extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
+extern void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD14
+extern std::atomic<uint32_t> g_rdKickSerial; // FEAT-RD5
+extern std::atomic<uint32_t> g_rdMergedSpan; // FEAT-RD17
+extern uint64_t ps2xRdLookupContentId(uint32_t serial); // FEAT-RD5
+extern bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_t &test, uint64_t &frame,
+                              uint64_t &zbuf, uint64_t &tex0, uint64_t &tex1, uint64_t &clamp, uint64_t &texa, uint64_t &fba); // FEAT-RD17
+extern bool ps2xRdTakeoverOn(); // FEAT-RD40
+extern bool ps2xRdFastGeomOn(); // FEAT-RD40
+extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD40
+extern bool ps2xRdHasDisplayFbp(); // FEAT-RD40
+extern bool ps2xRdForceClassic(); // FEAT-RD48
+
+static inline bool rdSerialsCanMerge(uint32_t s0, uint32_t s1) // FEAT-RD17
+{
+    if (s0 == s1)
+        return true;
+    if (s0 == 0u || s1 == 0u)
+        return false;
+    const uint64_t c0 = ::ps2xRdLookupContentId(s0);
+    const uint64_t c1 = ::ps2xRdLookupContentId(s1);
+    if (c0 == 0ull || c0 != c1)
+        return false;
+    uint64_t p0, a0, t0, f0, z0, tx0, tx10, cl0, txa0, fb0;
+    uint64_t p1, a1, t1, f1, z1, tx1, tx11, cl1, txa1, fb1;
+    if (::ps2xRdLookupState(s0, p0, a0, t0, f0, z0, tx0, tx10, cl0, txa0, fb0) &&
+        ::ps2xRdLookupState(s1, p1, a1, t1, f1, z1, tx1, tx11, cl1, txa1, fb1))
+    {
+        constexpr uint64_t kAbeTme = (1ull << 6) | (1ull << 4);
+        if ((p0 & kAbeTme) != (p1 & kAbeTme) || a0 != a1 || t0 != t1 || f0 != f1 ||
+            z0 != z1 || tx10 != tx11 || cl0 != cl1 || fb0 != fb1)
+            return false;
+    }
+    return true;
+}
 
 namespace vu1func
 {
@@ -206,6 +272,131 @@ struct HScope // PROBE-VX: per-handler timing at the dispatch site; clip time is
     ~HScope() { end(__rdtsc()); }
 };
 } // namespace vx
+
+namespace hprof // PROBE-RD39
+{
+inline bool on() // PROBE-RD39
+{
+    static const bool v = []() { const char *e = std::getenv("PS2X_VU1_HPROF"); return e && e[0] == '1'; }();
+    return v;
+}
+inline double msPerTick() // PROBE-RD39
+{
+    static const double v = []() {
+        const auto t0 = std::chrono::steady_clock::now();
+        const uint64_t c0 = __rdtsc();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() < 20) {}
+        const auto t1 = std::chrono::steady_clock::now();
+        const uint64_t c1 = __rdtsc();
+        const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        return (c1 > c0) ? (ms / static_cast<double>(c1 - c0)) : 0.0;
+    }();
+    return v;
+}
+struct Entry // PROBE-RD39
+{
+    uint16_t pc = 0;
+    uint64_t ticks = 0;
+    uint64_t calls = 0;
+};
+struct St // PROBE-RD39
+{
+    uint64_t totalT = 0, takenT = 0, fallbackT = 0, recT = 0, undoT = 0, frames = 0;
+    uint64_t eeHdr = 0, eeVerts = 0, eeRec = 0, eeKick = 0, eeRest = 0, eeNSum = 0, eeCalls = 0; // PROBE-RD41
+    Entry entries[64] = {};
+    uint32_t nEntries = 0;
+    uint32_t tick = 0;
+    std::chrono::steady_clock::time_point lastPrint{};
+    bool init = false;
+};
+static St g_st; // PROBE-RD39
+inline void addHandler(uint16_t pc, uint64_t ticks) // PROBE-RD39
+{
+    for (uint32_t i = 0; i < g_st.nEntries; ++i)
+    {
+        if (g_st.entries[i].pc == pc)
+        {
+            g_st.entries[i].ticks += ticks;
+            ++g_st.entries[i].calls;
+            return;
+        }
+    }
+    if (g_st.nEntries < 64u)
+    {
+        g_st.entries[g_st.nEntries++] = Entry{pc, ticks, 1ull};
+    }
+}
+inline void subtractHandler(uint16_t pc, uint64_t ticks) // PROBE-RD39
+{
+    for (uint32_t i = 0; i < g_st.nEntries; ++i)
+    {
+        if (g_st.entries[i].pc == pc)
+        {
+            g_st.entries[i].ticks = (g_st.entries[i].ticks > ticks) ? (g_st.entries[i].ticks - ticks) : 0ull;
+            return;
+        }
+    }
+}
+struct HScope // PROBE-RD39
+{
+    uint64_t t0 = 0;
+    uint16_t pc = 0;
+    void end()
+    {
+        if (t0)
+        {
+            addHandler(pc, __rdtsc() - t0);
+            t0 = 0;
+        }
+    }
+    void begin(uint16_t p)
+    {
+        end();
+        pc = p;
+        t0 = __rdtsc();
+    }
+    ~HScope() { end(); }
+};
+inline void maybeReport() // PROBE-RD39
+{
+    if ((++g_st.tick & 63u) != 0u)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    if (!g_st.init)
+    {
+        g_st.init = true;
+        g_st.lastPrint = now;
+        (void)msPerTick();
+        return;
+    }
+    const double sec = std::chrono::duration<double>(now - g_st.lastPrint).count();
+    if (sec < 5.0)
+        return;
+    const double fr = sec * 60.0; // PROBE-RD39: always ms per 1/60 s
+    const double k = msPerTick() / fr;
+    Entry sorted[64];
+    const uint32_t n = g_st.nEntries;
+    for (uint32_t i = 0; i < n; ++i)
+        sorted[i] = g_st.entries[i];
+    std::sort(sorted, sorted + n, [](const Entry &a, const Entry &b) { return a.ticks > b.ticks; });
+    char topBuf[512];
+    int pos = 0;
+    topBuf[0] = '\0';
+    for (uint32_t i = 0; i < n && i < 10u && pos < 460; ++i)
+    {
+        pos += std::snprintf(topBuf + pos, sizeof(topBuf) - static_cast<size_t>(pos), "%s%04X:%.2f/%.1f",
+                             i ? " " : "", sorted[i].pc, sorted[i].ticks * k, static_cast<double>(sorted[i].calls) / fr);
+    }
+    const double avgN = g_st.eeCalls ? (static_cast<double>(g_st.eeNSum) / static_cast<double>(g_st.eeCalls)) : 0.0; // PROBE-RD41
+    ::ps2xSafeLog("[vu1h] total=%.2f taken=%.2f fallback=%.2f rec=%.2f undo=%.2f 1ee0split hdr=%.2f verts=%.2f rec=%.2f kick=%.2f rest=%.2f avgN=%.1f | top: %s\n",
+                  g_st.totalT * k, g_st.takenT * k, g_st.fallbackT * k, g_st.recT * k, g_st.undoT * k,
+                  g_st.eeHdr * k, g_st.eeVerts * k, g_st.eeRec * k, g_st.eeKick * k, g_st.eeRest * k, avgN, topBuf); // PROBE-RD41
+    g_st.totalT = g_st.takenT = g_st.fallbackT = g_st.recT = g_st.undoT = g_st.frames = 0;
+    g_st.eeHdr = g_st.eeVerts = g_st.eeRec = g_st.eeKick = g_st.eeRest = g_st.eeNSum = g_st.eeCalls = 0; // PROBE-RD41
+    g_st.nEntries = 0;
+    g_st.lastPrint = now;
+}
+} // namespace hprof
 
 inline __m128 norm4(__m128 v) // vuhot::N4 (normalizeOperand on 4 lanes)
 {
@@ -500,7 +691,7 @@ namespace scene
 inline bool on()
 {
     static const bool v = []() { const char *e = std::getenv("PS2X_SCENE"); return e && e[0] == '1'; }();
-    return v;
+    return v || ::ps2xRdActive(); // FEAT-RD1 // FEAT-RD49
 }
 inline bool checkOn()
 {
@@ -518,6 +709,120 @@ inline int64_t dumpFrame()
         return (end != e && n >= 0) ? static_cast<int64_t>(n) : -1;
     }();
     return v;
+}
+inline bool leanRdOn() // FEAT-RD14
+{
+    static const bool v = ::ps2xRdViewOn() && !checkOn() && dumpFrame() < 0;
+    return v && ::ps2xRdActive(); // FEAT-RD49
+}
+inline bool leanSkinOn() // FEAT-RD40
+{
+    static const bool v = []() {
+        const char *e = std::getenv("PS2X_RD_LEANSKIN");
+        return !(e && e[0] == '0') && ::ps2xRdTakeoverOn() && leanRdOn() && ::ps2xRdFastGeomOn();
+    }();
+    return v && !::ps2xRdForceClassic(); // FEAT-RD48
+}
+inline bool leanSkinCheckOn() // FEAT-RD40
+{
+    static const bool v = []() {
+        const char *e = std::getenv("PS2X_RD_LEANSKIN_CHECK");
+        return e && e[0] == '1' && ::ps2xRdTakeoverOn() && leanRdOn() && ::ps2xRdFastGeomOn();
+    }();
+    return v && !::ps2xRdForceClassic(); // FEAT-RD48
+}
+inline bool leanKickOn() // FEAT-RD42
+{
+    static const bool v = []() {
+        const char *e = std::getenv("PS2X_RD_LEANKICK");
+        return !(e && e[0] == '0');
+    }();
+    return v && ::ps2xRdActive(); // FEAT-RD48 // FEAT-RD49
+}
+inline void leanSkinNoteDraw(bool isLean, bool mismatch, bool isLeanKick = false) // FEAT-RD40 // FEAT-RD42
+{
+    struct Stat
+    {
+        uint32_t draws = 0, lean = 0, exact = 0, mism = 0, leanKicks = 0; // FEAT-RD42
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    };
+    static thread_local Stat s;
+    ++s.draws;
+    if (isLean) ++s.lean; else ++s.exact;
+    if (mismatch) ++s.mism;
+    if (isLeanKick) ++s.leanKicks; // FEAT-RD42
+    if ((s.draws & 0xFFu) == 0u)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - s.t0).count() >= 5.0)
+        {
+            ::ps2xSafeLog("[leanskin] draws=%u lean=%u exact=%u mism=%u leanKicks=%u\n", s.draws, s.lean, s.exact, s.mism, s.leanKicks); // FEAT-RD42
+            s.draws = s.lean = s.exact = s.mism = s.leanKicks = 0u; // FEAT-RD42
+            s.t0 = now;
+        }
+    }
+}
+
+// FEAT-RD32: recording timing probe (PS2X_RD_RECPROF=1), rdtsc per section
+inline bool recProfOn()
+{
+    static const bool v = []() { const char *e = std::getenv("PS2X_RD_RECPROF"); return e && e[0] == '1'; }();
+    return v;
+}
+enum RecSlot { kRpParse = 0, kRpMarker, kRpBegin, kRpRigid, kRpSkinned, kRpClip, kRpPush, kRpPublish, kRpCount };
+struct RecProf
+{
+    uint64_t cyc[kRpCount] = {};
+    uint64_t cnt[kRpCount] = {};
+    uint64_t verts = 0;
+    uint64_t frames = 0;
+    uint64_t t0Cyc = 0;
+    std::chrono::steady_clock::time_point t0{};
+};
+inline RecProf &recProf()
+{
+    static thread_local RecProf p;
+    return p;
+}
+struct RecScope
+{
+    int slot;
+    uint64_t start;
+    explicit RecScope(int s) : slot(s), start(recProfOn() ? __rdtsc() : 0ull) {}
+    ~RecScope()
+    {
+        if (start)
+        {
+            RecProf &p = recProf();
+            p.cyc[slot] += __rdtsc() - start;
+            ++p.cnt[slot];
+        }
+    }
+};
+inline void recProfFrame(uint64_t verts)
+{
+    RecProf &p = recProf();
+    ++p.frames;
+    p.verts += verts;
+    const auto now = std::chrono::steady_clock::now();
+    if (p.t0.time_since_epoch().count() == 0)
+    {
+        p.t0 = now;
+        p.t0Cyc = __rdtsc();
+        return;
+    }
+    const double sec = std::chrono::duration<double>(now - p.t0).count();
+    if (sec < 5.0)
+        return;
+    const double cps = static_cast<double>(__rdtsc() - p.t0Cyc) / sec;
+    const double fr = p.frames ? static_cast<double>(p.frames) : 1.0;
+    static const char *kNames[kRpCount] = {"parse", "marker", "begin", "rigid", "skinned", "clip", "push", "publish"};
+    char buf[512];
+    int n = std::snprintf(buf, sizeof(buf), "[rdrec] frames=%llu verts/frame=%.0f ms/frame:", static_cast<unsigned long long>(p.frames), static_cast<double>(p.verts) / fr);
+    for (int i = 0; i < kRpCount && n > 0 && n < 440; ++i)
+        n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %s=%.3f(n%.0f)", kNames[i], static_cast<double>(p.cyc[i]) / cps * 1000.0 / fr, static_cast<double>(p.cnt[i]) / fr);
+    ::ps2xSafeLog("%s\n", buf);
+    p = RecProf{};
 }
 
 struct SceneVertex // 80 bytes
@@ -558,20 +863,79 @@ struct SceneBinHeader // 32 bytes
 };
 static_assert(sizeof(SceneBinHeader) == 32u, "SceneBinHeader size");
 
+struct SceneGs // FEAT-RD2
+{
+    uint64_t prim;
+    uint64_t tex0;
+    uint64_t clamp;
+    uint64_t tex1;
+    uint64_t alpha;
+    uint64_t test;
+    uint64_t frame;
+    uint64_t zbuf;
+    uint64_t texa;
+    uint64_t texclut;
+    uint32_t fba;
+    uint32_t ownTex0;
+    uint32_t kickSerial; // FEAT-RD5
+};
+
+struct GsShadow // FEAT-RD2
+{
+    uint64_t prim = 0;
+    uint64_t tex0[2] = {};
+    uint64_t clamp[2] = {};
+    uint64_t tex1[2] = {};
+    uint64_t alpha[2] = {};
+    uint64_t test[2] = {};
+    uint64_t frame[2] = {};
+    uint64_t zbuf[2] = {};
+    uint64_t fba[2] = {};
+    uint64_t scissor[2] = {}; // FEAT-RD40
+    uint64_t xyoffset[2] = {}; // FEAT-RD40
+    uint64_t texa = 0;
+    uint64_t texclut = 0;
+};
+
 struct SceneFrame
 {
     uint64_t frameIndex = 0;
     uint32_t mscalCount = 0;
     uint32_t gifBytes = 0;
     std::vector<SceneDraw> draws;
+    std::vector<SceneGs> gs; // FEAT-RD2
     std::vector<SceneVertex> vertices;
+    std::vector<::RdVert> rdVerts;    // FEAT-RD14
+    std::vector<uint32_t> rdIndices;  // FEAT-RD14
+    std::vector<::RdBatch> rdBatches; // FEAT-RD14
+    uint32_t leanDraws = 0;           // FEAT-RD14
+    uint32_t maskedDraws = 0;         // FEAT-RD14
+    uint32_t bestVpVerts = 0;         // FEAT-RD14
+    float vpScaleZ = 0.0f;            // FEAT-RD14
+    float vpOffsetZ = 0.0f;           // FEAT-RD14
+    float curVpS[2] = {0.0f, 0.0f};   // FEAT-RD21
+    float curVpO[2] = {0.0f, 0.0f};   // FEAT-RD21
+    uint32_t curCamHash = 0u;         // PROBE-RD26
+    size_t hwVerts = 0, hwIdx = 0, hwBatches = 0; // FEAT-RD32: high-water marks so capacity survives swaps with the publish ring
     void clear()
     {
         frameIndex = 0;
         mscalCount = 0;
         gifBytes = 0;
         draws.clear();
+        gs.clear(); // FEAT-RD2
         vertices.clear();
+        rdVerts.clear();   // FEAT-RD14
+        rdIndices.clear(); // FEAT-RD14
+        rdBatches.clear(); // FEAT-RD14
+        if (hwVerts > rdVerts.capacity()) rdVerts.reserve(hwVerts + hwVerts / 8u); // FEAT-RD32
+        if (hwIdx > rdIndices.capacity()) rdIndices.reserve(hwIdx + hwIdx / 8u);   // FEAT-RD32
+        if (hwBatches > rdBatches.capacity()) rdBatches.reserve(hwBatches + hwBatches / 8u); // FEAT-RD32
+        leanDraws = 0;     // FEAT-RD14
+        maskedDraws = 0;   // FEAT-RD14
+        bestVpVerts = 0;   // FEAT-RD14
+        vpScaleZ = 0.0f;   // FEAT-RD14
+        vpOffsetZ = 0.0f;  // FEAT-RD14
     }
 };
 
@@ -579,22 +943,137 @@ struct SceneState
 {
     SceneFrame bufs[2];
     uint32_t writeIdx = 0;
+    size_t mscalIdx0 = 0; // FEAT-RD14
     uint64_t frameSeq = 0;
     uint64_t lastPresentSeq = 0; // PERF-SA
     uint32_t mscalIndex = 0;
     uint32_t frameGifBytes = 0;
     uint32_t curBoneCount = 0;
     float curObjMatrix[16] = {};
+    GsShadow gs{}; // FEAT-RD2
+    bool curOwnTex0 = false; // FEAT-RD2
+    uint32_t curKickSerial = 0u; // FEAT-RD5
     uint64_t totalFrames = 0;
     uint64_t totalDraws = 0;
     uint64_t totalVerts = 0;
     uint64_t totalMismatch = 0;
+    uint64_t totalOwnTex0 = 0; // FEAT-RD2
+    uint64_t totalTme = 0; // FEAT-RD2
+    uint64_t totalAbe = 0; // FEAT-RD2
+    uint64_t totalDistinctTex0 = 0; // FEAT-RD2
+    uint64_t totalFallbacks = 0; // FEAT-RD2
     uint64_t mismatchByHandler[4] = {}; // 0:1EE0, 1:1EF0, 2:2440, 3:2900
     std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
     bool dumped = false;
 };
 
 static thread_local SceneState t_scene;
+
+inline void applyAD(uint64_t data, uint8_t reg) // FEAT-RD2
+{
+    GsShadow &g = t_scene.gs;
+    switch (reg)
+    {
+    case 0x00u: g.prim = data & 0x7FFull; break;
+    case 0x06u: case 0x07u: g.tex0[reg - 0x06u] = data; t_scene.curOwnTex0 = true; break;
+    case 0x08u: case 0x09u: g.clamp[reg - 0x08u] = data; break;
+    case 0x14u: case 0x15u: g.tex1[reg - 0x14u] = data; break;
+    case 0x18u: case 0x19u: g.xyoffset[reg - 0x18u] = data; break; // FEAT-RD40
+    case 0x16u: case 0x17u:
+    {
+        constexpr uint64_t kTex2Mask = 0xFFFFFFE003F00000ull; // PSM, CBP, CPSM, CSM, CSA, CLD
+        const uint32_t c = reg - 0x16u;
+        g.tex0[c] = (g.tex0[c] & ~kTex2Mask) | (data & kTex2Mask);
+        t_scene.curOwnTex0 = true;
+        break;
+    }
+    case 0x1Cu: g.texclut = data; break;
+    case 0x3Bu: g.texa = data; break;
+    case 0x40u: case 0x41u: g.scissor[reg - 0x40u] = data; break; // FEAT-RD40
+    case 0x42u: case 0x43u: g.alpha[reg - 0x42u] = data; break;
+    case 0x47u: case 0x48u: g.test[reg - 0x47u] = data; break;
+    case 0x4Au: case 0x4Bu: g.fba[reg - 0x4Au] = data; break;
+    case 0x4Cu: case 0x4Du: g.frame[reg - 0x4Cu] = data; break;
+    case 0x4Eu: case 0x4Fu: g.zbuf[reg - 0x4Eu] = data; break;
+    default: break;
+    }
+}
+
+inline void parseChain(const uint8_t *p, uint32_t len) // FEAT-RD2
+{
+    t_scene.curOwnTex0 = false;
+    uint32_t off = 0u;
+    while (off + 16u <= len)
+    {
+        uint64_t tagLo, tagHi;
+        std::memcpy(&tagLo, p + off, 8);
+        std::memcpy(&tagHi, p + off + 8u, 8);
+        off += 16u;
+        const uint64_t nloop = tagLo & 0x7FFFu;
+        const uint32_t eop = static_cast<uint32_t>((tagLo >> 15) & 1u);
+        const uint32_t pre = static_cast<uint32_t>((tagLo >> 46) & 1u);
+        const uint32_t flg = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
+        uint64_t nreg = (tagLo >> 60) & 0xFu;
+        if (nreg == 0u)
+            nreg = 16u;
+        if (pre)
+            t_scene.gs.prim = (tagLo >> 47) & 0x7FFull;
+        if (flg == 0u)
+        {
+            const uint64_t nq = nloop * nreg;
+            if (nq * 16u > len - off)
+                break;
+            for (uint64_t i = 0; i < nq; ++i)
+            {
+                const uint32_t r = static_cast<uint32_t>(i % nreg);
+                const uint32_t desc = static_cast<uint32_t>((tagHi >> (r * 4u)) & 0xFu);
+                if (desc == 0xEu)
+                {
+                    uint64_t data;
+                    std::memcpy(&data, p + off + i * 16u, 8);
+                    applyAD(data, p[off + i * 16u + 8u]);
+                }
+                else if (desc == 0x0u)
+                {
+                    uint64_t data;
+                    std::memcpy(&data, p + off + i * 16u, 8);
+                    t_scene.gs.prim = data & 0x7FFull;
+                }
+            }
+            off += static_cast<uint32_t>(nq * 16u);
+        }
+        else if (flg == 1u)
+        {
+            const uint64_t nd = nloop * nreg;
+            const uint64_t bytes = ((nd + 1u) & ~1ull) * 8u;
+            if (bytes > len - off)
+                break;
+            for (uint64_t i = 0; i < nd; ++i)
+            {
+                const uint32_t r = static_cast<uint32_t>(i % nreg);
+                const uint32_t desc = static_cast<uint32_t>((tagHi >> (r * 4u)) & 0xFu);
+                if (desc == 0x0u)
+                {
+                    uint64_t data;
+                    std::memcpy(&data, p + off + i * 8u, 8);
+                    t_scene.gs.prim = data & 0x7FFull;
+                }
+            }
+            off += static_cast<uint32_t>(bytes);
+        }
+        else if (flg == 2u)
+        {
+            const uint64_t bytes = nloop * 16u;
+            if (bytes > len - off)
+                break;
+            off += static_cast<uint32_t>(bytes);
+        }
+        else
+            break;
+        if (eop)
+            break;
+    }
+}
 
 inline int handlerSlot(uint32_t pc)
 {
@@ -620,9 +1099,16 @@ inline void setObjMatrix(__m128 r0, __m128 r1, __m128 r2, __m128 r3)
 inline void beginMscal(const uint8_t *vu, size_t &d0, size_t &v0)
 {
     const SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    t_scene.curBoneCount = 0;
+    if (leanRdOn()) // FEAT-RD14
+    {
+        d0 = f.rdBatches.size();
+        v0 = f.rdVerts.size();
+        t_scene.mscalIdx0 = f.rdIndices.size();
+        return;
+    }
     d0 = f.draws.size();
     v0 = f.vertices.size();
-    t_scene.curBoneCount = 0;
     const __m128 zero = _mm_setzero_ps();
     const __m128 m998 = ldq(vu, 998u), m999 = ldq(vu, 999u), m1000 = ldq(vu, 1000u), m1001 = ldq(vu, 1001u);
     const auto mulRow = [&](__m128 row, bool hasW) {
@@ -646,7 +1132,15 @@ inline void commitMscal(uint32_t gifBytes)
 inline void rollbackMscal(size_t d0, size_t v0)
 {
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    if (leanRdOn()) // FEAT-RD14
+    {
+        f.rdBatches.resize(d0);
+        f.rdVerts.resize(v0);
+        f.rdIndices.resize(t_scene.mscalIdx0);
+        return;
+    }
     f.draws.resize(d0);
+    f.gs.resize(d0); // FEAT-RD2
     f.vertices.resize(v0);
 }
 } // namespace scene
@@ -789,45 +1283,95 @@ static bool fb1EE0(int reason)
     return false;
 }
 
-static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
+static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool leanTag = false) // FEAT-RD42
 {
     const uint32_t q0 = addr & 0x3FFu;
     uint32_t total = 0;
-    for (;;)
+    if (leanTag) // FEAT-RD42
     {
         uint64_t tagLo;
-        std::memcpy(&tagLo, vu + (((q0 + total / 16u) & 0x3FFu) << 4), 8);
-        const uint64_t nloop = tagLo & 0x7FFFu;
-        const uint32_t format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
-        uint64_t nreg = (tagLo >> 60) & 0xFu;
-        if (nreg == 0u)
-            nreg = 16u;
-        uint64_t tagBytes = 16u;
-        if (format == 0u)
-            tagBytes += nloop * nreg * 16u;
-        else if (format == 1u)
-            tagBytes += ((nloop * nreg + 1u) & ~1ull) * 8u;
-        else if (format == 2u)
-            tagBytes += nloop * 16u;
-        else
+        std::memcpy(&tagLo, vu + (q0 << 4), 8);
+        if (((tagLo >> 58) & 0x3u) == 3u)
         {
             s_fbPc = 0xF010u;
             return false;
         }
-        if ((tagBytes & 15u) != 0u || tagBytes > kMaxKickBytes - total)
-        {
-            s_fbPc = 0xF011u;
-            return false;
-        }
-        total += static_cast<uint32_t>(tagBytes);
-        if (((tagLo >> 15) & 1u) != 0u) // EOP
-            break;
+        total = 16u;
     }
-    const uint32_t start = static_cast<uint32_t>(gif.size());
-    gif.resize(start + total);
-    for (uint32_t i = 0; i < total / 16u; ++i)
-        std::memcpy(gif.data() + start + i * 16u, vu + (((q0 + i) & 0x3FFu) << 4), 16);
+    else
+    {
+        for (;;)
+        {
+            uint64_t tagLo;
+            std::memcpy(&tagLo, vu + (((q0 + total / 16u) & 0x3FFu) << 4), 8);
+            const uint64_t nloop = tagLo & 0x7FFFu;
+            const uint32_t format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
+            uint64_t nreg = (tagLo >> 60) & 0xFu;
+            if (nreg == 0u)
+                nreg = 16u;
+            uint64_t tagBytes = 16u;
+            if (format == 0u)
+                tagBytes += nloop * nreg * 16u;
+            else if (format == 1u)
+                tagBytes += ((nloop * nreg + 1u) & ~1ull) * 8u;
+            else if (format == 2u)
+                tagBytes += nloop * 16u;
+            else
+            {
+                s_fbPc = 0xF010u;
+                return false;
+            }
+            if ((tagBytes & 15u) != 0u || tagBytes > kMaxKickBytes - total)
+            {
+                s_fbPc = 0xF011u;
+                return false;
+            }
+            total += static_cast<uint32_t>(tagBytes);
+            if (((tagLo >> 15) & 1u) != 0u) // EOP
+                break;
+        }
+    }
+    uint32_t start = static_cast<uint32_t>(gif.size());
+    if (scene::on() && ::ps2xRdActive()) // FEAT-RD5 // FEAT-RD49
+    {
+        uint32_t serial = (g_rdKickSerial.fetch_add(1u, std::memory_order_relaxed) + 1u) & 0x3FFFFFFFu; // FEAT-RD10
+        if (serial == 0u)
+            serial = (g_rdKickSerial.fetch_add(1u, std::memory_order_relaxed) + 1u) & 0x3FFFFFFFu;
+        scene::t_scene.curKickSerial = serial;
+        gif.resize(start + 32u + total);
+        const uint64_t mLo = 1ull | (1ull << 60); // NLOOP=1, EOP=0, FLG=0 (PACKED), NREG=1
+        const uint64_t mHi = 0xEull;              // REGS[0] = A+D
+        const uint64_t dLo = static_cast<uint64_t>(serial);
+        const uint64_t dHi = 0x7Full;             // byte 8 = 0x7F (GS NOP)
+        std::memcpy(gif.data() + start + 0u, &mLo, 8);
+        std::memcpy(gif.data() + start + 8u, &mHi, 8);
+        std::memcpy(gif.data() + start + 16u, &dLo, 8);
+        std::memcpy(gif.data() + start + 24u, &dHi, 8);
+        start += 32u;
+    }
+    else
+    {
+        gif.resize(start + total);
+    }
+    if (leanTag) // FEAT-RD42
+    {
+        std::memcpy(gif.data() + start, vu + (q0 << 4), 16);
+        uint64_t tagLo;
+        std::memcpy(&tagLo, gif.data() + start, 8);
+        tagLo &= ~0x7FFFull; // NLOOP = 0
+        std::memcpy(gif.data() + start, &tagLo, 8);
+    }
+    else
+    {
+        for (uint32_t i = 0; i < total / 16u; ++i)
+            std::memcpy(gif.data() + start + i * 16u, vu + (((q0 + i) & 0x3FFu) << 4), 16);
+    }
     kicks.emplace_back(start, total);
+    if (scene::on()) // FEAT-RD2
+    {
+        scene::RecScope rs(scene::kRpParse); // FEAT-RD32
+        scene::parseChain(gif.data() + start, total);
+    }
     return true;
 }
 
@@ -1079,20 +1623,145 @@ inline void onFlush()
         return;
     t_scene.lastPresentSeq = pseq;
     SceneFrame &cur = t_scene.bufs[t_scene.writeIdx];
-    if (cur.draws.empty() && t_scene.mscalIndex == 0u)
+    const bool lean = leanRdOn(); // FEAT-RD14
+    if ((lean ? cur.rdBatches.empty() : cur.draws.empty()) && t_scene.mscalIndex == 0u)
         return;
     cur.frameIndex = t_scene.frameSeq++;
     cur.mscalCount = t_scene.mscalIndex;
     cur.gifBytes = t_scene.frameGifBytes;
     ++t_scene.totalFrames;
-    t_scene.totalDraws += cur.draws.size();
-    t_scene.totalVerts += cur.vertices.size();
-
-    const int64_t df = dumpFrame();
-    if (df >= 0 && !t_scene.dumped && cur.frameIndex == static_cast<uint64_t>(df))
+    if (lean) // FEAT-RD14
     {
-        dumpSceneFrame(cur);
-        t_scene.dumped = true;
+        t_scene.totalDraws += cur.leanDraws;
+        t_scene.totalVerts += cur.rdVerts.size();
+        cur.hwVerts = std::max(cur.hwVerts, cur.rdVerts.size()); // FEAT-RD32
+        cur.hwIdx = std::max(cur.hwIdx, cur.rdIndices.size());
+        cur.hwBatches = std::max(cur.hwBatches, cur.rdBatches.size());
+        const size_t profVerts = cur.rdVerts.size();
+        {
+            RecScope rs(kRpPublish); // FEAT-RD32
+            ::ps2xRdPublishLean(cur.rdVerts, cur.rdIndices, cur.rdBatches, 0u, cur.maskedDraws, cur.vpScaleZ, cur.vpOffsetZ);
+        }
+        if (recProfOn())
+            recProfFrame(profVerts);
+    }
+    else
+    {
+        t_scene.totalDraws += cur.draws.size();
+        t_scene.totalVerts += cur.vertices.size();
+        { // FEAT-RD2
+            static thread_local std::vector<uint64_t> t_tex0s;
+            t_tex0s.clear();
+            t_tex0s.reserve(cur.gs.size());
+            for (const SceneGs &g : cur.gs)
+            {
+                if (g.ownTex0) ++t_scene.totalOwnTex0;
+                if ((g.prim >> 4) & 1ull) ++t_scene.totalTme;
+                if ((g.prim >> 6) & 1ull) ++t_scene.totalAbe;
+                t_tex0s.push_back(g.tex0);
+            }
+            std::sort(t_tex0s.begin(), t_tex0s.end());
+            t_scene.totalDistinctTex0 += static_cast<uint64_t>(std::unique(t_tex0s.begin(), t_tex0s.end()) - t_tex0s.begin());
+        }
+
+        const int64_t df = dumpFrame();
+        if (df >= 0 && !t_scene.dumped && cur.frameIndex == static_cast<uint64_t>(df))
+        {
+            dumpSceneFrame(cur);
+            t_scene.dumped = true;
+        }
+    }
+
+    if (!lean && ::ps2xRdActive()) // FEAT-RD1 // FEAT-RD49
+    {
+        static thread_local std::vector<::RdVert> t_rdTris;
+        static thread_local std::vector<::RdBatch> t_rdBatches; // FEAT-RD2
+        t_rdTris.clear();
+        t_rdBatches.clear();
+        uint32_t skippedDraws = 0;
+        uint32_t maskedDraws = 0; // FEAT-RD2
+        uint32_t bestVpVerts = 0; // FEAT-RD11
+        float vpScaleZ = 0.0f;    // FEAT-RD11
+        float vpOffsetZ = 0.0f;   // FEAT-RD11
+        const auto toRdVert = [](const SceneVertex &sv) -> ::RdVert {
+            ::RdVert rv;
+            rv.pos[0] = sv.pos[0];
+            rv.pos[1] = sv.pos[1];
+            rv.pos[2] = sv.pos[2];
+            rv.pos[3] = sv.pos[3];
+            for (int c = 0; c < 4; ++c)
+                rv.rgba[c] = static_cast<uint8_t>(std::min<uint32_t>(sv.rgba[c], 255u));
+            const float q = sv.stq[2]; // FEAT-RD3
+            if (q != 0.0f)
+            {
+                rv.uv[0] = sv.stq[0] / q;
+                rv.uv[1] = sv.stq[1] / q;
+            }
+            else
+            {
+                rv.uv[0] = 0.0f;
+                rv.uv[1] = 0.0f;
+            }
+            return rv;
+        };
+        for (size_t di = 0; di < cur.draws.size(); ++di) // FEAT-RD2
+        {
+            const SceneDraw &d = cur.draws[di];
+            const SceneGs &g = cur.gs[di];
+            if (d.vertexCount > bestVpVerts && d.vpScale[2] != 0.0f) // FEAT-RD11
+            {
+                bestVpVerts = d.vertexCount;
+                vpScaleZ = d.vpScale[2];
+                vpOffsetZ = d.vpOffset[2];
+            }
+            if (static_cast<uint32_t>(g.frame >> 32) == 0xFFFFFFFFu) // FEAT-RD2: FRAME.FBMSK == 0xFFFFFFFF
+            {
+                ++maskedDraws;
+                continue;
+            }
+            const uint32_t batchFirst = static_cast<uint32_t>(t_rdTris.size());
+            if (d.flags & 4u) // FEAT-RD4: clipped convex polygon -> triangle fan
+            {
+                for (uint32_t k = 2; k < d.vertexCount; ++k)
+                {
+                    t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex]));
+                    t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex + k - 1u]));
+                    t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex + k]));
+                }
+            }
+            else
+            for (uint32_t i = 2; i < d.vertexCount; ++i)
+            {
+                const SceneVertex &sv2 = cur.vertices[d.firstVertex + i];
+                if (sv2.adc & 0x8000u)
+                    continue;
+                t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex + i - 2u]));
+                t_rdTris.push_back(toRdVert(cur.vertices[d.firstVertex + i - 1u]));
+                t_rdTris.push_back(toRdVert(sv2));
+            }
+            const uint32_t batchCount = static_cast<uint32_t>(t_rdTris.size()) - batchFirst;
+            if (batchCount == 0u)
+                continue;
+            if (!t_rdBatches.empty())
+            {
+                ::RdBatch &last = t_rdBatches.back();
+                if (rdSerialsCanMerge(last.kickSerial, g.kickSerial) &&
+                    last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf &&
+                    last.prim == g.prim && last.tex0 == g.tex0 && last.clamp == g.clamp && last.tex1 == g.tex1 &&
+                    last.texa == g.texa &&
+                    last.vpS[0] == d.vpScale[0] && last.vpS[1] == d.vpScale[1] && last.vpO[0] == d.vpOffset[0] && last.vpO[1] == d.vpOffset[1]) // FEAT-RD3 // FEAT-RD17 // FEAT-RD21
+                {
+                    if (last.kickSerial != g.kickSerial) // FEAT-RD17
+                        ::g_rdMergedSpan.fetch_add(1u, std::memory_order_relaxed);
+                    last.count += batchCount;
+                    continue;
+                }
+            }
+            t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, 0u, g.alpha, g.test, g.frame, g.zbuf, g.prim, g.tex0,
+                                            g.clamp, g.tex1, g.texa, g.kickSerial,
+                                            {d.vpScale[0], d.vpScale[1]}, {d.vpOffset[0], d.vpOffset[1]}}); // FEAT-RD3 // FEAT-RD5 // FEAT-RD14 // FEAT-RD21
+        }
+        ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws, vpScaleZ, vpOffsetZ); // FEAT-RD11
     }
 
     t_scene.writeIdx ^= 1u;
@@ -1105,11 +1774,17 @@ inline void onFlush()
     {
         t_scene.lastLog = now;
         const double fr = t_scene.totalFrames ? static_cast<double>(t_scene.totalFrames) : 1.0;
-        ::ps2xSafeLog("[scene] frames=%llu draws/frame=%.1f verts/frame=%.1f checkMismatch=%llu\n",
+        const double dr = t_scene.totalDraws ? static_cast<double>(t_scene.totalDraws) : 1.0; // FEAT-RD2
+        ::ps2xSafeLog("[scene] frames=%llu draws/frame=%.1f verts/frame=%.1f checkMismatch=%llu ownTex0=%.1f%% tex0/frame=%.1f tme=%.1f%% abe=%.1f%% fb=%llu\n",
                       static_cast<unsigned long long>(t_scene.totalFrames),
                       static_cast<double>(t_scene.totalDraws) / fr,
                       static_cast<double>(t_scene.totalVerts) / fr,
-                      static_cast<unsigned long long>(t_scene.totalMismatch));
+                      static_cast<unsigned long long>(t_scene.totalMismatch),
+                      100.0 * static_cast<double>(t_scene.totalOwnTex0) / dr,
+                      static_cast<double>(t_scene.totalDistinctTex0) / fr,
+                      100.0 * static_cast<double>(t_scene.totalTme) / dr,
+                      100.0 * static_cast<double>(t_scene.totalAbe) / dr,
+                      static_cast<unsigned long long>(t_scene.totalFallbacks));
     }
 }
 
@@ -1128,12 +1803,164 @@ inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t
     _mm_storeu_ps(d.vpScale, c1v);
     _mm_storeu_ps(d.vpOffset, c2v);
     f.draws.push_back(d);
+    const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull); // FEAT-RD2
+    SceneGs g{};
+    g.prim = t_scene.gs.prim;
+    g.tex0 = t_scene.gs.tex0[ctxt];
+    g.clamp = t_scene.gs.clamp[ctxt];
+    g.tex1 = t_scene.gs.tex1[ctxt];
+    g.alpha = t_scene.gs.alpha[ctxt];
+    g.test = t_scene.gs.test[ctxt];
+    g.frame = t_scene.gs.frame[ctxt];
+    g.zbuf = t_scene.gs.zbuf[ctxt];
+    g.texa = t_scene.gs.texa;
+    g.texclut = t_scene.gs.texclut;
+    g.fba = static_cast<uint32_t>(t_scene.gs.fba[ctxt] & 1ull);
+    g.ownTex0 = t_scene.curOwnTex0 ? 1u : 0u;
+    g.kickSerial = t_scene.curKickSerial; // FEAT-RD5
+    f.gs.push_back(g);
     return f.draws.back();
 }
 
-inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen)
+inline void markGeometryKick(std::vector<uint8_t> &gif, uint32_t gifOff) // FEAT-RD10
 {
+    if (::ps2xRdActive() && gifOff >= 16u && t_scene.curKickSerial != 0u) // FEAT-RD49
+    {
+        t_scene.curKickSerial |= 0x40000000u;
+        uint64_t dLo = 0ull;
+        std::memcpy(&dLo, gif.data() + gifOff - 16u, 8);
+        dLo |= 0x40000000ull;
+        std::memcpy(gif.data() + gifOff - 16u, &dLo, 8);
+    }
+}
+
+inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba) // FEAT-RD14
+{
+    ::RdVert rv;
+    _mm_storeu_ps(rv.pos, pos);
+    const __m128i clamped = _mm_min_epu32(rgba, _mm_set1_epi32(255));
+    const __m128i p16 = _mm_packus_epi32(clamped, clamped);
+    const __m128i p8 = _mm_packus_epi16(p16, p16);
+    const uint32_t packed = static_cast<uint32_t>(_mm_cvtsi128_si32(p8));
+    std::memcpy(rv.rgba, &packed, 4);
+    // FEAT-RD32: SIMD divide (bit-identical to the scalar s/q), q==0 -> uv 0
+    const __m128 q = _mm_shuffle_ps(stq, stq, _MM_SHUFFLE(2, 2, 2, 2));
+    const __m128 d = _mm_div_ps(stq, q);
+    const __m128 nz = _mm_cmpneq_ps(q, _mm_setzero_ps());
+    _mm_storel_pi(reinterpret_cast<__m64 *>(rv.uv), _mm_and_ps(d, nz));
+    return rv;
+}
+
+inline bool beginLeanDraw(const uint8_t *vu, SceneFrame &f, uint32_t vertCount, __m128 c1v, __m128 c2v) // FEAT-RD14
+{
+    static const bool s_camLog = []{ const char *e = std::getenv("PS2X_RD_CAMLOG"); return e && e[0] == '1'; }(); // PROBE-RD26
+    if (s_camLog) // PROBE-RD26: FNV-1a of camera quads 998..1001
+    {
+        uint32_t h = 2166136261u; // PROBE-RD26
+        for (uint32_t q = 998u; q <= 1001u; ++q) // PROBE-RD26
+        {
+            const uint8_t *cp = vu + ((q & 0x3FFu) << 4); // PROBE-RD26
+            for (uint32_t i = 0; i < 16u; ++i) { h ^= cp[i]; h *= 16777619u; } // PROBE-RD26
+        }
+        f.curCamHash = h; // PROBE-RD26
+    }
+    RecScope rs(kRpBegin); // FEAT-RD32
+    ++f.leanDraws;
+    alignas(16) float vps[4];
+    _mm_store_ps(vps, c1v);
+    alignas(16) float vpo[4];
+    _mm_store_ps(vpo, c2v);
+    f.curVpS[0] = vps[0]; f.curVpS[1] = vps[1]; // FEAT-RD21
+    f.curVpO[0] = vpo[0]; f.curVpO[1] = vpo[1]; // FEAT-RD21
+    if (vertCount > f.bestVpVerts && vps[2] != 0.0f)
+    {
+        f.bestVpVerts = vertCount;
+        f.vpScaleZ = vps[2];
+        f.vpOffsetZ = vpo[2];
+    }
+    const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull);
+    if (static_cast<uint32_t>(t_scene.gs.frame[ctxt] >> 32) == 0xFFFFFFFFu)
+    {
+        ++f.maskedDraws;
+        return false;
+    }
+    return true;
+}
+
+template <class V> inline void reserveGrow(V &v, size_t need) // FEAT-RD32: geometric growth (plain reserve(need) reallocates to the exact size every draw)
+{
+    if (need > v.capacity())
+        v.reserve(std::max(need, v.capacity() * 2u));
+}
+
+inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCount) // FEAT-RD14
+{
+    RecScope rs(kRpPush); // FEAT-RD32
+    if (indexCount == 0u)
+        return;
+    const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull);
+    const uint64_t prim = t_scene.gs.prim;
+    const uint64_t tex0 = t_scene.gs.tex0[ctxt];
+    const uint64_t clamp = t_scene.gs.clamp[ctxt];
+    const uint64_t tex1 = t_scene.gs.tex1[ctxt];
+    const uint64_t alpha = t_scene.gs.alpha[ctxt];
+    const uint64_t test = t_scene.gs.test[ctxt];
+    const uint64_t frame = t_scene.gs.frame[ctxt];
+    const uint64_t zbuf = t_scene.gs.zbuf[ctxt];
+    const uint64_t texa = t_scene.gs.texa;
+    const uint32_t kickSerial = t_scene.curKickSerial;
+    if (!f.rdBatches.empty())
+    {
+        ::RdBatch &last = f.rdBatches.back();
+        if (rdSerialsCanMerge(last.kickSerial, kickSerial) &&
+            last.alpha == alpha && last.test == test && last.frame == frame && last.zbuf == zbuf &&
+            last.prim == prim && last.tex0 == tex0 && last.clamp == clamp && last.tex1 == tex1 && last.texa == texa &&
+            last.vpS[0] == f.curVpS[0] && last.vpS[1] == f.curVpS[1] && last.vpO[0] == f.curVpO[0] && last.vpO[1] == f.curVpO[1] && last.camHash == f.curCamHash) // FEAT-RD17 // FEAT-RD21 // PROBE-RD26
+        {
+            if (last.kickSerial != kickSerial) // FEAT-RD17
+                ::g_rdMergedSpan.fetch_add(1u, std::memory_order_relaxed);
+            last.count += indexCount;
+            return;
+        }
+    }
+    f.rdBatches.push_back(::RdBatch{firstIndex, indexCount, 0u, alpha, test, frame, zbuf, prim, tex0, clamp, tex1, texa, kickSerial,
+                                    {f.curVpS[0], f.curVpS[1]}, {f.curVpO[0], f.curVpO[1]}, f.curCamHash}); // FEAT-RD21 // PROBE-RD26
+}
+
+inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
+{
+    { RecScope rm(kRpMarker); markGeometryKick(gif, gifOff); } // FEAT-RD10 // FEAT-RD32
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    if (leanRdOn()) // FEAT-RD14
+    {
+        RecScope rs(kRpClip); // FEAT-RD32 (inclusive of begin/push)
+        if (!beginLeanDraw(vu, f, static_cast<uint32_t>(polyCount), c1v, c2v))
+            return;
+        const size_t v0 = f.rdVerts.size();
+        const size_t i0 = f.rdIndices.size();
+        f.rdVerts.resize(v0 + static_cast<size_t>(polyCount));
+        for (int32_t k = 0; k < polyCount; ++k)
+        {
+            const uint32_t qOut = 877u + 4u * static_cast<uint32_t>(k);
+            f.rdVerts[v0 + static_cast<size_t>(k)] = makeRdVert(
+                ldq(vu, 918u + 3u * static_cast<uint32_t>(k)),
+                ldq(vu, qOut + 1u),
+                ldqi(vu, qOut + 2u));
+        }
+        if (polyCount >= 3)
+        {
+            reserveGrow(f.rdIndices, i0 + static_cast<size_t>(polyCount - 2) * 3u);
+            const uint32_t base = static_cast<uint32_t>(v0);
+            for (int32_t k = 2; k < polyCount; ++k)
+            {
+                f.rdIndices.push_back(base);
+                f.rdIndices.push_back(base + static_cast<uint32_t>(k - 1));
+                f.rdIndices.push_back(base + static_cast<uint32_t>(k));
+            }
+        }
+        pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
+        return;
+    }
     const SceneDraw &d = pushDraw(f, 0x2900u, gifOff, gifLen, static_cast<uint32_t>(polyCount), 0u, 4u | (copyS ? 2u : 0u), c1v, c2v);
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(polyCount));
@@ -1150,15 +1977,48 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
         sv.screenXyz[0] = xyzw[0];
         sv.screenXyz[1] = xyzw[1];
         sv.screenXyz[2] = xyzw[2];
-        sv.adc = ldw(vu, qOut, 3u);
+        sv.adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FEAT-RD27
     }
     if (checkOn())
         checkDraw(d, f.vertices.data() + v0);
 }
 
-inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __m128 c2v, const __m128 *Ps, const int32_t *Wd, uint32_t e7, uint32_t gifOff, uint32_t gifLen)
+inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __m128 c2v, const __m128 *Ps, const int32_t *Wd, uint32_t e7, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
 {
+    { RecScope rm(kRpMarker); markGeometryKick(gif, gifOff); } // FEAT-RD10 // FEAT-RD32
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    if (leanRdOn()) // FEAT-RD14
+    {
+        RecScope rs(kRpRigid); // FEAT-RD32 (inclusive of begin/push)
+        if (!beginLeanDraw(vu, f, static_cast<uint32_t>(N), c1v, c2v))
+            return;
+        const size_t v0 = f.rdVerts.size();
+        const size_t i0 = f.rdIndices.size();
+        f.rdVerts.resize(v0 + static_cast<size_t>(N));
+        if (N >= 3)
+            reserveGrow(f.rdIndices, i0 + static_cast<size_t>(N - 2) * 3u);
+        const uint32_t base = static_cast<uint32_t>(v0);
+        for (int32_t j = 0; j < N; ++j)
+        {
+            const uint32_t qOut = (e7 + 1u + 4u * static_cast<uint32_t>(j)) & 0x3FFu;
+            f.rdVerts[v0 + static_cast<size_t>(j)] = makeRdVert(
+                Ps[j],
+                ldq(vu, (qOut + 1u) & 0x3FFu),
+                ldqi(vu, (qOut + 2u) & 0x3FFu));
+            if (j >= 2)
+            {
+                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u);
+                if (!(adc & 0x8000u))
+                {
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(j - 2));
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(j - 1));
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(j));
+                }
+            }
+        }
+        pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
+        return;
+    }
     const SceneDraw &d = pushDraw(f, 0x2440u, gifOff, gifLen, static_cast<uint32_t>(N), 0u, copyS ? 2u : 0u, c1v, c2v);
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(N));
@@ -1182,9 +2042,62 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
         checkDraw(d, f.vertices.data() + v0);
 }
 
-inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, __m128 c2v, uint32_t i4base, uint32_t ubase, uint32_t gifOff, uint32_t gifLen)
+inline bool isMainPassSkinned(uint32_t vf27y) // FEAT-RD40
 {
+    if (!::ps2xRdHasDisplayFbp())
+        return false;
+    const uint64_t prim = ((vf27y >> 14) & 1u) ? ((vf27y >> 15) & 0x7FFull) : t_scene.gs.prim;
+    const uint32_t ctxt = static_cast<uint32_t>((prim >> 9) & 1ull);
+    const uint32_t fbp = static_cast<uint32_t>(t_scene.gs.frame[ctxt] & 0x1FFull);
+    if (!::ps2xRdIsDisplayFbp(fbp))
+        return false;
+    const uint64_t scis = t_scene.gs.scissor[ctxt];
+    const uint32_t x0 = static_cast<uint32_t>(scis & 0x7FFull);
+    const uint32_t x1 = static_cast<uint32_t>((scis >> 16) & 0x7FFull);
+    const uint32_t y0 = static_cast<uint32_t>((scis >> 32) & 0x7FFull);
+    const uint32_t y1 = static_cast<uint32_t>((scis >> 48) & 0x7FFull);
+    if (x1 < x0 || y1 < y0)
+        return false;
+    return (x1 + 1u - x0) >= 500u && (y1 + 1u - y0) >= 400u;
+}
+
+inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, __m128 c2v, uint32_t i4base, uint32_t ubase, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
+{
+    { RecScope rm(kRpMarker); markGeometryKick(gif, gifOff); } // FEAT-RD10 // FEAT-RD32
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    if (leanRdOn()) // FEAT-RD14
+    {
+        RecScope rs(kRpSkinned); // FEAT-RD32 (inclusive of begin/push)
+        if (!beginLeanDraw(vu, f, static_cast<uint32_t>(N), c1v, c2v))
+            return;
+        const size_t v0 = f.rdVerts.size();
+        const size_t i0 = f.rdIndices.size();
+        f.rdVerts.resize(v0 + static_cast<size_t>(N));
+        if (N >= 3)
+            reserveGrow(f.rdIndices, i0 + static_cast<size_t>(N - 2) * 3u);
+        const uint32_t base = static_cast<uint32_t>(v0);
+        for (int32_t v = 0; v < N; ++v)
+        {
+            const uint32_t qOut = ubase + 1u + 4u * static_cast<uint32_t>(v);
+            const int32_t idx = static_cast<int16_t>(ilw(vu, (i4base + static_cast<uint32_t>(v)) & 0x3FFu, 0u));
+            f.rdVerts[v0 + static_cast<size_t>(v)] = makeRdVert(
+                ldq(vu, (636u + static_cast<uint32_t>(idx)) & 0x3FFu),
+                ldq(vu, qOut + 1u),
+                ldqi(vu, qOut + 2u));
+            if (v >= 2)
+            {
+                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FEAT-RD27
+                if (!(adc & 0x8000u))
+                {
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(v - 2));
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(v - 1));
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(v));
+                }
+            }
+        }
+        pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
+        return;
+    }
     const SceneDraw &d = pushDraw(f, vi10 ? 0x1EF0u : 0x1EE0u, gifOff, gifLen, static_cast<uint32_t>(N), t_scene.curBoneCount, 1u | (vi10 ? 2u : 0u), c1v, c2v);
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(N));
@@ -1202,7 +2115,7 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
         sv.screenXyz[0] = xyzw[0];
         sv.screenXyz[1] = xyzw[1];
         sv.screenXyz[2] = xyzw[2];
-        sv.adc = ldw(vu, qOut, 3u);
+        sv.adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FEAT-RD27
     }
     if (checkOn())
         checkDraw(d, f.vertices.data() + v0);
@@ -1388,7 +2301,7 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
     if (!kick(vu, 876u, kicks, gif))
         return false;
     if (scene::on()) // PERF-SA
-        scene::recordClipPolygon(vu, polyCount, copyS, c1v, c2v, kicks.back().first, kicks.back().second);
+        scene::recordClipPolygon(vu, polyCount, copyS, c1v, c2v, kicks.back().first, kicks.back().second, gif);
     return true;
 }
 
@@ -1461,9 +2374,11 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
             {
                 // FIX-BJ: 25B0/27D8 MADD.xyzw vf13 (Lit[j]) -> 24E0/2708 LOI 255.0 -> 24E8/2710 MINIi.xyzw vf13, vf13, I before BAL 28A0->2900; 2978 MAXx.xyzw vf13, vf13, vf0 completes clampI(Lit[j]).
                 const uint64_t vxClip0 = vx::act() ? __rdtsc() : 0ull; // PROBE-VX
+                const uint64_t hpClip0 = hprof::on() ? __rdtsc() : 0ull; // PROBE-RD39
                 const bool vxClipOk = clipPolygon(vu, vi13, vi5, vi6, Wd[j], vi8, vi9, vi10, copyS, c1v, c2v, c5v,
                                  Ps[j - 2], Ps[j - 1], Ps[j], fmacV<0>(V7(Ss[j - 2]), zero, zero), V7(Ss[j - 1]), V7(Ss[j]),
                                  clampI(Lit[j - 2]), clampI(Lit[j - 1]), clampI(Lit[j]), kicks, gif); // PROBE-VX // FIX-BJ
+                if (hpClip0) { const uint64_t dt = __rdtsc() - hpClip0; hprof::addHandler(0x2900u, dt); hprof::subtractHandler(0x2440u, dt); } // PROBE-RD39
                 if (vxClip0) { vx::g_vx.hT[vx::kHClip] += __rdtsc() - vxClip0; ++vx::g_vx.hN[vx::kHClip]; } // PROBE-VX
                 if (!vxClipOk) // PROBE-VX
                     return fb1EE0(kFbRigidClip);
@@ -1521,7 +2436,7 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
     if (!kick(vu, e7, kicks, gif))
         return fb1EE0(kFbRigidKick);
     if (scene::on()) // PERF-SA
-        scene::recordRigid(vu, N, copyS, c1v, c2v, Ps, Wd, e7, kicks.back().first, kicks.back().second);
+        scene::recordRigid(vu, N, copyS, c1v, c2v, Ps, Wd, e7, kicks.back().first, kicks.back().second, gif);
     R.vi[12] = top; // XTOP vi12
     return true;
 }
@@ -1531,8 +2446,87 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
 // the caller restores the undo log) for every case lbFull declines or that it does not model: N outside 4..67, DIV by zero, any aliasing between the output
 // buffer and anything the real (software-pipelined) routine reads after its first stores, kick failure.
 // 1EE0 (vi10 = 0) and 1EF0 (vi10 = 1: reads S from 796+idx in both skinned 2210 and rigid 2670).
+static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t s2base, uint32_t s3base, const int32_t *idxs,
+                               __m128 vf2, __m128 vf16, const Fv8V &k2, const Fv8V &k16,
+                               ::RdVert *outVerts, uint32_t *outIndices, uint32_t baseIndex, uint32_t &outIdxCount) // FEAT-RD40
+{
+    const __m128 zero = _mm_setzero_ps();
+    const __m128i v255 = _mm_set1_epi32(255);
+    uint32_t ic = 0u;
+    for (int32_t t0 = 0; t0 < N; t0 += 8)
+    {
+        const int32_t n = (N - t0 < 8) ? (N - t0) : 8;
+        __m128 gA[8], gB[8], gS3[8], gS2[8];
+        for (int j = 0; j < 8; ++j)
+        {
+            const int32_t s = t0 + (j < n ? j : n - 1);
+            const int32_t idx = idxs[s];
+            gA[j] = ldq(vu, static_cast<uint32_t>(636 + idx));
+            gB[j] = ldq(vu, static_cast<uint32_t>(716 + idx));
+            gS3[j] = ldq(vu, s3base + static_cast<uint32_t>(s));
+            gS2[j] = vi10 ? ldq(vu, static_cast<uint32_t>(796 + idx)) : ldq(vu, s2base + static_cast<uint32_t>(s));
+        }
+        Fv8V B = fv8FromRows(gB), S3 = fv8FromRows(gS3), S2 = fv8FromRows(gS2);
+        for (int c = 0; c < 4; ++c)
+        {
+            B.c[c] = fv8N(B.c[c]);
+            S3.c[c] = fv8N(S3.c[c]);
+            S2.c[c] = fv8N(S2.c[c]);
+        }
+        Fv8V z8;
+        z8.c[0] = z8.c[1] = z8.c[2] = z8.c[3] = _mm256_setzero_ps();
+        __m256i bad = _mm256_setzero_si256();
+        const Fv8V bv = fv8Op<15, false>(B, k16, z8, bad);
+        const Fv8V in = fv8Op<15, true>(k2, k16, bv, bad);
+        const Fv8V pr = fv8Op<15, false>(S3, in, z8, bad);
+        __m128 oPr[8], oS2[8];
+        fv8ToRows(S2, oS2);
+        if (!fv8Any(bad))
+        {
+            Fv8V prOut;
+            for (int c = 0; c < 4; ++c)
+                prOut.c[c] = _mm256_castsi256_ps(fv8FtoiS<1>(fv8ClampI(pr.c[c])));
+            fv8ToRows(prOut, oPr);
+        }
+        else
+        {
+            for (int j = 0; j < n; ++j)
+            {
+                const __m128 sbv = fmacV<4>(gB[j], vf16, zero);
+                const __m128 sin = fmacV<2>(vf2, vf16, sbv);
+                const __m128 sprod = fmacV<4>(gS3[j], sin, zero);
+                oPr[j] = _mm_castsi128_ps(ftoiS<1>(clampI(sprod)));
+            }
+        }
+        for (int j = 0; j < n; ++j)
+        {
+            const int32_t v = t0 + j;
+            ::RdVert &rv = outVerts[v];
+            _mm_storeu_ps(rv.pos, gA[j]);
+            const __m128i clamped = _mm_min_epu32(_mm_castps_si128(oPr[j]), v255);
+            const __m128i p16 = _mm_packus_epi32(clamped, clamped);
+            const __m128i p8 = _mm_packus_epi16(p16, p16);
+            const uint32_t packed = static_cast<uint32_t>(_mm_cvtsi128_si32(p8));
+            std::memcpy(rv.rgba, &packed, 4);
+            const __m128 q = _mm_shuffle_ps(oS2[j], oS2[j], _MM_SHUFFLE(2, 2, 2, 2));
+            const __m128 d = _mm_div_ps(oS2[j], q);
+            const __m128 nz = _mm_cmpneq_ps(q, zero);
+            _mm_storel_pi(reinterpret_cast<__m64 *>(rv.uv), _mm_and_ps(d, nz));
+            if (v >= 2 && !(static_cast<uint32_t>(idxs[v]) & 0x8000u))
+            {
+                outIndices[ic++] = baseIndex + static_cast<uint32_t>(v - 2);
+                outIndices[ic++] = baseIndex + static_cast<uint32_t>(v - 1);
+                outIndices[ic++] = baseIndex + static_cast<uint32_t>(v);
+            }
+        }
+    }
+    outIdxCount = ic;
+}
+
 static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool vi10, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
 {
+    const bool hp = hprof::on(); // PROBE-RD41
+    const uint64_t tEntry = hp ? __rdtsc() : 0ull; // PROBE-RD41
     const int32_t vi1s = static_cast<int16_t>(ilw(vu, 1011, 1)); // 1F00 ILW.y vi1, 1011 (< 0: rigid path at 2440 / 2670)
     const uint16_t vi12 = R.vi[12];
     const uint16_t w1018 = ilw(vu, 1018, 3); // vi5 (before the skinned path doubles it) = vertex count N
@@ -1648,9 +2642,64 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
 
     const uint32_t m1012z = ldw(vu, 1012, 2), m1012w = ldw(vu, 1012, 3);
     const uint32_t ctlOld = ldw(vu, 1023, 3) & 0xFFFFu;
+    const bool leanSkinEnabled = scene::leanSkinOn(); // FEAT-RD40
+    const bool leanSkinCheck = scene::leanSkinCheckOn(); // FEAT-RD40
+    const bool leanMainPass = (leanSkinEnabled || leanSkinCheck) && scene::isMainPassSkinned(vf27y); // FEAT-RD40
+    const uint64_t tHdrEnd = hp ? __rdtsc() : 0ull; // PROBE-RD41
+    if (leanSkinEnabled && leanMainPass && !leanSkinCheck) // FEAT-RD40
+    {
+        logRange(vu, ubase, 1u);
+        stqRaw(vu, ubase, _mm_castsi128_ps(_mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))));
+        stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3));
+        const uint64_t t1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
+        const bool useLeanKick = scene::leanKickOn(); // FEAT-RD42
+        if (!kick(vu, ubase, kicks, gif, useLeanKick))
+            return fb1EE0(kFbSkinKick);
+        const uint64_t t2 = hp ? __rdtsc() : 0ull; // PROBE-RD41
+        uint64_t vertsT = 0; // PROBE-RD41
+        { scene::RecScope rm(scene::kRpMarker); scene::markGeometryKick(gif, kicks.back().first); }
+        {
+            scene::RecScope rs(scene::kRpSkinned);
+            scene::SceneFrame &f = scene::t_scene.bufs[scene::t_scene.writeIdx];
+            if (scene::beginLeanDraw(vu, f, static_cast<uint32_t>(N), vf3, vf4))
+            {
+                const size_t v0 = f.rdVerts.size();
+                const size_t i0 = f.rdIndices.size();
+                f.rdVerts.resize(v0 + static_cast<size_t>(N));
+                if (N >= 3)
+                {
+                    scene::reserveGrow(f.rdIndices, i0 + static_cast<size_t>(N - 2) * 3u);
+                    f.rdIndices.resize(i0 + static_cast<size_t>(N - 2) * 3u);
+                }
+                uint32_t ic = 0u;
+                const uint64_t tv0 = hp ? __rdtsc() : 0ull; // PROBE-RD41
+                buildLeanSkinVerts(vu, N, vi10, s2base, s3base, idxs, vf2, vf16, k2, k16,
+                                   f.rdVerts.data() + v0, N >= 3 ? f.rdIndices.data() + i0 : nullptr, static_cast<uint32_t>(v0), ic);
+                vertsT = hp ? (__rdtsc() - tv0) : 0ull; // PROBE-RD41
+                f.rdIndices.resize(i0 + ic);
+                scene::pushLeanBatch(f, static_cast<uint32_t>(i0), ic);
+            }
+        }
+        const uint64_t t3 = hp ? __rdtsc() : 0ull; // PROBE-RD41
+        scene::leanSkinNoteDraw(true, false, useLeanKick); // FEAT-RD42
+        R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0));
+        if (hp) // PROBE-RD41
+        {
+            const uint64_t t4 = __rdtsc();
+            hprof::g_st.eeHdr += tHdrEnd - tEntry;
+            hprof::g_st.eeVerts += vertsT;
+            hprof::g_st.eeRec += (t3 - t2) - vertsT;
+            hprof::g_st.eeKick += t2 - t1;
+            hprof::g_st.eeRest += (t1 - tHdrEnd) + (t4 - t3);
+            hprof::g_st.eeNSum += static_cast<uint64_t>(N);
+            ++hprof::g_st.eeCalls;
+        }
+        return true;
+    }
     // The whole output span [ubase, ubase + 4N] is logged once (if any block falls back to interpreter, undoLog restores it), then written raw.
     logRange(vu, ubase, span);
     stqRaw(vu, ubase, _mm_castsi128_ps(_mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))));
+    const uint64_t tVert0 = hp ? __rdtsc() : 0ull; // PROBE-RD41
 
     // PERF-SVF / PERF-V1R: gather 8 vertices directly into Fv8V, compute, convert, and fuse output stores
     for (int32_t t0 = 0; t0 < N; t0 += 8)
@@ -1756,12 +2805,63 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
             stqRaw(vu, q0 + 3u, _mm_castsi128_ps(_mm_insert_epi32(ftoiS<16>(R7), static_cast<int32_t>(static_cast<uint32_t>(idxs[t0 + j]) & 0xFFFFu), 3)));
         }
     }
+    const uint64_t tVert1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3)); // ISW.z / ISW.w toggle
+    const uint64_t tKick0 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
         return fb1EE0(kFbSkinKick);
+    const uint64_t tKick1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     if (scene::on()) // PERF-SA
-        scene::recordSkinned(vu, N, vi10, vf3, vf4, i4base, ubase, kicks.back().first, kicks.back().second);
+    {
+        scene::SceneFrame &f = scene::t_scene.bufs[scene::t_scene.writeIdx];
+        const size_t v0Chk = f.rdVerts.size();
+        const size_t i0Chk = f.rdIndices.size();
+        scene::recordSkinned(vu, N, vi10, vf3, vf4, i4base, ubase, kicks.back().first, kicks.back().second, gif);
+        if (leanSkinCheck) // FEAT-RD40
+        {
+            bool mism = false;
+            if (leanMainPass && f.rdVerts.size() - v0Chk == static_cast<size_t>(N))
+            {
+                ::RdVert chkVerts[kMaxSkinN];
+                uint32_t chkIdx[kMaxSkinN * 3u];
+                uint32_t chkIc = 0u;
+                buildLeanSkinVerts(vu, N, vi10, s2base, s3base, idxs, vf2, vf16, k2, k16,
+                                   chkVerts, chkIdx, static_cast<uint32_t>(v0Chk), chkIc);
+                if (chkIc != f.rdIndices.size() - i0Chk)
+                    mism = true;
+                else if (chkIc > 0u && std::memcmp(chkIdx, f.rdIndices.data() + i0Chk, chkIc * sizeof(uint32_t)) != 0)
+                    mism = true;
+                for (int32_t v = 0; v < N && !mism; ++v)
+                {
+                    const ::RdVert &ref = f.rdVerts[v0Chk + static_cast<size_t>(v)];
+                    if (std::memcmp(chkVerts[v].rgba, ref.rgba, 4) != 0)
+                        mism = true;
+                    for (int c = 0; c < 2 && !mism; ++c)
+                    {
+                        const float a = chkVerts[v].uv[c], b = ref.uv[c];
+                        if (std::fabs(a - b) > 1e-5f * std::max(std::fabs(b), 1e-6f))
+                            mism = true;
+                    }
+                }
+            }
+            scene::leanSkinNoteDraw(leanMainPass, mism);
+        }
+        else if (leanSkinEnabled) // FEAT-RD40
+            scene::leanSkinNoteDraw(false, false);
+    }
+    const uint64_t tRec1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0)); // ILW.x vi12, 1(vi4) (read from VU mem: V[1] does not exist for N==1)
+    if (hp) // PROBE-RD41
+    {
+        const uint64_t tEnd = __rdtsc();
+        hprof::g_st.eeHdr += tHdrEnd - tEntry;
+        hprof::g_st.eeVerts += tVert1 - tVert0;
+        hprof::g_st.eeRec += tRec1 - tKick1;
+        hprof::g_st.eeKick += tKick1 - tKick0;
+        hprof::g_st.eeRest += (tVert0 - tHdrEnd) + (tKick0 - tVert1) + (tEnd - tRec1);
+        hprof::g_st.eeNSum += static_cast<uint64_t>(N);
+        ++hprof::g_st.eeCalls;
+    }
     return true;
 }
 
@@ -2737,6 +3837,8 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
     const uint64_t imgMask = (t_curSlot >= 0) ? s_imgCache[t_curSlot].mask : ~0ull; // PERF-BE
     const uint8_t *const rowIdx = pcToRow(); // PERF-BE
     vx::HScope vxHs; // PROBE-VX
+    hprof::HScope hpHs; // PROBE-RD39
+    const bool hpOn = hprof::on(); // PROBE-RD39
     for (uint32_t step = 0; step < 100000u; ++step)
     {
         vi13 = static_cast<uint16_t>(vi13 + 1u);                      // 0028 IADDIU vi13, vi13, 1
@@ -2752,6 +3854,7 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
             } // PERF-BE
         } // PERF-BE
         if (vxA) { if (h) vxHs.begin(vx::slotOf(h, vu), __rdtsc()); else vxHs.end(__rdtsc()); } // PROBE-VX
+        if (hpOn) { if (h) { uint16_t hpc = static_cast<uint16_t>(h); if ((h == 0x1EE0u || h == 0x1EF0u) && static_cast<int16_t>(ilw(vu, 1011, 1)) < 0) hpc = 0x2440u; hpHs.begin(hpc); } else hpHs.end(); } // PROBE-RD39
         if (t_seqN < 64u) t_seq[t_seqN++] = static_cast<uint16_t>(h); // PROBE-BG
         switch (h)
         {
@@ -3556,6 +4659,8 @@ static bool fxProgram0A18(uint8_t *vu, uint32_t top, std::vector<std::pair<uint3
 static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t itop, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool vxA)
 {
     (void)itop;
+    const bool hpOn = hprof::on(); // PROBE-RD39
+    const uint64_t hpRun0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
     kicks.clear();
     gif.clear();
     s_fbPc = 0u;
@@ -3567,12 +4672,18 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
         log.clear(); // PERF-BK
         const bool fxOk = (pc == 0x0000u) ? fxProgram0000(vu, top, kicks, gif) : (pc == 0x04A0u) ? fxProgram04A0(vu, top, kicks, gif) : fxProgram0A18(vu, top, kicks, gif); // PERF-BK
         if (fxOk) // PERF-BK
+        {
+            if (hpRun0) hprof::g_st.takenT += __rdtsc() - hpRun0; // PROBE-RD39
             return true; // PERF-BK
+        }
+        const uint64_t hpUndo0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
         for (uint32_t i = log.size; i-- > 0;) // PERF-BK
             std::memcpy(vu + (static_cast<uint32_t>(log.data[i].qword) << 4), log.data[i].old, 16); // PERF-BK
         log.clear(); // PERF-BK
+        if (hpUndo0) hprof::g_st.undoT += __rdtsc() - hpUndo0; // PROBE-RD39
         kicks.clear(); // PERF-BK
         gif.clear(); // PERF-BK
+        if (hpRun0) hprof::g_st.fallbackT += __rdtsc() - hpRun0; // PROBE-RD39
         return false; // PERF-BK
     } // PERF-BK
     const bool oneShot = (startPC & 0xFFFFu) == 0x40u; // 0040: vi15 := 0, then entry at 0010; one handler, then END
@@ -3580,6 +4691,7 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     {
         s_fbPc = 0xF001u;
         ++s_startPcs[startPC & 0xFFFFu];
+        if (hpRun0) hprof::g_st.fallbackT += __rdtsc() - hpRun0; // PROBE-RD39
         return false;
     }
     // Learned skip: 256-entry direct-mapped memo keyed by the first vi1 (ILW.x at TOP); 4+ consecutive fallbacks -> skip, every 64th still tries.
@@ -3604,6 +4716,7 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
         if (m->streak >= 4u && (++skipCount & 63u) != 0u)
         {
             s_fbPc = 0xF040u;
+            if (hpRun0) hprof::g_st.fallbackT += __rdtsc() - hpRun0; // PROBE-RD39
             return false;
         }
     }
@@ -3611,24 +4724,36 @@ static bool vu1FuncRun(uint8_t *vu, uint32_t startPC, uint32_t top, uint32_t ito
     log.clear();
     size_t sceneD0 = 0, sceneV0 = 0; // PERF-SA
     if (scene::on()) // PERF-SA
+    {
+        const uint64_t hpRec0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
         scene::beginMscal(vu, sceneD0, sceneV0);
+        if (hpRec0) hprof::g_st.recT += __rdtsc() - hpRec0; // PROBE-RD39
+    }
     if (vu1FuncRunInner(vu, top, kicks, gif, oneShot, vxA))
     {
         if (scene::on()) // PERF-SA
+        {
+            const uint64_t hpRec0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
             scene::commitMscal(static_cast<uint32_t>(gif.size()));
+            if (hpRec0) hprof::g_st.recT += __rdtsc() - hpRec0; // PROBE-RD39
+        }
         if (m)
             m->streak = 0;
+        if (hpRun0) hprof::g_st.takenT += __rdtsc() - hpRun0; // PROBE-RD39
         return true;
     }
     if (scene::on()) // PERF-SA
         scene::rollbackMscal(sceneD0, sceneV0);
     if (m)
         ++m->streak;
+    const uint64_t hpUndo0 = hpOn ? __rdtsc() : 0ull; // PROBE-RD39
     for (uint32_t i = log.size; i-- > 0;)
         std::memcpy(vu + (static_cast<uint32_t>(log.data[i].qword) << 4), log.data[i].old, 16);
     log.clear();
+    if (hpUndo0) hprof::g_st.undoT += __rdtsc() - hpUndo0; // PROBE-RD39
     kicks.clear();
     gif.clear();
+    if (hpRun0) hprof::g_st.fallbackT += __rdtsc() - hpRun0; // PROBE-RD39
     return false;
 }
 
@@ -3821,24 +4946,27 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
     }
     if (!ok)
     {
+        if (!capture && scene::on()) // FEAT-RD2
+            ++scene::t_scene.totalFallbacks;
         if (t_path1BatchOn && !capture) // PERF-V1I: flush pending PATH1 before fallback submits directly
             flushPath1Pending(true);
         return false;
     }
     {
         // PERF: kicks are normally appended back to back in `gif`; then submit the whole stream once (one arbiter pass instead of one per kick).
+        const uint32_t prefixBytes = (!capture && scene::on() && ::ps2xRdActive()) ? 32u : 0u; // FEAT-RD5 // FEAT-RD49
         uint32_t expect = 0u;
         bool contiguous = true;
         for (const auto &k : kicks)
         {
             if (k.second == 0u)
                 continue;
-            if (k.first != expect)
+            if (k.first != expect + prefixBytes)
             {
                 contiguous = false;
                 break;
             }
-            expect += k.second;
+            expect += prefixBytes + k.second;
         }
         if (contiguous && expect == gif.size())
         {
@@ -3854,17 +4982,19 @@ static bool vu1FuncExec(uint8_t *vuData, uint32_t dataSize, uint32_t startPC, ui
             return true;
         }
     }
+    const uint32_t prefixBytes = (!capture && scene::on() && ::ps2xRdActive()) ? 32u : 0u; // FEAT-RD5 // FEAT-RD49
     for (const auto &k : kicks)
     {
         if (k.second == 0u)
             continue;
-        const uint8_t *p = gif.data() + k.first;
+        const uint8_t *p = gif.data() + k.first - prefixBytes;
+        const uint32_t len = k.second + prefixBytes;
         if (capture)
-            capture->insert(capture->end(), p, p + k.second);
+            capture->insert(capture->end(), p, p + len);
         else if (memory)
-            submitPath1Batched(memory, p, k.second); // PERF-V1I
+            submitPath1Batched(memory, p, len); // PERF-V1I
         else
-            gs.processGIFPacket(p, k.second);
+            gs.processGIFPacket(p, len);
     }
     return true;
 }
@@ -3882,6 +5012,8 @@ void ps2xVu1FlushPath1() // PERF-V1I
     vu1func::flushPath1Pending(true);
     if (vu1func::scene::on()) // PERF-SA
         vu1func::scene::onFlush();
+    if (vu1func::hprof::on()) // PROBE-RD39
+        ++vu1func::hprof::g_st.frames; // PROBE-RD39
 }
 
 // PROBE-VX: entry points used by vpExecThreadFunc (ps2_vif1_interpreter.cpp, declared extern there)

@@ -1040,6 +1040,11 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
             std::fflush(stdout);
         }
     }
+    {
+        extern void ps2xRdSetActiveClut(const uint16_t *clut); // FEAT-RD5b
+        ps2xRdSetActiveClut(m_clut.data());                    // FEAT-RD5b
+        extern uint32_t g_rdClutGen; ++g_rdClutGen;           // FEAT-RD5c
+    }
     s_lastLoadedClutCbp = effectiveCbp;
     std::memcpy(s_savedClut, m_clut.data(), sizeof(s_savedClut));
     s_savedClutCbp[0] = m_clutCbp[0];
@@ -5096,4 +5101,11 @@ void ps2xDumpVramAndState(const char *triggerName, uint64_t tick, void *rtVoid)
     std::fprintf(stderr, "[GS:VRAM_DUMP] Triggered by %s at tick %llu -> %s and %s\n",
                  triggerName ? triggerName : "unknown", static_cast<unsigned long long>(tick), binFn, txtFn);
     std::fflush(stderr);
+}
+
+static const uint16_t *s_rdActiveClut = nullptr; // FEAT-RD5
+void ps2xRdSetActiveClut(const uint16_t *clut) { s_rdActiveClut = clut; } // FEAT-RD5
+const uint16_t *ps2xRdActiveClut() // FEAT-RD5
+{
+    return s_rdActiveClut;
 }

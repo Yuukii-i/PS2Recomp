@@ -8,6 +8,14 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 #include "ps2_runtime.h"
 extern void ps2xEeGfxDecompInstall(PS2Runtime &); // DECOMP-BM
 extern void ps2xDevConsoleInstall(PS2Runtime &); // FEAT-DF
+extern bool ps2xRdViewOn(); // FEAT-RD1
+extern bool ps2xRdActive(); // FEAT-RD49
+extern bool ps2xRdTakeoverOn(); // FEAT-RD12
+extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
+extern "C" __declspec(dllimport) void __stdcall glReadPixels(int, int, int, int, unsigned int, unsigned int, void *); // PROBE-RD35
+extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
+extern void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h); // FEAT-RD12
+extern std::atomic<bool> g_rdFrameIsClassic; // FEAT-RD18
 extern void ps2xPadMarker(); // PROBE-MK
 extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
 extern void ps2xMcInit(); // FEAT-DE
@@ -63,6 +71,7 @@ namespace {
 #include "Kernel/Stubs/IsoDisc.h"
 #include "Stubs/CD.h"
 #include "ps2_host_backend.h"
+#include "rlgl.h" // FEAT-RD1
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
 
@@ -845,7 +854,7 @@ static bool isVblankLatchEnabled()
     return s_enabled;
 }
 
-static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight, uint64_t renderTick = 0u)
+static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight, uint64_t renderTick = 0u, bool skipLatch = false) // FEAT-RD18
 {
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
     static bool s_hasLatchedInitialFrame = false;
@@ -948,7 +957,18 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static uint64_t s_lastUploadedSeq = ~0ull;
     const bool vblankLatchOn = isVblankLatchEnabled();
 
-    if (vblankLatchOn)
+    if (skipLatch) // FEAT-RD18: caller already latched (takeover classic fallback)
+    {
+        uint64_t curSeq = g_hostPresentSeq.load(std::memory_order_acquire);
+        if (curSeq == s_lastUploadedSeq && s_hasUploadedFrame)
+        {
+            outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
+            outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
+            return;
+        }
+        s_lastUploadedSeq = curSeq;
+    }
+    else if (vblankLatchOn)
     {
         if (!s_hasLatchedInitialFrame)
         {
@@ -1341,8 +1361,10 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     }
 }
 
+extern void ps2xLoadConfig(); // FEAT-CFG
 PS2Runtime::PS2Runtime()
 {
+    ps2xLoadConfig(); // FEAT-CFG
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
 
@@ -1584,10 +1606,13 @@ bool PS2Runtime::isIopMemoryRange(uint32_t address, size_t size) const
 static VU1Interpreter s_vu1B(VU1Interpreter::Unit::VU1);
 std::function<void(uint32_t startPC, uint32_t top, uint32_t itop, uint8_t *vuData)> g_vu1MscalCallbackB;
 
+extern void ps2xRdSetVram(const uint8_t *vram); // FEAT-RD3
+
 bool PS2Runtime::syncCoreSubsystems()
 {
     uint8_t *const rdram = m_memory.getRDRAM();
     uint8_t *const gsVram = m_memory.getGSVRAM();
+    ps2xRdSetVram(gsVram); // FEAT-RD3
     if (!rdram || !gsVram)
     {
         return false;
@@ -1736,7 +1761,26 @@ bool PS2Runtime::initialize(const char *title)
         {
             SetConfigFlags(FLAG_WINDOW_RESIZABLE);
         }
-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+        { // FEAT-CFG
+            int msaaReq = 0;
+            if (const char *m = std::getenv("PS2X_MSAA"))
+                msaaReq = std::atoi(m);
+            const int msaaEff = (msaaReq >= 2) ? 4 : 0;
+            if (msaaEff)
+                SetConfigFlags(FLAG_MSAA_4X_HINT);
+            std::cerr << "[cfg] msaa requested=" << msaaReq << " effective=" << msaaEff << std::endl;
+        }
+        int winW = HOST_WINDOW_WIDTH, winH = HOST_WINDOW_HEIGHT; // FEAT-CFG
+        if (const char *ws = std::getenv("PS2X_WINDOW_SIZE"))    // FEAT-CFG
+        {
+            int w = 0, h = 0;
+            if (std::sscanf(ws, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
+            {
+                winW = w;
+                winH = h;
+            }
+        }
+        InitWindow(winW, winH, title); // FEAT-CFG
 #ifdef _WIN32
         if (bgWin) // FEAT-BGWIN
         {
@@ -6453,7 +6497,37 @@ void PS2Runtime::run()
             const auto presT0 = std::chrono::steady_clock::now();
             uint32_t presentWidth = FB_WIDTH;
             uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-            UploadFrame(frameTex, this, presentWidth, presentHeight, tick);
+            bool rdClassic = false; // FEAT-RD18
+            if (ps2xRdTakeoverOn()) // FEAT-RD12: skip UploadFrame / GS readback
+            {
+                if (!vblankLatchOn)
+                {
+                    static uint64_t s_takeoverLastTick = std::numeric_limits<uint64_t>::max();
+                    const uint64_t curTick = eeScheduler().currentVSyncTick();
+                    if (curTick != s_takeoverLastTick)
+                    {
+                        gs().latchHostPresentationFrame();
+                        s_takeoverLastTick = curTick;
+                    }
+                }
+                rdClassic = g_rdFrameIsClassic.load(std::memory_order_acquire); // FEAT-RD18
+                if (rdClassic) // FEAT-RD18: classic fallback for non-geometry frames
+                {
+                    UploadFrame(frameTex, this, presentWidth, presentHeight, tick, true);
+                }
+                else
+                {
+                    ps2xRdGetPresentSize(presentWidth, presentHeight);
+                    if (presentWidth == 0u) presentWidth = 640u;
+                    if (presentHeight == 0u) presentHeight = 448u;
+                }
+            }
+            else
+            {
+                UploadFrame(frameTex, this, presentWidth, presentHeight, tick);
+                if (ps2xRdActive()) // FEAT-RD8 // FEAT-RD49
+                    ps2xRdSetPresentSize(presentWidth, presentHeight);
+            }
 
             BeginDrawing();
             ClearBackground(BLACK);
@@ -6474,14 +6548,41 @@ void PS2Runtime::run()
                 return 0.0f;
             }();
             float dstWidth, dstHeight;
+            extern float g_rdAspectK; // FEAT-RD16
             if (s_aspect > 0.0f || s_aspect < 0.0f)
             {
-                const float boxAspect = (s_aspect > 0.0f) ? s_aspect : (screenWidth / screenHeight);
+                const float winAspect = (screenHeight > 0.0f) ? (screenWidth / screenHeight) : (4.0f / 3.0f);
+                const float k = winAspect / (4.0f / 3.0f);
+                float boxAspect = (s_aspect > 0.0f) ? s_aspect : winAspect;
+                if (s_aspect < 0.0f && ps2xRdTakeoverOn()) // FEAT-RD16
+                {
+                    if (k >= 1.0f)
+                    {
+                        boxAspect = winAspect;
+                        g_rdAspectK = k;
+                    }
+                    else
+                    {
+                        boxAspect = 4.0f / 3.0f;
+                        g_rdAspectK = 1.0f;
+                    }
+                    static bool s_aspectLogged = false;
+                    if (!s_aspectLogged)
+                    {
+                        s_aspectLogged = true;
+                        ps2xSafeLog("[aspect] fill k=%.3f\n", k);
+                    }
+                }
+                else
+                {
+                    g_rdAspectK = 1.0f;
+                }
                 dstWidth = std::min(screenWidth, screenHeight * boxAspect);
                 dstHeight = dstWidth / boxAspect;
             }
             else
             {
+                g_rdAspectK = 1.0f; // FEAT-RD16
                 const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
                 dstWidth = srcWidth * scale;
                 dstHeight = srcHeight * scale;
@@ -6492,7 +6593,66 @@ void PS2Runtime::run()
                 (screenHeight - dstHeight) * 0.5f,
                 dstWidth,
                 dstHeight};
-            DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            static bool s_rdShow = true; // FEAT-RD1
+            if (ps2xRdActive() && IsKeyPressed(KEY_F11)) // FEAT-RD1 // FEAT-RD49
+                s_rdShow = !s_rdShow;
+            char rd35Path = 'd'; // PROBE-RD35
+            const bool rd35Upload = rdClassic || !ps2xRdTakeoverOn(); // UploadFrame ran this frame
+            if (ps2xRdActive() && (s_rdShow || ps2xRdTakeoverOn()) && !rdClassic) // FEAT-RD1 // FEAT-RD12 // FEAT-RD18 // FEAT-RD49
+            {
+                rlClearScreenBuffers();
+                if (!ps2xRdDraw(dstRect.x, dstRect.y, dstRect.width, dstRect.height))
+                {
+                    DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+                    rd35Path = 'b'; // PROBE-RD35
+                }
+                else
+                    rd35Path = 'a'; // PROBE-RD35
+            }
+            else
+            {
+                DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+                rd35Path = rdClassic ? 'c' : 'd'; // PROBE-RD35
+            }
+            if (ps2xRdActive()) // PROBE-RD35 // FEAT-RD49
+            {
+                extern void ps2xRd35Describe(char *buf, size_t cap);
+                static uint32_t s_rb35Frames = 0u, s_rb35Black = 0u, s_rb35A = 0u, s_rb35B = 0u, s_rb35C = 0u, s_rb35Detail = 0u;
+                static auto s_rb35Last = std::chrono::steady_clock::now();
+                rlDrawRenderBatchActive();
+                ++s_rb35Frames;
+                if (rd35Path == 'a') ++s_rb35A; else if (rd35Path == 'b') ++s_rb35B; else if (rd35Path == 'c') ++s_rb35C;
+                unsigned sum = 0u;
+                unsigned maxv = 0u;
+                for (int gy = 0; gy < 8; ++gy)
+                    for (int gx = 0; gx < 8; ++gx)
+                    {
+                        unsigned char px[4] = {0, 0, 0, 0};
+                        const int sx = static_cast<int>(dstRect.x + dstRect.width * ((static_cast<float>(gx) + 0.5f) / 8.0f));
+                        const int sy = static_cast<int>(screenHeight - (dstRect.y + dstRect.height * ((static_cast<float>(gy) + 0.5f) / 8.0f)));
+                        glReadPixels(sx, sy, 1, 1, 0x1908u, 0x1401u, px);
+                        sum += px[0] + px[1] + px[2];
+                        maxv = std::max<unsigned>(maxv, std::max<unsigned>(px[0], std::max<unsigned>(px[1], px[2])));
+                    }
+                if (maxv < 12u)
+                {
+                    ++s_rb35Black;
+                    if (s_rb35Frames > 600u && s_rb35Detail < 8u)
+                    {
+                        ++s_rb35Detail;
+                        char d[1024];
+                        ps2xRd35Describe(d, sizeof(d));
+                        ps2xSafeLog("[rdblack] #%u path=%c uploadFrame=%d classic=%d takeover=%d sum=%u max=%u frame=%u %s\n", s_rb35Black, rd35Path,
+                                    rd35Upload ? 1 : 0, rdClassic ? 1 : 0, ps2xRdTakeoverOn() ? 1 : 0, sum, maxv, s_rb35Frames, d);
+                    }
+                }
+                const auto nowRb = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(nowRb - s_rb35Last).count() >= 5000)
+                {
+                    s_rb35Last = nowRb;
+                    ps2xSafeLog("[rdblack] frames=%u black=%u pathA=%u pathB=%u pathC=%u\n", s_rb35Frames, s_rb35Black, s_rb35A, s_rb35B, s_rb35C);
+                }
+            }
             if (m_debugUiInitialized && m_debugUiDrawCallback)
             {
                 m_debugUiDrawCallback(*this, m_debugUiUserData);
