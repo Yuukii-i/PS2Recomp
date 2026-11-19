@@ -64,6 +64,7 @@ struct RdStateSlot // FEAT-RD17
     std::atomic<uint64_t> clamp{0};
     std::atomic<uint64_t> texa{0};
     std::atomic<uint64_t> fba{0};
+    std::atomic<uint64_t> xyoff{0}; // FEAT-RD21: ofx | ofy<<32 (12.4)
 };
 RdStateSlot g_stateRing[kRdRingSize]; // FEAT-RD17
 
@@ -988,6 +989,24 @@ void ps2xRdNoteState(uint32_t serial, uint64_t prim, uint64_t alpha, uint64_t te
     slot.texa.store(texa, std::memory_order_relaxed);
     slot.fba.store(fba, std::memory_order_relaxed);
     slot.serial.store(serial, std::memory_order_release);
+}
+
+void ps2xRdNoteXyoff(uint32_t serial, uint64_t xyoff) // FEAT-RD21
+{
+    if (serial == 0u)
+        return;
+    g_stateRing[serial & (kRdRingSize - 1u)].xyoff.store(xyoff, std::memory_order_relaxed);
+}
+
+bool ps2xRdLookupXyoff(uint32_t serial, uint64_t &xyoff) // FEAT-RD21
+{
+    if (serial == 0u)
+        return false;
+    const RdStateSlot &slot = g_stateRing[serial & (kRdRingSize - 1u)];
+    if (slot.serial.load(std::memory_order_acquire) != serial)
+        return false;
+    xyoff = slot.xyoff.load(std::memory_order_relaxed);
+    return true;
 }
 
 bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_t &test, uint64_t &frame,

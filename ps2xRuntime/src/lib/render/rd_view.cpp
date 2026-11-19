@@ -3,6 +3,10 @@
 #include <cstring>
 #include "raylib.h"
 #include "rlgl.h"
+#ifdef _WIN32
+extern "C" __declspec(dllimport) void __stdcall glDepthFunc(unsigned int func); // FEAT-RD20 (opengl32 export; rlgl.h does not expose glad here)
+#endif
+static bool g_rdAlwaysFunc = false; // FEAT-RD20
 
 #include <algorithm>
 #include <atomic> // FEAT-RD8
@@ -14,10 +18,13 @@
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD1
 extern unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t texa); // FEAT-RD5
+extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD19
+extern bool ps2xRdHasDisplayFbp(); // FEAT-RD19
 extern bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_t &test, uint64_t &frame,
                               uint64_t &zbuf, uint64_t &tex0, uint64_t &tex1, uint64_t &clamp, uint64_t &texa, uint64_t &fba); // FEAT-RD17
+extern bool ps2xRdLookupXyoff(uint32_t serial, uint64_t &xyoff); // FEAT-RD21
 extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
-extern std::atomic<uint32_t> g_rdMergedSpan;         // FEAT-RD17
+extern std::atomic<uint32_t> g_rdMergedSpan;        // FEAT-RD17
 extern void ps2xRdTexTickFrame(); // FEAT-RD3
 
 struct RdVert // FEAT-RD1
@@ -43,6 +50,8 @@ struct RdBatch // FEAT-RD2 // FEAT-RD14
     uint64_t tex1;  // FEAT-RD3
     uint64_t texa;  // FEAT-RD3
     uint32_t kickSerial; // FEAT-RD5
+    float vpS[2]; // FEAT-RD21
+    float vpO[2]; // FEAT-RD21
 };
 
 struct Rd2DBatch // FEAT-RD8
@@ -152,6 +161,8 @@ struct RdGpuState
     int mode2dLoc = -1; // FEAT-RD8
     int fbSizeLoc = -1; // FEAT-RD8
     int vpZLoc = -1;    // FEAT-RD11
+    int vpALoc = -1;    // FEAT-RD21
+    int vpBLoc = -1;    // FEAT-RD21
     int atstLoc = -1; // FEAT-RD2
     int arefLoc = -1; // FEAT-RD2
     int samplerLoc = -1; // FEAT-RD3
@@ -174,6 +185,7 @@ struct RdGpuState
     uint32_t fallbackPrevFrames = 0; // FEAT-RD13
     uint32_t spanned2Frames = 0; // FEAT-RD13
     uint32_t gsStateCount = 0;        // FEAT-RD17
+    uint32_t rtSkipped3d = 0;         // FEAT-RD19
     uint32_t parsedFallbackCount = 0; // FEAT-RD17
     uint32_t frames = 0;
     uint64_t frameVerts = 0;   // FEAT-RD14
@@ -188,6 +200,7 @@ struct RdGpuState
     uint64_t totalApproxAd = 0; // FEAT-RD7
     uint64_t total2dDraws = 0; // FEAT-RD8
     uint64_t total2dZtested = 0; // FEAT-RD11
+    uint64_t total2dZclears = 0; // FEAT-RD20
     uint64_t total2dTris = 0; // FEAT-RD8
     uint64_t totalRtSkipped = 0; // FEAT-RD8
     uint64_t totalPointLineSkipped = 0; // FEAT-RD8
@@ -729,12 +742,20 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             "uniform int uMode2d;\n" // FEAT-RD8
             "uniform vec2 uFbSize;\n" // FEAT-RD8
             "uniform vec2 uVpZ;\n"    // FEAT-RD11
+            "uniform vec4 uVpA;\n"    // FEAT-RD21: sx, sy, ox, oy
+            "uniform vec4 uVpB;\n"    // FEAT-RD21: offx, offy (12.4), aspect k, enable
             "out vec4 vCol;\n"
             "out vec2 vUv;\n" // FEAT-RD3
             "void main() {\n"
             "    if (uMode2d != 0) {\n" // FEAT-RD8
-            "        float ndcZ = (uMode2d == 2 && abs(uVpZ.x) > 1e-6) ? ((aPos.z - uVpZ.y) / uVpZ.x) * uFlip.z : 0.0;\n" // FEAT-RD11
+            "        float ndcZ = (uMode2d == 2 && abs(uVpZ.x) > 1e-6) ? clamp(((aPos.z - uVpZ.y) / uVpZ.x) * uFlip.z, -1.0, 1.0) : 0.0;\n" // FEAT-RD11 // FEAT-RD20
             "        gl_Position = vec4(aPos.x / uFbSize.x * 2.0 - 1.0, 1.0 - aPos.y / uFbSize.y * 2.0, ndcZ, 1.0);\n"
+            "    } else if (uVpB.w > 0.5) {\n" // FEAT-RD21: guard-band VU clip -> GS fb pixels -> ndc (linear in x,y,w)
+            "        float px = aPos.x * uVpA.x + aPos.w * uVpA.z - aPos.w * uVpB.x * (1.0 / 16.0);\n" // FEAT-RD21b
+            "        float py = aPos.y * uVpA.y + aPos.w * uVpA.w - aPos.w * uVpB.y * (1.0 / 16.0);\n" // FEAT-RD21b
+            "        float nx = (2.0 * px / uFbSize.x - aPos.w) / uVpB.z;\n"
+            "        float ny = aPos.w - 2.0 * py / uFbSize.y;\n"
+            "        gl_Position = vec4(nx * uFlip.x, ny * (-uFlip.y), aPos.z * uFlip.z, aPos.w);\n"
             "    } else {\n"
             "        gl_Position = vec4(aPos.x * uFlip.x, aPos.y * uFlip.y, aPos.z * uFlip.z, aPos.w);\n"
             "    }\n"
@@ -795,6 +816,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         g_rdGpu.mode2dLoc = GetShaderLocation(g_rdGpu.shader, "uMode2d"); // FEAT-RD8
         g_rdGpu.fbSizeLoc = GetShaderLocation(g_rdGpu.shader, "uFbSize"); // FEAT-RD8
         g_rdGpu.vpZLoc = GetShaderLocation(g_rdGpu.shader, "uVpZ");       // FEAT-RD11
+        g_rdGpu.vpALoc = GetShaderLocation(g_rdGpu.shader, "uVpA");       // FEAT-RD21
+        g_rdGpu.vpBLoc = GetShaderLocation(g_rdGpu.shader, "uVpB");       // FEAT-RD21
         g_rdGpu.atstLoc = GetShaderLocation(g_rdGpu.shader, "uAtst"); // FEAT-RD2
         g_rdGpu.arefLoc = GetShaderLocation(g_rdGpu.shader, "uAref"); // FEAT-RD2
         g_rdGpu.fixLoc = GetShaderLocation(g_rdGpu.shader, "uFixAlpha"); // FEAT-RD7
@@ -1024,6 +1047,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     static const bool s_2dDepth = []{ const char *e = std::getenv("PS2X_RD_2DZ"); return !(e && e[0] == '0'); }(); // FEAT-RD11
     uint64_t draws2dThisFrame = 0; // FEAT-RD8
     uint64_t ztested2dThisFrame = 0; // FEAT-RD11
+    uint64_t zclears2dThisFrame = 0; // FEAT-RD20
     if ((!g_rdGpu.drawBatches.empty() || g_rdGpu.gpu2dVertCount > 0) && g_rdGpu.shader.id != 0) // FEAT-RD8 // FEAT-RD14
     {
         rlEnableShader(g_rdGpu.shader.id);
@@ -1079,7 +1103,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     continue;
                 }
                 const bool use2dZ = s_2dDepth && zte && (ztst == 2u || ztst == 3u) && (g_rdGpu.vpScaleZ != 0.0f);
-                const int wantMode2d = use2dZ ? 2 : 1;
+                const bool zWrite2d = s_2dDepth && !((b0.zbuf >> 32) & 1ull) && (g_rdGpu.vpScaleZ != 0.0f); // FEAT-RD20
+                const bool zAlways2d = zWrite2d && !use2dZ; // FEAT-RD20: ZTE=0 or ZTST=1 with Z writes -> ALWAYS + write
+                const int wantMode2d = (use2dZ || zAlways2d) ? 2 : 1;
                 if (wantMode2d != mode2d)
                 {
                     mode2d = wantMode2d;
@@ -1094,11 +1120,23 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     else
                         rdDepthMask(true);
                 }
+                else if (zAlways2d) // FEAT-RD20
+                {
+                    rdDepthTest(true);
+                    rdDepthMask(true);
+                }
                 else
                 {
                     rdDepthTest(false);
                     rdDepthMask(false);
                 }
+#ifdef _WIN32
+                if (g_rdAlwaysFunc != zAlways2d) // FEAT-RD20
+                {
+                    glDepthFunc(zAlways2d ? 0x0207u : 0x0203u); // GL_ALWAYS : GL_LEQUAL
+                    g_rdAlwaysFunc = zAlways2d;
+                }
+#endif
                 applyRdFbmsk(b0.frame, true, partialMask); // FEAT-RD9
                 float fixAlpha = -1.0f;
                 const int blendState = computeRdBlend(b0.prim, b0.alpha, unsupBlend, approxAd, fixAlpha);
@@ -1157,8 +1195,17 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 ++draws2dThisFrame;
                 if (use2dZ) // FEAT-RD11
                     ++ztested2dThisFrame;
+                if (zWrite2d) // FEAT-RD20
+                    ++zclears2dThisFrame;
                 i2d = j;
             }
+#ifdef _WIN32
+            if (g_rdAlwaysFunc) // FEAT-RD20: restore LEQUAL
+            {
+                glDepthFunc(0x0203u);
+                g_rdAlwaysFunc = false;
+            }
+#endif
 
             mode2d = 0;
             if (g_rdGpu.mode2dLoc >= 0)
@@ -1186,6 +1233,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             const uint64_t test = gsOk ? gsTest : batch.test;
             const uint64_t zbuf = gsOk ? gsZbuf : batch.zbuf;
             const uint64_t frame = gsOk ? gsFrame : batch.frame;
+            if (ps2xRdHasDisplayFbp() && !ps2xRdIsDisplayFbp(static_cast<uint32_t>(frame & 0x1FFull))) // FEAT-RD19
+            {
+                ++g_rdGpu.rtSkipped3d;
+                continue;
+            }
             const uint64_t alpha = gsOk ? gsAlpha : batch.alpha;
             constexpr uint64_t kPrimAbeTmeMask = (1ull << 6) | (1ull << 4);
             const uint64_t prim = gsOk ? ((batch.prim & ~kPrimAbeTmeMask) | (gsPrim & kPrimAbeTmeMask)) : batch.prim;
@@ -1245,6 +1297,38 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (g_rdGpu.fixLoc >= 0) // FEAT-RD7
                 rdSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
 
+            if (g_rdGpu.vpALoc >= 0 && g_rdGpu.vpBLoc >= 0) // FEAT-RD21
+            {
+                static float s_lastOfx = 0.0f, s_lastOfy = 0.0f;
+                static bool s_haveOff = false, s_loggedNoOff = false;
+                uint64_t xo = 0ull;
+                if (ps2xRdLookupXyoff(batch.kickSerial, xo))
+                {
+                    s_lastOfx = static_cast<float>(xo & 0xFFFFull);
+                    s_lastOfy = static_cast<float>((xo >> 32) & 0xFFFFull);
+                    s_haveOff = true;
+                }
+                else if (!s_haveOff && !s_loggedNoOff)
+                {
+                    s_loggedNoOff = true;
+                    ps2xSafeLog("[rd] FEAT-RD21: no XYOFFSET for serial, using 0\n");
+                }
+                const bool vpOk = (batch.vpS[0] != 0.0f && batch.vpS[1] != 0.0f);
+                const float vpA[4] = {batch.vpS[0], batch.vpS[1], batch.vpO[0], batch.vpO[1]};
+                const float vpB[4] = {s_lastOfx, s_lastOfy, (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f, vpOk ? 1.0f : 0.0f};
+                static float s_prevA[4] = {}, s_prevB[4] = {};
+                static bool s_prevValid = false;
+                if (!s_prevValid || std::memcmp(s_prevA, vpA, sizeof(vpA)) != 0 || std::memcmp(s_prevB, vpB, sizeof(vpB)) != 0)
+                {
+                    rlSetUniform(g_rdGpu.vpALoc, vpA, RL_SHADER_UNIFORM_VEC4, 1);
+                    rlSetUniform(g_rdGpu.vpBLoc, vpB, RL_SHADER_UNIFORM_VEC4, 1);
+                    std::memcpy(s_prevA, vpA, sizeof(vpA));
+                    std::memcpy(s_prevB, vpB, sizeof(vpB));
+                    s_prevValid = true;
+                    g_rdc.calls += 2;
+                }
+            }
+
             int texVal = 0; // FEAT-RD3
             int tfxVal = 0;
             int tccVal = 0;
@@ -1301,6 +1385,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     g_rdGpu.totalApproxAd += approxAd; // FEAT-RD7
     g_rdGpu.total2dDraws += draws2dThisFrame; // FEAT-RD8
     g_rdGpu.total2dZtested += ztested2dThisFrame; // FEAT-RD11
+    g_rdGpu.total2dZclears += zclears2dThisFrame; // FEAT-RD20
     g_rdGpu.total2dTris += static_cast<uint64_t>(g_rdGpu.gpu2dVertCount / 3u); // FEAT-RD8
     g_rdGpu.totalRtSkipped += static_cast<uint64_t>(g_rdGpu.lastRtSkipped); // FEAT-RD8
     g_rdGpu.totalPointLineSkipped += static_cast<uint64_t>(g_rdGpu.lastPointLineSkipped); // FEAT-RD8
@@ -1325,8 +1410,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     static_cast<double>(g_rdGpu.total2dTris) / fr,
                     static_cast<double>(g_rdGpu.totalRtSkipped) / fr,
                     static_cast<double>(g_rdGpu.totalPointLineSkipped) / fr); // FEAT-RD8
-        ps2xSafeLog("[rd2d] ztested/frame=%.1f vpZ=%f,%f\n",
+        ps2xSafeLog("[rd2d] ztested/frame=%.1f zclears2d/frame=%.2f vpZ=%f,%f\n",
                     static_cast<double>(g_rdGpu.total2dZtested) / fr,
+                    static_cast<double>(g_rdGpu.total2dZclears) / fr, // FEAT-RD20
                     g_rdGpu.vpScaleZ,
                     g_rdGpu.vpOffsetZ); // FEAT-RD11
         ps2xSafeLog("[rd] aligned=%u fallbackPrev=%u spanned2=%u\n",
@@ -1338,6 +1424,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     g_rdGpu.parsedFallbackCount,
                     g_rdStateChangesInKick.exchange(0u, std::memory_order_relaxed),
                     g_rdMergedSpan.exchange(0u, std::memory_order_relaxed)); // FEAT-RD17
+        ps2xSafeLog("[rd] rtSkipped3d/frame=%.1f\n", static_cast<double>(g_rdGpu.rtSkipped3d) / fr); // FEAT-RD19
+        g_rdGpu.rtSkipped3d = 0u;
         g_rdGpu.gsStateCount = 0u;
         g_rdGpu.parsedFallbackCount = 0u;
     }

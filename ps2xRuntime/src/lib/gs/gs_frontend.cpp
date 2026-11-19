@@ -68,6 +68,7 @@ extern void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const 
 extern void ps2xRdNoteState(uint32_t serial, uint64_t prim, uint64_t alpha, uint64_t test, uint64_t frame,
                             uint64_t zbuf, uint64_t tex0, uint64_t tex1, uint64_t clamp, uint64_t texa, uint64_t fba); // FEAT-RD17
 extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
+extern void ps2xRdNoteXyoff(uint32_t serial, uint64_t xyoff); // FEAT-RD21
 extern const uint16_t *ps2xRdActiveClut(); // FEAT-RD5
 static uint32_t s_rdCurSerial = 0u;       // FEAT-RD5
 static uint32_t s_rdLastNotedSerial = 0u; // FEAT-RD5
@@ -84,6 +85,31 @@ bool g_rdClassicPresentRequested = false;   // FEAT-RD18
 std::atomic<bool> g_rdFrameIsClassic{false}; // FEAT-RD18
 static std::atomic<bool> s_rdFrameHasGeom{false}; // FEAT-RD18
 static std::atomic<uint32_t> s_rdFrameGeomFbp{0xFFFFFFFFu}; // FEAT-RD18b
+static std::atomic<uint32_t> s_rdDispFbps[4] = {{0xFFFFFFFFu}, {0xFFFFFFFFu}, {0xFFFFFFFFu}, {0xFFFFFFFFu}}; // FEAT-RD19
+static std::atomic<uint32_t> s_rdDispFbpNext{0u}; // FEAT-RD19
+static void rdNoteDispFbp(uint64_t dispfb) // FEAT-RD19
+{
+    const uint32_t fbp = static_cast<uint32_t>(dispfb & 0x1FFull);
+    for (int i = 0; i < 4; ++i)
+        if (s_rdDispFbps[i].load(std::memory_order_relaxed) == fbp)
+            return;
+    const uint32_t slot = s_rdDispFbpNext.fetch_add(1u, std::memory_order_relaxed) & 3u;
+    s_rdDispFbps[slot].store(fbp, std::memory_order_relaxed);
+}
+bool ps2xRdIsDisplayFbp(uint32_t fbp) // FEAT-RD19
+{
+    for (int i = 0; i < 4; ++i)
+        if (s_rdDispFbps[i].load(std::memory_order_relaxed) == fbp)
+            return true;
+    return false;
+}
+bool ps2xRdHasDisplayFbp() // FEAT-RD19
+{
+    for (int i = 0; i < 4; ++i)
+        if (s_rdDispFbps[i].load(std::memory_order_relaxed) != 0xFFFFFFFFu)
+            return true;
+    return false;
+}
 static bool s_rdRunIsGeom = false;         // FEAT-RD18
 
 struct RdVert // FEAT-RD8
@@ -2785,6 +2811,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     case 0x59:
         if (m_privRegs)
             m_privRegs->dispfb1 = value;
+        rdNoteDispFbp(value); // FEAT-RD19
         break;
     case 0x5a:
         if (m_privRegs)
@@ -2793,6 +2820,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     case 0x5b:
         if (m_privRegs)
             m_privRegs->dispfb2 = value;
+        rdNoteDispFbp(value); // FEAT-RD19
         break;
     case 0x5c:
         if (m_privRegs)
@@ -3185,7 +3213,8 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
     {
         s_rdMainFbp = batch.state.context.frame.fbp;
         s_rdFrameHasGeom.store(true, std::memory_order_relaxed);
-        s_rdFrameGeomFbp.store(batch.state.context.frame.fbp, std::memory_order_relaxed); // FEAT-RD18b
+        if (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(batch.state.context.frame.fbp)) // FEAT-RD19
+            s_rdFrameGeomFbp.store(batch.state.context.frame.fbp, std::memory_order_relaxed); // FEAT-RD18b
     }
     if (ps2xRdViewOn() && s_rdCurSerial != 0u) // FEAT-RD17
     {
@@ -3209,6 +3238,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                             ctx.clamp,
                             rdPackTexa(batch.state.texa),
                             ctx.fba);
+            ps2xRdNoteXyoff(s_rdCurSerial, static_cast<uint64_t>(ctx.xyoffset.ofx) | (static_cast<uint64_t>(ctx.xyoffset.ofy) << 32)); // FEAT-RD21
         }
         else if (!s_rdKickStateChanged &&
                  (ctx.alpha != s_rdFirstAlpha || rawFrame != s_rdFirstFrame || ctx.test != s_rdFirstTest))
@@ -3362,7 +3392,7 @@ void GS::flushPendingDraws() const
     if (g_gwOn) ps2_gw_count(2, 1); // PROBE-GW
     if (m_backend)
     {
-        g_rdCurDrawIsGeom = s_rdRunIsGeom; // FEAT-RD18
+        g_rdCurDrawIsGeom = s_rdRunIsGeom && (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(m_runState.context.frame.fbp)); // FEAT-RD18 // FEAT-RD19: off-screen RT draws still rasterised
         const uint64_t gqS0 = __rdtsc(); // PROBE-GQ2
         m_backend->SubmitRun(m_runState, m_runPrims.data(), m_runPrims.size());
         g_gqSubmit.fetch_add(__rdtsc() - gqS0, std::memory_order_relaxed);

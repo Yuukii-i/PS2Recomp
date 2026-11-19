@@ -38,6 +38,8 @@ struct RdBatch // FEAT-RD2 // FEAT-RD14
     uint64_t tex1;  // FEAT-RD3
     uint64_t texa;  // FEAT-RD3
     uint32_t kickSerial; // FEAT-RD5
+    float vpS[2]; // FEAT-RD21
+    float vpO[2]; // FEAT-RD21
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
@@ -665,6 +667,8 @@ struct SceneFrame
     uint32_t bestVpVerts = 0;         // FEAT-RD14
     float vpScaleZ = 0.0f;            // FEAT-RD14
     float vpOffsetZ = 0.0f;           // FEAT-RD14
+    float curVpS[2] = {0.0f, 0.0f};   // FEAT-RD21
+    float curVpO[2] = {0.0f, 0.0f};   // FEAT-RD21
     void clear()
     {
         frameIndex = 0;
@@ -1454,7 +1458,8 @@ inline void onFlush()
                 if (rdSerialsCanMerge(last.kickSerial, g.kickSerial) &&
                     last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf &&
                     last.prim == g.prim && last.tex0 == g.tex0 && last.clamp == g.clamp && last.tex1 == g.tex1 &&
-                    last.texa == g.texa) // FEAT-RD3 // FEAT-RD17
+                    last.texa == g.texa &&
+                    last.vpS[0] == d.vpScale[0] && last.vpS[1] == d.vpScale[1] && last.vpO[0] == d.vpOffset[0] && last.vpO[1] == d.vpOffset[1]) // FEAT-RD3 // FEAT-RD17 // FEAT-RD21
                 {
                     if (last.kickSerial != g.kickSerial) // FEAT-RD17
                         ::g_rdMergedSpan.fetch_add(1u, std::memory_order_relaxed);
@@ -1463,7 +1468,8 @@ inline void onFlush()
                 }
             }
             t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, 0u, g.alpha, g.test, g.frame, g.zbuf, g.prim, g.tex0,
-                                            g.clamp, g.tex1, g.texa, g.kickSerial}); // FEAT-RD3 // FEAT-RD5 // FEAT-RD14
+                                            g.clamp, g.tex1, g.texa, g.kickSerial,
+                                            {d.vpScale[0], d.vpScale[1]}, {d.vpOffset[0], d.vpOffset[1]}}); // FEAT-RD3 // FEAT-RD5 // FEAT-RD14 // FEAT-RD21
         }
         ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws, vpScaleZ, vpOffsetZ); // FEAT-RD11
     }
@@ -1567,10 +1573,12 @@ inline bool beginLeanDraw(SceneFrame &f, uint32_t vertCount, __m128 c1v, __m128 
     ++f.leanDraws;
     alignas(16) float vps[4];
     _mm_store_ps(vps, c1v);
+    alignas(16) float vpo[4];
+    _mm_store_ps(vpo, c2v);
+    f.curVpS[0] = vps[0]; f.curVpS[1] = vps[1]; // FEAT-RD21
+    f.curVpO[0] = vpo[0]; f.curVpO[1] = vpo[1]; // FEAT-RD21
     if (vertCount > f.bestVpVerts && vps[2] != 0.0f)
     {
-        alignas(16) float vpo[4];
-        _mm_store_ps(vpo, c2v);
         f.bestVpVerts = vertCount;
         f.vpScaleZ = vps[2];
         f.vpOffsetZ = vpo[2];
@@ -1604,7 +1612,8 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
         ::RdBatch &last = f.rdBatches.back();
         if (rdSerialsCanMerge(last.kickSerial, kickSerial) &&
             last.alpha == alpha && last.test == test && last.frame == frame && last.zbuf == zbuf &&
-            last.prim == prim && last.tex0 == tex0 && last.clamp == clamp && last.tex1 == tex1 && last.texa == texa) // FEAT-RD17
+            last.prim == prim && last.tex0 == tex0 && last.clamp == clamp && last.tex1 == tex1 && last.texa == texa &&
+            last.vpS[0] == f.curVpS[0] && last.vpS[1] == f.curVpS[1] && last.vpO[0] == f.curVpO[0] && last.vpO[1] == f.curVpO[1]) // FEAT-RD17 // FEAT-RD21
         {
             if (last.kickSerial != kickSerial) // FEAT-RD17
                 ::g_rdMergedSpan.fetch_add(1u, std::memory_order_relaxed);
@@ -1612,7 +1621,8 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
             return;
         }
     }
-    f.rdBatches.push_back(::RdBatch{firstIndex, indexCount, 0u, alpha, test, frame, zbuf, prim, tex0, clamp, tex1, texa, kickSerial});
+    f.rdBatches.push_back(::RdBatch{firstIndex, indexCount, 0u, alpha, test, frame, zbuf, prim, tex0, clamp, tex1, texa, kickSerial,
+                                    {f.curVpS[0], f.curVpS[1]}, {f.curVpO[0], f.curVpO[1]}}); // FEAT-RD21
 }
 
 inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
