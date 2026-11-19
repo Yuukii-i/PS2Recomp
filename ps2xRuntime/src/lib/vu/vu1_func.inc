@@ -43,7 +43,33 @@ extern bool ps2xRdViewOn(); // FEAT-RD1
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
 extern void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD14
 extern std::atomic<uint32_t> g_rdKickSerial; // FEAT-RD5
+extern std::atomic<uint32_t> g_rdMergedSpan; // FEAT-RD17
 extern uint64_t ps2xRdLookupContentId(uint32_t serial); // FEAT-RD5
+extern bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_t &test, uint64_t &frame,
+                              uint64_t &zbuf, uint64_t &tex0, uint64_t &tex1, uint64_t &clamp, uint64_t &texa, uint64_t &fba); // FEAT-RD17
+
+static inline bool rdSerialsCanMerge(uint32_t s0, uint32_t s1) // FEAT-RD17
+{
+    if (s0 == s1)
+        return true;
+    if (s0 == 0u || s1 == 0u)
+        return false;
+    const uint64_t c0 = ::ps2xRdLookupContentId(s0);
+    const uint64_t c1 = ::ps2xRdLookupContentId(s1);
+    if (c0 == 0ull || c0 != c1)
+        return false;
+    uint64_t p0, a0, t0, f0, z0, tx0, tx10, cl0, txa0, fb0;
+    uint64_t p1, a1, t1, f1, z1, tx1, tx11, cl1, txa1, fb1;
+    if (::ps2xRdLookupState(s0, p0, a0, t0, f0, z0, tx0, tx10, cl0, txa0, fb0) &&
+        ::ps2xRdLookupState(s1, p1, a1, t1, f1, z1, tx1, tx11, cl1, txa1, fb1))
+    {
+        constexpr uint64_t kAbeTme = (1ull << 6) | (1ull << 4);
+        if ((p0 & kAbeTme) != (p1 & kAbeTme) || a0 != a1 || t0 != t1 || f0 != f1 ||
+            z0 != z1 || tx10 != tx11 || cl0 != cl1 || fb0 != fb1)
+            return false;
+    }
+    return true;
+}
 
 namespace vu1func
 {
@@ -1425,17 +1451,13 @@ inline void onFlush()
             if (!t_rdBatches.empty())
             {
                 ::RdBatch &last = t_rdBatches.back();
-                bool serialMatch = (last.kickSerial == g.kickSerial); // FEAT-RD5
-                if (!serialMatch && last.kickSerial != 0u && g.kickSerial != 0u)
-                {
-                    const uint64_t c0 = ::ps2xRdLookupContentId(last.kickSerial);
-                    const uint64_t c1 = ::ps2xRdLookupContentId(g.kickSerial);
-                    serialMatch = (c0 != 0ull && c0 == c1);
-                }
-                if (serialMatch && last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf &&
+                if (rdSerialsCanMerge(last.kickSerial, g.kickSerial) &&
+                    last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf &&
                     last.prim == g.prim && last.tex0 == g.tex0 && last.clamp == g.clamp && last.tex1 == g.tex1 &&
-                    last.texa == g.texa) // FEAT-RD3
+                    last.texa == g.texa) // FEAT-RD3 // FEAT-RD17
                 {
+                    if (last.kickSerial != g.kickSerial) // FEAT-RD17
+                        ::g_rdMergedSpan.fetch_add(1u, std::memory_order_relaxed);
                     last.count += batchCount;
                     continue;
                 }
@@ -1580,16 +1602,12 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
     if (!f.rdBatches.empty())
     {
         ::RdBatch &last = f.rdBatches.back();
-        bool serialMatch = (last.kickSerial == kickSerial);
-        if (!serialMatch && last.kickSerial != 0u && kickSerial != 0u)
+        if (rdSerialsCanMerge(last.kickSerial, kickSerial) &&
+            last.alpha == alpha && last.test == test && last.frame == frame && last.zbuf == zbuf &&
+            last.prim == prim && last.tex0 == tex0 && last.clamp == clamp && last.tex1 == tex1 && last.texa == texa) // FEAT-RD17
         {
-            const uint64_t c0 = ::ps2xRdLookupContentId(last.kickSerial);
-            const uint64_t c1 = ::ps2xRdLookupContentId(kickSerial);
-            serialMatch = (c0 != 0ull && c0 == c1);
-        }
-        if (serialMatch && last.alpha == alpha && last.test == test && last.frame == frame && last.zbuf == zbuf &&
-            last.prim == prim && last.tex0 == tex0 && last.clamp == clamp && last.tex1 == tex1 && last.texa == texa)
-        {
+            if (last.kickSerial != kickSerial) // FEAT-RD17
+                ::g_rdMergedSpan.fetch_add(1u, std::memory_order_relaxed);
             last.count += indexCount;
             return;
         }

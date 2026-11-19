@@ -28,6 +28,8 @@ std::atomic<uint32_t> g_rdFullDecodes{0};    // FEAT-RD5b
 uint32_t g_rdClutGen = 0;                    // FEAT-RD5c bumped on every CLUT load (GS thread)
 std::atomic<uint32_t> g_rdRawHits{0};        // FEAT-RD5d
 std::atomic<uint32_t> g_rdFastHits{0};     // FEAT-RD5c
+std::atomic<uint32_t> g_rdStateChangesInKick{0}; // FEAT-RD17
+std::atomic<uint32_t> g_rdMergedSpan{0};         // FEAT-RD17
 void ps2xRdMarkVramWrite(uint32_t firstByte, uint32_t byteCount) // FEAT-RD5b
 {
     if (byteCount == 0u || firstByte >= 0x400000u)
@@ -48,6 +50,22 @@ struct RdSerialSlot                      // FEAT-RD5
     std::atomic<uint64_t> contentId{0};
 };
 RdSerialSlot g_serialRing[kRdRingSize]; // FEAT-RD5
+
+struct RdStateSlot // FEAT-RD17
+{
+    std::atomic<uint32_t> serial{0};
+    std::atomic<uint64_t> prim{0};
+    std::atomic<uint64_t> alpha{0};
+    std::atomic<uint64_t> test{0};
+    std::atomic<uint64_t> frame{0};
+    std::atomic<uint64_t> zbuf{0};
+    std::atomic<uint64_t> tex0{0};
+    std::atomic<uint64_t> tex1{0};
+    std::atomic<uint64_t> clamp{0};
+    std::atomic<uint64_t> texa{0};
+    std::atomic<uint64_t> fba{0};
+};
+RdStateSlot g_stateRing[kRdRingSize]; // FEAT-RD17
 
 struct RdContentEntry // FEAT-RD5
 {
@@ -950,4 +968,45 @@ unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t t
     }
     ++g_fallbackSinceLog;
     return ps2xRdGetTexture(tex0, texa);
+}
+
+void ps2xRdNoteState(uint32_t serial, uint64_t prim, uint64_t alpha, uint64_t test, uint64_t frame,
+                     uint64_t zbuf, uint64_t tex0, uint64_t tex1, uint64_t clamp, uint64_t texa, uint64_t fba) // FEAT-RD17
+{
+    if (serial == 0u)
+        return;
+    RdStateSlot &slot = g_stateRing[serial & (kRdRingSize - 1u)];
+    slot.serial.store(0u, std::memory_order_release);
+    slot.prim.store(prim, std::memory_order_relaxed);
+    slot.alpha.store(alpha, std::memory_order_relaxed);
+    slot.test.store(test, std::memory_order_relaxed);
+    slot.frame.store(frame, std::memory_order_relaxed);
+    slot.zbuf.store(zbuf, std::memory_order_relaxed);
+    slot.tex0.store(tex0, std::memory_order_relaxed);
+    slot.tex1.store(tex1, std::memory_order_relaxed);
+    slot.clamp.store(clamp, std::memory_order_relaxed);
+    slot.texa.store(texa, std::memory_order_relaxed);
+    slot.fba.store(fba, std::memory_order_relaxed);
+    slot.serial.store(serial, std::memory_order_release);
+}
+
+bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_t &test, uint64_t &frame,
+                       uint64_t &zbuf, uint64_t &tex0, uint64_t &tex1, uint64_t &clamp, uint64_t &texa, uint64_t &fba) // FEAT-RD17
+{
+    if (serial == 0u)
+        return false;
+    const RdStateSlot &slot = g_stateRing[serial & (kRdRingSize - 1u)];
+    if (slot.serial.load(std::memory_order_acquire) != serial)
+        return false;
+    prim = slot.prim.load(std::memory_order_relaxed);
+    alpha = slot.alpha.load(std::memory_order_relaxed);
+    test = slot.test.load(std::memory_order_relaxed);
+    frame = slot.frame.load(std::memory_order_relaxed);
+    zbuf = slot.zbuf.load(std::memory_order_relaxed);
+    tex0 = slot.tex0.load(std::memory_order_relaxed);
+    tex1 = slot.tex1.load(std::memory_order_relaxed);
+    clamp = slot.clamp.load(std::memory_order_relaxed);
+    texa = slot.texa.load(std::memory_order_relaxed);
+    fba = slot.fba.load(std::memory_order_relaxed);
+    return slot.serial.load(std::memory_order_acquire) == serial;
 }

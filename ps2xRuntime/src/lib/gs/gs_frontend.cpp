@@ -65,9 +65,17 @@ extern bool ps2xRdViewOn(); // FEAT-RD5
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD12
 extern void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t *vram, const uint16_t *clut512); // FEAT-RD5
+extern void ps2xRdNoteState(uint32_t serial, uint64_t prim, uint64_t alpha, uint64_t test, uint64_t frame,
+                            uint64_t zbuf, uint64_t tex0, uint64_t tex1, uint64_t clamp, uint64_t texa, uint64_t fba); // FEAT-RD17
+extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
 extern const uint16_t *ps2xRdActiveClut(); // FEAT-RD5
 static uint32_t s_rdCurSerial = 0u;       // FEAT-RD5
 static uint32_t s_rdLastNotedSerial = 0u; // FEAT-RD5
+static uint32_t s_rdLastStateSerial = 0u; // FEAT-RD17
+static uint64_t s_rdFirstAlpha = 0ull;    // FEAT-RD17
+static uint64_t s_rdFirstFrame = 0ull;    // FEAT-RD17
+static uint64_t s_rdFirstTest = 0ull;     // FEAT-RD17
+static bool s_rdKickStateChanged = false; // FEAT-RD17
 static uint32_t s_rdLastNonZeroSerial = 0u; // FEAT-RD8
 static uint32_t s_rdMainFbp = 0xFFFFFFFFu;  // FEAT-RD8b
 static uint32_t s_rd2dTexCounter = 1u;      // FEAT-RD8
@@ -3103,6 +3111,36 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
     const bool isGeomKick = (s_rdCurSerial & 0x40000000u) != 0u; // FEAT-RD10
     if (isGeomKick) // FEAT-RD8b // FEAT-RD10
         s_rdMainFbp = batch.state.context.frame.fbp;
+    if (ps2xRdViewOn() && s_rdCurSerial != 0u) // FEAT-RD17
+    {
+        const GSContext &ctx = batch.state.context;
+        const uint64_t rawFrame = rdPackFrame(ctx.frame);
+        if (s_rdCurSerial != s_rdLastStateSerial)
+        {
+            s_rdLastStateSerial = s_rdCurSerial;
+            s_rdKickStateChanged = false;
+            s_rdFirstAlpha = ctx.alpha;
+            s_rdFirstFrame = rawFrame;
+            s_rdFirstTest = ctx.test;
+            ps2xRdNoteState(s_rdCurSerial,
+                            rdPackPrim(batch.state.prim),
+                            ctx.alpha,
+                            ctx.test,
+                            rawFrame,
+                            rdPackZbuf(ctx.zbuf),
+                            rdPackTex0(ctx.tex0),
+                            ctx.tex1,
+                            ctx.clamp,
+                            rdPackTexa(batch.state.texa),
+                            ctx.fba);
+        }
+        else if (!s_rdKickStateChanged &&
+                 (ctx.alpha != s_rdFirstAlpha || rawFrame != s_rdFirstFrame || ctx.test != s_rdFirstTest))
+        {
+            s_rdKickStateChanged = true;
+            g_rdStateChangesInKick.fetch_add(1u, std::memory_order_relaxed);
+        }
+    }
     if (ps2xRdViewOn() && isGeomKick) // FEAT-RD5 // FEAT-RD10
     {
         if (s_rdCurSerial != s_rdLastNotedSerial && batch.state.prim.tme)

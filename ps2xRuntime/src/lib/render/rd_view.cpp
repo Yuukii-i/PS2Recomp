@@ -14,6 +14,10 @@
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD1
 extern unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t texa); // FEAT-RD5
+extern bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_t &test, uint64_t &frame,
+                              uint64_t &zbuf, uint64_t &tex0, uint64_t &tex1, uint64_t &clamp, uint64_t &texa, uint64_t &fba); // FEAT-RD17
+extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
+extern std::atomic<uint32_t> g_rdMergedSpan;         // FEAT-RD17
 extern void ps2xRdTexTickFrame(); // FEAT-RD3
 
 struct RdVert // FEAT-RD1
@@ -169,6 +173,8 @@ struct RdGpuState
     uint32_t alignedFrames = 0; // FEAT-RD13
     uint32_t fallbackPrevFrames = 0; // FEAT-RD13
     uint32_t spanned2Frames = 0; // FEAT-RD13
+    uint32_t gsStateCount = 0;        // FEAT-RD17
+    uint32_t parsedFallbackCount = 0; // FEAT-RD17
     uint32_t frames = 0;
     uint64_t frameVerts = 0;   // FEAT-RD14
     uint64_t frameIndices = 0; // FEAT-RD14
@@ -1169,7 +1175,25 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             RdGpuSlot &slot = g_rdGpu.slots[db.slotIdx]; // FEAT-RD14
             if (batch.count == 0u || slot.vao == 0u)
                 continue;
-            const uint64_t test = batch.test;
+            uint64_t gsPrim = 0ull, gsAlpha = 0ull, gsTest = 0ull, gsFrame = 0ull, gsZbuf = 0ull; // FEAT-RD17
+            uint64_t gsTex0 = 0ull, gsTex1 = 0ull, gsClamp = 0ull, gsTexa = 0ull, gsFba = 0ull;   // FEAT-RD17
+            const bool gsOk = ps2xRdLookupState(batch.kickSerial, gsPrim, gsAlpha, gsTest, gsFrame,
+                                                gsZbuf, gsTex0, gsTex1, gsClamp, gsTexa, gsFba); // FEAT-RD17
+            if (gsOk)
+                ++g_rdGpu.gsStateCount;
+            else
+                ++g_rdGpu.parsedFallbackCount;
+            const uint64_t test = gsOk ? gsTest : batch.test;
+            const uint64_t zbuf = gsOk ? gsZbuf : batch.zbuf;
+            const uint64_t frame = gsOk ? gsFrame : batch.frame;
+            const uint64_t alpha = gsOk ? gsAlpha : batch.alpha;
+            constexpr uint64_t kPrimAbeTmeMask = (1ull << 6) | (1ull << 4);
+            const uint64_t prim = gsOk ? ((batch.prim & ~kPrimAbeTmeMask) | (gsPrim & kPrimAbeTmeMask)) : batch.prim;
+            const uint64_t tex0 = gsOk ? gsTex0 : batch.tex0;
+            const uint64_t tex1 = gsOk ? gsTex1 : batch.tex1;
+            const uint64_t clamp = gsOk ? gsClamp : batch.clamp;
+            const uint64_t texa = gsOk ? gsTexa : batch.texa;
+            (void)gsFba;
             const uint32_t ate = static_cast<uint32_t>(test & 1ull);
             const uint32_t atst = ate ? static_cast<uint32_t>((test >> 1) & 7ull) : 1u;
             if (atst == 0u)
@@ -1182,15 +1206,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdDepthTest(false);
             else
                 rdDepthTest(true);
-            if ((batch.zbuf >> 32) & 1ull)
+            if ((zbuf >> 32) & 1ull)
                 rdDepthMask(false);
             else
                 rdDepthMask(true);
 
             // FEAT-RD7: blendState 0 = off, else 1 + sfk*64 + dfk*16 + eqk (factor kinds: 0 ZERO, 1 ONE, 2 C, 3 1-C)
-            applyRdFbmsk(batch.frame, false, partialMask); // FEAT-RD9
+            applyRdFbmsk(frame, false, partialMask); // FEAT-RD9
             float fixAlpha = -1.0f;
-            const int blendState = computeRdBlend(batch.prim, batch.alpha, unsupBlend, approxAd, fixAlpha); // FEAT-RD8
+            const int blendState = computeRdBlend(prim, alpha, unsupBlend, approxAd, fixAlpha); // FEAT-RD8
             if (blendState != prevBlend) // FEAT-RD2b: blend calls flush raylib batch and unbind shader/VAO
             {
                 applyRdBlend(blendState, slot.vao); // FEAT-RD8 // FEAT-RD14
@@ -1224,17 +1248,17 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             int texVal = 0; // FEAT-RD3
             int tfxVal = 0;
             int tccVal = 0;
-            if ((batch.prim >> 4) & 1ull)
+            if ((prim >> 4) & 1ull)
             {
-                const unsigned int texId = ps2xRdGetTextureForBatch(batch.kickSerial, batch.tex0, batch.texa); // FEAT-RD5
+                const unsigned int texId = ps2xRdGetTextureForBatch(batch.kickSerial, tex0, texa); // FEAT-RD5
                 if (texId != 0u)
                 {
-                    const uint32_t wms = static_cast<uint32_t>(batch.clamp & 3ull);
-                    const uint32_t wmt = static_cast<uint32_t>((batch.clamp >> 2) & 3ull);
-                    rdBindTex(texId, (wms != 0u ? 1u : 0u) | (wmt != 0u ? 2u : 0u) | ((((batch.tex1 >> 5) & 1ull) != 0ull) ? 4u : 0u) | ((((batch.tex1 >> 6) & 7ull) != 0ull) ? 8u : 0u)); // FEAT-RD15
+                    const uint32_t wms = static_cast<uint32_t>(clamp & 3ull);
+                    const uint32_t wmt = static_cast<uint32_t>((clamp >> 2) & 3ull);
+                    rdBindTex(texId, (wms != 0u ? 1u : 0u) | (wmt != 0u ? 2u : 0u) | ((((tex1 >> 5) & 1ull) != 0ull) ? 4u : 0u) | ((((tex1 >> 6) & 7ull) != 0ull) ? 8u : 0u)); // FEAT-RD15
                     texVal = 1;
-                    tfxVal = static_cast<int>((batch.tex0 >> 35) & 3ull);
-                    tccVal = static_cast<int>((batch.tex0 >> 34) & 1ull);
+                    tfxVal = static_cast<int>((tex0 >> 35) & 3ull);
+                    tccVal = static_cast<int>((tex0 >> 34) & 1ull);
                 }
             }
             if (g_rdGpu.texLoc >= 0)
@@ -1309,6 +1333,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     g_rdGpu.alignedFrames,
                     g_rdGpu.fallbackPrevFrames,
                     g_rdGpu.spanned2Frames); // FEAT-RD13
+        ps2xSafeLog("[rd] gsState=%u parsedFallback=%u stateChangesInKick=%u mergedSpan=%u\n",
+                    g_rdGpu.gsStateCount,
+                    g_rdGpu.parsedFallbackCount,
+                    g_rdStateChangesInKick.exchange(0u, std::memory_order_relaxed),
+                    g_rdMergedSpan.exchange(0u, std::memory_order_relaxed)); // FEAT-RD17
+        g_rdGpu.gsStateCount = 0u;
+        g_rdGpu.parsedFallbackCount = 0u;
     }
     return true;
 }
