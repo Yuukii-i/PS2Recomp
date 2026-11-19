@@ -23,6 +23,9 @@ namespace ps2x::iop::detail
         m_servers.clear();
         m_nextDmaId = 1u;
         m_sifInitialized = false;
+        m_sg2Base = 0u;
+        m_lastSg2ReturnPointer = 0u;
+        m_lastSg2IopStatusNonZero = 0u;
     }
 
     bool IopRpcBridge::dispatchSifManImport(uint16_t ordinal, IopCpuState &cpu)
@@ -221,6 +224,11 @@ namespace ps2x::iop::detail
             server.callbackBuffer = m_memory.read32(stackPointer + 20u);
             server.queue = m_memory.read32(stackPointer + 24u);
             m_servers[server.sid] = server;
+            // PERF-AU3B: Record SG2 module base from its 0x3BB4 RPC server function.
+            if (server.sid == 0x11223344u && server.function >= 0x3BB4u)
+            {
+                m_sg2Base = server.function - 0x3BB4u;
+            }
             if (server.serverData != 0u)
             {
                 m_memory.write32(server.serverData + 0x20u, server.sid);
@@ -298,6 +306,26 @@ namespace ps2x::iop::detail
                                                                request.send.size,
                                                                0u,
                                                                server.gp);
+        // PERF-AU3B: Capture raw returnPointer and 0x8D38+base non-zero count for SG2 diagnostics.
+        if (request.sid == 0x11223344u)
+        {
+            m_lastSg2ReturnPointer = returnPointer;
+            uint32_t iopNz = 0u;
+            if (m_sg2Base != 0u)
+            {
+                const uint32_t statusPhys = IopMemory::physicalAddress(m_sg2Base + 0x8D38u);
+                if (statusPhys + 0x1C0u <= IopMemory::RamSize)
+                {
+                    const uint8_t *ramPtr = m_memory.ram().data() + statusPhys;
+                    for (uint32_t i = 0u; i < 0x1C0u; ++i)
+                    {
+                        if (ramPtr[i] != 0u)
+                            ++iopNz;
+                    }
+                }
+            }
+            m_lastSg2IopStatusNonZero = iopNz;
+        }
         if (returnPointer == 0u)
             returnPointer = server.buffer;
         if (request.receive.address != 0u && request.receive.size != 0u && returnPointer != 0u)

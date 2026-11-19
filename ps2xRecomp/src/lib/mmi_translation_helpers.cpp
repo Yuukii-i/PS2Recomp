@@ -520,8 +520,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePROT3W(const Instruction &inst)
     {
-        // Rotates words left by 3: [d,c,b,a] -> [a,d,c,b]
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(0,3,2,1)));",
+        // PROT3W rotates only the low three words: [d,c,b,a] -> [d,a,c,b] (word 3 unchanged)
+        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(3,0,2,1)));",
                            inst.rd, inst.rt);
     }
 
@@ -577,8 +577,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePEXCW(const Instruction &inst)
     {
-        // Parallel Exchange Center Word (Swaps words 0<>2, 1<>3)
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(1,0,3,2)));",
+        // Parallel Exchange Center Word: swaps the two middle words (1<>2), words 0 and 3 unchanged
+        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(3,1,2,0)));",
                            inst.rd, inst.rt);
     }
 

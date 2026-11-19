@@ -1,6 +1,9 @@
 #include <cstdint>
 #include <cstdlib>
 void ps2xSafeLog(const char *fmt, ...);
+void ps2xSpu2GuestVblank(); // FIX-AU4
+void ps2xCid1Vblank(); // FIX-AU5
+extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 static inline bool isVerboseLog()
 {
     static int s_verbose = -1;
@@ -24,14 +27,164 @@ namespace ps2_syscalls {
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_runtime.h"
 #include "Stubs/CD.h"
 
 #include <algorithm>
+#include <intrin.h>
 #include <cassert>
 #include <mutex>
+#include "ThreadNaming.h" // PERF-MB
+#include <thread>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <chrono>
+extern std::atomic<uint64_t> g_aw2Mark2000, g_aw2C5Raised, g_aw2C5Delivered; // PROBE-AW2
+extern std::atomic<uint32_t> g_vif1PublishedMark; // PROBE-AW2
+extern std::atomic<uint64_t> g_gsFrameKicks; // PROBE-AW2
+extern void aw3DumpRing(); // PROBE-AW3
+static inline bool aw2ProbeOn() // PROBE-AW2
+{ // PROBE-AW2
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_AW2_PROBE"); return e && e[0] == '1'; }(); // PROBE-AW2
+    return s_on; // PROBE-AW2
+} // PROBE-AW2
+namespace // PERF-SA
+{
+struct ScratchDepthGuard
+{
+    int &depth;
+    explicit ScratchDepthGuard(int &d) noexcept : depth(d) {}
+    ~ScratchDepthGuard() noexcept { --depth; }
+    ScratchDepthGuard(const ScratchDepthGuard &) = delete;
+    ScratchDepthGuard &operator=(const ScratchDepthGuard &) = delete;
+};
+
+thread_local std::vector<int> s_vsyncCompletedScratch;
+thread_local int s_vsyncCompletedDepth = 0;
+thread_local std::vector<EeEvent> s_pendingEventsScratch;
+thread_local int s_pendingEventsDepth = 0;
+} // namespace // PERF-SA
+extern "C" void ps2xFlushLog(); // PERF-LG
+thread_local uint32_t g_au9SchedulerEntry = 0u; // FIX-AU9
+#ifdef _WIN32 // PROBE-EX
+extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
+#endif
+
+// PROBE-EX: EeDispatcherTransfer exception cost & stack depth probe (PS2X_EX=1)
+static const bool s_probeExOn = []() {
+    const char *v = std::getenv("PS2X_EX");
+    return v && v[0] == '1';
+}();
+
+struct ProbeExSiteStats
+{
+    uint64_t count = 0;
+    uint64_t qpcTicks = 0;
+    uint64_t depthSum = 0;
+    uint32_t depthMax = 0;
+};
+
+struct ProbeExState
+{
+    ProbeExSiteStats sites[5]{};
+    int64_t lastReportQpc = 0;
+    int64_t qpcFreq = 0;
+};
+
+static ProbeExState s_probeEx;
+static thread_local int t_probeExSite = -1;
+static thread_local int64_t t_probeExStamp = 0;
+
+static inline int64_t probeExQpcNow()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+static inline int64_t probeExQpcFreq()
+{
+    return 1000000000LL;
+}
+
+static inline void probeExBeforeThrow(int site)
+{
+    if (!s_probeExOn) return;
+    ++s_probeEx.sites[site].count;
+    void *frames[62];
+#ifdef _WIN32
+    uint32_t depth = static_cast<uint32_t>(RtlCaptureStackBackTrace(0, 62, frames, nullptr));
+#else
+    uint32_t depth = 0;
+#endif
+    s_probeEx.sites[site].depthSum += depth;
+    if (depth > s_probeEx.sites[site].depthMax)
+        s_probeEx.sites[site].depthMax = depth;
+    t_probeExSite = site;
+    t_probeExStamp = probeExQpcNow();
+}
+
+static inline void probeExOnCatch()
+{
+    if (!s_probeExOn) return;
+    const int64_t now = probeExQpcNow();
+    const int site = t_probeExSite;
+    if (site >= 0 && site < 5)
+    {
+        const int64_t dt = now - t_probeExStamp;
+        if (dt > 0)
+            s_probeEx.sites[site].qpcTicks += static_cast<uint64_t>(dt);
+        t_probeExSite = -1;
+    }
+    if (s_probeEx.qpcFreq == 0)
+        s_probeEx.qpcFreq = probeExQpcFreq();
+    if (s_probeEx.lastReportQpc == 0)
+    {
+        s_probeEx.lastReportQpc = now;
+        return;
+    }
+    const int64_t elapsedQpc = now - s_probeEx.lastReportQpc;
+    if (elapsedQpc >= s_probeEx.qpcFreq * 5)
+    {
+        const double dtSec = static_cast<double>(elapsedQpc) / static_cast<double>(s_probeEx.qpcFreq);
+        const double usPerTick = 1000000.0 / static_cast<double>(s_probeEx.qpcFreq);
+        uint64_t totalTicks = 0;
+        for (int i = 0; i < 5; ++i)
+            totalTicks += s_probeEx.sites[i].qpcTicks;
+        const double totalMsPerS = (static_cast<double>(totalTicks) * usPerTick / 1000.0) / dtSec;
+        auto siteUs = [&](int i) -> double {
+            return static_cast<double>(s_probeEx.sites[i].qpcTicks) * usPerTick;
+        };
+        auto siteAvgDepth = [&](int i) -> double {
+            return s_probeEx.sites[i].count > 0
+                       ? static_cast<double>(s_probeEx.sites[i].depthSum) / static_cast<double>(s_probeEx.sites[i].count)
+                       : 0.0;
+        };
+        ::ps2xSafeLog(
+            "[exc] dt=%.1fs site0=start n=%llu us=%.0f depth=%.1f/%u "
+            "site1=transfer n=%llu us=%.0f depth=%.1f/%u "
+            "site2=inv1 n=%llu us=%.0f depth=%.1f/%u "
+            "site3=inv2 n=%llu us=%.0f depth=%.1f/%u "
+            "site4=block n=%llu us=%.0f depth=%.1f/%u "
+            "total_ms_per_s=%.3f\n",
+            dtSec,
+            (unsigned long long)s_probeEx.sites[0].count, siteUs(0), siteAvgDepth(0), s_probeEx.sites[0].depthMax,
+            (unsigned long long)s_probeEx.sites[1].count, siteUs(1), siteAvgDepth(1), s_probeEx.sites[1].depthMax,
+            (unsigned long long)s_probeEx.sites[2].count, siteUs(2), siteAvgDepth(2), s_probeEx.sites[2].depthMax,
+            (unsigned long long)s_probeEx.sites[3].count, siteUs(3), siteAvgDepth(3), s_probeEx.sites[3].depthMax,
+            (unsigned long long)s_probeEx.sites[4].count, siteUs(4), siteAvgDepth(4), s_probeEx.sites[4].depthMax,
+            totalMsPerS);
+        for (int i = 0; i < 5; ++i)
+            s_probeEx.sites[i] = {};
+        s_probeEx.lastReportQpc = now;
+    }
+}
+
+// PERF-KM: bumped whenever an element of EeScheduler::m_threads is erased, so checkpointDue() can cache the running thread's record pointer
+// (unordered_map nodes are stable across inserts/rehash; only erase/clear invalidate them).
+static uint32_t s_threadMapGen = 0;
 
 namespace
 {
@@ -174,6 +327,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_executorThread = std::this_thread::get_id();
     m_rdram = rdram;
     m_readyQueues = {};
+    ++s_threadMapGen; // PERF-KM
     m_threads.clear();
     m_semaphores.clear();
     m_eventFlags.clear();
@@ -282,6 +436,7 @@ void EeScheduler::run()
                     uint32_t cause = getRegU32(&invocation.context, 4);
                     probe_ae::onCeVblankDelivered(cause);
                     probe_ae::onDc3IrqDelivered(cause, invocation.context.pc);
+                    if (aw2ProbeOn() && cause == 5u) g_aw2C5Delivered.fetch_add(1, std::memory_order_relaxed); // PROBE-AW2
                 }
                 owner->status = EeThreadStatus::Running;
                 m_currentThreadId = owner->id;
@@ -307,6 +462,7 @@ void EeScheduler::run()
             }
             catch (const EeDispatcherTransfer &)
             {
+                probeExOnCatch(); // PROBE-EX
             }
             if (m_currentThreadId == 0)
             {
@@ -341,6 +497,7 @@ void EeScheduler::run()
                     }
                     catch (const EeDispatcherTransfer &)
                     {
+                        probeExOnCatch(); // PROBE-EX
                     }
                 }
                 continue;
@@ -361,6 +518,7 @@ void EeScheduler::run()
                 uint32_t cause = getRegU32(&invocation.context, 4);
                 probe_ae::onCeVblankDelivered(cause);
                 probe_ae::onDc3IrqDelivered(cause, invocation.context.pc);
+                if (aw2ProbeOn() && cause == 5u) g_aw2C5Delivered.fetch_add(1, std::memory_order_relaxed); // PROBE-AW2
             }
             if (getRegU32(&invocation.context, 29) == 0u)
             {
@@ -375,17 +533,18 @@ void EeScheduler::run()
 
         if (!m_runtime.hasFunction(context.pc))
         {
-            fprintf(stderr, "[abort] EeScheduler: missing function at pc=0x%08x, ra=0x%08x, sp=0x%08x, threadId=%d, invocations=%zu\n",
-                    context.pc,
-                    (uint32_t)_mm_extract_epi32(context.r[31], 0),
-                    (uint32_t)_mm_extract_epi32(context.r[29], 0),
-                    running ? running->id : -999,
-                    running ? running->invocations.size() : 0);
-            fprintf(stderr, "[abort] Last dispatched PCs by EeScheduler:\n");
+            ps2xSafeLog("[abort] EeScheduler: missing function at pc=0x%08x, ra=0x%08x, sp=0x%08x, threadId=%d, invocations=%zu\n", // FIX-CR3
+                        context.pc,
+                        (uint32_t)_mm_extract_epi32(context.r[31], 0),
+                        (uint32_t)_mm_extract_epi32(context.r[29], 0),
+                        running ? running->id : -999,
+                        running ? running->invocations.size() : 0);
+            ps2xSafeLog("[abort] Last dispatched PCs by EeScheduler:\n"); // FIX-CR3
             for (int i = 0; i < 32; ++i) {
                 uint32_t p = s_lastDispatchedPc[(s_lastDispatchIdx + i) % 32];
-                if (p) fprintf(stderr, "  [%d] 0x%08x\n", i, p);
+                if (p) ps2xSafeLog("  [%d] 0x%08x\n", i, p); // FIX-CR3
             }
+            ps2xFlushLog(); // PERF-LG
             fflush(stderr);
             m_runtime.reportMissingFunction(m_rdram,
                                             &context,
@@ -393,7 +552,7 @@ void EeScheduler::run()
                                             context.pc,
                                             PS2Runtime::GuestBranchKind::DirectJump,
                                             "EE scheduler");
-            std::abort();
+            ps2xFlushLog(); std::abort(); // PERF-LG
         }
         PS2Runtime::RecompiledFunction function = m_runtime.lookupFunction(context.pc);
 
@@ -439,6 +598,8 @@ void EeScheduler::run()
             }
             const uint32_t prevExecutingFunction = g_currentExecutingFunction;
             g_currentExecutingFunction = entryPc;
+            const uint32_t prevAu9SchedulerEntry = g_au9SchedulerEntry; // FIX-AU9
+            g_au9SchedulerEntry = entryPc; // FIX-AU9
             s_lastDispatchedPc[s_lastDispatchIdx++ % 32] = entryPc;
             if (running && running->id == 1 && probe_ae::isEnabled())
             {
@@ -458,11 +619,13 @@ void EeScheduler::run()
                 }
             }
             g_currentExecutingFunction = prevExecutingFunction;
+            g_au9SchedulerEntry = prevAu9SchedulerEntry; // FIX-AU9
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
         catch (const EeDispatcherTransfer &)
         {
+            probeExOnCatch(); // PROBE-EX
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
@@ -518,12 +681,26 @@ void EeScheduler::postEvent(EeEvent event)
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
     uint32_t pc = g_currentExecutingFunction;
+    bool hasThreadPc = false; // FIX-AU9
     if (m_currentThreadId != 0)
     {
-        const GuestThread *running = currentThread();
+        // PERF-KM: cached record of the running guest thread (was an unordered_map lookup on every checkpoint, ~4.5M/s)
+        static thread_local const GuestThread *s_cachedThread = nullptr;
+        static thread_local int s_cachedThreadId = -1;
+        static thread_local uint32_t s_cachedGen = ~0u;
+        static thread_local const EeScheduler *s_cachedOwner = nullptr;
+        if (s_cachedOwner != this || s_cachedThreadId != m_currentThreadId || s_cachedGen != s_threadMapGen)
+        {
+            s_cachedThread = currentThread();
+            s_cachedThreadId = m_currentThreadId;
+            s_cachedGen = s_threadMapGen;
+            s_cachedOwner = this;
+        }
+        const GuestThread *running = s_cachedThread;
         if (running != nullptr)
         {
             pc = running->activeContext().pc;
+            hasThreadPc = true; // FIX-AU9
         }
     }
     if ((pc >= 0x003D7000u && pc <= 0x003E5000u) ||
@@ -544,44 +721,111 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         return false;
     }
 
+    // PERF-KM: apply the cycle accounting (EE timers, IOP, deadline/time-slice checks) in steps of >= kBatch cycles instead of at every checkpoint
+    // (~4.5M calls/s). Total emulated cycles are unchanged; timers, deadlines and preemption fire up to kBatch cycles (~1 us at 256) late.
+    // A pending cross-thread event or stop request still takes the normal path immediately. PS2X_CKPT_BATCH=<cycles> overrides (0 = old behaviour).
+    static const uint32_t kCkptBatch = []() -> uint32_t
+    {
+        const char *e = std::getenv("PS2X_CKPT_BATCH");
+        return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 256u;
+    }();
+    static thread_local uint32_t s_ckptAcc = 0;
+    if (kCkptBatch > cycles)
+    {
+        s_ckptAcc += cycles;
+        if (s_ckptAcc < kCkptBatch && !m_checkpointPending.load(std::memory_order_acquire) && !m_stopRequested.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+        cycles = s_ckptAcc;
+        s_ckptAcc = 0;
+    }
+
     accountCycles(cycles);
 
+    bool due = false; // FIX-AU9
     if (m_checkpointPending.load(std::memory_order_acquire) ||
         m_stopRequested.load(std::memory_order_acquire))
     {
-        return true;
+        due = true; // FIX-AU9
     }
+    else // FIX-AU9
+    { // FIX-AU9
+        const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+        if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
+        {
+            m_checkpointPending.store(true, std::memory_order_release);
+            due = true; // FIX-AU9
+        }
+        else if (m_eeCycle >= m_sliceEndCycle) // FIX-AU9
+        { // FIX-AU9
+            const GuestThread *running = currentThread();
+            if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
+            {
+                m_rescheduleRequested = true;
+                m_timeSliceExpired = true;
+                due = true; // FIX-AU9
+            }
+            else // FIX-AU9
+            { // FIX-AU9
+                renewTimeSlice();
+            } // FIX-AU9
+        } // FIX-AU9
+    } // FIX-AU9
 
-    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
-    if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
-    {
-        m_checkpointPending.store(true, std::memory_order_release);
-        return true;
-    }
-
-    if (m_eeCycle < m_sliceEndCycle)
-    {
-        return false;
-    }
-
-    const GuestThread *running = currentThread();
-    if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
-    {
-        m_rescheduleRequested = true;
-        m_timeSliceExpired = true;
-        return true;
-    }
-
-    renewTimeSlice();
-    return false;
+    static thread_local uint64_t s_au9ConsecutiveDeferrals = 0; // FIX-AU9
+    if (due) // FIX-AU9
+    { // FIX-AU9
+        if (hasThreadPc && pc != 0u && pc == g_currentExecutingFunction && g_currentExecutingFunction != g_au9SchedulerEntry) // FIX-AU9
+        { // FIX-AU9
+            ++s_au9ConsecutiveDeferrals; // FIX-AU9
+            if ((s_au9ConsecutiveDeferrals % 10000000ull) == 0ull) // FIX-AU9
+            { // FIX-AU9
+                static std::atomic<uint32_t> s_au9LongLogCount{0}; // FIX-AU9
+                if (s_au9LongLogCount.fetch_add(1u, std::memory_order_relaxed) < 50u) // FIX-AU9
+                { // FIX-AU9
+                    ps2xSafeLog("[au9] LONG pc=0x%x n=%llu\n", pc, static_cast<unsigned long long>(s_au9ConsecutiveDeferrals)); // FIX-AU9
+                } // FIX-AU9
+            } // FIX-AU9
+            static std::atomic<uint64_t> s_au9DeferTotal{0}; // FIX-AU9
+            const uint64_t n = s_au9DeferTotal.fetch_add(1u, std::memory_order_relaxed) + 1u; // FIX-AU9
+            static const bool s_au9Log = []() { const char *e = std::getenv("PS2X_AU9_LOG"); return e && e[0] == '1'; }(); // FIX-AU9
+            if (s_au9Log && (n <= 20u || (n % 1000u) == 0u)) // FIX-AU9
+            { // FIX-AU9
+                ps2xSafeLog("[au9] deferred=%llu pc=0x%x\n", static_cast<unsigned long long>(n), pc); // FIX-AU9
+            } // FIX-AU9
+            return false; // FIX-AU9
+        } // FIX-AU9
+        s_au9ConsecutiveDeferrals = 0u; // FIX-AU9
+    } // FIX-AU9
+    return due; // FIX-AU9
 }
+
+extern const bool g_profCounts;                                     // PROBE-IJ (ps2_runtime.cpp)
+extern uint64_t g_pcAcctCalls, g_pcAcctTicks, g_pcIopTicks;          // PROBE-IJ
+
+extern thread_local uint32_t g_acctPending; // PERF-LM: dispatch cycles batched by ps2_runtime.cpp (PS2X_ACCT_BATCH)
 
 void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
+    if (g_acctPending != 0u) // PERF-LM: merge pending batched cycles so every caller sees exact EE time
+    {
+        cycles += g_acctPending;
+        g_acctPending = 0u;
+    }
+    const uint64_t t0 = g_profCounts ? __rdtsc() : 0u;
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
     m_eeCycle += elapsed;
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
+    const uint64_t t1 = g_profCounts ? __rdtsc() : 0u;
     m_runtime.advanceIopEeCycles(elapsed);
+    if (g_profCounts) // PROBE-IJ
+    {
+        const uint64_t t2 = __rdtsc();
+        ++g_pcAcctCalls;
+        g_pcAcctTicks += t2 - t0;
+        g_pcIopTicks += t2 - t1;
+    }
     if (m_pendingEeTimerInterrupts != 0u)
     {
         m_checkpointPending.store(true, std::memory_order_release);
@@ -667,6 +911,7 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
     {
         ownedStack = it->second.stack;
     }
+    ++s_threadMapGen; // PERF-KM
     m_threads.erase(it);
     publishSnapshot();
     return KE_OK;
@@ -686,6 +931,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     }
 
     target->context = R5900Context{};
+    target->context.vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // vf0 is hardwired {0,0,0,1}
     target->context.pc = target->entry;
     target->arg = arg;
     target->suspendCount = 0;
@@ -729,6 +975,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     m_currentThreadId = 0;
     if (deleteThreadRecord && id != kMainThreadId)
     {
+        ++s_threadMapGen; // PERF-KM
         m_threads.erase(id);
     }
     if (ownedStack != 0u)
@@ -736,6 +983,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
         m_runtime.guestFree(ownedStack);
     }
     publishSnapshot();
+    probeExBeforeThrow(0); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 
@@ -1084,6 +1332,7 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     publishSnapshot();
+    probeExBeforeThrow(1); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 
@@ -1406,6 +1655,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     invocation.sequence = ++m_invocationSequence;
     owner->invocations.push_back(std::move(invocation));
     publishSnapshot();
+    probeExBeforeThrow(2); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 
@@ -1425,6 +1675,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
         owner->invocations.push_back(std::move(*it));
     }
     publishSnapshot();
+    probeExBeforeThrow(3); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 
@@ -1658,7 +1909,11 @@ uint32_t EeScheduler::setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_
 void EeScheduler::completeVSync(uint64_t tick)
 {
     assertExecutor();
-    std::vector<int> completed;
+    const bool outer = (s_vsyncCompletedDepth++ == 0); // PERF-SA
+    ScratchDepthGuard depthGuard(s_vsyncCompletedDepth); // PERF-SA
+    std::vector<int> local; // PERF-SA
+    auto &completed = outer ? s_vsyncCompletedScratch : local; // PERF-SA
+    completed.clear(); // PERF-SA
     for (const auto &[id, candidate] : m_threads)
     {
         if ((candidate.status == EeThreadStatus::Waiting || candidate.status == EeThreadStatus::WaitingSuspended) &&
@@ -2022,6 +2277,7 @@ void EeScheduler::blockCurrent(EeWaitState wait)
     self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
     m_currentThreadId = 0;
     publishSnapshot();
+    probeExBeforeThrow(4); // PROBE-EX
     throw EeDispatcherTransfer{};
 }
 
@@ -2105,10 +2361,18 @@ void EeScheduler::processPendingEvents()
             dispatchIrq(false, 9u + timer);
         }
     }
-    std::deque<EeEvent> pending;
+    const bool outer = (s_pendingEventsDepth++ == 0); // PERF-SA
+    ScratchDepthGuard depthGuard(s_pendingEventsDepth); // PERF-SA
+    std::vector<EeEvent> local; // PERF-SA
+    auto &pending = outer ? s_pendingEventsScratch : local; // PERF-SA
+    pending.clear(); // PERF-SA
     {
         std::lock_guard lock(m_eventMutex);
-        pending.swap(m_events);
+        while (!m_events.empty()) // PERF-SA
+        { // PERF-SA
+            pending.push_back(m_events.front()); // PERF-SA
+            m_events.pop_front(); // PERF-SA
+        } // PERF-SA
     }
     for (const EeEvent &event : pending)
     {
@@ -2127,9 +2391,15 @@ void EeScheduler::processPendingEvents()
 
 void EeScheduler::processDueDeadlines()
 {
+    static thread_local std::vector<ScheduledEvent> s_dueScratch; // PERF-SA
+    static thread_local int s_dueDepth = 0; // PERF-SA
+    const bool outer = (s_dueDepth++ == 0); // PERF-SA
+    ScratchDepthGuard depthGuard(s_dueDepth); // PERF-SA
+    std::vector<ScheduledEvent> local; // PERF-SA
+    auto &due = outer ? s_dueScratch : local; // PERF-SA
     for (;;)
     {
-        std::vector<ScheduledEvent> due;
+        due.clear(); // PERF-SA
         {
             std::unique_lock lock(m_eventMutex);
             auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
@@ -2175,6 +2445,7 @@ void EeScheduler::processDueDeadlines()
                 const auto now = std::chrono::steady_clock::now();
                 const double lateMs = std::chrono::duration<double, std::milli>(now - scheduled.hostDeadline).count();
                 probe_ae::onDc2VBlankStart(lateMs);
+                if (g_ps2Ft2On) ps2_ft2_ev(0, m_vsyncTick); // PROBE-FT2: VBLANK
                 auto nextHost = scheduled.hostDeadline + kVBlankPeriod;
                 if (nextHost < now || nextHost > now + kVBlankPeriod * 2)
                 {
@@ -2190,6 +2461,90 @@ void EeScheduler::processDueDeadlines()
             processEvent(scheduled.event);
         }
     }
+}
+
+
+// PERF-JF: PS2X_PRESENT_ASYNC=1 (needs PS2X_GS_ASYNC=1) runs the vblank present latch (GPU fence wait + CPU de-swizzle, ~14 ms) on its own
+// thread, ordered after the GIF packets queued at vblank time, so the EE thread no longer waits for it. A latch requested while one is still
+// running is coalesced (the worker re-latches once with the newest ticket).
+extern "C" uint64_t ps2_gs_async_ticket();
+extern "C" void ps2_gs_async_wait_ticket(uint64_t ticket);
+extern "C" void ps2_gt_count(int what, uint64_t n); // PROBE-GT
+namespace
+{
+struct PresentLatchWorker
+{
+    std::mutex m;
+    std::condition_variable cv;
+    bool pending = false;
+    bool dirty = false;
+    bool started = false;
+    uint64_t ticket = 0;
+    GS *gs = nullptr;
+};
+
+bool isPresentAsyncEnabled()
+{
+    static const bool on = []() { const char *e = std::getenv("PS2X_PRESENT_ASYNC"); return !(e && e[0] == '0'); }(); // default on (needs PS2X_GS_ASYNC=1, else inline)
+    return on;
+}
+
+bool postPresentLatch(GS &gs)
+{
+    static PresentLatchWorker *w = new PresentLatchWorker(); // leaked on purpose: detached worker outlives static destruction
+    const uint64_t ticket = ps2_gs_async_ticket();
+    if (!ticket)
+        return false; // async GS off or not started yet: caller latches inline
+    {
+        std::lock_guard<std::mutex> lk(w->m);
+        w->ticket = ticket;
+        w->gs = &gs;
+        if (w->pending)
+        {
+            w->dirty = true;
+            ps2_gt_count(1, 1); // PROBE-GT: coalesce_latch
+            return true;
+        }
+        w->pending = true;
+        if (!w->started)
+        {
+            w->started = true;
+            std::thread([w = w]() {
+                ThreadNaming::SetCurrentThreadName("PresentLatch"); // PERF-MB
+                std::unique_lock<std::mutex> lk2(w->m);
+                for (;;)
+                {
+                    w->cv.wait(lk2, [&] { return w->pending; });
+                    for (;;)
+                    {
+                        const uint64_t t = w->ticket;
+                        GS *g = w->gs;
+                        w->dirty = false;
+                        lk2.unlock();
+                        ps2_gs_async_wait_ticket(t);
+                        g->latchHostPresentationFrame();
+                        lk2.lock();
+                        if (!w->dirty)
+                            break;
+                    }
+                    w->pending = false;
+                }
+            }).detach();
+        }
+    }
+    w->cv.notify_one();
+    return true;
+}
+} // namespace
+
+static bool isVblankLatchEnabled()
+{
+    static const bool s_enabled = []() {
+        const char *e = std::getenv("PS2X_VBLANK_LATCH");
+        if (e && std::strcmp(e, "0") == 0) return false;
+        return true;
+    }();
+    return s_enabled;
 }
 
 void EeScheduler::processEvent(const EeEvent &event)
@@ -2222,6 +2577,60 @@ void EeScheduler::processEvent(const EeEvent &event)
         m_vsyncFlagAddress = 0u;
         m_vsyncTickAddress = 0u;
         completeVSync(m_vsyncTick);
+        ps2xSpu2GuestVblank(); // FIX-AU4
+        ps2xCid1Vblank(); // FIX-AU5
+        if (aw2ProbeOn()) // PROBE-AW2
+        { // PROBE-AW2
+            static uint64_t s_aw2Vbl = 0; // PROBE-AW2
+            static uint32_t s_aw2Lines = 0; // PROBE-AW2
+            if ((++s_aw2Vbl % 60u) == 0u && s_aw2Lines < 900u) // PROBE-AW2
+            { // PROBE-AW2
+                ++s_aw2Lines; // PROBE-AW2
+                uint32_t flag = 0; // PROBE-AW2
+                if (m_rdram && 0x649DE4u <= PS2_RAM_SIZE - sizeof(uint32_t)) // PROBE-AW2
+                    std::memcpy(&flag, m_rdram + 0x649DE4u, sizeof(flag)); // PROBE-AW2
+                ps2xSafeLog("[aw2] vbl=%llu mark2000=%llu c5raised=%llu c5deliv=%llu flag=%u mark=0x%04x kicks=%llu\n", // PROBE-AW2
+                            (unsigned long long)m_vsyncTick, // PROBE-AW2
+                            (unsigned long long)g_aw2Mark2000.load(std::memory_order_relaxed), // PROBE-AW2
+                            (unsigned long long)g_aw2C5Raised.load(std::memory_order_relaxed), // PROBE-AW2
+                            (unsigned long long)g_aw2C5Delivered.load(std::memory_order_relaxed), // PROBE-AW2
+                            (unsigned)flag, // PROBE-AW2
+                            (unsigned)g_vif1PublishedMark.load(std::memory_order_relaxed), // PROBE-AW2
+                            (unsigned long long)g_gsFrameKicks.load(std::memory_order_relaxed)); // PROBE-AW2
+            } // PROBE-AW2
+            static uint64_t s_aw3LastKicks = 0; // PROBE-AW3
+            static uint32_t s_aw3StallVbl = 0; // PROBE-AW3
+            static bool s_aw3Dumped = false; // PROBE-AW3
+            const uint64_t curKicks = g_gsFrameKicks.load(std::memory_order_relaxed); // PROBE-AW3
+            if (curKicks != s_aw3LastKicks) // PROBE-AW3
+            { // PROBE-AW3
+                s_aw3LastKicks = curKicks; // PROBE-AW3
+                s_aw3StallVbl = 0; // PROBE-AW3
+            } // PROBE-AW3
+            else if (!s_aw3Dumped && ++s_aw3StallVbl >= 120u) // PROBE-AW3
+            { // PROBE-AW3
+                s_aw3Dumped = true; // PROBE-AW3
+                aw3DumpRing(); // PROBE-AW3
+            } // PROBE-AW3
+        } // PROBE-AW2
+
+        if (isVblankLatchEnabled())
+        {
+            extern std::atomic<uint64_t> g_gsFrameKicks;
+            static uint64_t s_lastLatchKicks = ~0ull;
+            static uint64_t s_lastLatchTick = 0;
+            if ((g_gsFrameKicks.load(std::memory_order_relaxed) != s_lastLatchKicks) || (m_vsyncTick - s_lastLatchTick >= 30))
+            {
+                if (!(isPresentAsyncEnabled() && postPresentLatch(m_runtime.gs())))
+                    m_runtime.gs().latchHostPresentationFrame();
+                s_lastLatchKicks = g_gsFrameKicks.load(std::memory_order_relaxed);
+                s_lastLatchTick = m_vsyncTick;
+            }
+            else
+            {
+                ps2_gt_count(0, 1); // PROBE-GT: skip_nokick
+            }
+        }
 
         // GameThread pad injection
         {
@@ -2306,10 +2715,21 @@ void EeScheduler::processEvent(const EeEvent &event)
                 }
             }
 
-            if (activeMask != 0) {
-                ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~activeMask), 0x80, 0x80, 0x80, 0x80);
+            // PERF-JH: this hard-wired key override (buttons only, sticks centred, W=L2, no gamepad) shadowed PSPadBackend::readState, so the
+            // real mapping and gamepads never reached the game. It is now only used for injected/auto pad input or with PS2X_LEGACY_PAD=1.
+            static const bool s_legacyPadOverride = []() {
+                const char *a = std::getenv("PS2X_AUTO_PAD");
+                const char *l = std::getenv("PS2X_LEGACY_PAD");
+                return (a && (a[0] == '1' || a[0] == 't')) || (l && l[0] == '1');
+            }();
+            if (!s_injections.empty() || s_legacyPadOverride) {
+                if (activeMask != 0) {
+                    ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~activeMask), 0x80, 0x80, 0x80, 0x80);
+                } else {
+                    ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+                }
             } else {
-                ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+                ps2_stubs::clearPadOverrideState();
             }
 
             ps2_syscalls::ps2xUpdateDbcPadBuffers(m_rdram, &m_runtime);

@@ -77,11 +77,7 @@ namespace probe_ae {
         return s;
     }
 
-    static void cgSamplerWorker() {
-        HANDLE hProc = GetCurrentProcess();
-        DWORD currentPid = GetCurrentProcessId();
-        DWORD samplerTid = GetCurrentThreadId();
-
+    static void cgInitSymbols(HANDLE hProc, const char *logTag, bool runSelfTest) {
         char exePath[MAX_PATH] = {};
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
 
@@ -117,10 +113,16 @@ namespace probe_ae {
         if (!initOk && initErr == ERROR_INVALID_PARAMETER) {
             initOk = TRUE;
         }
+        if (!initOk) {
+            // PROBE-IL: invading the process sometimes fails (0xC0000004 while enumerating modules); load just the exe instead
+            initOk = SymInitialize(hProc, searchPath, FALSE);
+            if (initOk)
+                initOk = SymLoadModuleEx(hProc, NULL, exePath, NULL, exeBase, 0, NULL, 0) != 0 || GetLastError() == ERROR_SUCCESS;
+        }
         SymSetSearchPath(hProc, searchPath);
 
-        bhLog("[prof2] syminit ok=%d err=%lu exe=%s pdb_exists=%d base=0x%llX\n",
-              initOk ? 1 : 0, initErr, exePath, pdbExists, (unsigned long long)exeBase);
+        bhLog("[%s] syminit ok=%d err=%lu exe=%s pdb_exists=%d base=0x%llX\n",
+              logTag, initOk ? 1 : 0, initErr, exePath, pdbExists, (unsigned long long)exeBase);
 
         IMAGEHLP_MODULE64 modInfo{};
         modInfo.SizeOfStruct = sizeof(modInfo);
@@ -133,6 +135,8 @@ namespace probe_ae {
         if (needExplicitLoad) {
             SymLoadModule64(hProc, NULL, exePath, NULL, exeBase, 0);
         }
+
+        if (!runSelfTest) return;
 
         // Self-test
         DWORD64 testAddr = reinterpret_cast<DWORD64>(&recordMainGuestThread);
@@ -166,8 +170,30 @@ namespace probe_ae {
             testSymType = static_cast<int>(testModInfo.SymType);
         }
 
-        bhLog("[prof2] selftest sym=%s line=%s symtype=%d\n",
-              testSymName.c_str(), testLineStr.c_str(), testSymType);
+        bhLog("[%s] selftest sym=%s line=%s symtype=%d\n",
+              logTag, testSymName.c_str(), testLineStr.c_str(), testSymType);
+    }
+
+    static void cgSamplerWorker() {
+        HANDLE hProc = GetCurrentProcess();
+        DWORD currentPid = GetCurrentProcessId();
+        DWORD samplerTid = GetCurrentThreadId();
+
+        // High-resolution waitable timer (immune to Win11 timer coalescing); falls back to Sleep(1).
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        {
+            PROCESS_POWER_THROTTLING_STATE pts{};
+            pts.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+            pts.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+            pts.StateMask = 0;
+            SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pts, sizeof(pts));
+        }
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+        HANDLE hTimer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+
+        cgInitSymbols(hProc, "prof2", true);
 
         std::unordered_map<DWORD64, std::string> symCache;
         symCache.reserve(16384);
@@ -496,14 +522,14 @@ namespace probe_ae {
                         DWORD tid = pair.first;
                         const CgThreadAgg &tagg = pair.second;
                         double threadPct = (static_cast<double>(tagg.totalSamples) * 100.0) / static_cast<double>(totalProcessSamples);
-                        if (threadPct > 5.0) {
+                        if (threadPct > 1.0) { // PROBE-IL: was 5% (driver threads in Vulkan runs hid the workers)
                             std::vector<std::pair<std::string, uint64_t>> sortedLeaf(tagg.leafCounts.begin(), tagg.leafCounts.end());
                             std::sort(sortedLeaf.begin(), sortedLeaf.end(), [](const std::pair<std::string, uint64_t> &a, const std::pair<std::string, uint64_t> &b) {
                                 return a.second > b.second;
                             });
 
                             std::string topStr;
-                            size_t limit = (std::min)(size_t(12), sortedLeaf.size());
+                            size_t limit = (std::min)(size_t(30), sortedLeaf.size()); // PROBE-IL: was 12 (30 fits bhLog's 4 KB line)
                             for (size_t i = 0; i < limit; ++i) {
                                 double symPct = (static_cast<double>(sortedLeaf[i].second) * 100.0) / static_cast<double>(tagg.totalSamples);
                                 char sbuf[128];
@@ -514,6 +540,19 @@ namespace probe_ae {
 
                             bhLog("[prof2] t=%u thread=%u samples=%llu top: %s\n",
                                   tSec, (unsigned)tid, (unsigned long long)tagg.totalSamples, topStr.c_str());
+                            if (sortedLeaf.size() > 30) // PERF-MB: the first line stops at 30 entries; the rest of the table goes on a second line
+                            {
+                                std::string moreStr;
+                                const size_t limit2 = (std::min)(size_t(75), sortedLeaf.size());
+                                for (size_t i = 30; i < limit2; ++i)
+                                {
+                                    double symPct = (static_cast<double>(sortedLeaf[i].second) * 100.0) / static_cast<double>(tagg.totalSamples);
+                                    char sbuf[128];
+                                    snprintf(sbuf, sizeof(sbuf), "%s=%.1f%% ", sortedLeaf[i].first.c_str(), symPct);
+                                    moreStr += sbuf;
+                                }
+                                bhLog("[prof2] t=%u thread=%u more: %s\n", tSec, (unsigned)tid, moreStr.c_str());
+                            }
                         }
                     }
 
@@ -607,18 +646,354 @@ namespace probe_ae {
                 mainSamplesCount = 0;
             }
 
-            Sleep(1);
+            if (hTimer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -10000LL; // 1 ms relative, 100-ns units
+                if (SetWaitableTimer(hTimer, &due, 0, nullptr, nullptr, FALSE))
+                    WaitForSingleObject(hTimer, INFINITE);
+                else
+                    Sleep(1);
+            } else {
+                Sleep(1);
+            }
+        }
+    }
+
+    // PROBE-EP: fast EE-only sampling profiler (PS2X_PROF_EE=1)
+    struct EeSample {
+        uint8_t count;
+        DWORD64 addr[20];
+        DWORD64 fnStart[20];
+    };
+
+    static bool eeUnwindFrames(CONTEXT &ctx, EeSample &out) {
+        __try {
+            out.count = 0;
+            for (int f = 0; f < 20; ++f) {
+                if (ctx.Rip == 0) break;
+                DWORD64 imageBase = 0;
+                PRUNTIME_FUNCTION rtFn = RtlLookupFunctionEntry(ctx.Rip, &imageBase, nullptr);
+                out.addr[out.count] = ctx.Rip;
+                out.fnStart[out.count] = rtFn ? (imageBase + rtFn->BeginAddress) : 0;
+                out.count++;
+
+                if (!rtFn) {
+                    if (ctx.Rsp < 0x10000 || (ctx.Rsp & 7) != 0) break;
+                    DWORD64 retAddr = *reinterpret_cast<const DWORD64 *>(ctx.Rsp);
+                    ctx.Rsp += 8;
+                    ctx.Rip = retAddr;
+                } else {
+                    PVOID handlerData = nullptr;
+                    DWORD64 establisherFrame = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, ctx.Rip, rtFn, &ctx, &handlerData, &establisherFrame, nullptr);
+                }
+            }
+            return out.count > 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return out.count > 0;
+        }
+    }
+
+    static bool eeIsIdleLeaf(const std::string &rawSym) {
+        if (rawSym.rfind("Wait", 0) == 0 ||
+            rawSym.rfind("ZwWait", 0) == 0 ||
+            rawSym.rfind("NtWait", 0) == 0 ||
+            rawSym.rfind("Sleep", 0) == 0 ||
+            rawSym.rfind("SwitchToThread", 0) == 0 ||
+            rawSym.rfind("RtlWaitOnAddress", 0) == 0 ||
+            rawSym.rfind("NtDelayExecution", 0) == 0 ||
+            rawSym.rfind("ZwDelayExecution", 0) == 0) {
+            return true;
+        }
+        return rawSym.find("condition_variable") != std::string::npos ||
+               rawSym.find("WaitOnAddress") != std::string::npos ||
+               rawSym.find("_Cnd_wait") != std::string::npos ||
+               rawSym.find("_Cnd_timedwait") != std::string::npos;
+    }
+
+    static void eeLogList(uint32_t tSec, const char *tag,
+                          const std::unordered_map<std::string, uint64_t> &counts,
+                          size_t topN) {
+        if (counts.empty()) {
+            bhLog("[eeprof] t=%u %s: none\n", tSec, tag);
+            return;
+        }
+
+        std::vector<std::pair<std::string, uint64_t>> sorted(counts.begin(), counts.end());
+        size_t limit = (std::min)(topN, sorted.size());
+        std::partial_sort(sorted.begin(), sorted.begin() + limit, sorted.end(),
+                          [](const auto &a, const auto &b) { return a.second > b.second; });
+
+        char buf[8192];
+        size_t pos = 0;
+        size_t lineStart = 0;
+        bool splitUsed = false;
+
+        for (size_t i = 0; i < limit; ++i) {
+            char item[640];
+            int itemLen = snprintf(item, sizeof(item), "%s=%llu ",
+                                   sorted[i].first.c_str(),
+                                   (unsigned long long)sorted[i].second);
+            if (itemLen <= 0) continue;
+            size_t ulen = static_cast<size_t>(itemLen);
+            if (pos + ulen >= sizeof(buf)) break;
+
+            // bhLog uses a 4 KB internal buffer; split into a second line if needed.
+            if (!splitUsed && (pos - lineStart) > 0 && (pos - lineStart) + ulen > 3600) {
+                if (pos > lineStart && buf[pos - 1] == ' ') buf[pos - 1] = '\0';
+                else buf[pos] = '\0';
+                bhLog("[eeprof] t=%u %s: %s\n", tSec, tag, buf + lineStart);
+                lineStart = pos;
+                splitUsed = true;
+            } else if (splitUsed && (pos - lineStart) + ulen > 3600) {
+                break;
+            }
+
+            memcpy(buf + pos, item, ulen);
+            pos += ulen;
+        }
+
+        if (pos > lineStart) {
+            if (buf[pos - 1] == ' ') buf[pos - 1] = '\0';
+            else buf[pos] = '\0';
+            bhLog("[eeprof] t=%u %s: %s\n", tSec, tag, buf + lineStart);
+        }
+    }
+
+    static void eeSamplerWorker() {
+        HANDLE hProc = GetCurrentProcess();
+
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        {
+            PROCESS_POWER_THROTTLING_STATE pts{};
+            pts.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+            pts.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+            pts.StateMask = 0;
+            SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pts, sizeof(pts));
+        }
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+        HANDLE hTimer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+
+        cgInitSymbols(hProc, "eeprof", false);
+
+        // Cache keyed on function start from RtlLookupFunctionEntry so each function is resolved once.
+        std::unordered_map<DWORD64, std::string> symCache;
+        symCache.reserve(16384);
+
+        auto resolveSymByFn = [&](DWORD64 addr, DWORD64 fnStart) -> const std::string & {
+            DWORD64 key = fnStart ? fnStart : addr;
+            auto it = symCache.find(key);
+            if (it != symCache.end()) return it->second;
+
+            if (symCache.size() >= 16384) {
+                symCache.clear();
+            }
+
+            char buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR)] = {};
+            PSYMBOL_INFO pSymbol = reinterpret_cast<PSYMBOL_INFO>(buffer);
+            pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+            pSymbol->MaxNameLen = MAX_SYM_NAME;
+
+            DWORD64 displacement = 0;
+            std::string name;
+            if (SymFromAddr(hProc, key, &displacement, pSymbol)) {
+                name = pSymbol->Name;
+            } else {
+                IMAGEHLP_MODULE64 mInfo{};
+                mInfo.SizeOfStruct = sizeof(mInfo);
+                if (SymGetModuleInfo64(hProc, addr, &mInfo)) {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%s+0x%llX", mInfo.ModuleName, (unsigned long long)(addr - mInfo.BaseOfImage));
+                    name = buf;
+                } else {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "0x%llX", (unsigned long long)addr);
+                    name = buf;
+                }
+            }
+            return symCache.emplace(key, std::move(name)).first->second;
+        };
+
+        // PROBE-EP wait chains: is this frame in a system module we skip?
+        std::unordered_map<DWORD64, bool> sysCache;
+        auto isSysFrame = [&](DWORD64 addr, DWORD64 fnStart) -> bool {
+            DWORD64 key = fnStart ? fnStart : addr;
+            auto it = sysCache.find(key);
+            if (it != sysCache.end()) return it->second;
+            if (sysCache.size() >= 16384) sysCache.clear();
+            bool sys = false;
+            IMAGEHLP_MODULE64 mInfo{};
+            mInfo.SizeOfStruct = sizeof(mInfo);
+            if (SymGetModuleInfo64(hProc, addr, &mInfo)) {
+                std::string m = mInfo.ModuleName;
+                for (auto &c : m) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                sys = m.rfind("ntdll", 0) == 0 || m.rfind("kernelbase", 0) == 0 || m.rfind("kernel32", 0) == 0 ||
+                      m.rfind("msvcp140", 0) == 0 || m.rfind("ucrtbase", 0) == 0 || m.rfind("vcruntime", 0) == 0;
+            }
+            sysCache.emplace(key, sys);
+            return sys;
+        };
+
+        // PROBE-EP: PS2X_PROF_EE_CHAIN=<comma-separated leaf substrings>
+        std::vector<std::string> chainSubs;
+        if (const char *ce = std::getenv("PS2X_PROF_EE_CHAIN")) {
+            std::string cs = ce, cur;
+            for (char c : cs) {
+                if (c == ',') { if (!cur.empty()) chainSubs.push_back(cur); cur.clear(); }
+                else cur += c;
+            }
+            if (!cur.empty()) chainSubs.push_back(cur);
+        }
+
+        std::vector<EeSample> samples;
+        samples.reserve(12000);
+
+        DWORD cachedTid = 0;
+        HANDLE hEeThread = nullptr;
+
+        auto startTime = std::chrono::steady_clock::now();
+        auto lastDump = startTime;
+
+        while (true) {
+            DWORD mainTid = s_cgMainGuestThreadId.load(std::memory_order_relaxed);
+            if (mainTid != 0) {
+                if (mainTid != cachedTid) {
+                    if (hEeThread) {
+                        CloseHandle(hEeThread);
+                        hEeThread = nullptr;
+                    }
+                    cachedTid = mainTid;
+                    hEeThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, mainTid);
+                }
+
+                if (hEeThread) {
+                    CONTEXT ctx{};
+                    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+                    EeSample sample{};
+                    bool ok = false;
+                    if (SuspendThread(hEeThread) != static_cast<DWORD>(-1)) {
+                        if (GetThreadContext(hEeThread, &ctx)) {
+                            ok = eeUnwindFrames(ctx, sample);
+                        }
+                        ResumeThread(hEeThread);
+                    }
+                    if (ok) {
+                        samples.push_back(sample);
+                    }
+                }
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            double elapsedSinceDump = std::chrono::duration<double>(now - lastDump).count();
+            if (elapsedSinceDump >= 5.0) {
+                lastDump = now;
+                uint32_t tSec = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count());
+
+                uint64_t idleCount = 0;
+                std::unordered_map<std::string, uint64_t> leafCounts;
+                std::unordered_map<std::string, uint64_t> ownerCounts;
+                std::unordered_map<std::string, uint64_t> pairCounts;
+                std::unordered_map<std::string, uint64_t> waitCounts;
+                std::unordered_map<std::string, uint64_t> chainCounts;
+
+                for (const EeSample &s : samples) {
+                    if (s.count == 0) continue;
+
+                    const std::string &leafRaw = resolveSymByFn(s.addr[0], s.fnStart[0]);
+                    const bool idleLeaf = eeIsIdleLeaf(leafRaw);
+                    if (idleLeaf) {
+                        idleCount++;
+                        std::string chain;
+                        int got = 0;
+                        for (uint8_t f = 0; f < s.count && got < 4; ++f) {
+                            if (isSysFrame(s.addr[f], s.fnStart[f])) continue;
+                            const std::string &sym = (f == 0) ? leafRaw : resolveSymByFn(s.addr[f], s.fnStart[f]);
+                            if (got) chain += "<";
+                            chain += shortenSymbolName(sym);
+                            got++;
+                        }
+                        if (chain.empty()) chain = "(none)";
+                        waitCounts[chain]++;
+                    }
+                    if (!chainSubs.empty()) {
+                        bool hit = false;
+                        for (const auto &sub : chainSubs) {
+                            if (leafRaw.find(sub) != std::string::npos) { hit = true; break; }
+                        }
+                        if (hit) {
+                            std::string chain;
+                            int got = 0;
+                            for (uint8_t f = 0; f < s.count && got < 6; ++f) {
+                                if (f != 0 && isSysFrame(s.addr[f], s.fnStart[f])) continue;
+                                const std::string &sym = (f == 0) ? leafRaw : resolveSymByFn(s.addr[f], s.fnStart[f]);
+                                if (got) chain += "<";
+                                chain += shortenSymbolName(sym);
+                                got++;
+                            }
+                            chainCounts[chain]++;
+                        }
+                    }
+                    std::string leafShort = shortenSymbolName(leafRaw);
+                    leafCounts[leafShort]++;
+
+                    std::string ownerRaw;
+                    for (uint8_t f = 0; f < s.count; ++f) {
+                        const std::string &sym = (f == 0) ? leafRaw : resolveSymByFn(s.addr[f], s.fnStart[f]);
+                        if (sym.rfind("sub_", 0) == 0) {
+                            ownerRaw = sym;
+                            break;
+                        }
+                    }
+
+                    if (!ownerRaw.empty()) {
+                        std::string ownerShort = shortenSymbolName(ownerRaw);
+                        ownerCounts[ownerShort]++;
+                        if (leafRaw.rfind("sub_", 0) != 0) {
+                            pairCounts[ownerShort + ">" + leafShort]++;
+                        }
+                    }
+                }
+
+                bhLog("[eeprof] t=%u n=%llu idle=%llu\n",
+                      tSec,
+                      (unsigned long long)samples.size(),
+                      (unsigned long long)idleCount);
+                eeLogList(tSec, "leaf", leafCounts, 40);
+                eeLogList(tSec, "owner", ownerCounts, 40);
+                eeLogList(tSec, "pair", pairCounts, 25);
+                eeLogList(tSec, "wait", waitCounts, 15);
+                if (!chainSubs.empty()) eeLogList(tSec, "chain", chainCounts, 15);
+
+                samples.clear();
+            }
+
+            if (hTimer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -5000LL; // ~0.5 ms relative, 100-ns units
+                if (SetWaitableTimer(hTimer, &due, 0, nullptr, nullptr, FALSE))
+                    WaitForSingleObject(hTimer, INFINITE);
+                else
+                    Sleep(1);
+            } else {
+                Sleep(1);
+            }
         }
     }
 
     void cgStartSamplerIfEnabled() {
+        // PROBE-EP: PS2X_PROF_EE=1 (independent of PS2X_PROF_SAMPLE; if both set, EE wins)
+        const char *eeEnv = std::getenv("PS2X_PROF_EE");
+        const bool eeEnabled = (eeEnv && (eeEnv[0] == '1' || eeEnv[0] == 't' || eeEnv[0] == 'T'));
         const char *env = std::getenv("PS2X_PROF_SAMPLE");
-        if (!env || (env[0] != '1' && env[0] != 't' && env[0] != 'T')) return;
+        const bool cgEnabled = (env && (env[0] == '1' || env[0] == 't' || env[0] == 'T'));
+        if (!eeEnabled && !cgEnabled) return;
 
         bool expected = false;
         if (!s_cgSamplerStarted.compare_exchange_strong(expected, true)) return;
 
-        std::thread samplerThread(cgSamplerWorker);
+        std::thread samplerThread(eeEnabled ? eeSamplerWorker : cgSamplerWorker);
         samplerThread.detach();
     }
 #else
@@ -626,3 +1001,71 @@ namespace probe_ae {
     void cgStartSamplerIfEnabled() {}
 #endif
 }
+
+// PERF-LU (PS2X_SCHED=1): scheduling hints, called from ps2_runtime.cpp / ps2_memory.cpp / gs/ps2_gif_arbiter.cpp.
+// Lives here because this TU already includes <windows.h> (the other TUs avoid it: min/max and stub-name clashes).
+// flags & 1: process priority class ABOVE_NORMAL + opt out of process power throttling (EcoQoS).
+// flags & 2: current thread priority ABOVE_NORMAL + opt out of thread power throttling. No affinity changes, no REALTIME/HIGHEST.
+extern "C" void ps2x_sched_apply(int flags) // flags: 1 = process level, 2 = current thread
+{
+#ifdef _WIN32
+    if (flags & 1)
+    {
+        SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+        PROCESS_POWER_THROTTLING_STATE ps{};
+        ps.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        ps.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        ps.StateMask = 0;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &ps, sizeof(ps));
+    }
+    if (!(flags & 2))
+        return;
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    THREAD_POWER_THROTTLING_STATE ts{};
+    ts.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+    ts.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+    ts.StateMask = 0;
+    SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &ts, sizeof(ts));
+#else
+    (void)flags;
+#endif
+}
+
+// PERF-PT: opt out of EcoQoS / timer coalescing (env PS2X_NO_THROTTLE=1).
+extern void ps2xSafeLog(const char *fmt, ...);
+#ifdef _WIN32
+#ifndef PROCESS_POWER_THROTTLING_CURRENT_VERSION
+#define PROCESS_POWER_THROTTLING_CURRENT_VERSION 1
+#endif
+#ifndef PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+#define PROCESS_POWER_THROTTLING_EXECUTION_SPEED 0x1
+#endif
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+#ifndef THREAD_POWER_THROTTLING_CURRENT_VERSION
+#define THREAD_POWER_THROTTLING_CURRENT_VERSION 1
+#endif
+#ifndef THREAD_POWER_THROTTLING_EXECUTION_SPEED
+#define THREAD_POWER_THROTTLING_EXECUTION_SPEED 0x1
+#endif
+extern "C" void ps2xPerfPtOptOut()
+{
+    static const bool enabled = []() { const char *e = std::getenv("PS2X_NO_THROTTLE"); return e && e[0] == '1'; }();
+    if (!enabled)
+        return;
+    PROCESS_POWER_THROTTLING_STATE ps{};
+    ps.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    ps.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    ps.StateMask = 0;
+    BOOL okP = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &ps, sizeof(ps));
+    THREAD_POWER_THROTTLING_STATE ts{};
+    ts.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+    ts.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+    ts.StateMask = 0;
+    BOOL okT = SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &ts, sizeof(ts));
+    ps2xSafeLog("[throttle] opt-out ok=%d\n", (int)(okP && okT));
+}
+#else
+extern "C" void ps2xPerfPtOptOut() {}
+#endif

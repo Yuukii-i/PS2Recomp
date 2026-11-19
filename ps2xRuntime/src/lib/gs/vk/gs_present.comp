@@ -1,0 +1,135 @@
+#version 450
+// PERF-PG: display conversion on the GPU. One thread per visible pixel reads the GS framebuffer (swizzled, in the 4 MB VRAM storage buffer) and writes
+// plain RGBA8 rows (stride 640 pixels) into a small host-readable buffer, replacing the 4 MB page copy + CPU de-swizzle of the presenter.
+// Mirrors GSCpuBackend::PresentFromLocalMemory for CT32/CT24/CT16/CT16S, one circuit or both circuits blended (PMODE), alpha forced to 255.
+// Header of the output buffer: count of pixels with a non-zero RGB for circuit 1 (nonBlack) and circuit 2 (pad0): the presenter's "is this frame black?" test.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer Vram { uint vram[]; };
+layout(std430, binding = 1) readonly buffer Tables { uint tbl[]; };
+layout(std430, binding = 2) buffer Out { uint nonBlack; uint pad0; uint pad1; uint pad2; uint px[]; };
+
+layout(push_constant) uniform PC
+{
+    uint base;  // circuit 1 (or the only circuit): block address of the frame (fbp << 5 for display frames, fbp for a preferred source)
+    uint fbw;   // frame width in 64-pixel units, already defaulted
+    uint psm;   // 0 CT32, 1 CT24, 2 CT16, 10 CT16S
+    uint x0;    // read origin (DBX)
+    uint y0;    // read origin (DBY)
+    uint w;     // size of circuit 1's picture
+    uint h;
+    uint flags; // bit0 both circuits blended, bit1 SLBG, bit2 MMOD, bits 8..15 ALP
+    uint base2; // circuit 2 (only with bit0)
+    uint fbw2;
+    uint psm2;
+    uint x2;
+    uint y2;
+    uint w2;
+    uint h2;
+    uint bg;    // BGCOLOR as r | g << 8 | b << 16
+    uint outW;  // size of the written picture
+    uint outH;
+    uint pad0v;
+    uint pad1v;
+} pc;
+
+// page-table offsets (in u16 entries) inside the Tables buffer; same layout as gs_draw.frag
+const uint T_C32 = 0u, T_C16 = 131072u, T_C16S = 262144u;
+
+uint pixelAddr(uint tableOff, uint pageW, uint pageH, uint pixPerPage, uint base, uint bw, uint x, uint y)
+{
+    const uint basePage = base / 32u;
+    const uint row = (y / pageH) * ((bw * 64u) / pageW);
+    const uint col = x / pageW;
+    const uint page = basePage + row + col;
+    const uint idx = tableOff + (((base % 32u) * pageH + (y % pageH)) * pageW + (x % pageW));
+    uint e = tbl[idx >> 1];
+    e = ((idx & 1u) != 0u) ? (e >> 16) : (e & 0xFFFFu);
+    return page * pixPerPage + e;
+}
+
+uint readColor(uint psm, uint base, uint bw, uint x, uint y)
+{
+    if (psm == 0u || psm == 1u)
+    {
+        const uint a = pixelAddr(T_C32, 64u, 32u, 2048u, base, bw, x, y);
+        return vram[a & 0xFFFFFu];
+    }
+    const uint off = (psm == 2u) ? T_C16 : T_C16S;
+    const uint a = pixelAddr(off, 64u, 64u, 4096u, base, bw, x, y);
+    const uint byteAddr = (a * 2u) & 0x3FFFFEu;
+    return (vram[byteAddr >> 2] >> ((byteAddr & 2u) * 8u)) & 0xFFFFu;
+}
+
+// x = rgb in the low 24 bits, y = alpha as the CPU presenter keeps it (CT32: stored alpha, CT24: 255, 16 bit: 0x80 or 0)
+uvec2 decode(uint psm, uint c)
+{
+    if (psm <= 1u)
+        return uvec2(c & 0xFFFFFFu, psm == 1u ? 255u : (c >> 24));
+    const uint r5 = c & 31u, g5 = (c >> 5) & 31u, b5 = (c >> 10) & 31u;
+    const uint r = (r5 << 3) | (r5 >> 2);
+    const uint g = (g5 << 3) | (g5 >> 2);
+    const uint b = (b5 << 3) | (b5 >> 2);
+    return uvec2(r | (g << 8) | (b << 16), (c & 0x8000u) != 0u ? 0x80u : 0u);
+}
+
+int blendCh(int src, int dst, int factor)
+{
+    return clamp(dst + ((src - dst) * factor) / 255, 0, 255);
+}
+
+shared uint wgCount1;
+shared uint wgCount2;
+
+void main()
+{
+    if (gl_LocalInvocationIndex == 0u)
+    {
+        wgCount1 = 0u;
+        wgCount2 = 0u;
+    }
+    barrier();
+    const uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+    if (x < pc.outW && y < pc.outH)
+    {
+        uint rgb = 0u;
+        if ((pc.flags & 1u) == 0u)
+        {
+            rgb = decode(pc.psm, readColor(pc.psm, pc.base, pc.fbw, pc.x0 + x, pc.y0 + y)).x;
+            if (rgb != 0u)
+                atomicAdd(wgCount1, 1u);
+        }
+        else
+        {
+            rgb = pc.bg;
+            if (x < pc.w2 && y < pc.h2)
+            {
+                const uint c2 = decode(pc.psm2, readColor(pc.psm2, pc.base2, pc.fbw2, pc.x2 + x, pc.y2 + y)).x;
+                if (c2 != 0u)
+                    atomicAdd(wgCount2, 1u);
+                if ((pc.flags & 2u) == 0u)
+                    rgb = c2;
+            }
+            if (x < pc.w && y < pc.h)
+            {
+                const uvec2 s = decode(pc.psm, readColor(pc.psm, pc.base, pc.fbw, pc.x0 + x, pc.y0 + y));
+                if (s.x != 0u)
+                    atomicAdd(wgCount1, 1u);
+                const int factor = (pc.flags & 4u) != 0u ? int((pc.flags >> 8) & 255u) : int(min(255u, s.y * 2u));
+                const int r = blendCh(int(s.x & 255u), int(rgb & 255u), factor);
+                const int g = blendCh(int((s.x >> 8) & 255u), int((rgb >> 8) & 255u), factor);
+                const int b = blendCh(int((s.x >> 16) & 255u), int((rgb >> 16) & 255u), factor);
+                rgb = uint(r) | (uint(g) << 8) | (uint(b) << 16);
+            }
+        }
+        px[y * 640u + x] = rgb | 0xFF000000u;
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u)
+    {
+        if (wgCount1 != 0u)
+            atomicAdd(nonBlack, wgCount1);
+        if (wgCount2 != 0u)
+            atomicAdd(pad0, wgCount2);
+    }
+}

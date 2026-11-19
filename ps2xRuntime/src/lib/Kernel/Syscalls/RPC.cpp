@@ -14,6 +14,29 @@ extern std::atomic<bool> g_movieSeekDone;
 extern std::atomic<uint32_t> g_movieReadsCount;
 extern std::atomic<uint32_t> g_trackedCurScene;
 
+// FEAT-DE: Main character selector (0 = boy, 1 = girl, -1 = unset)
+std::atomic<int> g_mcPendingChoice{-1};
+
+void ps2xMcInit() // FEAT-DE
+{
+    static std::once_flag s_once;
+    std::call_once(s_once, []() {
+        const char *env = std::getenv("PS2X_MC");
+        if (!env || env[0] == '\0')
+            return;
+        if (std::strcmp(env, "boy") == 0)
+        {
+            g_mcPendingChoice.store(0, std::memory_order_relaxed);
+            ps2xSafeLog("[mc] requested=boy\n");
+        }
+        else if (std::strcmp(env, "girl") == 0)
+        {
+            g_mcPendingChoice.store(1, std::memory_order_relaxed);
+            ps2xSafeLog("[mc] requested=girl\n");
+        }
+    });
+}
+
 #include <atomic>
 #include <mutex>
 #include <cstring>
@@ -27,7 +50,205 @@ extern std::atomic<uint32_t> g_trackedCurScene;
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <array>
+#include <deque> // FIX-AU5
 #include "probe_ae.h"
+
+// PERF-AU1 / PERF-AU3B: Local declarations for ps2xIOP diagnostics (header rule safe).
+namespace ps2x::iop
+{
+    struct LibsdDiagSnapshot
+    {
+        uint64_t totalCalls = 0u;
+        uint64_t keyOns = 0u;
+        uint64_t transferBytes = 0u;
+        std::array<uint64_t, 28> ordinalCounts{};
+        uint64_t naxCalls = 0u;
+        uint64_t naxChanged = 0u;
+        uint64_t envxCalls = 0u;
+        uint64_t envxChanged = 0u;
+    };
+
+    struct Sg2DiagSnapshot
+    {
+        uint32_t sg2Base = 0u;
+        uint64_t heartbeatCount = 0u;
+        uint64_t tickCount = 0u;
+        uint64_t naxPollCount = 0u;
+        uint32_t lastReturnPointer = 0u;
+        uint32_t lastIopStatusNonZero = 0u;
+        uint32_t vblankHandlers = 0u;
+        uint64_t vblankDelivered = 0u;
+    };
+
+    void getLibsdDiagnostics(LibsdDiagSnapshot &outSnapshot, std::vector<std::string> &outPendingLogs);
+    void getSg2DiagSnapshot(Sg2DiagSnapshot &outSnapshot);
+    void getSg2QueueDiag(std::string &out); // PROBE-AU3C
+}
+
+uint64_t ps2xAu6FramesMixed(); // PROBE-AU6
+uint64_t ps2xAu6FramesConsumed(); // PROBE-AU6
+static uint8_t *s_au6Rdram = nullptr; // PROBE-AU6
+static std::atomic<uint64_t> s_au6Hv{0}; // PROBE-AU7
+
+namespace
+{
+    bool isSg2LleEnabled()
+    {
+        static const bool enabled = []() {
+            const char *env = std::getenv("PS2X_SG2_LLE");
+            return !env || env[0] == '\0' || std::strcmp(env, "0") != 0; // FIX-AU10
+        }();
+        return enabled;
+    }
+
+    // PERF-AU3: Stream byte counter + SG2 opcode histogram for [sg2lle] diagnostics.
+    std::atomic<uint64_t> g_sg2LleStreamBytes{0u};
+    std::mutex g_sg2LleHistMutex;
+    std::array<uint64_t, 36> g_sg2LleOpHist{};
+    uint64_t g_sg2LleOpOther = 0u;
+
+    void recordSg2LlePackets(const uint8_t *sendBuf, uint32_t sendSize)
+    {
+        if (!sendBuf || sendSize < 16u)
+            return;
+        const uint32_t count = sendSize / 16u;
+        std::lock_guard<std::mutex> lock(g_sg2LleHistMutex);
+        static uint32_t s_sg2PktLogCount = 0u; // PROBE-AU3C
+        for (uint32_t i = 0u; i < count; ++i)
+        {
+            uint32_t op = 0u;
+            std::memcpy(&op, sendBuf + i * 16u, sizeof(op));
+            if ((op == 0x18u || op == 0x1Cu || op == 0x19u || op == 0x1Du || op == 0x1Au || op == 0x1Bu) && s_sg2PktLogCount < 80u) // PROBE-AU3H
+            { // PROBE-AU3C
+                uint32_t w[4]{}; // PROBE-AU3C
+                std::memcpy(w, sendBuf + i * 16u, sizeof(w)); // PROBE-AU3C
+                ++s_sg2PktLogCount; // PROBE-AU3C
+                ::ps2xSafeLog("[sg2pkt] op=0x%02x w0=0x%08x w1=0x%08x w2=0x%08x w3=0x%08x\n", // PROBE-AU3C
+                              op, w[0], w[1], w[2], w[3]); // PROBE-AU3C
+            } // PROBE-AU3C
+            if (op < g_sg2LleOpHist.size())
+                ++g_sg2LleOpHist[op];
+            else
+                ++g_sg2LleOpOther;
+        }
+    }
+
+    void flushSg2LleDiagnostics(uint32_t packetCount, uint32_t statusNonZeroBytes, bool countRpc)
+    {
+        static std::mutex s_diagMutex;
+        static uint64_t s_rpcCalls = 0u;
+        static uint64_t s_packets = 0u;
+        static uint32_t s_lastStatusNonZero = 0u;
+        static uint64_t s_lastStreamBytes = 0u;
+        static auto s_lastReport = std::chrono::steady_clock::now();
+
+        ps2x::iop::LibsdDiagSnapshot snap{};
+        std::vector<std::string> pendingLogs;
+        ps2x::iop::getLibsdDiagnostics(snap, pendingLogs);
+        ps2x::iop::Sg2DiagSnapshot sg2Snap{}; // PERF-AU3B
+        ps2x::iop::getSg2DiagSnapshot(sg2Snap);
+
+        for (const std::string &line : pendingLogs)
+        {
+            ::ps2xSafeLog("[sg2lle:libsd] %s\n", line.c_str());
+        }
+
+        std::lock_guard<std::mutex> lock(s_diagMutex);
+        if (countRpc)
+        {
+            ++s_rpcCalls;
+            s_packets += packetCount;
+            s_lastStatusNonZero = statusNonZeroBytes;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastReport).count();
+        if (elapsedMs >= 5000)
+        {
+            s_lastReport = now;
+            const uint64_t totalStreamBytes = g_sg2LleStreamBytes.load(std::memory_order_relaxed);
+            const uint64_t deltaStreamBytes = totalStreamBytes - s_lastStreamBytes;
+            s_lastStreamBytes = totalStreamBytes;
+            const double streamKBps = (elapsedMs > 0)
+                                          ? (static_cast<double>(deltaStreamBytes) / 1024.0) / (static_cast<double>(elapsedMs) / 1000.0)
+                                          : 0.0;
+
+            std::string opHistStr;
+            {
+                std::lock_guard<std::mutex> hlock(g_sg2LleHistMutex);
+                for (size_t i = 0u; i < g_sg2LleOpHist.size(); ++i)
+                {
+                    if (g_sg2LleOpHist[i] == 0u)
+                        continue;
+                    char entry[32];
+                    std::snprintf(entry, sizeof(entry), "%s%02zx:%llu",
+                                  opHistStr.empty() ? "" : ",", i,
+                                  static_cast<unsigned long long>(g_sg2LleOpHist[i]));
+                    opHistStr += entry;
+                }
+                if (g_sg2LleOpOther != 0u)
+                {
+                    char entry[32];
+                    std::snprintf(entry, sizeof(entry), "%sother:%llu",
+                                  opHistStr.empty() ? "" : ",",
+                                  static_cast<unsigned long long>(g_sg2LleOpOther));
+                    opHistStr += entry;
+                }
+            }
+
+            const double xferKB = static_cast<double>(snap.transferBytes) / 1024.0;
+            ::ps2xSafeLog(
+                "[sg2lle] rpc=%llu pkts=%llu libsd=%llu keyOns=%llu xferKB=%.2f streamKB/s=%.2f statusNonZero=%u "
+                "hb=%llu tick=%llu naxPoll=%llu base=0x%08x ret=0x%08x iopNZ=%u nax=%llu/%llu envx=%llu/%llu vb=%u/%llu "
+                "ops=[%s] calls(Init=%llu SetParam=%llu GetParam=%llu SetSwitch=%llu SetAddr=%llu GetAddr=%llu "
+                "SetCoreAttr=%llu VoiceTrans=%llu BlockTrans=%llu VoiceTransStat=%llu BlockTransStat=%llu "
+                "SetEffectAttr=%llu SetTransIntr=%llu)\n",
+                static_cast<unsigned long long>(s_rpcCalls),
+                static_cast<unsigned long long>(s_packets),
+                static_cast<unsigned long long>(snap.totalCalls),
+                static_cast<unsigned long long>(snap.keyOns),
+                xferKB,
+                streamKBps,
+                s_lastStatusNonZero,
+                static_cast<unsigned long long>(sg2Snap.heartbeatCount),
+                static_cast<unsigned long long>(sg2Snap.tickCount),
+                static_cast<unsigned long long>(sg2Snap.naxPollCount),
+                sg2Snap.sg2Base,
+                sg2Snap.lastReturnPointer,
+                sg2Snap.lastIopStatusNonZero,
+                static_cast<unsigned long long>(snap.naxCalls),
+                static_cast<unsigned long long>(snap.naxChanged),
+                static_cast<unsigned long long>(snap.envxCalls),
+                static_cast<unsigned long long>(snap.envxChanged),
+                sg2Snap.vblankHandlers,
+                static_cast<unsigned long long>(sg2Snap.vblankDelivered),
+                opHistStr.c_str(),
+                static_cast<unsigned long long>(snap.ordinalCounts[4]),
+                static_cast<unsigned long long>(snap.ordinalCounts[5]),
+                static_cast<unsigned long long>(snap.ordinalCounts[6]),
+                static_cast<unsigned long long>(snap.ordinalCounts[7]),
+                static_cast<unsigned long long>(snap.ordinalCounts[9]),
+                static_cast<unsigned long long>(snap.ordinalCounts[10]),
+                static_cast<unsigned long long>(snap.ordinalCounts[11]),
+                static_cast<unsigned long long>(snap.ordinalCounts[17]),
+                static_cast<unsigned long long>(snap.ordinalCounts[18]),
+                static_cast<unsigned long long>(snap.ordinalCounts[19]),
+                static_cast<unsigned long long>(snap.ordinalCounts[20]),
+                static_cast<unsigned long long>(snap.ordinalCounts[23]),
+                static_cast<unsigned long long>(snap.ordinalCounts[26]));
+            std::string qdiag; // PROBE-AU3C
+            ps2x::iop::getSg2QueueDiag(qdiag); // PROBE-AU3C
+            ::ps2xSafeLog("[sg2q] %s\n", qdiag.c_str()); // PROBE-AU3C
+        }
+    }
+}
+// PROBE-KY: ring of recent CID1 writes into EE RAM (for heap-corruption forensics)
+struct Cid1WrNote { uint32_t dst, len, op; long long ms; };
+static Cid1WrNote g_cid1WrRing[24]; static unsigned g_cid1WrIdx = 0;
+void ps2xProbeCid1Note(uint32_t dst, uint32_t len, uint32_t op) { Cid1WrNote &n = g_cid1WrRing[g_cid1WrIdx++ % 24]; n.dst = dst; n.len = len; n.op = op; n.ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+void ps2xProbeCid1Dump(uint32_t addr) { const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); for (unsigned i = 0; i < 24; ++i) { const Cid1WrNote &n = g_cid1WrRing[(g_cid1WrIdx + i) % 24]; if (n.len) std::printf("[heapbad] cid1 op=%u dst=%08x len=%x age_ms=%lld%s\n", n.op, n.dst, n.len, now - n.ms, (addr >= n.dst && addr < n.dst + n.len) ? " OVERLAPS-BAD-ADDR" : ""); } std::fflush(stdout); }
+
 
 
 namespace probe_ae {
@@ -120,6 +341,93 @@ struct Cid1StreamJob
 static std::mutex s_cid1JobsMutex;
 static std::vector<Cid1StreamJob> s_cid1StreamJobs;
 
+// FIX-AU5: Deferred CID1 op 0x07 stream-read completion queue.
+struct PendingCid1Reply
+{
+    uint8_t replyBytes[112]{};
+    uint32_t slotPtr = 0;
+    uint32_t slotOffset = 0;
+    uint64_t dueVbl = 0;
+    uint8_t *rdram = nullptr;
+    PS2Runtime *runtime = nullptr;
+};
+static std::mutex s_cid1LatMutex;
+static std::deque<PendingCid1Reply> s_cid1PendingReplies;
+static uint64_t s_cid1VblankCounter = 0;
+
+static uint64_t getCid1LatVbl() noexcept
+{
+    static const uint64_t s_lat = []() -> uint64_t {
+        const char *env = std::getenv("PS2X_CID1_LAT_VBL");
+        if (!env || env[0] == '\0')
+            return 1ull;
+        char *end = nullptr;
+        unsigned long long val = std::strtoull(env, &end, 10);
+        if (end == env)
+            return 1ull;
+        return static_cast<uint64_t>(val);
+    }();
+    return s_lat;
+}
+
+static void deliverCid1Batch(const std::deque<PendingCid1Reply> &batch, uint64_t vbl, uint32_t remaining)
+{
+    if (batch.empty())
+        return;
+    for (const auto &item : batch)
+    {
+        if (item.slotPtr != 0u && item.rdram != nullptr)
+        {
+            if (uint8_t *slotMem = getMemPtr(item.rdram, item.slotPtr))
+            {
+                slotMem[0x0B] |= 0x80;
+                *reinterpret_cast<uint32_t *>(slotMem + 0x0C) = item.slotOffset;
+            }
+        }
+        ps2_stubs::dispatchSifCommand(item.rdram, item.runtime, 1u, item.replyBytes, sizeof(item.replyBytes));
+    }
+    static std::atomic<uint32_t> s_cid1LatLogCount{0};
+    if (s_cid1LatLogCount.fetch_add(1, std::memory_order_relaxed) < 200u)
+    {
+        ps2xSafeLog("[cid1lat] vbl=%llu delivered=%u pending=%u\n",
+                    static_cast<unsigned long long>(vbl),
+                    static_cast<unsigned>(batch.size()),
+                    static_cast<unsigned>(remaining));
+    }
+}
+
+static void flushAllCid1Pending()
+{
+    std::deque<PendingCid1Reply> toDeliver;
+    uint64_t vbl = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+        if (s_cid1PendingReplies.empty())
+            return;
+        vbl = s_cid1VblankCounter;
+        toDeliver.swap(s_cid1PendingReplies);
+    }
+    deliverCid1Batch(toDeliver, vbl, 0u);
+}
+
+static void onCid1Vblank()
+{
+    std::deque<PendingCid1Reply> toDeliver;
+    uint64_t vbl = 0;
+    uint32_t remaining = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+        vbl = ++s_cid1VblankCounter;
+        while (!s_cid1PendingReplies.empty() && s_cid1PendingReplies.front().dueVbl <= vbl)
+        {
+            toDeliver.push_back(s_cid1PendingReplies.front());
+            s_cid1PendingReplies.pop_front();
+        }
+        remaining = static_cast<uint32_t>(s_cid1PendingReplies.size());
+    }
+    deliverCid1Batch(toDeliver, vbl, remaining);
+}
+
 
     namespace
     {
@@ -199,35 +507,28 @@ static std::vector<Cid1StreamJob> s_cid1StreamJobs;
             uint8_t *dst = getMemPtr(rdram, addr);
             if (!dst) return;
 
-            dst[0x00] = 0x01; // status: DBC_STAT_CONNECTED
-            dst[0x01] = 0x00;
-            dst[0x02] = 0x20; // packet len: 32 bytes
-            dst[0x03] = 0x00;
-            dst[0x04] = 0x01; // valid / connected word
+            // Layout verified in PCSX2 (idle pad, buffer 0x784D40): header `01 0a 06 04 01`, byte +2 = payload
+            // length (6), payload at +0x1C = {buttons_lo, buttons_hi (active low), then four stick bytes},
+            // sequence counter at +0x7C. The EE copies [+2] bytes from +0x1C (func 0x405700); the old layout
+            // (len 0x20, payload starting `00 73`) made the game see START/SELECT/D-pad permanently held,
+            // so a real key press never produced a press edge.
+            std::memset(dst, 0, 0x7C);
+            dst[0x00] = 0x01;
+            dst[0x01] = 0x0A;
+            dst[0x02] = 0x06; // payload length
+            dst[0x03] = 0x04;
+            dst[0x04] = 0x01;
 
-            std::memset(dst + 0x1C, 0, 32);
-            dst[0x1C + 0x00] = 0x00; // terminal/status
-            dst[0x1C + 0x01] = 0x73; // pad type: DS2
-            dst[0x1C + 0x02] = static_cast<uint8_t>(pad.buttons & 0xFFu);
-            dst[0x1C + 0x03] = static_cast<uint8_t>((pad.buttons >> 8u) & 0xFFu);
-            dst[0x1C + 0x04] = pad.rx;
-            dst[0x1C + 0x05] = pad.ry;
-            dst[0x1C + 0x06] = pad.lx;
-            dst[0x1C + 0x07] = pad.ly;
-
-            // Pressure values: 0xFF if pressed, 0x00 if not:
-            dst[0x1C + 8]  = (pad.buttons & (1 << 5)) ? 0x00 : 0xFF; // Right
-            dst[0x1C + 9]  = (pad.buttons & (1 << 7)) ? 0x00 : 0xFF; // Left
-            dst[0x1C + 10] = (pad.buttons & (1 << 4)) ? 0x00 : 0xFF; // Up
-            dst[0x1C + 11] = (pad.buttons & (1 << 6)) ? 0x00 : 0xFF; // Down
-            dst[0x1C + 12] = (pad.buttons & (1 << 12)) ? 0x00 : 0xFF; // Triangle
-            dst[0x1C + 13] = (pad.buttons & (1 << 13)) ? 0x00 : 0xFF; // Circle
-            dst[0x1C + 14] = (pad.buttons & (1 << 14)) ? 0x00 : 0xFF; // Cross
-            dst[0x1C + 15] = (pad.buttons & (1 << 15)) ? 0x00 : 0xFF; // Square
-            dst[0x1C + 16] = (pad.buttons & (1 << 10)) ? 0x00 : 0xFF; // L1
-            dst[0x1C + 17] = (pad.buttons & (1 << 8)) ? 0x00 : 0xFF; // L2
-            dst[0x1C + 18] = (pad.buttons & (1 << 11)) ? 0x00 : 0xFF; // R1
-            dst[0x1C + 19] = (pad.buttons & (1 << 9)) ? 0x00 : 0xFF; // R2
+            dst[0x1C + 0x00] = static_cast<uint8_t>(pad.buttons & 0xFFu);
+            dst[0x1C + 0x01] = static_cast<uint8_t>((pad.buttons >> 8u) & 0xFFu);
+            dst[0x1C + 0x02] = pad.rx;
+            dst[0x1C + 0x03] = pad.ry;
+            dst[0x1C + 0x04] = pad.lx;
+            dst[0x1C + 0x05] = pad.ly;
+            // Trailing bytes seen in the real idle buffer (beyond the 6-byte payload).
+            dst[0x22] = 0xFF;
+            dst[0x23] = 0xFF;
+            dst[0x24] = 0x0F;
 
             // sequence counter at +0x7C:
             std::memcpy(dst + 0x7C, &seq, sizeof(seq));
@@ -486,7 +787,8 @@ static std::vector<Cid1StreamJob> s_cid1StreamJobs;
                 }
             };
 
-            // 0x11223344u: SG2 Audio Server
+            // 0x11223344u: SG2 Audio Server (PERF-AU1: skipped unless PS2X_SG2_LLE=0 so IOP handles it) // FIX-AU10
+            if (!isSg2LleEnabled())
             s_rpcHleServices[0x11223344u] = {
                 0x11223344u,
                 "SG2_AUDIO",
@@ -983,6 +1285,21 @@ uint64_t vblDiff = 0;
         client->hdr.mode = mode;
 
         initRpcHleServices();
+
+        // PERF-AU1: Unless PS2X_SG2_LLE=0, ensure sg2iopm1.irx is loaded into the IOP emulator before binding 0x11223344. // FIX-AU10
+        if (isSg2LleEnabled() && rpcId == 0x11223344u && runtime)
+        {
+            static bool s_sg2FallbackAttempted = false;
+            if (!PS2IopTransport::canBindRpc(runtime, 0x11223344u) && !s_sg2FallbackAttempted)
+            {
+                s_sg2FallbackAttempted = true;
+                const auto loaded = runtime->loadIopModule("tools/iop/sg2iopm1.irx");
+                ::ps2xSafeLog("[sg2lle] loaded tools/iop/sg2iopm1.irx handled=%d id=%d start=%d\n",
+                              loaded.handled ? 1 : 0, loaded.moduleId, loaded.startResult);
+            }
+            flushSg2LleDiagnostics(0u, 0u, false);
+        }
+
         uint32_t serverPtr = 0;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
@@ -1295,6 +1612,52 @@ uint64_t vblDiff = 0;
             request.endParameter = endParameter;
 
             iopResult = PS2IopTransport::handleRpc(runtime, rdram, ctx, request);
+
+            // PERF-AU1 / PERF-AU3: Diagnostics for LLE sg2iopm1.irx RPC calls.
+            if (isSg2LleEnabled() && sid == 0x11223344u)
+            {
+                if (sendBuf != 0u && sendSize != 0u)
+                {
+                    recordSg2LlePackets(getConstMemPtr(rdram, sendBuf), sendSize);
+                }
+                uint32_t nonZero = 0u;
+                if (receiveBuffer != 0u && receiveSize != 0u)
+                {
+                    if (const uint8_t *recvPtr = getConstMemPtr(rdram, receiveBuffer))
+                    {
+                        for (uint32_t i = 0u; i < receiveSize; ++i)
+                        {
+                            if (recvPtr[i] != 0u)
+                                ++nonZero;
+                        }
+                    }
+                }
+                { // PROBE-AU3H
+                    static uint64_t s_sg2StRpc = 0u; // PROBE-AU3H
+                    static uint32_t s_sg2StPrev[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}; // PROBE-AU3H
+                    static uint32_t s_sg2StLogCount = 0u; // PROBE-AU3H
+                    ++s_sg2StRpc; // PROBE-AU3H
+                    if (receiveBuffer != 0u && receiveSize >= 0xC8u) // PROBE-AU3H
+                    { // PROBE-AU3H
+                        if (const uint8_t *stPtr = getConstMemPtr(rdram, receiveBuffer)) // PROBE-AU3H
+                        { // PROBE-AU3H
+                            uint32_t cur[4]{}; // PROBE-AU3H
+                            std::memcpy(&cur[0], stPtr + 0x00, 4u); // PROBE-AU3H
+                            std::memcpy(&cur[1], stPtr + 0x04, 4u); // PROBE-AU3H
+                            std::memcpy(&cur[2], stPtr + 0xC0, 4u); // PROBE-AU3H
+                            std::memcpy(&cur[3], stPtr + 0xC4, 4u); // PROBE-AU3H
+                            if (s_sg2StLogCount < 3000u && std::memcmp(cur, s_sg2StPrev, sizeof(cur)) != 0) // PROBE-AU3H
+                            { // PROBE-AU3H
+                                ++s_sg2StLogCount; // PROBE-AU3H
+                                std::memcpy(s_sg2StPrev, cur, sizeof(cur)); // PROBE-AU3H
+                                ::ps2xSafeLog("[sg2st] rpc=%llu envx0=%04x envx1=%04x pos0=%06x pos1=%06x\n", // PROBE-AU3H
+                                              (unsigned long long)s_sg2StRpc, cur[0] & 0xFFFFu, cur[1] & 0xFFFFu, cur[2] & 0xFFFFFFu, cur[3] & 0xFFFFFFu); // PROBE-AU3H
+                            } // PROBE-AU3H
+                        } // PROBE-AU3H
+                    } // PROBE-AU3H
+                } // PROBE-AU3H
+                flushSg2LleDiagnostics(sendSize / 16u, nonZero, true);
+            }
 
             if (iopResult.signalNowaitCompletion &&
                 (mode & kSifRpcModeNowait) != 0u)
@@ -1783,6 +2146,7 @@ uint64_t vblDiff = 0;
 
         if (cid == 1u)
         {
+            if (rdram) s_au6Rdram = rdram; // PROBE-AU6
             auto tCid1Start = std::chrono::steady_clock::now();
             struct VfiDescriptorSlot
             {
@@ -1882,6 +2246,13 @@ uint64_t vblDiff = 0;
             reply.seq = seq;
             reply.ringTail = ringTail;
             reply.isDone = 1;
+
+            // FIX-AU5: Flush pending op 0x07 replies FIFO before any non-0x07 CID1 command.
+            if (opcode != 0x07u)
+            {
+                flushAllCid1Pending();
+            }
+            bool deferReply = false; // FIX-AU5
 
             switch (opcode)
             {
@@ -2054,7 +2425,7 @@ uint64_t vblDiff = 0;
                     {
                         if (toRead > 0)
                         {
-                            ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + eeDst);
+                            ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + eeDst); ps2xProbeCid1Note(eeDst, (uint32_t)toRead, opcode);
                         }
                         slot.offset += toRead;
                         g_diagCid1BytesServed.fetch_add(toRead, std::memory_order_relaxed);
@@ -2178,9 +2549,22 @@ uint64_t vblDiff = 0;
                         }
                     }
                     uint64_t startFileOff = slot.offset;
-                    if (toRead > 0 && dstAddr != 0u && dstAddr < 0x02000000u && (dstAddr + toRead) <= 0x02000000u)
+                    // PERF-AU3: In file3.irx (0x0C94/0x1E60), flags & 1 means dstAddr is an IOP RAM address (direct memcpy on IOP, no EE DMA).
+                    if (isSg2LleEnabled() && (flags & 1u) != 0u)
                     {
-                        ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + dstAddr);
+                        if (toRead > 0 && dstAddr != 0u && runtime && runtime->isIopMemoryRange(dstAddr, toRead))
+                        {
+                            std::vector<uint8_t> iopBuf(static_cast<size_t>(toRead));
+                            if (ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, iopBuf.data()))
+                            {
+                                (void)runtime->writeIopMemory(dstAddr, iopBuf.data(), iopBuf.size());
+                                g_sg2LleStreamBytes.fetch_add(toRead, std::memory_order_relaxed);
+                            }
+                        }
+                    }
+                    else if (toRead > 0 && dstAddr != 0u && dstAddr < 0x02000000u && (dstAddr + toRead) <= 0x02000000u)
+                    {
+                        ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + dstAddr); ps2xProbeCid1Note(dstAddr, (uint32_t)toRead, opcode);
                     }
                     slot.offset += toRead;
                     if (probe_ae::isEnabled()) {
@@ -2210,14 +2594,33 @@ uint64_t vblDiff = 0;
                     reply.result = static_cast<uint32_t>(toRead);
                     reply.isDone = 1;
 
-                    // Direct writeback to slot descriptor to guarantee completion flag
-                    if (slotPtr != 0u)
+                    const uint64_t cid1LatVbl = getCid1LatVbl(); // FIX-AU5
+                    if (cid1LatVbl == 0)
                     {
-                        if (uint8_t *slotMem = getMemPtr(rdram, slotPtr))
+                        // Direct writeback to slot descriptor to guarantee completion flag
+                        if (slotPtr != 0u)
                         {
-                            slotMem[0x0B] |= 0x80;
-                            *reinterpret_cast<uint32_t *>(slotMem + 0x0C) = static_cast<uint32_t>(slot.offset);
+                            if (uint8_t *slotMem = getMemPtr(rdram, slotPtr))
+                            {
+                                slotMem[0x0B] |= 0x80;
+                                *reinterpret_cast<uint32_t *>(slotMem + 0x0C) = static_cast<uint32_t>(slot.offset);
+                            }
                         }
+                    }
+                    else
+                    {
+                        // FIX-AU5: Defer slot done-bit writeback and SIF reply until due vblank.
+                        std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+                        PendingCid1Reply pending{};
+                        static_assert(sizeof(reply) == sizeof(pending.replyBytes), "reply size mismatch");
+                        std::memcpy(pending.replyBytes, &reply, sizeof(reply));
+                        pending.slotPtr = slotPtr;
+                        pending.slotOffset = static_cast<uint32_t>(slot.offset);
+                        pending.dueVbl = s_cid1VblankCounter + cid1LatVbl;
+                        pending.rdram = rdram;
+                        pending.runtime = runtime;
+                        s_cid1PendingReplies.push_back(pending);
+                        deferReply = true;
                     }
 
 
@@ -2264,6 +2667,24 @@ uint64_t vblDiff = 0;
                 uint32_t statDst = *reinterpret_cast<const uint32_t *>(src + 0x10);
                 const char *pathPtr = reinterpret_cast<const char *>(src + 0x18);
                 std::string path(pathPtr);
+                // FEAT-DE: apply pending MC choice right before a stage loads
+                {
+                    const int pending = g_mcPendingChoice.load(std::memory_order_relaxed);
+                    if ((pending == 0 || pending == 1) && path.find("/etc/norma/") != std::string::npos)
+                    {
+                        if (uint8_t *mcMem = getMemPtr(rdram, 0x00649910u))
+                        {
+                            uint32_t curMc = 0;
+                            std::memcpy(&curMc, mcMem, sizeof(uint32_t));
+                            const uint32_t wantMc = static_cast<uint32_t>(pending);
+                            if ((curMc == 0u || curMc == 1u) && curMc != wantMc)
+                            {
+                                std::memcpy(mcMem, &wantMc, sizeof(uint32_t));
+                                ps2xSafeLog("[mc] applied=%s at '%s'\n", (wantMc == 0u) ? "boy" : "girl", path.c_str());
+                            }
+                        }
+                    }
+                }
                 const auto *entry = ps2x::vfi::VfiArchive::instance().find(path);
                 const auto *dirEntry = entry ? nullptr : ps2x::vfi::VfiArchive::instance().findDir(path);
                 if (!entry && !dirEntry)
@@ -2310,6 +2731,31 @@ uint64_t vblDiff = 0;
                 const char *pathPtr = reinterpret_cast<const char *>(src + 0x20);
                 std::string path(pathPtr ? pathPtr : "");
                 diagSetLastCid1Path(path);
+                { // PROBE-GW: dump raw path bytes + guest address when the path has non-printable bytes
+                    bool badPath = false;
+                    for (unsigned char ch : path)
+                        if (ch < 0x20 || ch > 0x7E)
+                            badPath = true;
+                    if (badPath)
+                    {
+                        char hex[256] = {0};
+                        for (int i = 0; i < 48; ++i)
+                            std::snprintf(hex + i * 3, 4, "%02X ", static_cast<unsigned>(src[0x20 + i]));
+                        ps2xSafeLog("[probe] gw badpath guest=0x%08X len=%zu bytes@+0x20: %s\n",
+                                    static_cast<unsigned>(src - rdram) + 0x20u, path.size(), hex);
+                        static bool s_gwDumped = false; // PROBE-GW2: one full RAM dump at the first bad path (diff vs PCSX2 savestate 3)
+                        if (!s_gwDumped)
+                        {
+                            s_gwDumped = true;
+                            if (FILE *gf = std::fopen("logs/ram_badpath.bin", "wb"))
+                            {
+                                std::fwrite(rdram, 1, PS2_RAM_SIZE, gf);
+                                std::fclose(gf);
+                                ps2xSafeLog("[probe] gw ram dump written logs/ram_badpath.bin\n");
+                            }
+                        }
+                    }
+                }
 
                 if (bufSize < 0x104u)
                 {
@@ -2351,13 +2797,18 @@ uint64_t vblDiff = 0;
                 uint32_t strPoolEe = ptrArrayEe + totalEntries * 4u;
                 uint32_t totalBytes = totalEntries * 64u + totalEntries * 4u + totalStrBytes;
 
-                if (totalBytes > bufSize || (dstEeAddr != 0u && dstEeAddr + totalBytes > PS2_RAM_SIZE))
+                // C330: the real file3.irx does not clamp to the caller's bufSize (the game always passes 1024 but the hub folder
+                // debug/us/stage/travel_a needs 1148 bytes and works on hardware); only refuse a write that would leave RAM.
+                if (dstEeAddr != 0u && dstEeAddr + totalBytes > PS2_RAM_SIZE)
                 {
-                    ps2xSafeLog("[CID1:EnumDir-0x0A] ERROR: totalBytes %u exceeds bufSize %u or RAM for '%s'\n", totalBytes, bufSize, path.c_str());
+                    ps2xSafeLog("[CID1:EnumDir-0x0A] ERROR: totalBytes %u exceeds RAM for '%s'\n", totalBytes, path.c_str());
                     reply.result = static_cast<uint32_t>(-12);
                     break;
                 }
+                if (totalBytes > bufSize)
+                    ps2xSafeLog("[CID1:EnumDir-0x0A] note: totalBytes %u > bufSize %u for '%s' (written in full, like file3.irx)\n", totalBytes, bufSize, path.c_str());
 
+                ps2xProbeCid1Note(dstEeAddr, totalBytes, 0x0Au); // PROBE-KY
                 if (dstEeAddr != 0u && dstEeAddr + totalBytes <= PS2_RAM_SIZE)
                 {
                     std::memset(rdram + statArrayEe, 0, totalEntries * 64u);
@@ -2415,7 +2866,7 @@ uint64_t vblDiff = 0;
                     {
                         if (toRead > 0)
                         {
-                            ps2x::vfi::VfiArchive::instance().readFileData(*entry, fileOffset, toRead, rdram + eeDst);
+                            ps2x::vfi::VfiArchive::instance().readFileData(*entry, fileOffset, toRead, rdram + eeDst); ps2xProbeCid1Note(eeDst, (uint32_t)toRead, opcode);
                         }
                         g_diagCid1BytesServed.fetch_add(toRead, std::memory_order_relaxed);
                         diagSetLastCid1Path(path);
@@ -2444,6 +2895,7 @@ uint64_t vblDiff = 0;
             default:
             {
                 uint32_t flags = (cmdSize >= 0x18) ? *reinterpret_cast<const uint32_t *>(src + 0x14) : 0u;
+                { char hx_[200] = {0}; const uint32_t dl_ = cmdSize < 48u ? cmdSize : 48u; for (uint32_t i = 0; i < dl_; ++i) std::snprintf(hx_ + i * 3, 4, "%02x ", src[i]); ps2xSafeLog("[cid1] unimpl detail cmdSize=%u slot=0x%08x seq=%u srcExtra=0x%08x destExtra=0x%08x off=%u bytes: %s\n", cmdSize, slotPtr, seq, srcExtra, destExtra, off, hx_); } // PROBE-KY
                 ps2xSafeLog( "[cid1] UNIMPLEMENTED cmd=0x%02x flags=0x%x\n", opcode, flags);
                 reply.result = static_cast<uint32_t>(-1);
                 break;
@@ -2464,7 +2916,10 @@ uint64_t vblDiff = 0;
             std::fflush(stderr);
 
                 probe_ae::onBlCid1Reply(reply.slotPtr, reply.seq, reply.result, (reply.cmd == 0x05) ? reply.result : 0);
-                ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
+                if (!deferReply) // FIX-AU5
+                {
+                    ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, &reply, sizeof(reply));
+                }
                 uint32_t dev30_after = *reinterpret_cast<const uint32_t *>(rdram + (0x00771BB8u & 0x01FFFFFFu));
                 probe_ae::onBmCid1(opcode, seq, dev30_before, dev30_after);
                 return alignedCmdSize;
@@ -2684,3 +3139,163 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram)
                      dev30, s1_0, s1_1, s1_2, s1_3, s2_0, s2_1, s2_2, s2_3);
     }
 }
+
+void ps2xCid1Vblank() // FIX-AU5
+{
+    ps2_syscalls::onCid1Vblank();
+    static const bool s_au11Enabled = []() { // PROBE-AU11
+        const char *env = std::getenv("PS2X_AU11_PROBE"); // PROBE-AU11
+        return env && std::strcmp(env, "1") == 0; // PROBE-AU11
+    }(); // PROBE-AU11
+    if (s_au11Enabled) // PROBE-AU11
+    { // PROBE-AU11
+        static bool s_au11Init = false; // PROBE-AU11
+        static std::chrono::steady_clock::time_point s_au11T0{}; // PROBE-AU11
+        static std::chrono::steady_clock::time_point s_au11Last{}; // PROBE-AU11
+        static uint32_t s_au11Eevb = 0; // PROBE-AU11
+        static uint64_t s_au11PrevIopVb = 0; // PROBE-AU11
+        static uint64_t s_au11PrevSg2Tick = 0; // PROBE-AU11
+        static uint64_t s_au11PrevMix = 0; // PROBE-AU11
+        static uint64_t s_au11PrevOut = 0; // PROBE-AU11
+        const auto now = std::chrono::steady_clock::now(); // PROBE-AU11
+        ++s_au11Eevb; // PROBE-AU11
+        if (!s_au11Init) // PROBE-AU11
+        { // PROBE-AU11
+            ps2x::iop::Sg2DiagSnapshot sg2{}; // PROBE-AU11
+            ps2x::iop::getSg2DiagSnapshot(sg2); // PROBE-AU11
+            s_au11T0 = now; // PROBE-AU11
+            s_au11Last = now; // PROBE-AU11
+            s_au11PrevIopVb = sg2.vblankDelivered; // PROBE-AU11
+            s_au11PrevSg2Tick = sg2.tickCount; // PROBE-AU11
+            s_au11PrevMix = ps2xAu6FramesMixed(); // PROBE-AU11
+            s_au11PrevOut = ps2xAu6FramesConsumed(); // PROBE-AU11
+            s_au11Eevb = 0; // PROBE-AU11
+            s_au11Init = true; // PROBE-AU11
+        } // PROBE-AU11
+        else if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_au11Last).count() >= 1000) // PROBE-AU11
+        { // PROBE-AU11
+            ps2x::iop::Sg2DiagSnapshot sg2{}; // PROBE-AU11
+            ps2x::iop::getSg2DiagSnapshot(sg2); // PROBE-AU11
+            const uint64_t mixNow = ps2xAu6FramesMixed(); // PROBE-AU11
+            const uint64_t outNow = ps2xAu6FramesConsumed(); // PROBE-AU11
+            const uint64_t ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - s_au11T0).count()); // PROBE-AU11
+            ps2xSafeLog("[au11] ms=%llu eevb=%u iopvb=%llu sg2tick=%llu mix=%llu out=%llu\n", // PROBE-AU11
+                        static_cast<unsigned long long>(ms), // PROBE-AU11
+                        s_au11Eevb, // PROBE-AU11
+                        static_cast<unsigned long long>(sg2.vblankDelivered - s_au11PrevIopVb), // PROBE-AU11
+                        static_cast<unsigned long long>(sg2.tickCount - s_au11PrevSg2Tick), // PROBE-AU11
+                        static_cast<unsigned long long>(mixNow - s_au11PrevMix), // PROBE-AU11
+                        static_cast<unsigned long long>(outNow - s_au11PrevOut)); // PROBE-AU11
+            s_au11Last = now; // PROBE-AU11
+            s_au11Eevb = 0; // PROBE-AU11
+            s_au11PrevIopVb = sg2.vblankDelivered; // PROBE-AU11
+            s_au11PrevSg2Tick = sg2.tickCount; // PROBE-AU11
+            s_au11PrevMix = mixNow; // PROBE-AU11
+            s_au11PrevOut = outNow; // PROBE-AU11
+        } // PROBE-AU11
+    } // PROBE-AU11
+    static const bool s_au6Enabled = []() { // PROBE-AU6
+        const char *env = std::getenv("PS2X_AU6_PROBE"); // PROBE-AU6
+        return env && std::strcmp(env, "1") == 0; // PROBE-AU6
+    }(); // PROBE-AU6
+    if (!s_au6Enabled || s_au6Rdram == nullptr) // PROBE-AU6
+        return; // PROBE-AU6
+    const uint64_t hv = ++s_au6Hv; // PROBE-AU6
+    auto readU32 = [&](uint32_t addr) -> uint32_t { // PROBE-AU6
+        uint32_t val = 0; // PROBE-AU6
+        std::memcpy(&val, s_au6Rdram + (addr & 0x1FFFFFFFu), 4); // PROBE-AU6
+        return val; // PROBE-AU6
+    }; // PROBE-AU6
+    const uint32_t st = readU32(0x772188u); // PROBE-AU6
+    static uint32_t s_au6Lines = 0; // PROBE-AU6
+    if (st == 9u && s_au6Lines < 15000u) // PROBE-AU6
+    { // PROBE-AU6
+        ++s_au6Lines; // PROBE-AU6
+        const uint32_t tot = readU32(0x7721DCu); // PROBE-AU6
+        const uint32_t fr = readU32(0x7721E4u); // PROBE-AU6
+        const uint32_t dev = readU32(0x771BB8u); // PROBE-AU6
+        const uint32_t gv = readU32(0x696FD0u); // PROBE-AU6
+        const uint32_t pos0 = readU32(0x74B080u + 0xC0u); // PROBE-AU6
+        static bool s_hasT0 = false; // PROBE-AU6
+        static std::chrono::steady_clock::time_point s_t0; // PROBE-AU6
+        const auto now = std::chrono::steady_clock::now(); // PROBE-AU6
+        if (!s_hasT0) { s_t0 = now; s_hasT0 = true; } // PROBE-AU6
+        const uint64_t ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - s_t0).count()); // PROBE-AU6
+        ps2x::iop::Sg2DiagSnapshot sg2{}; // PROBE-AU6
+        ps2x::iop::getSg2DiagSnapshot(sg2); // PROBE-AU6
+        ps2xSafeLog("[au6] hv=%llu ms=%llu gv=%u tot=%u fr=%u dev=%u pos0=0x%x mix=%llu out=%llu iopTick=%llu\n", // PROBE-AU6
+                    static_cast<unsigned long long>(hv), static_cast<unsigned long long>(ms), // PROBE-AU6
+                    gv, tot, fr, dev, pos0, // PROBE-AU6
+                    static_cast<unsigned long long>(ps2xAu6FramesMixed()), // PROBE-AU6
+                    static_cast<unsigned long long>(ps2xAu6FramesConsumed()), // PROBE-AU6
+                    static_cast<unsigned long long>(sg2.tickCount)); // PROBE-AU6
+    } // PROBE-AU6
+}
+
+void ps2xAu7Cb(uint8_t *rdram, R5900Context *ctx) // PROBE-AU7
+{ // PROBE-AU7
+    static const bool s_au7Enabled = []() { // PROBE-AU7
+        const char *env = std::getenv("PS2X_AU7_PROBE"); // PROBE-AU7
+        return env && std::strcmp(env, "1") == 0; // PROBE-AU7
+    }(); // PROBE-AU7
+    if (!s_au7Enabled || !rdram || !ctx) // PROBE-AU7
+        return; // PROBE-AU7
+    auto readU32 = [&](uint32_t addr) -> uint32_t { // PROBE-AU7
+        uint32_t val = 0; // PROBE-AU7
+        std::memcpy(&val, rdram + (addr & 0x1FFFFFFu), 4); // PROBE-AU7
+        return val; // PROBE-AU7
+    }; // PROBE-AU7
+    const uint32_t st = readU32(0x772188u); // PROBE-AU7
+    if (st != 8u && st != 9u) // PROBE-AU7
+        return; // PROBE-AU7
+    static std::atomic<uint32_t> s_au7Lines{0}; // PROBE-AU7
+    if (s_au7Lines.fetch_add(1u, std::memory_order_relaxed) >= 6000u) // PROBE-AU7
+        return; // PROBE-AU7
+    const uint64_t hv = s_au6Hv.load(std::memory_order_relaxed); // PROBE-AU7
+    const uint32_t fr = readU32(0x7721E4u); // PROBE-AU7
+    const uint32_t c6c = readU32(0x7721ECu); // PROBE-AU7
+    const uint32_t obj = getRegU32(ctx, 17); // PROBE-AU7
+    const uint32_t head = readU32(obj + 0x228u); // PROBE-AU7
+    const uint32_t tail = readU32(obj + 0x22Cu); // PROBE-AU7
+    const uint32_t ev = readU32(obj + 0xA8u + 12u * head); // PROBE-AU7
+    const uint32_t a3 = readU32(obj + 0xB0u + 12u * head); // PROBE-AU7
+    const int32_t v0 = static_cast<int32_t>(getRegU32(ctx, 2)); // PROBE-AU7
+    const uint32_t dev = readU32(0x771BB8u); // PROBE-AU7
+    const uint32_t tid = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFF); // PROBE-AU8
+    const uint32_t ra = getRegU32(ctx, 31); // PROBE-AU8
+    ps2xSafeLog("[au7] hv=%llu st=%u fr=%u c6c=%u obj=0x%x head=%u tail=%u ev=%u a3=0x%x v0=%d dev=%u tid=%u ra=0x%x\n", // PROBE-AU8
+                static_cast<unsigned long long>(hv), st, fr, c6c, obj, head, tail, ev, a3, v0, dev, tid, ra); // PROBE-AU8
+} // PROBE-AU7
+
+void ps2xAu8Push(uint8_t *rdram, R5900Context *ctx) // PROBE-AU8
+{ // PROBE-AU8
+    static const bool s_au8Enabled = []() { // PROBE-AU8
+        const char *env = std::getenv("PS2X_AU8_PROBE"); // PROBE-AU8
+        return env && std::strcmp(env, "1") == 0; // PROBE-AU8
+    }(); // PROBE-AU8
+    if (!s_au8Enabled || !rdram || !ctx) // PROBE-AU8
+        return; // PROBE-AU8
+    auto readU32 = [&](uint32_t addr) -> uint32_t { // PROBE-AU8
+        uint32_t val = 0; // PROBE-AU8
+        std::memcpy(&val, rdram + (addr & 0x1FFFFFFu), 4); // PROBE-AU8
+        return val; // PROBE-AU8
+    }; // PROBE-AU8
+    const uint32_t st = readU32(0x772188u); // PROBE-AU8
+    if (st != 8u && st != 9u) // PROBE-AU8
+        return; // PROBE-AU8
+    static std::atomic<uint32_t> s_au8Lines{0}; // PROBE-AU8
+    if (s_au8Lines.fetch_add(1u, std::memory_order_relaxed) >= 4000u) // PROBE-AU8
+        return; // PROBE-AU8
+    const uint64_t hv = s_au6Hv.load(std::memory_order_relaxed); // PROBE-AU8
+    const uint32_t fr = readU32(0x7721E4u); // PROBE-AU8
+    const uint32_t tid = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFF); // PROBE-AU8
+    const uint32_t obj = getRegU32(ctx, 4); // PROBE-AU8
+    const uint32_t ev = getRegU32(ctx, 5); // PROBE-AU8
+    const uint32_t a3 = getRegU32(ctx, 7); // PROBE-AU8
+    const uint32_t ra = getRegU32(ctx, 31); // PROBE-AU8
+    const uint32_t tail = readU32(obj + 0x22Cu); // PROBE-AU8
+    const uint32_t head = readU32(obj + 0x228u); // PROBE-AU8
+    const uint32_t flags = readU32(obj + 8u); // PROBE-AU8
+    ps2xSafeLog("[au8] hv=%llu fr=%u tid=%u obj=0x%x ev=%u tail=%u head=%u flags=0x%x a3=0x%x ra=0x%x\n", // PROBE-AU8
+                static_cast<unsigned long long>(hv), fr, tid, obj, ev, tail, head, flags, a3, ra); // PROBE-AU8
+} // PROBE-AU8
