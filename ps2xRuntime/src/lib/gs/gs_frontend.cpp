@@ -66,6 +66,92 @@ extern void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const 
 extern const uint16_t *ps2xRdActiveClut(); // FEAT-RD5
 static uint32_t s_rdCurSerial = 0u;       // FEAT-RD5
 static uint32_t s_rdLastNotedSerial = 0u; // FEAT-RD5
+static uint32_t s_rdLastNonZeroSerial = 0u; // FEAT-RD8
+static uint32_t s_rdMainFbp = 0xFFFFFFFFu;  // FEAT-RD8b
+static uint32_t s_rd2dTexCounter = 1u;      // FEAT-RD8
+
+struct RdVert // FEAT-RD8
+{
+    float pos[4];
+    uint8_t rgba[4];
+    float uv[2];
+};
+
+struct Rd2DBatch // FEAT-RD8
+{
+    uint32_t first;
+    uint32_t count;
+    uint32_t afterSerial;
+    uint32_t texSerial;
+    uint64_t prim;
+    uint64_t tex0;
+    uint64_t texa;
+    uint64_t clamp;
+    uint64_t tex1;
+    uint64_t alpha;
+    uint64_t test;
+    uint64_t frame;
+    uint64_t zbuf;
+};
+
+extern void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped); // FEAT-RD8
+
+static std::mutex s_rd2dCapMutex; // FEAT-RD8
+static std::vector<RdVert> s_rd2dVerts; // FEAT-RD8
+static std::vector<Rd2DBatch> s_rd2dBatches; // FEAT-RD8
+static uint32_t s_rd2dRtSkipped = 0u; // FEAT-RD8
+static uint32_t s_rd2dPointLineSkipped = 0u; // FEAT-RD8
+
+static uint64_t rdPackTex0(const GSTex0Reg &t) // FEAT-RD8
+{
+    return (static_cast<uint64_t>(t.tbp0) & 0x3FFFull) |
+           ((static_cast<uint64_t>(t.tbw) & 0x3Full) << 14) |
+           ((static_cast<uint64_t>(t.psm) & 0x3Full) << 20) |
+           ((static_cast<uint64_t>(t.tw) & 0xFull) << 26) |
+           ((static_cast<uint64_t>(t.th) & 0xFull) << 30) |
+           ((static_cast<uint64_t>(t.tcc) & 0x1ull) << 34) |
+           ((static_cast<uint64_t>(t.tfx) & 0x3ull) << 35) |
+           ((static_cast<uint64_t>(t.cbp) & 0x3FFFull) << 37) |
+           ((static_cast<uint64_t>(t.cpsm) & 0xFull) << 51) |
+           ((static_cast<uint64_t>(t.csm) & 0x1ull) << 55) |
+           ((static_cast<uint64_t>(t.csa) & 0x1Full) << 56) |
+           ((static_cast<uint64_t>(t.cld) & 0x7ull) << 61);
+}
+
+static uint64_t rdPackTexa(const GSTexaReg &texa) // FEAT-RD8
+{
+    return static_cast<uint64_t>(texa.ta0) |
+           (texa.aem ? (1ull << 15) : 0ull) |
+           (static_cast<uint64_t>(texa.ta1) << 32);
+}
+
+static uint64_t rdPackPrim(const GSPrimReg &p) // FEAT-RD8
+{
+    return (static_cast<uint64_t>(p.type) & 7ull) |
+           (p.iip ? (1ull << 3) : 0ull) |
+           (p.tme ? (1ull << 4) : 0ull) |
+           (p.fge ? (1ull << 5) : 0ull) |
+           (p.abe ? (1ull << 6) : 0ull) |
+           (p.aa1 ? (1ull << 7) : 0ull) |
+           (p.fst ? (1ull << 8) : 0ull) |
+           (p.ctxt ? (1ull << 9) : 0ull) |
+           (p.fix ? (1ull << 10) : 0ull);
+}
+
+static uint64_t rdPackFrame(const GSFrameReg &f) // FEAT-RD8
+{
+    return (static_cast<uint64_t>(f.fbp) & 0x1FFull) |
+           ((static_cast<uint64_t>(f.fbw) & 0x3Full) << 16) |
+           ((static_cast<uint64_t>(f.psm) & 0x3Full) << 24) |
+           (static_cast<uint64_t>(f.fbmsk) << 32);
+}
+
+static uint64_t rdPackZbuf(const GSZbufReg &z) // FEAT-RD8
+{
+    return (static_cast<uint64_t>(z.zbp) & 0x1FFull) |
+           ((static_cast<uint64_t>(z.psm) & 0xFull) << 24) |
+           (z.zmask ? (1ull << 32) : 0ull);
+}
 extern void ps2xRdMarkVramWrite(uint32_t firstByte, uint32_t byteCount); // FEAT-RD5b
 static void rdMarkDest(uint32_t psm, uint32_t dbp, uint32_t dbw, uint32_t dsax, uint32_t dsay, uint32_t rrw, uint32_t rrh) // FEAT-RD5b
 {
@@ -1180,6 +1266,24 @@ void GS::latchHostPresentationFrame()
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
         g_hostPresentSeq.fetch_add(1, std::memory_order_release);
+        if (ps2xRdViewOn()) // FEAT-RD8
+        {
+            static std::vector<RdVert> s_pubVerts;
+            static std::vector<Rd2DBatch> s_pubBatches;
+            uint32_t rtSk = 0u, plSk = 0u;
+            {
+                std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+                s_pubVerts.swap(s_rd2dVerts);
+                s_pubBatches.swap(s_rd2dBatches);
+                rtSk = s_rd2dRtSkipped;
+                plSk = s_rd2dPointLineSkipped;
+                s_rd2dRtSkipped = 0u;
+                s_rd2dPointLineSkipped = 0u;
+            }
+            ps2xRdPublish2D(s_pubVerts.data(), s_pubVerts.size(), s_pubBatches.data(), s_pubBatches.size(), rtSk, plSk);
+            s_pubVerts.clear();
+            s_pubBatches.clear();
+        }
         ps2_gt_count(4, 1); // PROBE-GT: latched
         ft2OnPresent(); // PERF-LN
         if (g_ps2Ft2On) ps2_ft2_ev(12, g_hostPresentSeq.load(std::memory_order_relaxed)); // PROBE-FT2: GS_FRAME_DONE
@@ -2575,6 +2679,8 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         {
             RdpScope rdpS(3); // PROBE-RDP
             s_rdCurSerial = static_cast<uint32_t>(value & 0xFFFFFFFFull);
+            if (s_rdCurSerial != 0u) // FEAT-RD8
+                s_rdLastNonZeroSerial = s_rdCurSerial;
         }
         break;
     default:
@@ -2934,29 +3040,137 @@ void GS::refreshDrawBatch(int vertexCount)
 
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
+    if (s_rdCurSerial != 0u) // FEAT-RD8b
+        s_rdMainFbp = batch.state.context.frame.fbp;
     if (ps2xRdViewOn() && s_rdCurSerial != 0u && s_rdCurSerial != s_rdLastNotedSerial && batch.state.prim.tme) // FEAT-RD5
     {
         s_rdLastNotedSerial = s_rdCurSerial;
-        const GSTex0Reg &t = batch.state.context.tex0;
-        const uint64_t rawTex0 =
-            (static_cast<uint64_t>(t.tbp0) & 0x3FFFull) |
-            ((static_cast<uint64_t>(t.tbw) & 0x3Full) << 14) |
-            ((static_cast<uint64_t>(t.psm) & 0x3Full) << 20) |
-            ((static_cast<uint64_t>(t.tw) & 0xFull) << 26) |
-            ((static_cast<uint64_t>(t.th) & 0xFull) << 30) |
-            ((static_cast<uint64_t>(t.tcc) & 0x1ull) << 34) |
-            ((static_cast<uint64_t>(t.tfx) & 0x3ull) << 35) |
-            ((static_cast<uint64_t>(t.cbp) & 0x3FFFull) << 37) |
-            ((static_cast<uint64_t>(t.cpsm) & 0xFull) << 51) |
-            ((static_cast<uint64_t>(t.csm) & 0x1ull) << 55) |
-            ((static_cast<uint64_t>(t.csa) & 0x1Full) << 56) |
-            ((static_cast<uint64_t>(t.cld) & 0x7ull) << 61);
-        const uint64_t rawTexa =
-            static_cast<uint64_t>(batch.state.texa.ta0) |
-            (batch.state.texa.aem ? (1ull << 15) : 0ull) |
-            (static_cast<uint64_t>(batch.state.texa.ta1) << 32);
+        const uint64_t rawTex0 = rdPackTex0(batch.state.context.tex0); // FEAT-RD8
+        const uint64_t rawTexa = rdPackTexa(batch.state.texa); // FEAT-RD8
         RdpScope rdpS(0); // PROBE-RDP
         ps2xRdNoteDraw(s_rdCurSerial, rawTex0, rawTexa, m_localMemoryStorage, ps2xRdActiveClut());
+    }
+    else if (ps2xRdViewOn() && s_rdCurSerial == 0u) // FEAT-RD8
+    {
+        const GSContext &ctx = batch.state.context;
+        const GSPrimReg &prim = batch.state.prim;
+        uint32_t dispFbp = 0xFFFFFFFFu;
+        if (m_privRegs)
+        {
+            const uint64_t pmode = m_privRegs->pmode;
+            if (pmode & 1ull)
+                dispFbp = static_cast<uint32_t>(m_privRegs->dispfb1 & 0x1FFu);
+            else if (pmode & 2ull)
+                dispFbp = static_cast<uint32_t>(m_privRegs->dispfb2 & 0x1FFu);
+            else if (m_privRegs->dispfb1 != 0ull)
+                dispFbp = static_cast<uint32_t>(m_privRegs->dispfb1 & 0x1FFu);
+            else if (m_privRegs->dispfb2 != 0ull)
+                dispFbp = static_cast<uint32_t>(m_privRegs->dispfb2 & 0x1FFu);
+        }
+        if (dispFbp == 0xFFFFFFFFu)
+            dispFbp = m_hostPresentationDisplayFbp;
+
+        const bool rdTargetOk = (s_rdMainFbp != 0xFFFFFFFFu) ? (ctx.frame.fbp == s_rdMainFbp || ctx.frame.fbp == dispFbp)
+                                                             : (ctx.frame.fbp == dispFbp); // FEAT-RD8b
+        if (!rdTargetOk)
+        {
+            std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+            ++s_rd2dRtSkipped;
+        }
+        else if (prim.type == GS_PRIM_POINT || prim.type == GS_PRIM_LINE || prim.type == GS_PRIM_LINESTRIP)
+        {
+            std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+            ++s_rd2dPointLineSkipped;
+        }
+        else if ((prim.type == GS_PRIM_SPRITE && batch.vertexCount >= 2u) ||
+                 ((prim.type == GS_PRIM_TRIANGLE || prim.type == GS_PRIM_TRISTRIP || prim.type == GS_PRIM_TRIFAN) && batch.vertexCount >= 3u))
+        {
+            const float ofx = static_cast<float>(ctx.xyoffset.ofx) * (1.0f / 16.0f);
+            const float ofy = static_cast<float>(ctx.xyoffset.ofy) * (1.0f / 16.0f);
+            const float texW = static_cast<float>(1u << std::min<uint32_t>(ctx.tex0.tw, 10u));
+            const float texH = static_cast<float>(1u << std::min<uint32_t>(ctx.tex0.th, 10u));
+            auto makeVert = [&](const GSVertex &v, const GSVertex &colSrc) -> RdVert {
+                RdVert out{};
+                out.pos[0] = v.x - ofx;
+                out.pos[1] = v.y - ofy;
+                out.pos[2] = 0.0f;
+                out.pos[3] = 1.0f;
+                out.rgba[0] = colSrc.r;
+                out.rgba[1] = colSrc.g;
+                out.rgba[2] = colSrc.b;
+                out.rgba[3] = colSrc.a;
+                if (prim.tme)
+                {
+                    if (prim.fst)
+                    {
+                        out.uv[0] = (static_cast<float>(v.u) / 16.0f) / texW;
+                        out.uv[1] = (static_cast<float>(v.v) / 16.0f) / texH;
+                    }
+                    else
+                    {
+                        const float invQ = (v.q != 0.0f) ? (1.0f / v.q) : 1.0f;
+                        out.uv[0] = v.s * invQ;
+                        out.uv[1] = v.t * invQ;
+                    }
+                }
+                return out;
+            };
+
+            RdVert triVerts[6]{};
+            uint32_t addCount = 0u;
+            if (prim.type == GS_PRIM_SPRITE)
+            {
+                const GSVertex &v0 = m_vtxQueue[0];
+                const GSVertex &v1 = m_vtxQueue[1];
+                const RdVert c00 = makeVert(v0, v1);
+                const RdVert c11 = makeVert(v1, v1);
+                RdVert c10 = c00;
+                c10.pos[0] = c11.pos[0];
+                c10.uv[0] = c11.uv[0];
+                RdVert c01 = c00;
+                c01.pos[1] = c11.pos[1];
+                c01.uv[1] = c11.uv[1];
+                triVerts[0] = c00; triVerts[1] = c10; triVerts[2] = c11;
+                triVerts[3] = c00; triVerts[4] = c11; triVerts[5] = c01;
+                addCount = 6u;
+            }
+            else
+            {
+                const GSVertex &flatCol = prim.iip ? m_vtxQueue[0] : m_vtxQueue[2];
+                triVerts[0] = makeVert(m_vtxQueue[0], prim.iip ? m_vtxQueue[0] : flatCol);
+                triVerts[1] = makeVert(m_vtxQueue[1], prim.iip ? m_vtxQueue[1] : flatCol);
+                triVerts[2] = makeVert(m_vtxQueue[2], prim.iip ? m_vtxQueue[2] : flatCol);
+                addCount = 3u;
+            }
+
+            const uint64_t rawTex0 = rdPackTex0(ctx.tex0);
+            const uint64_t rawTexa = rdPackTexa(batch.state.texa);
+            uint32_t texSerial = 0u;
+            if (prim.tme)
+            {
+                texSerial = (s_rd2dTexCounter++ & 0x7FFFFFFFu) | 0x80000000u;
+                ps2xRdNoteDraw(texSerial, rawTex0, rawTexa, m_localMemoryStorage, ps2xRdActiveClut());
+            }
+
+            Rd2DBatch b2d{};
+            b2d.afterSerial = s_rdLastNonZeroSerial;
+            b2d.texSerial = texSerial;
+            b2d.prim = rdPackPrim(prim);
+            b2d.tex0 = rawTex0;
+            b2d.texa = rawTexa;
+            b2d.clamp = ctx.clamp;
+            b2d.tex1 = ctx.tex1;
+            b2d.alpha = ctx.alpha;
+            b2d.test = ctx.test;
+            b2d.frame = rdPackFrame(ctx.frame);
+            b2d.zbuf = rdPackZbuf(ctx.zbuf);
+
+            std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+            b2d.first = static_cast<uint32_t>(s_rd2dVerts.size());
+            b2d.count = addCount;
+            s_rd2dVerts.insert(s_rd2dVerts.end(), triVerts, triVerts + addCount);
+            s_rd2dBatches.push_back(b2d);
+        }
     }
     if (g_rdpOn) { ++s_rdpQueueDraws; if ((s_rdpQueueDraws & 1023u) == 0u) rdpMaybeReport(); } // PROBE-RDP
     GwScope gwS(5); // PROBE-GW primbuild

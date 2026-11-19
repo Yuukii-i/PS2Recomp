@@ -10,6 +10,7 @@ extern void ps2xEeGfxDecompInstall(PS2Runtime &); // DECOMP-BM
 extern void ps2xDevConsoleInstall(PS2Runtime &); // FEAT-DF
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
+extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
 extern void ps2xPadMarker(); // PROBE-MK
 extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
 extern void ps2xMcInit(); // FEAT-DE
@@ -6460,6 +6461,8 @@ void PS2Runtime::run()
             uint32_t presentWidth = FB_WIDTH;
             uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
             UploadFrame(frameTex, this, presentWidth, presentHeight, tick);
+            if (ps2xRdViewOn()) // FEAT-RD8
+                ps2xRdSetPresentSize(presentWidth, presentHeight);
 
             BeginDrawing();
             ClearBackground(BLACK);
