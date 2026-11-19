@@ -631,13 +631,17 @@ void uploadRdSlot(RdGpuSlot &slot, const std::vector<RdVert> &verts, const std::
 }
 } // namespace
 
+static std::atomic<int8_t> s_rdViewOnCache{-1}; // PERF-PF1
 bool ps2xRdViewOn() // FEAT-RD1
 {
-    static const bool v = []() {
+    int8_t v = s_rdViewOnCache.load(std::memory_order_relaxed);
+    if (v < 0)
+    {
         const char *e = std::getenv("PS2X_RD_VIEW");
-        return e && e[0] == '1';
-    }();
-    return v;
+        v = (e && e[0] == '1') ? 1 : 0;
+        s_rdViewOnCache.store(v, std::memory_order_relaxed);
+    }
+    return v != 0;
 }
 
 extern bool ps2xRdForceClassic(); // FEAT-RD49

@@ -94,15 +94,30 @@ bool g_rdCurDrawIsGeom = false;             // FEAT-RD18
 std::atomic<bool> g_rdForceClassic{false};  // FEAT-RD48
 std::atomic<uint64_t> g_rdFrameRtSyncCyc{0ull}; // FEAT-RD48
 static std::atomic<uint32_t> s_rdLatchPrims{0u}; // FEAT-RD50
-static int rdForceClassicMode() // FEAT-RD48: 0=never, 1=always, 2=auto
+static std::atomic<int8_t> s_rdForceClassicModeCache{-1}; // PERF-PF1
+static inline int rdForceClassicMode() // FEAT-RD48: 0=never, 1=always, 2=auto
 {
-    static const int mode = []() {
+    int8_t v = s_rdForceClassicModeCache.load(std::memory_order_relaxed);
+    if (v < 0)
+    {
         const char *e = std::getenv("PS2X_RD_FORCECLASSIC");
-        if (e && e[0] == '0') return 0;
-        if (e && e[0] == '1') return 1;
-        return 2;
-    }();
-    return mode;
+        if (e && e[0] == '0') v = 0;
+        else if (e && e[0] == '1') v = 1;
+        else v = 2;
+        s_rdForceClassicModeCache.store(v, std::memory_order_relaxed);
+    }
+    return v;
+}
+static std::atomic<int8_t> s_rdViewOnCache{-1}; // PERF-PF1
+static inline bool rdViewOnFast()
+{
+    int8_t v = s_rdViewOnCache.load(std::memory_order_relaxed);
+    if (v < 0)
+    {
+        v = ps2xRdViewOn() ? 1 : 0;
+        s_rdViewOnCache.store(v, std::memory_order_relaxed);
+    }
+    return v != 0;
 }
 bool ps2xRdForceClassic() // FEAT-RD48
 {
@@ -3458,7 +3473,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         else
         {
             s_rdCurSerial = 0u; // FEAT-RD49
-            if (ps2xRdViewOn() && (value & 0x40000000ull) != 0ull) // FEAT-RD49: keep stage-transition detector alive while forced
+            if (rdViewOnFast() && (value & 0x40000000ull) != 0ull) // FEAT-RD49: keep stage-transition detector alive while forced // PERF-PF1
                 s_rdFrameHasGeom.store(true, std::memory_order_relaxed);
         }
         break;
@@ -3825,7 +3840,7 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
     const uint32_t maskedS = s_rdCurSerial & 0x3FFFFFFFu; // FEAT-RD13 // FEAT-RD55
     if (maskedS != 0u) // FEAT-RD13 // FEAT-RD55: single capLock for GMin/GMax + KickRecs
     {
-        const bool recordKick = isGeomKick && ps2xRdViewOn();
+        const bool recordKick = isGeomKick && rdViewOnFast(); // PERF-PF1
         const GSScissorReg &sc = ctx.scissor; // FEAT-RD33b
         const uint32_t scW = (sc.x1 >= sc.x0) ? (static_cast<uint32_t>(sc.x1) + 1u - sc.x0) : 0u;
         const uint32_t scH = (sc.y1 >= sc.y0) ? (static_cast<uint32_t>(sc.y1) + 1u - sc.y0) : 0u;
@@ -3853,7 +3868,7 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
         if (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(ctx.frame.fbp)) // FEAT-RD19
             s_rdFrameGeomFbp.store(ctx.frame.fbp, std::memory_order_relaxed); // FEAT-RD18b
     }
-    if (ps2xRdViewOn() && s_rdCurSerial != 0u) // FEAT-RD17
+    if (rdViewOnFast() && s_rdCurSerial != 0u) // FEAT-RD17 // PERF-PF1
     {
         const uint64_t rawFrame = rdPackFrame(ctx.frame);
         if (s_rdCurSerial != s_rdLastStateSerial)
@@ -3884,7 +3899,7 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
             g_rdStateChangesInKick.fetch_add(1u, std::memory_order_relaxed);
         }
     }
-    if (ps2xRdViewOn() && isGeomKick) // FEAT-RD5 // FEAT-RD10
+    if (rdViewOnFast() && isGeomKick) // FEAT-RD5 // FEAT-RD10 // PERF-PF1
     {
         if (s_rdCurSerial != s_rdLastNotedSerial && prim.tme)
         {
