@@ -15,6 +15,8 @@ static bool g_rdAlwaysFunc = false; // FEAT-RD20
 #include <cstdlib>
 #include <cstdio> // PROBE-RD24
 #include <string> // PROBE-RD24
+#include <map> // PROBE-RD26
+#include <algorithm> // PROBE-RD26
 #include <mutex>
 #include <vector>
 
@@ -57,6 +59,7 @@ struct RdBatch // FEAT-RD2 // FEAT-RD14
     uint32_t kickSerial; // FEAT-RD5
     float vpS[2]; // FEAT-RD21
     float vpO[2]; // FEAT-RD21
+    uint32_t camHash; // PROBE-RD26
 };
 
 struct Rd2DBatch // FEAT-RD8
@@ -701,6 +704,65 @@ void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h) // FEAT-RD12
     h = g_rdPresentH.load(std::memory_order_relaxed);
 }
 
+static const bool g_rdCamOn = []{ const char *e = std::getenv("PS2X_RD_CAMLOG"); return e && e[0] == '1'; }(); // PROBE-RD26
+struct RdCamTl // PROBE-RD26
+{
+    std::vector<std::string> lines;
+    std::map<uint32_t, uint32_t> hist;
+    bool open = false;
+    uint32_t hash = 0u, s0 = 0u, s1 = 0u, batches = 0u, tris = 0u, small2d = 0u, pendSmall = 0u;
+    float bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+    void begin() { lines.clear(); hist.clear(); open = false; pendSmall = 0u; }
+    void push(const char *b) { if (lines.size() < 56u) lines.emplace_back(b); }
+    void flush()
+    {
+        if (!open) return;
+        char b[256];
+        std::snprintf(b, sizeof(b), "[rdcam] 3D cam=%08x serial=%08x..%08x batches=%u tris=%u bbox=%d,%d-%d,%d small2d=%u\n",
+                      hash, s0, s1, batches, tris, (int)bx0, (int)by0, (int)bx1, (int)by1, small2d);
+        push(b);
+        open = false;
+    }
+    void add3d(uint32_t h, uint32_t serial, uint32_t t, float x0, float y0, float x1, float y1, bool hasBox)
+    {
+        ++hist[h];
+        if (open && hash != h) flush();
+        if (!open)
+        {
+            open = true; hash = h; s0 = serial; batches = 0u; tris = 0u; small2d = pendSmall; pendSmall = 0u;
+            bx0 = 1e30f; by0 = 1e30f; bx1 = -1e30f; by1 = -1e30f;
+        }
+        s1 = serial; ++batches; tris += t;
+        if (hasBox) { bx0 = std::min(bx0, x0); by0 = std::min(by0, y0); bx1 = std::max(bx1, x1); by1 = std::max(by1, y1); }
+    }
+    void add2d(bool big, uint32_t after, uint32_t t, float x0, float y0, float x1, float y1, uint64_t zbuf, uint64_t test, uint64_t frame, uint64_t alpha, uint64_t prim)
+    {
+        if (!big)
+        {
+            if (open) ++small2d; else ++pendSmall;
+            return;
+        }
+        flush();
+        char b[320];
+        std::snprintf(b, sizeof(b), "[rdcam] 2D after=%08x tris=%u bbox=%d,%d-%d,%d zmsk=%u zte=%u ztst=%u fbmsk=%08x alpha=%llx prim=%llx\n",
+                      after, t, (int)x0, (int)y0, (int)x1, (int)y1, (unsigned)((zbuf >> 32) & 1ull), (unsigned)((test >> 16) & 1ull),
+                      (unsigned)((test >> 17) & 3ull), (unsigned)(frame >> 32), (unsigned long long)alpha, (unsigned long long)prim);
+        push(b);
+    }
+    void finish()
+    {
+        flush();
+        for (const std::string &l : lines) ps2xSafeLog("%s", l.c_str());
+        std::vector<std::pair<uint32_t, uint32_t>> v(hist.begin(), hist.end());
+        std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+        char b[256];
+        int n = std::snprintf(b, sizeof(b), "[rdcam] hist cams=%u:", (unsigned)v.size());
+        for (size_t i = 0; i < v.size() && i < 4u; ++i)
+            n += std::snprintf(b + n, sizeof(b) - n, " %08x=%u", v[i].first, v[i].second);
+        ps2xSafeLog("%s\n", b);
+    }
+};
+static RdCamTl g_camTl; // PROBE-RD26
 static const bool g_rd24On = []{ const char *e = std::getenv("PS2X_RD_BIGLOG"); return e && e[0] == '1'; }(); // PROBE-RD24
 static std::vector<RdVert> g_rd24Verts[4]; // PROBE-RD24
 static std::vector<uint16_t> g_rd24Idx[4]; // PROBE-RD24
@@ -873,7 +935,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         {
             g_rdGpu.everUploaded = true;
             uploadRdSlot(g_rdGpu.slots[idx], g_rdGpu.pendingVerts[idx], g_rdGpu.pendingIndices[idx], g_rdGpu.slots[idx].batches);
-            if (g_rd24On) // PROBE-RD24: CPU copy of uploaded verts + final 16-bit indices (relative to batch.baseVertex)
+            if (g_rd24On || g_rdCamOn) // PROBE-RD24 // PROBE-RD26: CPU copy of uploaded verts + final 16-bit indices (relative to batch.baseVertex)
             {
                 g_rd24Verts[idx] = g_rdGpu.pendingVerts[idx];
                 if (g_rdGpu.slots[idx].indexCount != 0)
@@ -1155,6 +1217,18 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             return true;
         };
 
+        bool camDump = false; // PROBE-RD26
+        if (g_rdCamOn)
+        {
+            static std::chrono::steady_clock::time_point s_camLast{};
+            const auto nowC = std::chrono::steady_clock::now();
+            if (s_camLast.time_since_epoch().count() == 0 || nowC - s_camLast >= std::chrono::seconds(5))
+            {
+                s_camLast = nowC;
+                camDump = true;
+                g_camTl.begin();
+            }
+        }
         auto draw2dUntil = [&](uint32_t maxSerial, bool drawAll) // FEAT-RD8
         {
             const uint32_t maxS = maxSerial & 0x3FFFFFFFu; // FEAT-RD10
@@ -1289,6 +1363,21 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         break;
                     totalCount += bn.count;
                     ++j;
+                }
+                if (camDump) // PROBE-RD26
+                {
+                    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+                    const size_t e2 = std::min<size_t>(static_cast<size_t>(b0.first) + totalCount, g_rdGpu.local2dScratch.size());
+                    for (size_t k = b0.first; k < e2; ++k)
+                    {
+                        const float *pp = g_rdGpu.local2dScratch[k].pos;
+                        x0 = std::min(x0, pp[0]); x1 = std::max(x1, pp[0]);
+                        y0 = std::min(y0, pp[1]); y1 = std::max(y1, pp[1]);
+                    }
+                    x0 = std::max(0.0f, std::min(x0, fbSize[0])); x1 = std::max(0.0f, std::min(x1, fbSize[0]));
+                    y0 = std::max(0.0f, std::min(y0, fbSize[1])); y1 = std::max(0.0f, std::min(y1, fbSize[1]));
+                    const bool big2 = (x1 - x0) * (y1 - y0) > 0.20f * fbSize[0] * fbSize[1];
+                    g_camTl.add2d(big2, b0.afterSerial, totalCount / 3u, x0, y0, x1, y1, b0.zbuf, b0.test, b0.frame, b0.alpha, b0.prim);
                 }
                 rlDrawVertexArray(static_cast<int>(b0.first), static_cast<int>(totalCount));
                 ++draws2dThisFrame;
@@ -1587,6 +1676,41 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         rd24Ref.emplace_back(buf);
                 }
             }
+            if (camDump) // PROBE-RD26
+            {
+                const std::vector<RdVert> &pv = g_rd24Verts[db.slotIdx];
+                const std::vector<uint16_t> &pi = g_rd24Idx[db.slotIdx];
+                uint64_t xoC = 0ull;
+                ps2xRdLookupXyoff(batch.kickSerial, xoC);
+                const float offx = static_cast<float>(xoC & 0xFFFFull);
+                const float offy = static_cast<float>((xoC >> 32) & 0xFFFFull);
+                float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+                const size_t endI = static_cast<size_t>(batch.first) + batch.count;
+                if (endI <= pi.size() && batch.vpS[0] != 0.0f && batch.vpS[1] != 0.0f)
+                {
+                    for (size_t k = batch.first; k < endI; ++k)
+                    {
+                        const uint32_t vi = static_cast<uint32_t>(pi[k]) + batch.baseVertex;
+                        if (vi >= pv.size())
+                            continue;
+                        const float *pp = pv[vi].pos;
+                        const float pw = pp[3];
+                        if (pw <= 0.0f)
+                            continue;
+                        const float px = (pp[0] * batch.vpS[0] + pw * batch.vpO[0] - pw * offx * (1.0f / 16.0f)) / pw;
+                        const float py = (pp[1] * batch.vpS[1] + pw * batch.vpO[1] - pw * offy * (1.0f / 16.0f)) / pw;
+                        x0 = std::min(x0, px); x1 = std::max(x1, px);
+                        y0 = std::min(y0, py); y1 = std::max(y1, py);
+                    }
+                }
+                const bool hb = (x1 >= x0 && y1 >= y0);
+                if (hb)
+                {
+                    x0 = std::max(0.0f, std::min(x0, fbSize[0])); x1 = std::max(0.0f, std::min(x1, fbSize[0]));
+                    y0 = std::max(0.0f, std::min(y0, fbSize[1])); y1 = std::max(0.0f, std::min(y1, fbSize[1]));
+                }
+                g_camTl.add3d(batch.camHash, batch.kickSerial, batch.count / 3u, x0, y0, x1, y1, hb);
+            }
             rlDrawVertexArrayElements(static_cast<int>(batch.first), static_cast<int>(batch.count), nullptr); // FEAT-RD14
         }
         if (rd24Dump) // PROBE-RD24
@@ -1600,6 +1724,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             }
         }
         draw2dUntil(0u, true); // FEAT-RD8
+        if (camDump) // PROBE-RD26
+            g_camTl.finish();
         if (scisOn) // FEAT-RD22
         {
             rlDisableScissorTest();

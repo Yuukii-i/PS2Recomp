@@ -40,6 +40,7 @@ struct RdBatch // FEAT-RD2 // FEAT-RD14
     uint32_t kickSerial; // FEAT-RD5
     float vpS[2]; // FEAT-RD21
     float vpO[2]; // FEAT-RD21
+    uint32_t camHash; // PROBE-RD26
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
@@ -669,6 +670,7 @@ struct SceneFrame
     float vpOffsetZ = 0.0f;           // FEAT-RD14
     float curVpS[2] = {0.0f, 0.0f};   // FEAT-RD21
     float curVpO[2] = {0.0f, 0.0f};   // FEAT-RD21
+    uint32_t curCamHash = 0u;         // PROBE-RD26
     void clear()
     {
         frameIndex = 0;
@@ -1568,8 +1570,19 @@ inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba) // FEAT-RD14
     return rv;
 }
 
-inline bool beginLeanDraw(SceneFrame &f, uint32_t vertCount, __m128 c1v, __m128 c2v) // FEAT-RD14
+inline bool beginLeanDraw(const uint8_t *vu, SceneFrame &f, uint32_t vertCount, __m128 c1v, __m128 c2v) // FEAT-RD14
 {
+    static const bool s_camLog = []{ const char *e = std::getenv("PS2X_RD_CAMLOG"); return e && e[0] == '1'; }(); // PROBE-RD26
+    if (s_camLog) // PROBE-RD26: FNV-1a of camera quads 998..1001
+    {
+        uint32_t h = 2166136261u; // PROBE-RD26
+        for (uint32_t q = 998u; q <= 1001u; ++q) // PROBE-RD26
+        {
+            const uint8_t *cp = vu + ((q & 0x3FFu) << 4); // PROBE-RD26
+            for (uint32_t i = 0; i < 16u; ++i) { h ^= cp[i]; h *= 16777619u; } // PROBE-RD26
+        }
+        f.curCamHash = h; // PROBE-RD26
+    }
     ++f.leanDraws;
     alignas(16) float vps[4];
     _mm_store_ps(vps, c1v);
@@ -1613,7 +1626,7 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
         if (rdSerialsCanMerge(last.kickSerial, kickSerial) &&
             last.alpha == alpha && last.test == test && last.frame == frame && last.zbuf == zbuf &&
             last.prim == prim && last.tex0 == tex0 && last.clamp == clamp && last.tex1 == tex1 && last.texa == texa &&
-            last.vpS[0] == f.curVpS[0] && last.vpS[1] == f.curVpS[1] && last.vpO[0] == f.curVpO[0] && last.vpO[1] == f.curVpO[1]) // FEAT-RD17 // FEAT-RD21
+            last.vpS[0] == f.curVpS[0] && last.vpS[1] == f.curVpS[1] && last.vpO[0] == f.curVpO[0] && last.vpO[1] == f.curVpO[1] && last.camHash == f.curCamHash) // FEAT-RD17 // FEAT-RD21 // PROBE-RD26
         {
             if (last.kickSerial != kickSerial) // FEAT-RD17
                 ::g_rdMergedSpan.fetch_add(1u, std::memory_order_relaxed);
@@ -1622,7 +1635,7 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
         }
     }
     f.rdBatches.push_back(::RdBatch{firstIndex, indexCount, 0u, alpha, test, frame, zbuf, prim, tex0, clamp, tex1, texa, kickSerial,
-                                    {f.curVpS[0], f.curVpS[1]}, {f.curVpO[0], f.curVpO[1]}}); // FEAT-RD21
+                                    {f.curVpS[0], f.curVpS[1]}, {f.curVpO[0], f.curVpO[1]}, f.curCamHash}); // FEAT-RD21 // PROBE-RD26
 }
 
 inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
@@ -1631,7 +1644,7 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     if (leanRdOn()) // FEAT-RD14
     {
-        if (!beginLeanDraw(f, static_cast<uint32_t>(polyCount), c1v, c2v))
+        if (!beginLeanDraw(vu, f, static_cast<uint32_t>(polyCount), c1v, c2v))
             return;
         const size_t v0 = f.rdVerts.size();
         const size_t i0 = f.rdIndices.size();
@@ -1674,7 +1687,7 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
         sv.screenXyz[0] = xyzw[0];
         sv.screenXyz[1] = xyzw[1];
         sv.screenXyz[2] = xyzw[2];
-        sv.adc = ldw(vu, qOut, 3u);
+        sv.adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FEAT-RD27
     }
     if (checkOn())
         checkDraw(d, f.vertices.data() + v0);
@@ -1686,7 +1699,7 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     if (leanRdOn()) // FEAT-RD14
     {
-        if (!beginLeanDraw(f, static_cast<uint32_t>(N), c1v, c2v))
+        if (!beginLeanDraw(vu, f, static_cast<uint32_t>(N), c1v, c2v))
             return;
         const size_t v0 = f.rdVerts.size();
         const size_t i0 = f.rdIndices.size();
@@ -1744,7 +1757,7 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     if (leanRdOn()) // FEAT-RD14
     {
-        if (!beginLeanDraw(f, static_cast<uint32_t>(N), c1v, c2v))
+        if (!beginLeanDraw(vu, f, static_cast<uint32_t>(N), c1v, c2v))
             return;
         const size_t v0 = f.rdVerts.size();
         const size_t i0 = f.rdIndices.size();
@@ -1762,7 +1775,7 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
                 ldqi(vu, qOut + 2u));
             if (v >= 2)
             {
-                const uint32_t adc = ldw(vu, qOut, 3u);
+                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FEAT-RD27
                 if (!(adc & 0x8000u))
                 {
                     f.rdIndices.push_back(base + static_cast<uint32_t>(v - 2));
@@ -1791,7 +1804,7 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
         sv.screenXyz[0] = xyzw[0];
         sv.screenXyz[1] = xyzw[1];
         sv.screenXyz[2] = xyzw[2];
-        sv.adc = ldw(vu, qOut, 3u);
+        sv.adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FEAT-RD27
     }
     if (checkOn())
         checkDraw(d, f.vertices.data() + v0);
