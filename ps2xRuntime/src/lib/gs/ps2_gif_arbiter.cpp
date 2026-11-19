@@ -123,10 +123,23 @@ GsAsyncState &gsAsync()
     return *s;
 }
 
+// PERF-PF1: lock-free cached env checks without per-call MSVC magic-static TLS guards
+static std::atomic<int8_t> s_gsAsyncEnabledCache{-1};
+static inline bool gsAsyncEnabledFast()
+{
+    int8_t v = s_gsAsyncEnabledCache.load(std::memory_order_relaxed);
+    if (v < 0)
+    {
+        const char *e = std::getenv("PS2X_GS_ASYNC");
+        v = (e && e[0] == '1') ? 1 : 0;
+        s_gsAsyncEnabledCache.store(v, std::memory_order_relaxed);
+    }
+    return v != 0;
+}
+
 bool gsAsyncEnabled()
 {
-    static const bool on = []() { const char *v = std::getenv("PS2X_GS_ASYNC"); return v && v[0] == '1'; }();
-    return on;
+    return gsAsyncEnabledFast();
 }
 
 bool gsBatchPopEnabled()
@@ -187,9 +200,12 @@ thread_local std::vector<uint8_t> t_gsCoalesce;
 constexpr size_t kGifCoalesceChunk = 64u * 1024u;
 std::atomic<uint64_t> g_gifCoPkts{0}, g_gifCoChunks{0};
 
-bool gifCoalesceEnabled()
+static std::atomic<int8_t> s_gifCoalesceEnabledCache{-1}; // PERF-PF1
+static inline bool gifCoalesceEnabledFast()
 {
-    static const bool on = []() {
+    int8_t v = s_gifCoalesceEnabledCache.load(std::memory_order_relaxed);
+    if (v < 0)
+    {
         const char *e = std::getenv("PS2X_GIF_COALESCE");
         const bool en = !(e && e[0] == '0'); // default ON since A/B mf2 (Vif1Worker -1.25, GsWorker -1.75 ms/frame); =0 disables
         if (en)
@@ -197,9 +213,15 @@ bool gifCoalesceEnabled()
             ::ps2xSafeLog("[gifco] ON chunk=%u\n", static_cast<unsigned>(kGifCoalesceChunk));
             std::fflush(stderr);
         }
-        return en;
-    }();
-    return on;
+        v = en ? 1 : 0;
+        s_gifCoalesceEnabledCache.store(v, std::memory_order_relaxed);
+    }
+    return v != 0;
+}
+
+bool gifCoalesceEnabled()
+{
+    return gifCoalesceEnabledFast();
 }
 
 inline bool gifCoalesceOk(const uint8_t *d, uint32_t n)
@@ -401,7 +423,7 @@ void gsAsyncWorker()
 // Wait until every queued GIF packet has been processed (no-op when async is off).
 extern "C" void ps2_gs_async_fence()
 {
-    if (!gsAsyncEnabled())
+    if (!gsAsyncEnabledFast())
         return;
     gsFlushPending(); // PERF-GB
     GsAsyncState &st = gsAsync();
@@ -427,7 +449,7 @@ extern "C" void ps2_gs_async_stats(uint64_t *out) // PROBE-GQ: busy, idle ticks,
 // PERF-GB: batch mode for the calling thread (VIF1 worker, around one job); turning it off flushes.
 extern "C" void ps2_gs_async_batch(bool on)
 {
-    if (!gsAsyncEnabled())
+    if (!gsAsyncEnabledFast())
         return;
     if (!on)
         gsFlushPending();
@@ -437,7 +459,7 @@ extern "C" void ps2_gs_async_batch(bool on)
 // PERF-JF: ticket = number of packets handed to the async worker so far (0 when async is off / not started).
 extern "C" uint64_t ps2_gs_async_ticket()
 {
-    if (!gsAsyncEnabled())
+    if (!gsAsyncEnabledFast())
         return 0;
     GsAsyncState &st = gsAsync();
     std::lock_guard<std::mutex> lock(st.m);
@@ -481,7 +503,7 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
 
-    if ((pathId == GifPathId::Path1 || pathId == GifPathId::Path2) && t_gsBatch && m_queue.empty() && gifCoalesceEnabled() && gsAsyncEnabled() &&
+    if ((pathId == GifPathId::Path1 || pathId == GifPathId::Path2) && t_gsBatch && m_queue.empty() && gifCoalesceEnabledFast() && gsAsyncEnabledFast() &&
         s_gsAsyncStarted.load(std::memory_order_acquire) && gifCoalesceOk(data, sizeBytes)) // PERF-MF
     {
         if (!t_gsCoalesce.empty() && t_gsCoalesce.size() + sizeBytes > kGifCoalesceChunk)
@@ -498,7 +520,7 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     }
 
     // PERF-V1I: large pre-batched Path1 packets (> kGifCoalesceChunk) go straight to t_gsPending so m_queue stays empty
-    if (pathId == GifPathId::Path1 && sizeBytes > kGifCoalesceChunk && t_gsBatch && m_queue.empty() && gsAsyncEnabled() &&
+    if (pathId == GifPathId::Path1 && sizeBytes > kGifCoalesceChunk && t_gsBatch && m_queue.empty() && gsAsyncEnabledFast() &&
         s_gsAsyncStarted.load(std::memory_order_acquire))
     {
         gsCoalesceSeal();
@@ -540,7 +562,7 @@ void GifArbiter::drain()
                          return pathPriority(a.pathId) < pathPriority(b.pathId);
                      });
 
-    if (gsAsyncEnabled() && t_gsBatch && s_gsAsyncStarted.load(std::memory_order_acquire)) // PERF-GB
+    if (gsAsyncEnabledFast() && t_gsBatch && s_gsAsyncStarted.load(std::memory_order_acquire)) // PERF-GB
     {
         if (!m_queue.empty())
             gsCoalesceSeal(); // PERF-MF: coalesced packets are older than anything queued now
@@ -558,7 +580,7 @@ void GifArbiter::drain()
         return;
     }
 
-    if (gsAsyncEnabled())
+    if (gsAsyncEnabledFast())
     {
         GsAsyncState &st = gsAsync();
         std::unique_lock<std::mutex> lock(st.m);
