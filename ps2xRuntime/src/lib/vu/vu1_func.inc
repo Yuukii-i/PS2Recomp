@@ -23,10 +23,11 @@ struct RdVert // FEAT-RD1
     uint8_t rgba[4];
     float uv[2]; // FEAT-RD3
 };
-struct RdBatch // FEAT-RD2
+struct RdBatch // FEAT-RD2 // FEAT-RD14
 {
     uint32_t first;
     uint32_t count;
+    uint32_t baseVertex; // FEAT-RD14
     uint64_t alpha;
     uint64_t test;
     uint64_t frame;
@@ -40,6 +41,7 @@ struct RdBatch // FEAT-RD2
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
+extern void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD14
 extern std::atomic<uint32_t> g_rdKickSerial; // FEAT-RD5
 extern uint64_t ps2xRdLookupContentId(uint32_t serial); // FEAT-RD5
 
@@ -545,6 +547,11 @@ inline int64_t dumpFrame()
     }();
     return v;
 }
+inline bool leanRdOn() // FEAT-RD14
+{
+    static const bool v = ::ps2xRdViewOn() && !checkOn() && dumpFrame() < 0;
+    return v;
+}
 
 struct SceneVertex // 80 bytes
 {
@@ -624,6 +631,14 @@ struct SceneFrame
     std::vector<SceneDraw> draws;
     std::vector<SceneGs> gs; // FEAT-RD2
     std::vector<SceneVertex> vertices;
+    std::vector<::RdVert> rdVerts;    // FEAT-RD14
+    std::vector<uint32_t> rdIndices;  // FEAT-RD14
+    std::vector<::RdBatch> rdBatches; // FEAT-RD14
+    uint32_t leanDraws = 0;           // FEAT-RD14
+    uint32_t maskedDraws = 0;         // FEAT-RD14
+    uint32_t bestVpVerts = 0;         // FEAT-RD14
+    float vpScaleZ = 0.0f;            // FEAT-RD14
+    float vpOffsetZ = 0.0f;           // FEAT-RD14
     void clear()
     {
         frameIndex = 0;
@@ -632,6 +647,14 @@ struct SceneFrame
         draws.clear();
         gs.clear(); // FEAT-RD2
         vertices.clear();
+        rdVerts.clear();   // FEAT-RD14
+        rdIndices.clear(); // FEAT-RD14
+        rdBatches.clear(); // FEAT-RD14
+        leanDraws = 0;     // FEAT-RD14
+        maskedDraws = 0;   // FEAT-RD14
+        bestVpVerts = 0;   // FEAT-RD14
+        vpScaleZ = 0.0f;   // FEAT-RD14
+        vpOffsetZ = 0.0f;  // FEAT-RD14
     }
 };
 
@@ -639,6 +662,7 @@ struct SceneState
 {
     SceneFrame bufs[2];
     uint32_t writeIdx = 0;
+    size_t mscalIdx0 = 0; // FEAT-RD14
     uint64_t frameSeq = 0;
     uint64_t lastPresentSeq = 0; // PERF-SA
     uint32_t mscalIndex = 0;
@@ -792,9 +816,16 @@ inline void setObjMatrix(__m128 r0, __m128 r1, __m128 r2, __m128 r3)
 inline void beginMscal(const uint8_t *vu, size_t &d0, size_t &v0)
 {
     const SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    t_scene.curBoneCount = 0;
+    if (leanRdOn()) // FEAT-RD14
+    {
+        d0 = f.rdBatches.size();
+        v0 = f.rdVerts.size();
+        t_scene.mscalIdx0 = f.rdIndices.size();
+        return;
+    }
     d0 = f.draws.size();
     v0 = f.vertices.size();
-    t_scene.curBoneCount = 0;
     const __m128 zero = _mm_setzero_ps();
     const __m128 m998 = ldq(vu, 998u), m999 = ldq(vu, 999u), m1000 = ldq(vu, 1000u), m1001 = ldq(vu, 1001u);
     const auto mulRow = [&](__m128 row, bool hasW) {
@@ -818,6 +849,13 @@ inline void commitMscal(uint32_t gifBytes)
 inline void rollbackMscal(size_t d0, size_t v0)
 {
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    if (leanRdOn()) // FEAT-RD14
+    {
+        f.rdBatches.resize(d0);
+        f.rdVerts.resize(v0);
+        f.rdIndices.resize(t_scene.mscalIdx0);
+        return;
+    }
     f.draws.resize(d0);
     f.gs.resize(d0); // FEAT-RD2
     f.vertices.resize(v0);
@@ -1274,37 +1312,47 @@ inline void onFlush()
         return;
     t_scene.lastPresentSeq = pseq;
     SceneFrame &cur = t_scene.bufs[t_scene.writeIdx];
-    if (cur.draws.empty() && t_scene.mscalIndex == 0u)
+    const bool lean = leanRdOn(); // FEAT-RD14
+    if ((lean ? cur.rdBatches.empty() : cur.draws.empty()) && t_scene.mscalIndex == 0u)
         return;
     cur.frameIndex = t_scene.frameSeq++;
     cur.mscalCount = t_scene.mscalIndex;
     cur.gifBytes = t_scene.frameGifBytes;
     ++t_scene.totalFrames;
-    t_scene.totalDraws += cur.draws.size();
-    t_scene.totalVerts += cur.vertices.size();
-    { // FEAT-RD2
-        static thread_local std::vector<uint64_t> t_tex0s;
-        t_tex0s.clear();
-        t_tex0s.reserve(cur.gs.size());
-        for (const SceneGs &g : cur.gs)
-        {
-            if (g.ownTex0) ++t_scene.totalOwnTex0;
-            if ((g.prim >> 4) & 1ull) ++t_scene.totalTme;
-            if ((g.prim >> 6) & 1ull) ++t_scene.totalAbe;
-            t_tex0s.push_back(g.tex0);
-        }
-        std::sort(t_tex0s.begin(), t_tex0s.end());
-        t_scene.totalDistinctTex0 += static_cast<uint64_t>(std::unique(t_tex0s.begin(), t_tex0s.end()) - t_tex0s.begin());
-    }
-
-    const int64_t df = dumpFrame();
-    if (df >= 0 && !t_scene.dumped && cur.frameIndex == static_cast<uint64_t>(df))
+    if (lean) // FEAT-RD14
     {
-        dumpSceneFrame(cur);
-        t_scene.dumped = true;
+        t_scene.totalDraws += cur.leanDraws;
+        t_scene.totalVerts += cur.rdVerts.size();
+        ::ps2xRdPublishLean(cur.rdVerts, cur.rdIndices, cur.rdBatches, 0u, cur.maskedDraws, cur.vpScaleZ, cur.vpOffsetZ);
+    }
+    else
+    {
+        t_scene.totalDraws += cur.draws.size();
+        t_scene.totalVerts += cur.vertices.size();
+        { // FEAT-RD2
+            static thread_local std::vector<uint64_t> t_tex0s;
+            t_tex0s.clear();
+            t_tex0s.reserve(cur.gs.size());
+            for (const SceneGs &g : cur.gs)
+            {
+                if (g.ownTex0) ++t_scene.totalOwnTex0;
+                if ((g.prim >> 4) & 1ull) ++t_scene.totalTme;
+                if ((g.prim >> 6) & 1ull) ++t_scene.totalAbe;
+                t_tex0s.push_back(g.tex0);
+            }
+            std::sort(t_tex0s.begin(), t_tex0s.end());
+            t_scene.totalDistinctTex0 += static_cast<uint64_t>(std::unique(t_tex0s.begin(), t_tex0s.end()) - t_tex0s.begin());
+        }
+
+        const int64_t df = dumpFrame();
+        if (df >= 0 && !t_scene.dumped && cur.frameIndex == static_cast<uint64_t>(df))
+        {
+            dumpSceneFrame(cur);
+            t_scene.dumped = true;
+        }
     }
 
-    if (::ps2xRdViewOn()) // FEAT-RD1
+    if (!lean && ::ps2xRdViewOn()) // FEAT-RD1
     {
         static thread_local std::vector<::RdVert> t_rdTris;
         static thread_local std::vector<::RdBatch> t_rdBatches; // FEAT-RD2
@@ -1392,8 +1440,8 @@ inline void onFlush()
                     continue;
                 }
             }
-            t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, g.alpha, g.test, g.frame, g.zbuf, g.prim, g.tex0,
-                                            g.clamp, g.tex1, g.texa, g.kickSerial}); // FEAT-RD3 // FEAT-RD5
+            t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, 0u, g.alpha, g.test, g.frame, g.zbuf, g.prim, g.tex0,
+                                            g.clamp, g.tex1, g.texa, g.kickSerial}); // FEAT-RD3 // FEAT-RD5 // FEAT-RD14
         }
         ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws, vpScaleZ, vpOffsetZ); // FEAT-RD11
     }
@@ -1468,10 +1516,120 @@ inline void markGeometryKick(std::vector<uint8_t> &gif, uint32_t gifOff) // FEAT
     }
 }
 
+inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba) // FEAT-RD14
+{
+    ::RdVert rv;
+    _mm_storeu_ps(rv.pos, pos);
+    const __m128i clamped = _mm_min_epu32(rgba, _mm_set1_epi32(255));
+    const __m128i p16 = _mm_packus_epi32(clamped, clamped);
+    const __m128i p8 = _mm_packus_epi16(p16, p16);
+    const uint32_t packed = static_cast<uint32_t>(_mm_cvtsi128_si32(p8));
+    std::memcpy(rv.rgba, &packed, 4);
+    alignas(16) float s[4];
+    _mm_store_ps(s, stq);
+    if (s[2] != 0.0f)
+    {
+        rv.uv[0] = s[0] / s[2];
+        rv.uv[1] = s[1] / s[2];
+    }
+    else
+    {
+        rv.uv[0] = 0.0f;
+        rv.uv[1] = 0.0f;
+    }
+    return rv;
+}
+
+inline bool beginLeanDraw(SceneFrame &f, uint32_t vertCount, __m128 c1v, __m128 c2v) // FEAT-RD14
+{
+    ++f.leanDraws;
+    alignas(16) float vps[4];
+    _mm_store_ps(vps, c1v);
+    if (vertCount > f.bestVpVerts && vps[2] != 0.0f)
+    {
+        alignas(16) float vpo[4];
+        _mm_store_ps(vpo, c2v);
+        f.bestVpVerts = vertCount;
+        f.vpScaleZ = vps[2];
+        f.vpOffsetZ = vpo[2];
+    }
+    const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull);
+    if (static_cast<uint32_t>(t_scene.gs.frame[ctxt] >> 32) == 0xFFFFFFFFu)
+    {
+        ++f.maskedDraws;
+        return false;
+    }
+    return true;
+}
+
+inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCount) // FEAT-RD14
+{
+    if (indexCount == 0u)
+        return;
+    const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull);
+    const uint64_t prim = t_scene.gs.prim;
+    const uint64_t tex0 = t_scene.gs.tex0[ctxt];
+    const uint64_t clamp = t_scene.gs.clamp[ctxt];
+    const uint64_t tex1 = t_scene.gs.tex1[ctxt];
+    const uint64_t alpha = t_scene.gs.alpha[ctxt];
+    const uint64_t test = t_scene.gs.test[ctxt];
+    const uint64_t frame = t_scene.gs.frame[ctxt];
+    const uint64_t zbuf = t_scene.gs.zbuf[ctxt];
+    const uint64_t texa = t_scene.gs.texa;
+    const uint32_t kickSerial = t_scene.curKickSerial;
+    if (!f.rdBatches.empty())
+    {
+        ::RdBatch &last = f.rdBatches.back();
+        bool serialMatch = (last.kickSerial == kickSerial);
+        if (!serialMatch && last.kickSerial != 0u && kickSerial != 0u)
+        {
+            const uint64_t c0 = ::ps2xRdLookupContentId(last.kickSerial);
+            const uint64_t c1 = ::ps2xRdLookupContentId(kickSerial);
+            serialMatch = (c0 != 0ull && c0 == c1);
+        }
+        if (serialMatch && last.alpha == alpha && last.test == test && last.frame == frame && last.zbuf == zbuf &&
+            last.prim == prim && last.tex0 == tex0 && last.clamp == clamp && last.tex1 == tex1 && last.texa == texa)
+        {
+            last.count += indexCount;
+            return;
+        }
+    }
+    f.rdBatches.push_back(::RdBatch{firstIndex, indexCount, 0u, alpha, test, frame, zbuf, prim, tex0, clamp, tex1, texa, kickSerial});
+}
+
 inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
 {
     markGeometryKick(gif, gifOff); // FEAT-RD10
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    if (leanRdOn()) // FEAT-RD14
+    {
+        if (!beginLeanDraw(f, static_cast<uint32_t>(polyCount), c1v, c2v))
+            return;
+        const size_t v0 = f.rdVerts.size();
+        const size_t i0 = f.rdIndices.size();
+        f.rdVerts.resize(v0 + static_cast<size_t>(polyCount));
+        for (int32_t k = 0; k < polyCount; ++k)
+        {
+            const uint32_t qOut = 877u + 4u * static_cast<uint32_t>(k);
+            f.rdVerts[v0 + static_cast<size_t>(k)] = makeRdVert(
+                ldq(vu, 918u + 3u * static_cast<uint32_t>(k)),
+                ldq(vu, qOut + 1u),
+                ldqi(vu, qOut + 2u));
+        }
+        if (polyCount >= 3)
+        {
+            f.rdIndices.reserve(i0 + static_cast<size_t>(polyCount - 2) * 3u);
+            const uint32_t base = static_cast<uint32_t>(v0);
+            for (int32_t k = 2; k < polyCount; ++k)
+            {
+                f.rdIndices.push_back(base);
+                f.rdIndices.push_back(base + static_cast<uint32_t>(k - 1));
+                f.rdIndices.push_back(base + static_cast<uint32_t>(k));
+            }
+        }
+        pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
+        return;
+    }
     const SceneDraw &d = pushDraw(f, 0x2900u, gifOff, gifLen, static_cast<uint32_t>(polyCount), 0u, 4u | (copyS ? 2u : 0u), c1v, c2v);
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(polyCount));
@@ -1498,6 +1656,37 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
 {
     markGeometryKick(gif, gifOff); // FEAT-RD10
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    if (leanRdOn()) // FEAT-RD14
+    {
+        if (!beginLeanDraw(f, static_cast<uint32_t>(N), c1v, c2v))
+            return;
+        const size_t v0 = f.rdVerts.size();
+        const size_t i0 = f.rdIndices.size();
+        f.rdVerts.resize(v0 + static_cast<size_t>(N));
+        if (N >= 3)
+            f.rdIndices.reserve(i0 + static_cast<size_t>(N - 2) * 3u);
+        const uint32_t base = static_cast<uint32_t>(v0);
+        for (int32_t j = 0; j < N; ++j)
+        {
+            const uint32_t qOut = (e7 + 1u + 4u * static_cast<uint32_t>(j)) & 0x3FFu;
+            f.rdVerts[v0 + static_cast<size_t>(j)] = makeRdVert(
+                Ps[j],
+                ldq(vu, (qOut + 1u) & 0x3FFu),
+                ldqi(vu, (qOut + 2u) & 0x3FFu));
+            if (j >= 2)
+            {
+                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u);
+                if (!(adc & 0x8000u))
+                {
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(j - 2));
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(j - 1));
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(j));
+                }
+            }
+        }
+        pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
+        return;
+    }
     const SceneDraw &d = pushDraw(f, 0x2440u, gifOff, gifLen, static_cast<uint32_t>(N), 0u, copyS ? 2u : 0u, c1v, c2v);
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(N));
@@ -1525,6 +1714,38 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
 {
     markGeometryKick(gif, gifOff); // FEAT-RD10
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    if (leanRdOn()) // FEAT-RD14
+    {
+        if (!beginLeanDraw(f, static_cast<uint32_t>(N), c1v, c2v))
+            return;
+        const size_t v0 = f.rdVerts.size();
+        const size_t i0 = f.rdIndices.size();
+        f.rdVerts.resize(v0 + static_cast<size_t>(N));
+        if (N >= 3)
+            f.rdIndices.reserve(i0 + static_cast<size_t>(N - 2) * 3u);
+        const uint32_t base = static_cast<uint32_t>(v0);
+        for (int32_t v = 0; v < N; ++v)
+        {
+            const uint32_t qOut = ubase + 1u + 4u * static_cast<uint32_t>(v);
+            const int32_t idx = static_cast<int16_t>(ilw(vu, (i4base + static_cast<uint32_t>(v)) & 0x3FFu, 0u));
+            f.rdVerts[v0 + static_cast<size_t>(v)] = makeRdVert(
+                ldq(vu, (636u + static_cast<uint32_t>(idx)) & 0x3FFu),
+                ldq(vu, qOut + 1u),
+                ldqi(vu, qOut + 2u));
+            if (v >= 2)
+            {
+                const uint32_t adc = ldw(vu, qOut, 3u);
+                if (!(adc & 0x8000u))
+                {
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(v - 2));
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(v - 1));
+                    f.rdIndices.push_back(base + static_cast<uint32_t>(v));
+                }
+            }
+        }
+        pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
+        return;
+    }
     const SceneDraw &d = pushDraw(f, vi10 ? 0x1EF0u : 0x1EE0u, gifOff, gifLen, static_cast<uint32_t>(N), t_scene.curBoneCount, 1u | (vi10 ? 2u : 0u), c1v, c2v);
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(N));
