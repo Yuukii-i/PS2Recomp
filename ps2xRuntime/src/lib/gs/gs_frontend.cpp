@@ -82,6 +82,20 @@ static uint32_t s_rdLastNonZeroSerial = 0u; // FEAT-RD8
 static uint32_t s_rdMainFbp = 0xFFFFFFFFu;  // FEAT-RD8b
 static uint32_t s_rd2dTexCounter = 1u;      // FEAT-RD8
 bool g_rdCurDrawIsGeom = false;             // FEAT-RD18
+static std::atomic<uint64_t> s_rdFastGeomQwords{0ull}; // FEAT-RD38
+static uint32_t s_rdFastGeomLastSerial = 0u;           // FEAT-RD38
+static inline bool rdFastGeomOn()                      // FEAT-RD38
+{
+    static const bool enabled = []() {
+        const char *e = std::getenv("PS2X_RD_FASTGEOM");
+        return !(e && e[0] == '0'); // FEAT-RD38: default ON, PS2X_RD_FASTGEOM=0 disables
+    }();
+    return enabled && ps2xRdTakeoverOn();
+}
+static inline bool rdIsPureVertexPackedReg(uint8_t reg) // FEAT-RD38
+{
+    return (reg >= 0x01u && reg <= 0x05u) || reg == 0x0Au || reg == 0x0Cu || reg == 0x0Du || reg == 0x0Fu;
+}
 bool g_rdClassicPresentRequested = false;   // FEAT-RD18
 std::atomic<bool> g_rdFrameIsClassic{false}; // FEAT-RD18
 extern std::atomic<uint32_t> g_rdRepeatFrames;       // FEAT-RD33c
@@ -1632,11 +1646,13 @@ void GS::latchHostPresentationFrame()
                 s_rdFlipLogT = flipNow;
                 const uint32_t totF = s_rdClassicFrames + s_rdRdFrames;
                 const double fr = totF ? static_cast<double>(totF) : 1.0;
-                ps2xSafeLog("[rd] classicFrames=%u rdFrames=%u 2dKeptAtFlip=%.1f 2dDroppedAtFlip=%.1f\n",
+                const uint32_t fgQwords = static_cast<uint32_t>(s_rdFastGeomQwords.exchange(0ull, std::memory_order_relaxed)); // FEAT-RD38
+                ps2xSafeLog("[rd] classicFrames=%u rdFrames=%u 2dKeptAtFlip=%.1f 2dDroppedAtFlip=%.1f fastGeomQwords=%u\n",
                             s_rdClassicFrames,
                             s_rdRdFrames,
                             static_cast<double>(s_rd2dKeptAtFlip) / fr,
-                            static_cast<double>(s_rd2dDroppedAtFlip) / fr);
+                            static_cast<double>(s_rd2dDroppedAtFlip) / fr,
+                            fgQwords);
             }
         }
         ps2_gt_count(4, 1); // PROBE-GT: latched
@@ -1869,8 +1885,85 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         const uint32_t gifStatDataOffset = offset;
         const uint64_t gifStatTsc0 = s_gifStatOn ? __rdtsc() : 0ull;
 
+        bool fastGeomEligible = false; // FEAT-RD38
+        if (nloop > 0u && rdFastGeomOn() && (s_rdCurSerial & 0x40000000u) != 0u &&
+            (flg == GIF_FMT_PACKED || flg == GIF_FMT_REGLIST))
+        {
+            const GSContext &fgCtx = m_ctx[m_prim.ctxt ? 1 : 0];
+            const uint32_t fgScW = static_cast<uint32_t>(fgCtx.scissor.x1) + 1u - fgCtx.scissor.x0;
+            const uint32_t fgScH = static_cast<uint32_t>(fgCtx.scissor.y1) + 1u - fgCtx.scissor.y0;
+            const uint64_t fgXyoff = static_cast<uint64_t>(fgCtx.xyoffset.ofx) |
+                                     (static_cast<uint64_t>(fgCtx.xyoffset.ofy) << 32);
+            fastGeomEligible = (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(fgCtx.frame.fbp)) &&
+                               rdScissorQualifies(fgScW, fgScH) &&
+                               ps2xRdIsMainPass(fgCtx.frame.fbp, fgXyoff);
+        }
+
         if (flg == GIF_FMT_PACKED)
         {
+            if (fastGeomEligible) // FEAT-RD38
+            {
+                bool allVertexOnly = true;
+                bool hasVertexKick = false;
+                for (uint32_t r = 0; r < nreg; ++r)
+                {
+                    const uint8_t reg = regs[r];
+                    if (!rdIsPureVertexPackedReg(reg))
+                        allVertexOnly = false;
+                    if (reg == 0x04u || reg == 0x05u)
+                        hasVertexKick = true;
+                }
+                if (allVertexOnly)
+                {
+                    const uint32_t qwords = nloop * nreg;
+                    const uint32_t skipBytes = qwords * 16u;
+                    if (offset + skipBytes > sizeBytes)
+                        return;
+                    offset += skipBytes;
+                    s_rdFastGeomQwords.fetch_add(qwords, std::memory_order_relaxed);
+                    if (hasVertexKick && (s_rdFastGeomLastSerial != s_rdCurSerial || m_stateDirty))
+                    {
+                        s_rdFastGeomLastSerial = s_rdCurSerial;
+                        refreshDrawBatch(0);
+                        queueDraw(m_drawBatch);
+                    }
+                }
+                else
+                {
+                    uint64_t skippedQwords = 0ull;
+                    for (uint32_t loop = 0; loop < nloop; ++loop)
+                    {
+                        for (uint32_t r = 0; r < nreg; ++r)
+                        {
+                            if (offset + 16 > sizeBytes)
+                                return;
+                            const uint8_t reg = regs[r];
+                            if (rdIsPureVertexPackedReg(reg))
+                            {
+                                offset += 16;
+                                ++skippedQwords;
+                            }
+                            else
+                            {
+                                uint64_t lo = loadLE64(data + offset);
+                                uint64_t hi = loadLE64(data + offset + 8);
+                                offset += 16;
+                                writeRegisterPacked(reg, lo, hi);
+                            }
+                        }
+                    }
+                    if (skippedQwords != 0ull)
+                        s_rdFastGeomQwords.fetch_add(skippedQwords, std::memory_order_relaxed);
+                    if (hasVertexKick && (s_rdFastGeomLastSerial != s_rdCurSerial || m_stateDirty))
+                    {
+                        s_rdFastGeomLastSerial = s_rdCurSerial;
+                        refreshDrawBatch(0);
+                        queueDraw(m_drawBatch);
+                    }
+                }
+            }
+            else
+            {
             const bool isDominantShape = (nreg == 4u) &&
                 (((tagHi & 0xFFFFull) == 0x512Aull) || ((tagHi & 0xFFFFull) == 0x412Aull));
 
@@ -2131,9 +2224,68 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
                     }
                 }
             }
+            }
         }
         else if (flg == GIF_FMT_REGLIST)
         {
+            if (fastGeomEligible) // FEAT-RD38
+            {
+                bool allVertexOnly = true;
+                bool hasVertexKick = false;
+                for (uint32_t r = 0; r < nreg; ++r)
+                {
+                    const uint8_t reg = regs[r];
+                    if (!rdIsPureVertexPackedReg(reg))
+                        allVertexOnly = false;
+                    if (reg == 0x04u || reg == 0x05u)
+                        hasVertexKick = true;
+                }
+                const uint32_t totalItems = nloop * nreg;
+                if (allVertexOnly)
+                {
+                    const uint32_t payloadBytes = totalItems * 8u;
+                    const uint32_t padBytes = (totalItems & 1u) ? 8u : 0u;
+                    if (offset + payloadBytes + padBytes > sizeBytes)
+                        return;
+                    offset += payloadBytes + padBytes;
+                    s_rdFastGeomQwords.fetch_add((payloadBytes + padBytes) / 16u, std::memory_order_relaxed);
+                }
+                else
+                {
+                    uint64_t skippedItems = 0ull;
+                    for (uint32_t loop = 0; loop < nloop; ++loop)
+                    {
+                        for (uint32_t r = 0; r < nreg; ++r)
+                        {
+                            if (offset + 8 > sizeBytes)
+                                return;
+                            const uint8_t reg = regs[r];
+                            if (rdIsPureVertexPackedReg(reg))
+                            {
+                                offset += 8;
+                                ++skippedItems;
+                            }
+                            else
+                            {
+                                writeRegisterUnlocked(reg, loadLE64(data + offset));
+                                offset += 8;
+                            }
+                        }
+                    }
+                    if (totalItems & 1u)
+                        offset += 8;
+                    if (skippedItems != 0ull)
+                        s_rdFastGeomQwords.fetch_add(skippedItems / 2ull, std::memory_order_relaxed);
+                }
+                if (hasVertexKick && (s_rdFastGeomLastSerial != s_rdCurSerial || m_stateDirty))
+                {
+                    s_rdFastGeomLastSerial = s_rdCurSerial;
+                    refreshDrawBatch(0);
+                    queueDraw(m_drawBatch);
+                }
+            }
+            else
+            {
             for (uint32_t loop = 0; loop < nloop; ++loop)
             {
                 for (uint32_t r = 0; r < nreg; ++r)
@@ -2146,6 +2298,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             }
             if ((nloop * nreg) & 1)
                 offset += 8;
+            }
         }
         else if (flg == GIF_FMT_IMAGE)
         {
@@ -2157,7 +2310,10 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         }
 
         if (ps2xRdViewOn() && ((tagLo >> 15) & 1ull) != 0ull) // FEAT-RD5
+        {
             s_rdCurSerial = 0u;
+            s_rdFastGeomLastSerial = 0u; // FEAT-RD38
+        }
 
         if (s_gifStatOn)
         {
