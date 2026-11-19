@@ -300,6 +300,7 @@ struct Entry // PROBE-RD39
 struct St // PROBE-RD39
 {
     uint64_t totalT = 0, takenT = 0, fallbackT = 0, recT = 0, undoT = 0, frames = 0;
+    uint64_t eeHdr = 0, eeVerts = 0, eeRec = 0, eeKick = 0, eeRest = 0, eeNSum = 0, eeCalls = 0; // PROBE-RD41
     Entry entries[64] = {};
     uint32_t nEntries = 0;
     uint32_t tick = 0;
@@ -384,9 +385,12 @@ inline void maybeReport() // PROBE-RD39
         pos += std::snprintf(topBuf + pos, sizeof(topBuf) - static_cast<size_t>(pos), "%s%04X:%.2f/%.1f",
                              i ? " " : "", sorted[i].pc, sorted[i].ticks * k, static_cast<double>(sorted[i].calls) / fr);
     }
-    ::ps2xSafeLog("[vu1h] total=%.2f taken=%.2f fallback=%.2f rec=%.2f undo=%.2f | top: %s\n",
-                  g_st.totalT * k, g_st.takenT * k, g_st.fallbackT * k, g_st.recT * k, g_st.undoT * k, topBuf);
+    const double avgN = g_st.eeCalls ? (static_cast<double>(g_st.eeNSum) / static_cast<double>(g_st.eeCalls)) : 0.0; // PROBE-RD41
+    ::ps2xSafeLog("[vu1h] total=%.2f taken=%.2f fallback=%.2f rec=%.2f undo=%.2f 1ee0split hdr=%.2f verts=%.2f rec=%.2f kick=%.2f rest=%.2f avgN=%.1f | top: %s\n",
+                  g_st.totalT * k, g_st.takenT * k, g_st.fallbackT * k, g_st.recT * k, g_st.undoT * k,
+                  g_st.eeHdr * k, g_st.eeVerts * k, g_st.eeRec * k, g_st.eeKick * k, g_st.eeRest * k, avgN, topBuf); // PROBE-RD41
     g_st.totalT = g_st.takenT = g_st.fallbackT = g_st.recT = g_st.undoT = g_st.frames = 0;
+    g_st.eeHdr = g_st.eeVerts = g_st.eeRec = g_st.eeKick = g_st.eeRest = g_st.eeNSum = g_st.eeCalls = 0; // PROBE-RD41
     g_st.nEntries = 0;
     g_st.lastPrint = now;
 }
@@ -725,24 +729,33 @@ inline bool leanSkinCheckOn() // FEAT-RD40
     }();
     return v;
 }
-inline void leanSkinNoteDraw(bool isLean, bool mismatch) // FEAT-RD40
+inline bool leanKickOn() // FEAT-RD42
+{
+    static const bool v = []() {
+        const char *e = std::getenv("PS2X_RD_LEANKICK");
+        return !(e && e[0] == '0');
+    }();
+    return v;
+}
+inline void leanSkinNoteDraw(bool isLean, bool mismatch, bool isLeanKick = false) // FEAT-RD40 // FEAT-RD42
 {
     struct Stat
     {
-        uint32_t draws = 0, lean = 0, exact = 0, mism = 0;
+        uint32_t draws = 0, lean = 0, exact = 0, mism = 0, leanKicks = 0; // FEAT-RD42
         std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
     };
     static thread_local Stat s;
     ++s.draws;
     if (isLean) ++s.lean; else ++s.exact;
     if (mismatch) ++s.mism;
+    if (isLeanKick) ++s.leanKicks; // FEAT-RD42
     if ((s.draws & 0xFFu) == 0u)
     {
         const auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration<double>(now - s.t0).count() >= 5.0)
         {
-            ::ps2xSafeLog("[leanskin] draws=%u lean=%u exact=%u mism=%u\n", s.draws, s.lean, s.exact, s.mism);
-            s.draws = s.lean = s.exact = s.mism = 0u;
+            ::ps2xSafeLog("[leanskin] draws=%u lean=%u exact=%u mism=%u leanKicks=%u\n", s.draws, s.lean, s.exact, s.mism, s.leanKicks); // FEAT-RD42
+            s.draws = s.lean = s.exact = s.mism = s.leanKicks = 0u; // FEAT-RD42
             s.t0 = now;
         }
     }
@@ -1268,39 +1281,53 @@ static bool fb1EE0(int reason)
     return false;
 }
 
-static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
+static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif, bool leanTag = false) // FEAT-RD42
 {
     const uint32_t q0 = addr & 0x3FFu;
     uint32_t total = 0;
-    for (;;)
+    if (leanTag) // FEAT-RD42
     {
         uint64_t tagLo;
-        std::memcpy(&tagLo, vu + (((q0 + total / 16u) & 0x3FFu) << 4), 8);
-        const uint64_t nloop = tagLo & 0x7FFFu;
-        const uint32_t format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
-        uint64_t nreg = (tagLo >> 60) & 0xFu;
-        if (nreg == 0u)
-            nreg = 16u;
-        uint64_t tagBytes = 16u;
-        if (format == 0u)
-            tagBytes += nloop * nreg * 16u;
-        else if (format == 1u)
-            tagBytes += ((nloop * nreg + 1u) & ~1ull) * 8u;
-        else if (format == 2u)
-            tagBytes += nloop * 16u;
-        else
+        std::memcpy(&tagLo, vu + (q0 << 4), 8);
+        if (((tagLo >> 58) & 0x3u) == 3u)
         {
             s_fbPc = 0xF010u;
             return false;
         }
-        if ((tagBytes & 15u) != 0u || tagBytes > kMaxKickBytes - total)
+        total = 16u;
+    }
+    else
+    {
+        for (;;)
         {
-            s_fbPc = 0xF011u;
-            return false;
+            uint64_t tagLo;
+            std::memcpy(&tagLo, vu + (((q0 + total / 16u) & 0x3FFu) << 4), 8);
+            const uint64_t nloop = tagLo & 0x7FFFu;
+            const uint32_t format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
+            uint64_t nreg = (tagLo >> 60) & 0xFu;
+            if (nreg == 0u)
+                nreg = 16u;
+            uint64_t tagBytes = 16u;
+            if (format == 0u)
+                tagBytes += nloop * nreg * 16u;
+            else if (format == 1u)
+                tagBytes += ((nloop * nreg + 1u) & ~1ull) * 8u;
+            else if (format == 2u)
+                tagBytes += nloop * 16u;
+            else
+            {
+                s_fbPc = 0xF010u;
+                return false;
+            }
+            if ((tagBytes & 15u) != 0u || tagBytes > kMaxKickBytes - total)
+            {
+                s_fbPc = 0xF011u;
+                return false;
+            }
+            total += static_cast<uint32_t>(tagBytes);
+            if (((tagLo >> 15) & 1u) != 0u) // EOP
+                break;
         }
-        total += static_cast<uint32_t>(tagBytes);
-        if (((tagLo >> 15) & 1u) != 0u) // EOP
-            break;
     }
     uint32_t start = static_cast<uint32_t>(gif.size());
     if (scene::on() && ::ps2xRdViewOn()) // FEAT-RD5
@@ -1324,8 +1351,19 @@ static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_
     {
         gif.resize(start + total);
     }
-    for (uint32_t i = 0; i < total / 16u; ++i)
-        std::memcpy(gif.data() + start + i * 16u, vu + (((q0 + i) & 0x3FFu) << 4), 16);
+    if (leanTag) // FEAT-RD42
+    {
+        std::memcpy(gif.data() + start, vu + (q0 << 4), 16);
+        uint64_t tagLo;
+        std::memcpy(&tagLo, gif.data() + start, 8);
+        tagLo &= ~0x7FFFull; // NLOOP = 0
+        std::memcpy(gif.data() + start, &tagLo, 8);
+    }
+    else
+    {
+        for (uint32_t i = 0; i < total / 16u; ++i)
+            std::memcpy(gif.data() + start + i * 16u, vu + (((q0 + i) & 0x3FFu) << 4), 16);
+    }
     kicks.emplace_back(start, total);
     if (scene::on()) // FEAT-RD2
     {
@@ -2485,6 +2523,8 @@ static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t
 
 static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool vi10, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
 {
+    const bool hp = hprof::on(); // PROBE-RD41
+    const uint64_t tEntry = hp ? __rdtsc() : 0ull; // PROBE-RD41
     const int32_t vi1s = static_cast<int16_t>(ilw(vu, 1011, 1)); // 1F00 ILW.y vi1, 1011 (< 0: rigid path at 2440 / 2670)
     const uint16_t vi12 = R.vi[12];
     const uint16_t w1018 = ilw(vu, 1018, 3); // vi5 (before the skinned path doubles it) = vertex count N
@@ -2603,13 +2643,18 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
     const bool leanSkinEnabled = scene::leanSkinOn(); // FEAT-RD40
     const bool leanSkinCheck = scene::leanSkinCheckOn(); // FEAT-RD40
     const bool leanMainPass = (leanSkinEnabled || leanSkinCheck) && scene::isMainPassSkinned(vf27y); // FEAT-RD40
+    const uint64_t tHdrEnd = hp ? __rdtsc() : 0ull; // PROBE-RD41
     if (leanSkinEnabled && leanMainPass && !leanSkinCheck) // FEAT-RD40
     {
         logRange(vu, ubase, 1u);
         stqRaw(vu, ubase, _mm_castsi128_ps(_mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))));
         stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3));
-        if (!kick(vu, ubase, kicks, gif))
+        const uint64_t t1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
+        const bool useLeanKick = scene::leanKickOn(); // FEAT-RD42
+        if (!kick(vu, ubase, kicks, gif, useLeanKick))
             return fb1EE0(kFbSkinKick);
+        const uint64_t t2 = hp ? __rdtsc() : 0ull; // PROBE-RD41
+        uint64_t vertsT = 0; // PROBE-RD41
         { scene::RecScope rm(scene::kRpMarker); scene::markGeometryKick(gif, kicks.back().first); }
         {
             scene::RecScope rs(scene::kRpSkinned);
@@ -2625,19 +2670,34 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
                     f.rdIndices.resize(i0 + static_cast<size_t>(N - 2) * 3u);
                 }
                 uint32_t ic = 0u;
+                const uint64_t tv0 = hp ? __rdtsc() : 0ull; // PROBE-RD41
                 buildLeanSkinVerts(vu, N, vi10, s2base, s3base, idxs, vf2, vf16, k2, k16,
                                    f.rdVerts.data() + v0, N >= 3 ? f.rdIndices.data() + i0 : nullptr, static_cast<uint32_t>(v0), ic);
+                vertsT = hp ? (__rdtsc() - tv0) : 0ull; // PROBE-RD41
                 f.rdIndices.resize(i0 + ic);
                 scene::pushLeanBatch(f, static_cast<uint32_t>(i0), ic);
             }
         }
-        scene::leanSkinNoteDraw(true, false);
+        const uint64_t t3 = hp ? __rdtsc() : 0ull; // PROBE-RD41
+        scene::leanSkinNoteDraw(true, false, useLeanKick); // FEAT-RD42
         R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0));
+        if (hp) // PROBE-RD41
+        {
+            const uint64_t t4 = __rdtsc();
+            hprof::g_st.eeHdr += tHdrEnd - tEntry;
+            hprof::g_st.eeVerts += vertsT;
+            hprof::g_st.eeRec += (t3 - t2) - vertsT;
+            hprof::g_st.eeKick += t2 - t1;
+            hprof::g_st.eeRest += (t1 - tHdrEnd) + (t4 - t3);
+            hprof::g_st.eeNSum += static_cast<uint64_t>(N);
+            ++hprof::g_st.eeCalls;
+        }
         return true;
     }
     // The whole output span [ubase, ubase + 4N] is logged once (if any block falls back to interpreter, undoLog restores it), then written raw.
     logRange(vu, ubase, span);
     stqRaw(vu, ubase, _mm_castsi128_ps(_mm_set_epi32(static_cast<int>(m1012w), static_cast<int>(m1012z), static_cast<int>(vf27y), static_cast<int>(vf27x))));
+    const uint64_t tVert0 = hp ? __rdtsc() : 0ull; // PROBE-RD41
 
     // PERF-SVF / PERF-V1R: gather 8 vertices directly into Fv8V, compute, convert, and fuse output stores
     for (int32_t t0 = 0; t0 < N; t0 += 8)
@@ -2743,9 +2803,12 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
             stqRaw(vu, q0 + 3u, _mm_castsi128_ps(_mm_insert_epi32(ftoiS<16>(R7), static_cast<int32_t>(static_cast<uint32_t>(idxs[t0 + j]) & 0xFFFFu), 3)));
         }
     }
+    const uint64_t tVert1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(ctlOld), 2), static_cast<int>(ubase), 3)); // ISW.z / ISW.w toggle
+    const uint64_t tKick0 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
         return fb1EE0(kFbSkinKick);
+    const uint64_t tKick1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     if (scene::on()) // PERF-SA
     {
         scene::SceneFrame &f = scene::t_scene.bufs[scene::t_scene.writeIdx];
@@ -2784,7 +2847,19 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
         else if (leanSkinEnabled) // FEAT-RD40
             scene::leanSkinNoteDraw(false, false);
     }
+    const uint64_t tRec1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0)); // ILW.x vi12, 1(vi4) (read from VU mem: V[1] does not exist for N==1)
+    if (hp) // PROBE-RD41
+    {
+        const uint64_t tEnd = __rdtsc();
+        hprof::g_st.eeHdr += tHdrEnd - tEntry;
+        hprof::g_st.eeVerts += tVert1 - tVert0;
+        hprof::g_st.eeRec += tRec1 - tKick1;
+        hprof::g_st.eeKick += tKick1 - tKick0;
+        hprof::g_st.eeRest += (tVert0 - tHdrEnd) + (tKick0 - tVert1) + (tEnd - tRec1);
+        hprof::g_st.eeNSum += static_cast<uint64_t>(N);
+        ++hprof::g_st.eeCalls;
+    }
     return true;
 }
 

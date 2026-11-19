@@ -277,6 +277,7 @@ static uint32_t s_rd2dGMin = 0u; // FEAT-RD13
 static uint32_t s_rd2dGMax = 0u; // FEAT-RD13
 static std::vector<RdKickRec> s_rdKickRecs; // FEAT-RD33
 static uint32_t s_rdLastKickRecSerial = 0u; // FEAT-RD33
+static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, const GSTexaReg &texa, const uint8_t *localMem); // FEAT-RD42
 
 static uint64_t rdPackTex0(const GSTex0Reg &t) // FEAT-RD8
 {
@@ -1880,6 +1881,11 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         if (pre)
         {
             writeRegisterUnlocked(GS_REG_PRIM, (tagLo >> 47) & 0x7FF);
+        }
+
+        if (nloop == 0u && (s_rdCurSerial & 0x40000000u) != 0u) // FEAT-RD42
+        {
+            rdNoteKickBookkeeping(m_ctx[m_prim.ctxt ? 1 : 0], m_prim, m_texa, m_localMemoryStorage);
         }
 
         uint8_t regs[16];
@@ -3555,7 +3561,7 @@ void GS::refreshDrawBatch(int vertexCount)
     batch.vertexCount = static_cast<uint8_t>(std::min(vertexCount, 3));
 }
 
-void GS::queueDraw(const GSPrimitiveBatch &batch)
+static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, const GSTexaReg &texa, const uint8_t *localMem) // FEAT-RD42
 {
     if (ps2xRdViewOn()) // FEAT-RD13
     {
@@ -3577,27 +3583,26 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             const uint32_t maskedS = s_rdCurSerial & 0x3FFFFFFFu;
             if (maskedS != 0u)
             {
-                const uint32_t fbp = batch.state.context.frame.fbp & 0x1FFu;
-                const uint64_t xyoff = static_cast<uint64_t>(batch.state.context.xyoffset.ofx & 0xFFFFu) |
-                                       (static_cast<uint64_t>(batch.state.context.xyoffset.ofy & 0xFFFFu) << 32);
+                const uint32_t fbp = ctx.frame.fbp & 0x1FFu;
+                const uint64_t xyoff = static_cast<uint64_t>(ctx.xyoffset.ofx & 0xFFFFu) |
+                                       (static_cast<uint64_t>(ctx.xyoffset.ofy & 0xFFFFu) << 32);
                 std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
                 if (maskedS != s_rdLastKickRecSerial)
                 {
                     s_rdLastKickRecSerial = maskedS;
-                    const GSScissorReg &sc = batch.state.context.scissor; // FEAT-RD33b
+                    const GSScissorReg &sc = ctx.scissor; // FEAT-RD33b
                     s_rdKickRecs.push_back({maskedS, fbp, xyoff, static_cast<uint32_t>(sc.x1) + 1u - sc.x0, static_cast<uint32_t>(sc.y1) + 1u - sc.y0});
                 }
             }
         }
-        s_rdMainFbp = batch.state.context.frame.fbp;
-        rdNotePassKick(batch.state.context.frame.fbp, static_cast<uint64_t>(batch.state.context.xyoffset.ofx), static_cast<uint64_t>(batch.state.context.xyoffset.ofy)); // FEAT-RD23
+        s_rdMainFbp = ctx.frame.fbp;
+        rdNotePassKick(ctx.frame.fbp, static_cast<uint64_t>(ctx.xyoffset.ofx), static_cast<uint64_t>(ctx.xyoffset.ofy)); // FEAT-RD23
         s_rdFrameHasGeom.store(true, std::memory_order_relaxed);
-        if (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(batch.state.context.frame.fbp)) // FEAT-RD19
-            s_rdFrameGeomFbp.store(batch.state.context.frame.fbp, std::memory_order_relaxed); // FEAT-RD18b
+        if (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(ctx.frame.fbp)) // FEAT-RD19
+            s_rdFrameGeomFbp.store(ctx.frame.fbp, std::memory_order_relaxed); // FEAT-RD18b
     }
     if (ps2xRdViewOn() && s_rdCurSerial != 0u) // FEAT-RD17
     {
-        const GSContext &ctx = batch.state.context;
         const uint64_t rawFrame = rdPackFrame(ctx.frame);
         if (s_rdCurSerial != s_rdLastStateSerial)
         {
@@ -3607,7 +3612,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             s_rdFirstFrame = rawFrame;
             s_rdFirstTest = ctx.test;
             ps2xRdNoteState(s_rdCurSerial,
-                            rdPackPrim(batch.state.prim),
+                            rdPackPrim(prim),
                             ctx.alpha,
                             ctx.test,
                             rawFrame,
@@ -3615,7 +3620,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                             rdPackTex0(ctx.tex0),
                             ctx.tex1,
                             ctx.clamp,
-                            rdPackTexa(batch.state.texa),
+                            rdPackTexa(texa),
                             ctx.fba);
             ps2xRdNoteXyoff(s_rdCurSerial, static_cast<uint64_t>(ctx.xyoffset.ofx) | (static_cast<uint64_t>(ctx.xyoffset.ofy) << 32)); // FEAT-RD21
             ps2xRdNoteScissor(s_rdCurSerial, rdPackScissor(ctx)); // FEAT-RD22
@@ -3629,16 +3634,22 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
     }
     if (ps2xRdViewOn() && isGeomKick) // FEAT-RD5 // FEAT-RD10
     {
-        if (s_rdCurSerial != s_rdLastNotedSerial && batch.state.prim.tme)
+        if (s_rdCurSerial != s_rdLastNotedSerial && prim.tme)
         {
             s_rdLastNotedSerial = s_rdCurSerial;
-            const uint64_t rawTex0 = rdPackTex0(batch.state.context.tex0); // FEAT-RD8
-            const uint64_t rawTexa = rdPackTexa(batch.state.texa); // FEAT-RD8
+            const uint64_t rawTex0 = rdPackTex0(ctx.tex0); // FEAT-RD8
+            const uint64_t rawTexa = rdPackTexa(texa); // FEAT-RD8
             RdpScope rdpS(0); // PROBE-RDP
-            ps2xRdNoteDraw(s_rdCurSerial, rawTex0, rawTexa, m_localMemoryStorage, ps2xRdActiveClut());
+            ps2xRdNoteDraw(s_rdCurSerial, rawTex0, rawTexa, localMem, ps2xRdActiveClut());
         }
     }
-    else if (ps2xRdViewOn()) // FEAT-RD8 // FEAT-RD10 // FEAT-RD18: capture all 2D candidates; FBP filtered at flip time
+    return isGeomKick;
+}
+
+void GS::queueDraw(const GSPrimitiveBatch &batch)
+{
+    const bool isGeomKick = rdNoteKickBookkeeping(batch.state.context, batch.state.prim, batch.state.texa, m_localMemoryStorage); // FEAT-RD42
+    if (ps2xRdViewOn() && !isGeomKick) // FEAT-RD8 // FEAT-RD10 // FEAT-RD18: capture all 2D candidates; FBP filtered at flip time
     {
         const GSContext &ctx = batch.state.context;
         const GSPrimReg &prim = batch.state.prim;
