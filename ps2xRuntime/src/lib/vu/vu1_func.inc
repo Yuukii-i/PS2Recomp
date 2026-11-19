@@ -39,7 +39,7 @@ struct RdBatch // FEAT-RD2
     uint32_t kickSerial; // FEAT-RD5
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
-extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws); // FEAT-RD2
+extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
 extern std::atomic<uint32_t> g_rdKickSerial; // FEAT-RD5
 extern uint64_t ps2xRdLookupContentId(uint32_t serial); // FEAT-RD5
 
@@ -1312,6 +1312,9 @@ inline void onFlush()
         t_rdBatches.clear();
         uint32_t skippedDraws = 0;
         uint32_t maskedDraws = 0; // FEAT-RD2
+        uint32_t bestVpVerts = 0; // FEAT-RD11
+        float vpScaleZ = 0.0f;    // FEAT-RD11
+        float vpOffsetZ = 0.0f;   // FEAT-RD11
         const auto toRdVert = [](const SceneVertex &sv) -> ::RdVert {
             ::RdVert rv;
             rv.pos[0] = sv.pos[0];
@@ -1337,6 +1340,12 @@ inline void onFlush()
         {
             const SceneDraw &d = cur.draws[di];
             const SceneGs &g = cur.gs[di];
+            if (d.vertexCount > bestVpVerts && d.vpScale[2] != 0.0f) // FEAT-RD11
+            {
+                bestVpVerts = d.vertexCount;
+                vpScaleZ = d.vpScale[2];
+                vpOffsetZ = d.vpOffset[2];
+            }
             if (static_cast<uint32_t>(g.frame >> 32) == 0xFFFFFFFFu) // FEAT-RD2: FRAME.FBMSK == 0xFFFFFFFF
             {
                 ++maskedDraws;
@@ -1386,7 +1395,7 @@ inline void onFlush()
             t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, g.alpha, g.test, g.frame, g.zbuf, g.prim, g.tex0,
                                             g.clamp, g.tex1, g.texa, g.kickSerial}); // FEAT-RD3 // FEAT-RD5
         }
-        ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws);
+        ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws, vpScaleZ, vpOffsetZ); // FEAT-RD11
     }
 
     t_scene.writeIdx ^= 1u;

@@ -3097,7 +3097,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                 RdVert out{};
                 out.pos[0] = v.x - ofx;
                 out.pos[1] = v.y - ofy;
-                out.pos[2] = 0.0f;
+                out.pos[2] = static_cast<float>(v.z); // FEAT-RD11
                 out.pos[3] = 1.0f;
                 out.rgba[0] = colSrc.r;
                 out.rgba[1] = colSrc.g;
@@ -3126,8 +3126,9 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             {
                 const GSVertex &v0 = m_vtxQueue[0];
                 const GSVertex &v1 = m_vtxQueue[1];
-                const RdVert c00 = makeVert(v0, v1);
+                RdVert c00 = makeVert(v0, v1); // FEAT-RD11
                 const RdVert c11 = makeVert(v1, v1);
+                c00.pos[2] = c11.pos[2]; // FEAT-RD11: GS sprite Z comes from v1
                 RdVert c10 = c00;
                 c10.pos[0] = c11.pos[0];
                 c10.uv[0] = c11.uv[0];

@@ -62,6 +62,8 @@ std::vector<RdVert> g_rdPending;
 std::vector<RdBatch> g_rdPendingBatches; // FEAT-RD2
 uint32_t g_rdPendingSkipped = 0;
 uint32_t g_rdPendingMasked = 0; // FEAT-RD2
+float g_rdPendingVpScaleZ = 0.0f;  // FEAT-RD11
+float g_rdPendingVpOffsetZ = 0.0f; // FEAT-RD11
 bool g_rdHasPending = false;
 bool g_rdEverPublished = false;
 
@@ -93,6 +95,7 @@ struct RdGpuState
     int flipLoc = -1;
     int mode2dLoc = -1; // FEAT-RD8
     int fbSizeLoc = -1; // FEAT-RD8
+    int vpZLoc = -1;    // FEAT-RD11
     int atstLoc = -1; // FEAT-RD2
     int arefLoc = -1; // FEAT-RD2
     int samplerLoc = -1; // FEAT-RD3
@@ -111,9 +114,12 @@ struct RdGpuState
     uint64_t totalUnsupportedBlend = 0; // FEAT-RD2
     uint64_t totalApproxAd = 0; // FEAT-RD7
     uint64_t total2dDraws = 0; // FEAT-RD8
+    uint64_t total2dZtested = 0; // FEAT-RD11
     uint64_t total2dTris = 0; // FEAT-RD8
     uint64_t totalRtSkipped = 0; // FEAT-RD8
     uint64_t totalPointLineSkipped = 0; // FEAT-RD8
+    float vpScaleZ = 0.0f;  // FEAT-RD11
+    float vpOffsetZ = 0.0f; // FEAT-RD11
     int fixLoc = -1; // FEAT-RD7
     std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
 };
@@ -271,7 +277,7 @@ bool ps2xRdViewOn() // FEAT-RD1
     return v;
 }
 
-void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws) // FEAT-RD2
+void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ) // FEAT-RD2 // FEAT-RD11
 {
     static thread_local std::vector<RdVert> t_staging;
     static thread_local std::vector<RdBatch> t_batchStaging;
@@ -289,6 +295,11 @@ void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint3
     g_rdPendingBatches.swap(t_batchStaging);
     g_rdPendingSkipped = skippedDraws;
     g_rdPendingMasked = maskedDraws;
+    if (vpScaleZ != 0.0f) // FEAT-RD11
+    {
+        g_rdPendingVpScaleZ = vpScaleZ;
+        g_rdPendingVpOffsetZ = vpOffsetZ;
+    }
     g_rdHasPending = true;
     g_rdEverPublished = true;
 }
@@ -337,6 +348,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             g_rdGpu.localBatches.swap(g_rdPendingBatches); // FEAT-RD2
             g_rdGpu.lastSkippedDraws = g_rdPendingSkipped;
             g_rdGpu.lastMaskedDraws = g_rdPendingMasked; // FEAT-RD2
+            g_rdGpu.vpScaleZ = g_rdPendingVpScaleZ;      // FEAT-RD11
+            g_rdGpu.vpOffsetZ = g_rdPendingVpOffsetZ;    // FEAT-RD11
             g_rdHasPending = false;
             hasNew = true;
         }
@@ -362,11 +375,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             "uniform vec3 uFlip;\n"
             "uniform int uMode2d;\n" // FEAT-RD8
             "uniform vec2 uFbSize;\n" // FEAT-RD8
+            "uniform vec2 uVpZ;\n"    // FEAT-RD11
             "out vec4 vCol;\n"
             "out vec2 vUv;\n" // FEAT-RD3
             "void main() {\n"
             "    if (uMode2d != 0) {\n" // FEAT-RD8
-            "        gl_Position = vec4(aPos.x / uFbSize.x * 2.0 - 1.0, 1.0 - aPos.y / uFbSize.y * 2.0, 0.0, 1.0);\n"
+            "        float ndcZ = (uMode2d == 2 && abs(uVpZ.x) > 1e-6) ? ((aPos.z - uVpZ.y) / uVpZ.x) * uFlip.z : 0.0;\n" // FEAT-RD11
+            "        gl_Position = vec4(aPos.x / uFbSize.x * 2.0 - 1.0, 1.0 - aPos.y / uFbSize.y * 2.0, ndcZ, 1.0);\n"
             "    } else {\n"
             "        gl_Position = vec4(aPos.x * uFlip.x, aPos.y * uFlip.y, aPos.z * uFlip.z, aPos.w);\n"
             "    }\n"
@@ -426,6 +441,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         g_rdGpu.flipLoc = GetShaderLocation(g_rdGpu.shader, "uFlip");
         g_rdGpu.mode2dLoc = GetShaderLocation(g_rdGpu.shader, "uMode2d"); // FEAT-RD8
         g_rdGpu.fbSizeLoc = GetShaderLocation(g_rdGpu.shader, "uFbSize"); // FEAT-RD8
+        g_rdGpu.vpZLoc = GetShaderLocation(g_rdGpu.shader, "uVpZ");       // FEAT-RD11
         g_rdGpu.atstLoc = GetShaderLocation(g_rdGpu.shader, "uAtst"); // FEAT-RD2
         g_rdGpu.arefLoc = GetShaderLocation(g_rdGpu.shader, "uAref"); // FEAT-RD2
         g_rdGpu.fixLoc = GetShaderLocation(g_rdGpu.shader, "uFixAlpha"); // FEAT-RD7
@@ -493,7 +509,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     uint64_t approxAd = 0;   // FEAT-RD7
     uint64_t partialMask = 0; // FEAT-RD9
     static const bool s_draw2d = []{ const char *e = std::getenv("PS2X_RD_2D"); return !(e && e[0] == '0'); }(); // FEAT-RD9
+    static const bool s_2dDepth = []{ const char *e = std::getenv("PS2X_RD_2DZ"); return !(e && e[0] == '0'); }(); // FEAT-RD11
     uint64_t draws2dThisFrame = 0; // FEAT-RD8
+    uint64_t ztested2dThisFrame = 0; // FEAT-RD11
     if ((g_rdGpu.gpuVertCount > 0 || g_rdGpu.gpu2dVertCount > 0) && g_rdGpu.vao != 0 && g_rdGpu.shader.id != 0) // FEAT-RD8
     {
         rlEnableShader(g_rdGpu.shader.id);
@@ -506,6 +524,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         };
         if (g_rdGpu.fbSizeLoc >= 0)
             rlSetUniform(g_rdGpu.fbSizeLoc, fbSize, RL_SHADER_UNIFORM_VEC2, 1);
+        const float vpZ[2] = { g_rdGpu.vpScaleZ, g_rdGpu.vpOffsetZ }; // FEAT-RD11
+        if (g_rdGpu.vpZLoc >= 0)
+            rlSetUniform(g_rdGpu.vpZLoc, vpZ, RL_SHADER_UNIFORM_VEC2, 1);
         rlEnableVertexArray(g_rdGpu.vao);
         int prevBlend = -1; // FEAT-RD2b
         size_t i2d = 0; // FEAT-RD8
@@ -537,6 +558,34 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 {
                     ++i2d;
                     continue;
+                }
+                const uint32_t zte = static_cast<uint32_t>((b0.test >> 16) & 1ull); // FEAT-RD11
+                const uint32_t ztst = static_cast<uint32_t>((b0.test >> 17) & 3ull);
+                if (zte && ztst == 0u)
+                {
+                    ++i2d;
+                    continue;
+                }
+                const bool use2dZ = s_2dDepth && zte && (ztst == 2u || ztst == 3u) && (g_rdGpu.vpScaleZ != 0.0f);
+                const int wantMode2d = use2dZ ? 2 : 1;
+                if (wantMode2d != mode2d)
+                {
+                    mode2d = wantMode2d;
+                    if (g_rdGpu.mode2dLoc >= 0)
+                        rlSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+                }
+                if (use2dZ)
+                {
+                    rlEnableDepthTest();
+                    if ((b0.zbuf >> 32) & 1ull)
+                        rlDisableDepthMask();
+                    else
+                        rlEnableDepthMask();
+                }
+                else
+                {
+                    rlDisableDepthTest();
+                    rlDisableDepthMask();
                 }
                 applyRdFbmsk(b0.frame, true, partialMask); // FEAT-RD9
                 float fixAlpha = -1.0f;
@@ -599,6 +648,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 }
                 rlDrawVertexArray(static_cast<int>(b0.first), static_cast<int>(totalCount));
                 ++draws2dThisFrame;
+                if (use2dZ) // FEAT-RD11
+                    ++ztested2dThisFrame;
                 i2d = j;
             }
 
@@ -707,6 +758,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     g_rdGpu.totalUnsupportedBlend += unsupBlend; // FEAT-RD2
     g_rdGpu.totalApproxAd += approxAd; // FEAT-RD7
     g_rdGpu.total2dDraws += draws2dThisFrame; // FEAT-RD8
+    g_rdGpu.total2dZtested += ztested2dThisFrame; // FEAT-RD11
     g_rdGpu.total2dTris += static_cast<uint64_t>(g_rdGpu.gpu2dVertCount / 3u); // FEAT-RD8
     g_rdGpu.totalRtSkipped += static_cast<uint64_t>(g_rdGpu.lastRtSkipped); // FEAT-RD8
     g_rdGpu.totalPointLineSkipped += static_cast<uint64_t>(g_rdGpu.lastPointLineSkipped); // FEAT-RD8
@@ -727,6 +779,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     static_cast<double>(g_rdGpu.total2dTris) / fr,
                     static_cast<double>(g_rdGpu.totalRtSkipped) / fr,
                     static_cast<double>(g_rdGpu.totalPointLineSkipped) / fr); // FEAT-RD8
+        ps2xSafeLog("[rd2d] ztested/frame=%.1f vpZ=%f,%f\n",
+                    static_cast<double>(g_rdGpu.total2dZtested) / fr,
+                    g_rdGpu.vpScaleZ,
+                    g_rdGpu.vpOffsetZ); // FEAT-RD11
     }
     return true;
 }
