@@ -460,6 +460,289 @@ static void rdGsDrawLogOnFrame() // PROBE-RD60
     }
 }
 
+// PROBE-RTT0: off-screen RT + consumer + L2H/L2L census (PS2X_RD_RTTLOG=1 + logs\gslog_go.flag, <=4 blocks, <=40 lines each)
+static const bool s_rtt0LogOn = []() { // PROBE-RTT0
+    const char *e = std::getenv("PS2X_RD_RTTLOG");
+    return e && e[0] == '1';
+}();
+static std::mutex s_rtt0Mutex; // PROBE-RTT0
+static std::atomic<bool> s_rtt0Done{false}; // PROBE-RTT0
+struct Rtt0ActiveRt { uint32_t fbp, fpFirst, fpLast; }; // PROBE-RTT0
+struct Rtt0RtAgg // PROBE-RTT0
+{
+    uint64_t draws = 0u, prims = 0u;
+    int minX = 0x7fffffff, minY = 0x7fffffff, maxX = -0x7fffffff, maxY = -0x7fffffff;
+    uint32_t zt = 0u;
+};
+struct Rtt0L2hEntry // PROBE-RTT0
+{
+    uint32_t sbp, sbw, rrw, rrh, ssax, ssay;
+    uint8_t spsm, overlapsRt;
+    uint64_t count = 0u;
+};
+struct Rtt0L2lEntry // PROBE-RTT0
+{
+    uint32_t sbp, sbw, dbp, dbw, rrw, rrh, ssax, ssay, dsax, dsay;
+    uint8_t spsm, dpsm, overlapsRt;
+    uint64_t count = 0u;
+};
+static std::vector<Rtt0ActiveRt> s_rtt0CurRts, s_rtt0PrevRts; // PROBE-RTT0
+static std::unordered_map<uint64_t, Rtt0RtAgg> s_rtt0RtAgg; // PROBE-RTT0
+static std::unordered_map<uint64_t, uint64_t> s_rtt0UseAgg; // PROBE-RTT0
+static std::vector<Rtt0L2hEntry> s_rtt0L2h; // PROBE-RTT0
+static std::vector<Rtt0L2lEntry> s_rtt0L2l; // PROBE-RTT0
+static uint32_t s_rtt0WindowFrames = 0u; // PROBE-RTT0
+static int s_rtt0BlocksPrinted = 0; // PROBE-RTT0
+static const auto s_rtt0Start = std::chrono::steady_clock::now(); // PROBE-RTT0
+
+static void rtt0PageRange(uint32_t baseBlocks, uint32_t bw, uint8_t psm, uint32_t w, uint32_t h, uint32_t &fpFirst, uint32_t &fpLast) // PROBE-RTT0
+{
+    uint32_t pageH = 32u, bppNum = 4u, bppDen = 1u;
+    switch (psm)
+    {
+    case 2u: case 10u: case 50u: case 58u: pageH = 64u; bppNum = 2u; break;
+    case 19u: case 27u: pageH = 64u; bppNum = 1u; break;
+    case 20u: case 36u: case 44u: pageH = 128u; bppNum = 1u; bppDen = 2u; break;
+    default: break;
+    }
+    const uint32_t rows = std::min<uint32_t>(((std::max<uint32_t>(h, 1u) + pageH - 1u) / pageH) * pageH, 2048u);
+    const uint32_t widthPx = std::max<uint32_t>(std::max<uint32_t>(bw, 1u) * 64u, std::max<uint32_t>(w, 1u));
+    const uint64_t bytes = (static_cast<uint64_t>(widthPx) * rows * bppNum + bppDen - 1u) / bppDen;
+    fpFirst = std::min<uint32_t>((baseBlocks * 256u) / 8192u, 511u);
+    fpLast = std::min<uint32_t>(static_cast<uint32_t>((static_cast<uint64_t>(baseBlocks) * 256u + (bytes > 0u ? bytes - 1u : 0u)) / 8192u), 511u);
+    if (fpLast < fpFirst) fpLast = fpFirst;
+}
+
+static void rtt0AddActiveRtLocked(uint32_t fbp, uint32_t fpFirst, uint32_t fpLast) // PROBE-RTT0
+{
+    for (auto &rt : s_rtt0CurRts)
+    {
+        if (rt.fbp == fbp)
+        {
+            rt.fpFirst = std::min(rt.fpFirst, fpFirst);
+            rt.fpLast = std::max(rt.fpLast, fpLast);
+            return;
+        }
+    }
+    s_rtt0CurRts.push_back({fbp, fpFirst, fpLast});
+}
+
+static bool rtt0OverlapsAnyRtLocked(uint32_t fpFirst, uint32_t fpLast) // PROBE-RTT0
+{
+    for (const auto &rt : s_rtt0CurRts)
+        if (fpFirst <= rt.fpLast && fpLast >= rt.fpFirst) return true;
+    for (const auto &rt : s_rtt0PrevRts)
+        if (fpFirst <= rt.fpLast && fpLast >= rt.fpFirst) return true;
+    return false;
+}
+
+static void rtt0RecordDraw(const GSContext &ctx, const GSPrimReg &prim) // PROBE-RTT0
+{
+    if (s_rtt0Done.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lk(s_rtt0Mutex);
+    if (!ps2xRdIsDisplayFbp(ctx.frame.fbp))
+    {
+        uint32_t fpFirst = 0u, fpLast = 0u;
+        const uint32_t rtW = static_cast<uint32_t>(ctx.scissor.x1) + 1u;
+        const uint32_t rtH = static_cast<uint32_t>(ctx.scissor.y1) + 1u;
+        rtt0PageRange(ctx.frame.fbp * 32u, ctx.frame.fbw, ctx.frame.psm, rtW, rtH, fpFirst, fpLast);
+        rtt0AddActiveRtLocked(ctx.frame.fbp, fpFirst, fpLast);
+
+        const uint64_t rtKey =
+            (static_cast<uint64_t>(ctx.frame.fbp & 0x1FFu)) |
+            (static_cast<uint64_t>(ctx.frame.fbw & 0x3Fu) << 9) |
+            (static_cast<uint64_t>(ctx.frame.psm & 0x3Fu) << 15) |
+            (static_cast<uint64_t>(ctx.zbuf.zbp & 0x1FFu) << 21) |
+            (static_cast<uint64_t>(ctx.zbuf.psm & 0xFu) << 30);
+        Rtt0RtAgg &agg = s_rtt0RtAgg[rtKey];
+        ++agg.draws;
+        ++agg.prims;
+        agg.minX = std::min<int>(agg.minX, ctx.scissor.x0);
+        agg.minY = std::min<int>(agg.minY, ctx.scissor.y0);
+        agg.maxX = std::max<int>(agg.maxX, ctx.scissor.x1);
+        agg.maxY = std::max<int>(agg.maxY, ctx.scissor.y1);
+        const uint32_t zte = static_cast<uint32_t>((ctx.test >> 16u) & 1u);
+        const uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17u) & 3u);
+        agg.zt |= ((zte != 0u && ztst != 1u) ? 1u : 0u) | (ctx.zbuf.zmask == 0u ? 2u : 0u);
+    }
+
+    if (prim.tme)
+    {
+        uint32_t texFirst = 0u, texLast = 0u;
+        const uint32_t w = 1u << std::min<uint32_t>(ctx.tex0.tw, 10u);
+        const uint32_t h = 1u << std::min<uint32_t>(ctx.tex0.th, 10u);
+        rtt0PageRange(ctx.tex0.tbp0, ctx.tex0.tbw, ctx.tex0.psm, w, h, texFirst, texLast);
+
+        uint32_t matched[16]{};
+        size_t nMatched = 0u;
+        auto tryMatch = [&](const std::vector<Rtt0ActiveRt> &rts) {
+            for (const auto &rt : rts)
+            {
+                if (texFirst <= rt.fpLast && texLast >= rt.fpFirst)
+                {
+                    bool dup = false;
+                    for (size_t i = 0u; i < nMatched; ++i)
+                        if (matched[i] == rt.fbp) { dup = true; break; }
+                    if (!dup && nMatched < 16u)
+                        matched[nMatched++] = rt.fbp;
+                }
+            }
+        };
+        tryMatch(s_rtt0CurRts);
+        tryMatch(s_rtt0PrevRts);
+
+        const uint8_t tpsm = ctx.tex0.psm;
+        const uint32_t idx = (tpsm == 0x13u || tpsm == 0x14u || tpsm == 0x1Bu || tpsm == 0x24u || tpsm == 0x2Cu) ? 1u : 0u;
+        for (size_t i = 0u; i < nMatched; ++i)
+        {
+            const uint32_t rtFbp = matched[i];
+            const uint32_t off = (ctx.tex0.tbp0 >= rtFbp * 32u) ? (ctx.tex0.tbp0 - rtFbp * 32u) : 0u;
+            const uint64_t useKey =
+                (static_cast<uint64_t>(rtFbp & 0x1FFu)) |
+                (static_cast<uint64_t>(off & 0x3FFFu) << 9) |
+                (static_cast<uint64_t>(tpsm & 0x3Fu) << 23) |
+                (static_cast<uint64_t>(ctx.tex0.tw & 0xFu) << 29) |
+                (static_cast<uint64_t>(ctx.tex0.th & 0xFu) << 33) |
+                (static_cast<uint64_t>(idx & 0x1u) << 37) |
+                (static_cast<uint64_t>(ctx.frame.fbp & 0x1FFu) << 38);
+            ++s_rtt0UseAgg[useKey];
+        }
+    }
+}
+
+extern "C" void ps2x_rtt0_record_l2h(uint32_t sbp, uint32_t sbw, uint8_t spsm, uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh) // PROBE-RTT0
+{
+    if (!s_rtt0LogOn || s_rtt0Done.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lk(s_rtt0Mutex);
+    uint32_t fpFirst = 0u, fpLast = 0u;
+    rtt0PageRange(sbp, sbw, spsm, ssax + rrw, ssay + rrh, fpFirst, fpLast);
+    const uint8_t ov = rtt0OverlapsAnyRtLocked(fpFirst, fpLast) ? 1u : 0u;
+    for (auto &e : s_rtt0L2h)
+    {
+        if (e.sbp == sbp && e.sbw == sbw && e.spsm == spsm && e.rrw == rrw && e.rrh == rrh &&
+            e.ssax == ssax && e.ssay == ssay && e.overlapsRt == ov)
+        {
+            ++e.count;
+            return;
+        }
+    }
+    s_rtt0L2h.push_back({sbp, sbw, rrw, rrh, ssax, ssay, spsm, ov, 1u});
+}
+
+extern "C" void ps2x_rtt0_record_l2l(uint32_t sbp, uint32_t sbw, uint8_t spsm, uint32_t dbp, uint32_t dbw, uint8_t dpsm,
+                                      uint32_t ssax, uint32_t ssay, uint32_t dsax, uint32_t dsay, uint32_t rrw, uint32_t rrh) // PROBE-RTT0
+{
+    if (!s_rtt0LogOn || s_rtt0Done.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lk(s_rtt0Mutex);
+    uint32_t fpFirst = 0u, fpLast = 0u;
+    rtt0PageRange(sbp, sbw, spsm, ssax + rrw, ssay + rrh, fpFirst, fpLast);
+    const uint8_t ov = rtt0OverlapsAnyRtLocked(fpFirst, fpLast) ? 1u : 0u;
+    for (auto &e : s_rtt0L2l)
+    {
+        if (e.sbp == sbp && e.sbw == sbw && e.spsm == spsm && e.dbp == dbp && e.dbw == dbw && e.dpsm == dpsm &&
+            e.rrw == rrw && e.rrh == rrh && e.ssax == ssax && e.ssay == ssay && e.dsax == dsax && e.dsay == dsay && e.overlapsRt == ov)
+        {
+            ++e.count;
+            return;
+        }
+    }
+    s_rtt0L2l.push_back({sbp, sbw, dbp, dbw, rrw, rrh, ssax, ssay, dsax, dsay, spsm, dpsm, ov, 1u});
+}
+
+static void rtt0OnFrame() // PROBE-RTT0
+{
+    if (s_rtt0Done.load(std::memory_order_relaxed))
+        return;
+    std::unordered_map<uint64_t, Rtt0RtAgg> rtMap;
+    std::unordered_map<uint64_t, uint64_t> useMap;
+    std::vector<Rtt0L2hEntry> l2hVec;
+    std::vector<Rtt0L2lEntry> l2lVec;
+    uint32_t frames = 0u;
+    int blockNum = 0;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lk(s_rtt0Mutex);
+        s_rtt0PrevRts.swap(s_rtt0CurRts);
+        s_rtt0CurRts.clear();
+        ++s_rtt0WindowFrames;
+        static std::chrono::steady_clock::time_point s_lastReport = s_rtt0Start;
+        if (std::chrono::duration<double>(now - s_lastReport).count() < 1.0)
+            return;
+        s_lastReport = now;
+        FILE *f = std::fopen("logs\\gslog_go.flag", "rb");
+        if (!f)
+        {
+            s_rtt0RtAgg.clear();
+            s_rtt0UseAgg.clear();
+            s_rtt0L2h.clear();
+            s_rtt0L2l.clear();
+            s_rtt0WindowFrames = 0u;
+            return;
+        }
+        std::fclose(f);
+        rtMap.swap(s_rtt0RtAgg);
+        useMap.swap(s_rtt0UseAgg);
+        l2hVec.swap(s_rtt0L2h);
+        l2lVec.swap(s_rtt0L2l);
+        frames = s_rtt0WindowFrames ? s_rtt0WindowFrames : 1u;
+        s_rtt0WindowFrames = 0u;
+        blockNum = ++s_rtt0BlocksPrinted;
+        if (s_rtt0BlocksPrinted >= 4)
+            s_rtt0Done.store(true, std::memory_order_relaxed);
+    }
+
+    const double invF = 1.0 / static_cast<double>(frames);
+    const double elapsedS = std::chrono::duration<double>(now - s_rtt0Start).count();
+    ps2xSafeLog("[rtt0] block=%d t=%.1fs frames=%u\n", blockNum, elapsedS, frames);
+
+    std::vector<std::pair<uint64_t, Rtt0RtAgg>> rtRows(rtMap.begin(), rtMap.end());
+    std::sort(rtRows.begin(), rtRows.end(), [](const auto &a, const auto &b) { return a.second.draws > b.second.draws; });
+    for (size_t i = 0u; i < std::min<size_t>(rtRows.size(), 8u); ++i)
+    {
+        const uint64_t k = rtRows[i].first;
+        const Rtt0RtAgg &a = rtRows[i].second;
+        ps2xSafeLog("[rtt0] RT fbp=%x fbw=%u fpsm=%u zbp=%x draws=%.0f prims=%.0f bbox=%d,%d-%d,%d zt=%d\n",
+                    static_cast<unsigned>(k & 0x1FFull), static_cast<unsigned>((k >> 9) & 0x3Full),
+                    static_cast<unsigned>((k >> 15) & 0x3Full), static_cast<unsigned>((k >> 21) & 0x1FFull),
+                    static_cast<double>(a.draws) * invF, static_cast<double>(a.prims) * invF,
+                    a.minX, a.minY, a.maxX, a.maxY, static_cast<int>(a.zt));
+    }
+
+    std::vector<std::pair<uint64_t, uint64_t>> useRows(useMap.begin(), useMap.end());
+    std::sort(useRows.begin(), useRows.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+    for (size_t i = 0u; i < std::min<size_t>(useRows.size(), 8u); ++i)
+    {
+        const uint64_t k = useRows[i].first;
+        ps2xSafeLog("[rtt0] USE rt=fbp%x off=%x tpsm=%u tw=%u th=%u idx=%d draws=%.0f dstfbp=%x\n",
+                    static_cast<unsigned>(k & 0x1FFull), static_cast<unsigned>((k >> 9) & 0x3FFFull),
+                    static_cast<unsigned>((k >> 23) & 0x3Full), static_cast<unsigned>((k >> 29) & 0xFull),
+                    static_cast<unsigned>((k >> 33) & 0xFull), static_cast<int>((k >> 37) & 0x1ull),
+                    static_cast<double>(useRows[i].second) * invF, static_cast<unsigned>((k >> 38) & 0x1FFull));
+    }
+
+    std::sort(l2hVec.begin(), l2hVec.end(), [](const auto &a, const auto &b) { return a.count > b.count; });
+    for (size_t i = 0u; i < std::min<size_t>(l2hVec.size(), 8u); ++i)
+    {
+        const auto &e = l2hVec[i];
+        ps2xSafeLog("[rtt0] L2H sbp=%x sbw=%u spsm=%u %ux%u at %u,%u n=%.1f overlapsRT=%d\n",
+                    e.sbp, e.sbw, static_cast<unsigned>(e.spsm), e.rrw, e.rrh, e.ssax, e.ssay,
+                    static_cast<double>(e.count) * invF, static_cast<int>(e.overlapsRt));
+    }
+
+    std::sort(l2lVec.begin(), l2lVec.end(), [](const auto &a, const auto &b) { return a.count > b.count; });
+    for (size_t i = 0u; i < std::min<size_t>(l2lVec.size(), 8u); ++i)
+    {
+        const auto &e = l2lVec[i];
+        ps2xSafeLog("[rtt0] L2L sbp=%x sbw=%u spsm=%u dbp=%x dbw=%u dpsm=%u %ux%u at %u,%u->%u,%u n=%.1f overlapsRT=%d\n",
+                    e.sbp, e.sbw, static_cast<unsigned>(e.spsm), e.dbp, e.dbw, static_cast<unsigned>(e.dpsm),
+                    e.rrw, e.rrh, e.ssax, e.ssay, e.dsax, e.dsay,
+                    static_cast<double>(e.count) * invF, static_cast<int>(e.overlapsRt));
+    }
+}
+
 static std::mutex s_rd2dCapMutex; // FEAT-RD8
 static std::vector<RdVert> s_rd2dVerts; // FEAT-RD8
 static std::vector<Rd2DBatch> s_rd2dBatches; // FEAT-RD8
@@ -1626,6 +1909,7 @@ void GS::latchHostPresentationFrame()
     struct GwPres { uint64_t t0; ~GwPres() { if (g_gwOn) { g_gwPresentT.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); g_gwFrames.fetch_add(1, std::memory_order_relaxed); } } } gwPres{pjStart}; // PROBE-GW
     const bool takeover = ps2xRdTakeoverOn(); // FEAT-RD12
     if (s_rdGsDrawLogOn) rdGsDrawLogOnFrame(); // PROBE-RD60
+    if (s_rtt0LogOn) rtt0OnFrame(); // PROBE-RTT0
     const bool frameHasGeom = s_rdFrameHasGeom.exchange(false, std::memory_order_acq_rel); // FEAT-RD18
     rdRollPassFrame(); // FEAT-RD23
     static uint32_t s_rdEmptyLatches = 0u; // FEAT-RD33c
@@ -4208,6 +4492,8 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
     const bool isGeomKick = rdNoteKickBookkeeping(batch.state.context, batch.state.prim, batch.state.texa, m_localMemoryStorage); // FEAT-RD42
     if (s_rdGsDrawLogOn) // PROBE-RD60
         rdGsDrawLogRecord(batch.state.context, batch.state.prim, m_vtxQueue, batch.vertexCount, s_rdCurSerial, isGeomKick);
+    if (s_rtt0LogOn) // PROBE-RTT0
+        rtt0RecordDraw(batch.state.context, batch.state.prim);
     if (ps2xRdActive() && !isGeomKick) // FEAT-RD8 // FEAT-RD10 // FEAT-RD18 // FEAT-RD49: capture all 2D candidates; FBP filtered at flip time
     {
         const GSContext &ctx = batch.state.context;

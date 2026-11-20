@@ -26,6 +26,18 @@ namespace probe_ae {
 #include <intrin.h>
 
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
+namespace GSMem // FIX-RD74
+{
+    const uint16_t *ExportPageTable(int idx, size_t *entries); // FIX-RD74
+}
+extern void ps2xSafeLog(const char *fmt, ...); // FIX-RD74
+static const bool s_rtt0LogOn = []() { // PROBE-RTT0
+    const char *e = std::getenv("PS2X_RD_RTTLOG");
+    return e && e[0] == '1';
+}();
+extern "C" void ps2x_rtt0_record_l2h(uint32_t sbp, uint32_t sbw, uint8_t spsm, uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh); // PROBE-RTT0
+extern "C" void ps2x_rtt0_record_l2l(uint32_t sbp, uint32_t sbw, uint8_t spsm, uint32_t dbp, uint32_t dbw, uint8_t dpsm,
+                                      uint32_t ssax, uint32_t ssay, uint32_t dsax, uint32_t dsay, uint32_t rrw, uint32_t rrh); // PROBE-RTT0
 std::atomic<uint64_t> g_profGsUs{0};
 std::atomic<uint64_t> g_profXferUs{0};
 std::atomic<uint64_t> g_profPrims{0};
@@ -4590,6 +4602,10 @@ void GSCpuBackend::PerformLocalToLocalTransfer()
         m_transferState.direction = 3u;
         return;
     }
+    if (s_rtt0LogOn) // PROBE-RTT0
+        ps2x_rtt0_record_l2l(m_transfer.bitbltbuf.sbp, std::max<uint32_t>(m_transfer.bitbltbuf.sbw, 1u), m_transfer.bitbltbuf.spsm,
+                             m_transfer.bitbltbuf.dbp, std::max<uint32_t>(m_transfer.bitbltbuf.dbw, 1u), m_transfer.bitbltbuf.dpsm,
+                             m_transfer.trxpos.ssax, m_transfer.trxpos.ssay, m_transfer.trxpos.dsax, m_transfer.trxpos.dsay, rrw, rrh);
 
     for (uint32_t pixel = 0; pixel < total; ++pixel)
     {
@@ -4617,6 +4633,106 @@ void GSCpuBackend::PerformLocalToLocalTransfer()
     m_transferState.direction = 3u;
 }
 
+template <uint32_t PW, uint32_t PH, uint32_t BYTES>
+static void l2hReadRowTiled(const uint16_t *table, const uint8_t *vram, uint32_t sbp, uint32_t sbw,
+                            uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh, uint8_t *dst) // FIX-RD74
+{
+    const uint32_t blockIdx = sbp & 31u;
+    const uint32_t basePage = sbp >> 5u;
+    const uint32_t pagesPerRow = (sbw * 64u) / PW;
+    for (uint32_t y = 0u; y < rrh; ++y)
+    {
+        const uint32_t sy = ssay + y;
+        const uint32_t rowBasePage = basePage + (sy / PH) * pagesPerRow;
+        const uint16_t *trow = &table[(static_cast<size_t>(blockIdx) * PH + (sy % PH)) * PW];
+        uint32_t x = 0u;
+        while (x < rrw)
+        {
+            const uint32_t sx = ssax + x;
+            const uint32_t page = (rowBasePage + (sx / PW)) & 511u;
+            const uint8_t *pagePtr = vram + static_cast<size_t>(page) * 8192u;
+            const uint32_t px0 = sx % PW;
+            const uint32_t span = std::min<uint32_t>(PW - px0, rrw - x);
+            const uint16_t *tspan = trow + px0;
+            if constexpr (BYTES == 4u)
+            {
+                for (uint32_t k = 0u; k < span; ++k)
+                {
+                    std::memcpy(dst, pagePtr + static_cast<size_t>(tspan[k]) * 4u, 4u);
+                    dst += 4;
+                }
+            }
+            else if constexpr (BYTES == 3u)
+            {
+                for (uint32_t k = 0u; k < span; ++k)
+                {
+                    std::memcpy(dst, pagePtr + static_cast<size_t>(tspan[k]) * 4u, 3u);
+                    dst += 3;
+                }
+            }
+            else if constexpr (BYTES == 2u)
+            {
+                for (uint32_t k = 0u; k < span; ++k)
+                {
+                    std::memcpy(dst, pagePtr + static_cast<size_t>(tspan[k]) * 2u, 2u);
+                    dst += 2;
+                }
+            }
+            else
+            {
+                for (uint32_t k = 0u; k < span; ++k)
+                    *dst++ = pagePtr[tspan[k]];
+            }
+            x += span;
+        }
+    }
+}
+
+static bool l2hTransferBulk(const uint8_t *vram, size_t vramSize, uint8_t spsm, uint32_t sbp, uint32_t sbw,
+                            uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh,
+                            std::vector<uint8_t> &outBuf) // FIX-RD74
+{
+    if (vramSize != GSMem::MEMORY_SIZE || rrw == 0u || rrh == 0u)
+        return false;
+    size_t entries = 0;
+    static const uint16_t *s_tblC32 = GSMem::ExportPageTable(0, &entries);
+    static const uint16_t *s_tblC16 = GSMem::ExportPageTable(2, &entries);
+    static const uint16_t *s_tblC16S = GSMem::ExportPageTable(3, &entries);
+    static const uint16_t *s_tblP8 = GSMem::ExportPageTable(6, &entries);
+
+    const size_t total = static_cast<size_t>(rrw) * rrh;
+    switch (spsm)
+    {
+    case GS_PSM_CT32:
+        if (!s_tblC32) return false;
+        outBuf.resize(total * 4u);
+        l2hReadRowTiled<64u, 32u, 4u>(s_tblC32, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    case GS_PSM_CT24:
+        if (!s_tblC32) return false;
+        outBuf.resize(total * 3u);
+        l2hReadRowTiled<64u, 32u, 3u>(s_tblC32, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    case GS_PSM_CT16:
+        if (!s_tblC16) return false;
+        outBuf.resize(total * 2u);
+        l2hReadRowTiled<64u, 64u, 2u>(s_tblC16, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    case GS_PSM_CT16S:
+        if (!s_tblC16S) return false;
+        outBuf.resize(total * 2u);
+        l2hReadRowTiled<64u, 64u, 2u>(s_tblC16S, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    case GS_PSM_T8:
+        if (!s_tblP8) return false;
+        outBuf.resize(total);
+        l2hReadRowTiled<128u, 64u, 1u>(s_tblP8, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    default:
+        return false;
+    }
+}
+
 void GSCpuBackend::PerformLocalToHostTransfer()
 {
     m_localToHostBuffer.clear();
@@ -4628,59 +4744,190 @@ void GSCpuBackend::PerformLocalToHostTransfer()
     const uint32_t rrh = m_transfer.trxreg.rrh;
     const uint32_t sbw = std::max<uint32_t>(m_transfer.bitbltbuf.sbw, 1u);
     const uint8_t spsm = m_transfer.bitbltbuf.spsm;
+    const uint32_t sbp = m_transfer.bitbltbuf.sbp;
+    const uint32_t ssax = m_transfer.trxpos.ssax;
+    const uint32_t ssay = m_transfer.trxpos.ssay;
     const uint32_t bpp = static_cast<uint32_t>(GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(spsm)));
     const uint32_t total = rrw * rrh;
-    m_localToHostBuffer.reserve((static_cast<size_t>(total) * bpp + 7u) / 8u);
+    if (s_rtt0LogOn && total > 0u) // PROBE-RTT0
+        ps2x_rtt0_record_l2h(sbp, sbw, spsm, ssax, ssay, rrw, rrh);
 
-    for (uint32_t pixel = 0u; pixel < total; ++pixel)
-    {
-        const uint32_t x = pixel % rrw;
-        const uint32_t y = pixel / rrw;
-        const uint32_t value = ReadVramUnlocked(spsm,
-                                                m_transfer.bitbltbuf.sbp,
-                                                sbw,
-                                                x + m_transfer.trxpos.ssax,
-                                                y + m_transfer.trxpos.ssay);
+    static const bool s_l2hFast = []() { // FIX-RD74
+        const char *e = std::getenv("PS2X_GS_L2H_FAST");
+        return !(e && e[0] == '0');
+    }();
+    static const bool s_l2hVerify = []() { // FIX-RD74
+        const char *e = std::getenv("PS2X_GS_L2H_VERIFY");
+        return e && e[0] == '1';
+    }();
+
+    auto runOld = [&](std::vector<uint8_t> &outBuf) {
+        outBuf.clear();
+        outBuf.reserve((static_cast<size_t>(total) * bpp + 7u) / 8u);
+        for (uint32_t pixel = 0u; pixel < total; ++pixel)
+        {
+            const uint32_t x = pixel % rrw;
+            const uint32_t y = pixel / rrw;
+            const uint32_t value = ReadVramUnlocked(spsm, sbp, sbw, x + ssax, y + ssay);
+            switch (bpp)
+            {
+            case 32:
+                outBuf.push_back(static_cast<uint8_t>(value));
+                outBuf.push_back(static_cast<uint8_t>(value >> 8u));
+                outBuf.push_back(static_cast<uint8_t>(value >> 16u));
+                outBuf.push_back(static_cast<uint8_t>(value >> 24u));
+                break;
+            case 24:
+                outBuf.push_back(static_cast<uint8_t>(value));
+                outBuf.push_back(static_cast<uint8_t>(value >> 8u));
+                outBuf.push_back(static_cast<uint8_t>(value >> 16u));
+                break;
+            case 16:
+                outBuf.push_back(static_cast<uint8_t>(value));
+                outBuf.push_back(static_cast<uint8_t>(value >> 8u));
+                break;
+            case 8:
+                outBuf.push_back(static_cast<uint8_t>(value));
+                break;
+            case 4:
+            {
+                if ((pixel & 1u) != 0u)
+                    break;
+                uint32_t next = 0u;
+                if (pixel + 1u < total)
+                {
+                    const uint32_t nextPixel = pixel + 1u;
+                    const uint32_t nextX = nextPixel % rrw;
+                    const uint32_t nextY = nextPixel / rrw;
+                    next = ReadVramUnlocked(spsm, sbp, sbw, nextX + ssax, nextY + ssay);
+                }
+                outBuf.push_back(static_cast<uint8_t>((value & 0x0Fu) | ((next & 0x0Fu) << 4u)));
+                break;
+            }
+            default:
+                break;
+            }
+        }
+    };
+
+    auto runFast = [&](std::vector<uint8_t> &outBuf) { // FIX-RD74
+        if (l2hTransferBulk(m_vram, m_vramSize, spsm, sbp, sbw, ssax, ssay, rrw, rrh, outBuf))
+            return;
+
+        size_t byteSize = 0u;
         switch (bpp)
         {
-        case 32:
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 8u));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 16u));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 24u));
-            break;
-        case 24:
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 8u));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 16u));
-            break;
-        case 16:
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 8u));
-            break;
-        case 8:
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value));
-            break;
-        case 4:
+        case 32: byteSize = static_cast<size_t>(total) * 4u; break;
+        case 24: byteSize = static_cast<size_t>(total) * 3u; break;
+        case 16: byteSize = static_cast<size_t>(total) * 2u; break;
+        case 8:  byteSize = static_cast<size_t>(total); break;
+        case 4:  byteSize = (static_cast<size_t>(total) + 1u) / 2u; break;
+        default: outBuf.clear(); return;
+        }
+        outBuf.resize(byteSize);
+        if (byteSize == 0u)
+            return;
+
+        uint8_t *dst = outBuf.data();
+        if (bpp == 4u)
         {
-            if ((pixel & 1u) != 0u)
-                break;
-            uint32_t next = 0u;
-            if (pixel + 1u < total)
+            uint32_t x = 0u;
+            uint32_t y = 0u;
+            for (uint32_t pixel = 0u; pixel < total; pixel += 2u)
             {
-                const uint32_t nextPixel = pixel + 1u;
-                const uint32_t nextX = nextPixel % rrw;
-                const uint32_t nextY = nextPixel / rrw;
-                next = ReadVramUnlocked(spsm, m_transfer.bitbltbuf.sbp, sbw,
-                                        nextX + m_transfer.trxpos.ssax,
-                                        nextY + m_transfer.trxpos.ssay);
+                const uint32_t v0 = ReadVramUnlocked(spsm, sbp, sbw, x + ssax, y + ssay);
+                if (++x == rrw) { x = 0u; ++y; }
+                uint32_t v1 = 0u;
+                if (pixel + 1u < total)
+                {
+                    v1 = ReadVramUnlocked(spsm, sbp, sbw, x + ssax, y + ssay);
+                    if (++x == rrw) { x = 0u; ++y; }
+                }
+                *dst++ = static_cast<uint8_t>((v0 & 0x0Fu) | ((v1 & 0x0Fu) << 4u));
             }
-            m_localToHostBuffer.push_back(static_cast<uint8_t>((value & 0x0Fu) | ((next & 0x0Fu) << 4u)));
-            break;
+            return;
         }
-        default:
-            break;
+
+        for (uint32_t y = 0u; y < rrh; ++y)
+        {
+            const uint32_t sy = y + ssay;
+            for (uint32_t x = 0u; x < rrw; ++x)
+            {
+                const uint32_t value = ReadVramUnlocked(spsm, sbp, sbw, x + ssax, sy);
+                switch (bpp)
+                {
+                case 32:
+                    dst[0] = static_cast<uint8_t>(value);
+                    dst[1] = static_cast<uint8_t>(value >> 8u);
+                    dst[2] = static_cast<uint8_t>(value >> 16u);
+                    dst[3] = static_cast<uint8_t>(value >> 24u);
+                    dst += 4;
+                    break;
+                case 24:
+                    dst[0] = static_cast<uint8_t>(value);
+                    dst[1] = static_cast<uint8_t>(value >> 8u);
+                    dst[2] = static_cast<uint8_t>(value >> 16u);
+                    dst += 3;
+                    break;
+                case 16:
+                    dst[0] = static_cast<uint8_t>(value);
+                    dst[1] = static_cast<uint8_t>(value >> 8u);
+                    dst += 2;
+                    break;
+                case 8:
+                    *dst++ = static_cast<uint8_t>(value);
+                    break;
+                default:
+                    break;
+                }
+            }
         }
+    };
+
+    if (s_l2hVerify) // FIX-RD74
+    {
+        thread_local std::vector<uint8_t> t_oldBuf;
+        runOld(t_oldBuf);
+        runFast(m_localToHostBuffer);
+
+        static std::atomic<uint64_t> s_ok{0ull};
+        static std::atomic<uint64_t> s_bad{0ull};
+        static std::atomic<uint32_t> s_mismatchLogs{0u};
+        static auto s_lastLog = std::chrono::steady_clock::now();
+
+        const bool match = (t_oldBuf.size() == m_localToHostBuffer.size()) &&
+                           (t_oldBuf.empty() || std::memcmp(t_oldBuf.data(), m_localToHostBuffer.data(), t_oldBuf.size()) == 0);
+        if (match)
+        {
+            s_ok.fetch_add(1ull, std::memory_order_relaxed);
+        }
+        else
+        {
+            s_bad.fetch_add(1ull, std::memory_order_relaxed);
+            if (s_mismatchLogs.fetch_add(1u, std::memory_order_relaxed) < 20u)
+            {
+                ps2xSafeLog("[l2h] MISMATCH spsm=%u rrw=%u rrh=%u sbw=%u sbp=%u ssax=%u ssay=%u\n",
+                            static_cast<unsigned>(spsm), rrw, rrh, sbw, sbp, ssax, ssay);
+            }
+            m_localToHostBuffer.swap(t_oldBuf);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastLog).count() >= 5)
+        {
+            s_lastLog = now;
+            ps2xSafeLog("[l2h] ok=%llu bad=%llu\n",
+                        static_cast<unsigned long long>(s_ok.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(s_bad.load(std::memory_order_relaxed)));
+        }
+    }
+    else if (!s_l2hFast) // FIX-RD74
+    {
+        runOld(m_localToHostBuffer);
+    }
+    else
+    {
+        runFast(m_localToHostBuffer);
     }
 
     m_transferState.copiedPixels = total;

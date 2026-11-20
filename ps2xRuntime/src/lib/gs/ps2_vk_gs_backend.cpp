@@ -72,6 +72,9 @@ namespace { struct GwScope { int p; explicit GwScope(int c) : p(g_gwOn ? ps2_gw_
 
 // PROBE-GT: GPU timestamp + present-path accounting (PS2X_GT=1)
 static const bool g_gtOn = []() { const char *e = std::getenv("PS2X_GT"); return e && e[0] == '1'; }();
+extern void ps2xSafeLog(const char *fmt, ...); // PROBE-RD75
+static const bool g_vkStats2On = []() { const char *e = std::getenv("PS2X_VK_STATS2"); return e && e[0] == '1'; }(); // PROBE-RD75
+static const bool g_vkSyncAll = []() { const char *e = std::getenv("PS2X_VK_SYNCALL"); return e && e[0] == '1'; }(); // FIX-RD76
 static std::atomic<uint64_t> g_gtFrameNs{0}, g_gtFrameMaxNs{0}, g_gtFrameSamples{0};
 static std::atomic<uint64_t> g_gtPresNs{0}, g_gtPresMaxNs{0}, g_gtPresSamples{0};
 static std::atomic<uint64_t> g_gtFenceWaitNs{0};
@@ -937,6 +940,8 @@ namespace
         {
             GwScope gwS(6); // PROBE-GW statechg (transfer setup; its flush/sync re-scope)
             std::lock_guard<std::mutex> lk(m_);
+            if (g_vkStats2On && command.direction == 1u) // PROBE-RD75
+                ++vk2L2hCalls_;
             if (ref_)
                 ref_->BeginTransfer(command);
             if (vkReady_)
@@ -1164,6 +1169,7 @@ namespace
             {
                 std::lock_guard<std::mutex> lk(m_);
                 ++presents_;
+                if (g_vkStats2On) { ++vk2Frames_; maybePrintStats2(); } // PROBE-RD75
                 primsThisFrame_ = 0;
                 return {};
             }
@@ -1215,6 +1221,7 @@ namespace
                     if (gtQueryPool_ != VK_NULL_HANDLE) gtHarvestQueries(); // PROBE-GT
                     ++presents_;
                     maybePrintStats();
+                    if (g_vkStats2On) { ++vk2Frames_; maybePrintStats2(); } // PROBE-RD75
                     if (gpuPresOk_ && presents_ % 240u == 0u)
                         std::printf("[presgpu] gpu=%llu pages=%llu blackFallback=%llu ineligible(none/both/format)=%llu/%llu/%llu verify: frames=%llu mismatched=%llu\n",
                                     static_cast<unsigned long long>(pgGpu_), static_cast<unsigned long long>(pgPages_), static_cast<unsigned long long>(pgBlack_),
@@ -1291,6 +1298,7 @@ namespace
                 comparePresent();
             ++presents_;
             maybePrintStats();
+            if (g_vkStats2On) { ++vk2Frames_; maybePrintStats2(); } // PROBE-RD75
             primsThisFrame_ = 0;
             g_gqPresentHold.fetch_add(__rdtsc() - gqP0, std::memory_order_relaxed); g_gqPresents.fetch_add(1, std::memory_order_relaxed); // PROBE-GQ2
             lk.unlock(); // PERF-PU: the VRAM snapshot + display conversion run under the CPU backend's own mutex; the draw thread no longer waits for them
@@ -1399,7 +1407,20 @@ namespace
             const bool useAsyncRt = asyncRtWanted() && asyncOk_ && !asyncPending_ && !compare_ && !ref_; // FEAT-RD47
             if (!useAsyncRt)
             {
-                syncPages(dirty, 6); // FEAT-RD46: pass exact dirty intersection
+                if (g_vkSyncAll) // FIX-RD76
+                {
+                    PageSet allDirty = gpuColor_;
+                    allDirty.orWith(gpuZ_);
+                    PageSet extra = allDirty;
+                    extra.andNot(need);
+                    if (extra.any())
+                        extraSynced_.orWith(extra);
+                    syncPages(allDirty, 6);
+                }
+                else
+                {
+                    syncPages(dirty, 6); // FEAT-RD46: pass exact dirty intersection
+                }
             }
             else
             {
@@ -1477,6 +1498,25 @@ namespace
             if (self->vkReady_)
                 self->syncAll(5);
             cpu_->SnapshotVram(out);
+        }
+
+        uint32_t takeExtraSyncedPages(uint16_t *out, uint32_t cap) // FIX-RD76
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            if (!extraSynced_.any())
+                return 0u;
+            uint32_t count = 0u;
+            for (uint32_t p = 0u; p < 512u; ++p)
+            {
+                if (extraSynced_.test(p))
+                {
+                    if (out && count < cap)
+                        out[count] = static_cast<uint16_t>(p);
+                    ++count;
+                }
+            }
+            extraSynced_.clear();
+            return count;
         }
 
         GSTransferSnapshot GetTransferSnapshot() const override { return cpu_->GetTransferSnapshot(); }
@@ -1985,7 +2025,7 @@ namespace
         };
 
         // submit everything recorded; optionally download the given GPU-newer pages into the host VRAM
-        void flush(const PageSet *down, FlushReason reason = FLUSH_REASON_OTHER)
+        void flush(const PageSet *down, FlushReason reason = FLUSH_REASON_OTHER, int syncReason = -1) // PROBE-RD75
         {
             if (rtAsyncPending_) // FEAT-RD47
                 completeRtAsync(true);
@@ -1999,6 +2039,25 @@ namespace
                 case FLUSH_REASON_CLUT:    ++flushWhyClut_; break;
                 case FLUSH_REASON_STAGING: ++flushWhyStaging_; break;
                 default:                   ++flushWhyOther_; break;
+                }
+            }
+            if (g_vkStats2On) // PROBE-RD75
+            {
+                ++vk2Flushes_;
+                if (down)
+                {
+                    const int rIdx = (syncReason >= 0 && syncReason < 10) ? syncReason : 9;
+                    ++vk2FlushDown_[rIdx];
+                }
+                else
+                {
+                    switch (reason)
+                    {
+                    case FLUSH_REASON_PRIMS:   ++vk2FlushPrims_; break;
+                    case FLUSH_REASON_CLUT:    ++vk2FlushClut_; break;
+                    case FLUSH_REASON_STAGING: ++vk2FlushStaging_; break;
+                    default:                   ++vk2FlushOther_; break;
+                    }
                 }
             }
             beginRecording();
@@ -2038,15 +2097,24 @@ namespace
             VkResult r;
             {
                 GwScope gwSub(8); // PROBE-GW submit
+                const auto s0 = g_vkStats2On ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-RD75
                 r = vkQueueSubmit(g_vk.queue, 1, &si, fence_);
+                if (g_vkStats2On) // PROBE-RD75
+                    vk2SubmitNs_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - s0).count());
             }
             {
                 GwScope gwSy(9); // PROBE-GW sync (fence wait)
-                const auto gtF0 = g_gtOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT
+                const auto gtF0 = (g_gtOn || g_vkStats2On) ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT // PROBE-RD75
                 if (r == VK_SUCCESS)
                     r = vkWaitForFences(g_vk.dev, 1, &fence_, VK_TRUE, ~0ull);
-                if (g_gtOn) // PROBE-GT
-                    g_gtFenceWaitNs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - gtF0).count()), std::memory_order_relaxed);
+                if (g_gtOn || g_vkStats2On) // PROBE-GT // PROBE-RD75
+                {
+                    const uint64_t wNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - gtF0).count());
+                    if (g_gtOn)
+                        g_gtFenceWaitNs.fetch_add(wNs, std::memory_order_relaxed);
+                    if (g_vkStats2On)
+                        vk2WaitNs_ += wNs;
+                }
             }
             vkResetFences(g_vk.dev, 1, &fence_);
             if (r != VK_SUCCESS)
@@ -2064,12 +2132,17 @@ namespace
                     const size_t off = static_cast<size_t>(run.first) * 8192u, len = static_cast<size_t>(run.second) * 8192u;
                     std::memcpy(host_ + off, down_.map + off, len);
                     downloadBytes_ += len;
+                    if (g_vkStats2On) // PROBE-RD75
+                        vk2PagesDown_ += run.second;
                 }
                 gpuColor_.andNot(*down);
                 gpuZ_.andNot(*down);
                 publishGpuDirtyMask(); // FEAT-RD45
             }
-            syncMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            const double flushMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            syncMs_ += flushMs;
+            if (g_vkStats2On && flushMs > vk2MaxFlushMs_) // PROBE-RD75
+                vk2MaxFlushMs_ = flushMs;
             ++submits_;
             resetRings();
         }
@@ -2087,8 +2160,11 @@ namespace
             if (!todo.any())
                 return;
             ++syncs_;
-            ++syncReason_[std::min(reason, 9)];
-            flush(&todo);
+            const int rIdx = std::clamp(reason, 0, 9);
+            ++syncReason_[rIdx];
+            if (g_vkStats2On) // PROBE-RD75
+                ++vk2SyncReason_[rIdx];
+            flush(&todo, FLUSH_REASON_OTHER, rIdx); // PROBE-RD75
         }
 
         void syncAll(int reason)
@@ -2142,6 +2218,11 @@ namespace
             stagingOff_ = off;
             if (g_gwOn) ps2_iu_gpu(total, __rdtsc() - iuT0); // PROBE-IU
             uploadBytes_ += total;
+            if (g_vkStats2On) // PROBE-RD75
+            {
+                ++vk2Uploads_;
+                vk2UploadBytes_ += total;
+            }
             presDirty_.orWith(hostNewer_);
             hostNewer_.clear();
             return true;
@@ -2780,6 +2861,53 @@ namespace
                 std::printf("[vkcmp] summary clean=%llu dirty=%llu\n", static_cast<unsigned long long>(cmpClean_), static_cast<unsigned long long>(cmpDirty_));
         }
 
+        void maybePrintStats2() // PROBE-RD75
+        {
+            if (!g_vkStats2On || (presents_ % 120u) != 0u || vk2Frames_ == 0u)
+                return;
+            const double f = static_cast<double>(vk2Frames_);
+            const double fl = vk2Flushes_ ? static_cast<double>(vk2Flushes_) : 1.0;
+            ps2xSafeLog("[vk2] frames=%u flushes/frame=%.1f | by cause: download(r0..r9)=%.1f/%.1f/%.1f/%.1f/%.1f/%.1f/%.1f/%.1f/%.1f/%.1f prims=%.1f clut=%.1f staging=%.1f other=%.1f | pages downloaded/frame=%.1f (KB=%.0f) | submit_ms/flush=%.2f wait_ms/flush=%.2f | uploads/frame=%.1f (KB=%.0f, ensureUpload) | l2hCalls/frame=%.1f | maxFlushMs=%.1f\n",
+                        vk2Frames_, static_cast<double>(vk2Flushes_) / f,
+                        static_cast<double>(vk2FlushDown_[0]) / f, static_cast<double>(vk2FlushDown_[1]) / f,
+                        static_cast<double>(vk2FlushDown_[2]) / f, static_cast<double>(vk2FlushDown_[3]) / f,
+                        static_cast<double>(vk2FlushDown_[4]) / f, static_cast<double>(vk2FlushDown_[5]) / f,
+                        static_cast<double>(vk2FlushDown_[6]) / f, static_cast<double>(vk2FlushDown_[7]) / f,
+                        static_cast<double>(vk2FlushDown_[8]) / f, static_cast<double>(vk2FlushDown_[9]) / f,
+                        static_cast<double>(vk2FlushPrims_) / f, static_cast<double>(vk2FlushClut_) / f,
+                        static_cast<double>(vk2FlushStaging_) / f, static_cast<double>(vk2FlushOther_) / f,
+                        static_cast<double>(vk2PagesDown_) / f, (static_cast<double>(vk2PagesDown_) * 8.0) / f,
+                        (static_cast<double>(vk2SubmitNs_) * 1e-6) / fl, (static_cast<double>(vk2WaitNs_) * 1e-6) / fl,
+                        static_cast<double>(vk2Uploads_) / f, (static_cast<double>(vk2UploadBytes_) / 1024.0) / f,
+                        static_cast<double>(vk2L2hCalls_) / f, vk2MaxFlushMs_);
+
+            static constexpr const char *kReasonNames[10] = {
+                "present", "transfer", "clut", "clear", "writevram", "readvram", "sync", "cpudraw", "r8", "r9"
+            };
+            std::array<int, 10> order{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+            std::sort(order.begin(), order.end(), [&](int a, int b) { return vk2SyncReason_[a] > vk2SyncReason_[b]; });
+            ps2xSafeLog("[vk2] top3_sync: %s=%llu %s=%llu %s=%llu\n",
+                        kReasonNames[order[0]], static_cast<unsigned long long>(vk2SyncReason_[order[0]]),
+                        kReasonNames[order[1]], static_cast<unsigned long long>(vk2SyncReason_[order[1]]),
+                        kReasonNames[order[2]], static_cast<unsigned long long>(vk2SyncReason_[order[2]]));
+
+            vk2Frames_ = 0;
+            vk2Flushes_ = 0;
+            vk2FlushDown_.fill(0);
+            vk2SyncReason_.fill(0);
+            vk2FlushPrims_ = 0;
+            vk2FlushClut_ = 0;
+            vk2FlushStaging_ = 0;
+            vk2FlushOther_ = 0;
+            vk2PagesDown_ = 0;
+            vk2SubmitNs_ = 0;
+            vk2WaitNs_ = 0;
+            vk2Uploads_ = 0;
+            vk2UploadBytes_ = 0;
+            vk2L2hCalls_ = 0;
+            vk2MaxFlushMs_ = 0.0;
+        }
+
         std::mutex m_;
         std::unique_ptr<GSCpuBackend> cpu_;
         std::unique_ptr<GSCpuBackend> ref_;
@@ -2951,6 +3079,7 @@ namespace
 
         Range unfenced_;
         PageSet gpuColor_, gpuZ_, hostNewer_;
+        PageSet extraSynced_; // FIX-RD76
         std::atomic<uint64_t> gpuDirtyMask_[8]{}; // FEAT-RD45: lock-free mirror of (gpuColor_ | gpuZ_)
         void publishGpuDirtyMask() // FEAT-RD45
         {
@@ -2995,6 +3124,17 @@ namespace
         uint64_t fallback_[16] = {};
         uint64_t cmpClean_ = 0, cmpDirty_ = 0;
         double syncMs_ = 0.0;
+
+        // PROBE-RD75
+        uint32_t vk2Frames_ = 0;
+        uint64_t vk2Flushes_ = 0;
+        std::array<uint64_t, 10> vk2FlushDown_{};
+        std::array<uint64_t, 10> vk2SyncReason_{};
+        uint64_t vk2FlushPrims_ = 0, vk2FlushClut_ = 0, vk2FlushStaging_ = 0, vk2FlushOther_ = 0;
+        uint64_t vk2PagesDown_ = 0;
+        uint64_t vk2SubmitNs_ = 0, vk2WaitNs_ = 0;
+        uint64_t vk2Uploads_ = 0, vk2UploadBytes_ = 0, vk2L2hCalls_ = 0;
+        double vk2MaxFlushMs_ = 0.0;
 
         // PERF-GA
         std::vector<PrimBbox> runBboxes_;
@@ -3061,4 +3201,14 @@ bool ps2xVkSyncPagesForCpu(uint32_t firstPage, uint32_t lastPage, uint32_t *outB
     if (!backend)
         return false;
     return backend->syncPageRangeForCpu(firstPage, lastPage, outBytes);
+}
+
+uint32_t ps2xVkTakeExtraSyncedPages(uint16_t *out, uint32_t cap) // FIX-RD76
+{
+    if (!g_vkSyncAll)
+        return 0u;
+    GSVulkanBackend *backend = g_activeVkBackend.load(std::memory_order_acquire);
+    if (!backend)
+        return 0u;
+    return backend->takeExtraSyncedPages(out, cap);
 }

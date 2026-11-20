@@ -4,6 +4,11 @@
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_memory.h"
 
+namespace GSMem // FIX-RD73
+{
+const uint16_t *ExportPageTable(int idx, size_t *entries); // FIX-RD73
+}
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -24,6 +29,7 @@
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD3
 extern bool ps2xRdActive(); // FEAT-RD49
 extern bool ps2xVkSyncPagesForCpu(uint32_t firstPage, uint32_t lastPage, uint32_t *outBytes = nullptr); // FEAT-RD28
+extern uint32_t ps2xVkTakeExtraSyncedPages(uint16_t *out, uint32_t cap); // FIX-RD76
 extern bool g_rdpOn; // FEAT-RD45
 uint64_t g_rdpNoteSubCyc[6] = {0, 0, 0, 0, 0, 0}; // FEAT-RD45: 0=rt, 1=fast, 2=clut, 3=quickKey, 4=rawCrc, 5=decode
 uint64_t g_rdpRtSubCyc[4] = {0, 0, 0, 0}; // FEAT-RD46: 0=rt_a(fb), 1=rt_b(mask), 2=rt_c(mutex), 3=rt_d(sync)
@@ -392,12 +398,197 @@ uint32_t decodeTexel(uint32_t raw, uint8_t psm, uint64_t texa, bool indexed, con
     return applyTexa(texa, psm, raw);
 }
 
+static const bool g_bulkDecode = []() { // FIX-RD73
+    const char *e = std::getenv("PS2X_RD_BULKDECODE");
+    return !(e && e[0] == '0');
+}();
+
+static const bool g_verifyDecode = []() { // FIX-RD73
+    const char *e = std::getenv("PS2X_RD_VERIFYDECODE");
+    return e && e[0] == '1';
+}();
+
+std::atomic<uint64_t> g_rdvfyOk{0ull};           // FIX-RD73
+std::atomic<uint64_t> g_rdvfyBad{0ull};          // FIX-RD73
+std::atomic<uint32_t> g_rdvfyMismatchLogs{0u};   // FIX-RD73
+
+template <uint32_t PW, uint32_t PH, int Mode>
+void bulkReadPageTiled(const uint16_t *table, const uint8_t *vram, uint32_t tbp0, uint32_t effTbw, uint32_t w, uint32_t h, uint32_t *outRaw) // FIX-RD73
+{
+    const uint32_t blockIdx = tbp0 & 31u;
+    const uint32_t basePage = tbp0 >> 5u;
+    const uint32_t pagesPerRow = (effTbw * 64u) / PW;
+    for (uint32_t y0 = 0u; y0 < h; y0 += PH)
+    {
+        const uint32_t spanH = std::min<uint32_t>(PH, h - y0);
+        const uint32_t rowBasePage = basePage + (y0 / PH) * pagesPerRow;
+        for (uint32_t x0 = 0u; x0 < w; x0 += PW)
+        {
+            const uint32_t spanW = std::min<uint32_t>(PW, w - x0);
+            const uint32_t page = (rowBasePage + (x0 / PW)) & 511u;
+            const uint8_t *pagePtr = vram + static_cast<size_t>(page) * 8192u;
+            for (uint32_t py = 0u; py < spanH; ++py)
+            {
+                const uint16_t *trow = &table[(static_cast<size_t>(blockIdx) * PH + py) * PW];
+                uint32_t *dstRow = outRaw + static_cast<size_t>(y0 + py) * w + x0;
+                for (uint32_t px = 0u; px < spanW; ++px)
+                {
+                    if constexpr (Mode == 0)
+                    {
+                        uint32_t v;
+                        std::memcpy(&v, pagePtr + static_cast<size_t>(trow[px]) * 4u, 4);
+                        dstRow[px] = v;
+                    }
+                    else if constexpr (Mode == 1)
+                    {
+                        uint32_t v;
+                        std::memcpy(&v, pagePtr + static_cast<size_t>(trow[px]) * 4u, 4);
+                        dstRow[px] = v & 0x00FFFFFFu;
+                    }
+                    else if constexpr (Mode == 2)
+                    {
+                        uint16_t v;
+                        std::memcpy(&v, pagePtr + static_cast<size_t>(trow[px]) * 2u, 2);
+                        dstRow[px] = v;
+                    }
+                    else if constexpr (Mode == 3)
+                    {
+                        dstRow[px] = pagePtr[trow[px]];
+                    }
+                    else if constexpr (Mode == 4)
+                    {
+                        const uint32_t pa = trow[px];
+                        dstRow[px] = (pagePtr[pa >> 1u] >> ((pa & 1u) * 4u)) & 0x0Fu;
+                    }
+                    else if constexpr (Mode == 5)
+                    {
+                        dstRow[px] = pagePtr[static_cast<size_t>(trow[px]) * 4u + 3u];
+                    }
+                    else if constexpr (Mode == 6)
+                    {
+                        dstRow[px] = pagePtr[static_cast<size_t>(trow[px]) * 4u + 3u] & 0x0Fu;
+                    }
+                    else
+                    {
+                        dstRow[px] = (pagePtr[static_cast<size_t>(trow[px]) * 4u + 3u] >> 4u) & 0x0Fu;
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool bulkReadTextureRaw(const uint8_t *vram, uint8_t psm, uint32_t tbp0, uint32_t effTbw, uint32_t w, uint32_t h, uint32_t *outRaw) // FIX-RD73
+{
+    size_t entries = 0;
+    static const uint16_t *s_tblC32 = GSMem::ExportPageTable(0, &entries);
+    static const uint16_t *s_tblC16 = GSMem::ExportPageTable(2, &entries);
+    static const uint16_t *s_tblC16S = GSMem::ExportPageTable(3, &entries);
+    static const uint16_t *s_tblP8 = GSMem::ExportPageTable(6, &entries);
+    static const uint16_t *s_tblP4 = GSMem::ExportPageTable(7, &entries);
+
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+        if (!s_tblC32) return false;
+        bulkReadPageTiled<64u, 32u, 0>(s_tblC32, vram, tbp0, effTbw, w, h, outRaw);
+        return true;
+    case GS_PSM_CT24:
+        if (!s_tblC32) return false;
+        bulkReadPageTiled<64u, 32u, 1>(s_tblC32, vram, tbp0, effTbw, w, h, outRaw);
+        return true;
+    case GS_PSM_CT16:
+        if (!s_tblC16) return false;
+        bulkReadPageTiled<64u, 64u, 2>(s_tblC16, vram, tbp0, effTbw, w, h, outRaw);
+        return true;
+    case GS_PSM_CT16S:
+        if (!s_tblC16S) return false;
+        bulkReadPageTiled<64u, 64u, 2>(s_tblC16S, vram, tbp0, effTbw, w, h, outRaw);
+        return true;
+    case GS_PSM_T8:
+        if (!s_tblP8) return false;
+        bulkReadPageTiled<128u, 64u, 3>(s_tblP8, vram, tbp0, effTbw, w, h, outRaw);
+        return true;
+    case GS_PSM_T4:
+        if (!s_tblP4) return false;
+        bulkReadPageTiled<128u, 128u, 4>(s_tblP4, vram, tbp0, effTbw, w, h, outRaw);
+        return true;
+    case GS_PSM_T8H:
+        if (!s_tblC32) return false;
+        bulkReadPageTiled<64u, 32u, 5>(s_tblC32, vram, tbp0, effTbw, w, h, outRaw);
+        return true;
+    case GS_PSM_T4HL:
+        if (!s_tblC32) return false;
+        bulkReadPageTiled<64u, 32u, 6>(s_tblC32, vram, tbp0, effTbw, w, h, outRaw);
+        return true;
+    case GS_PSM_T4HH:
+        if (!s_tblC32) return false;
+        bulkReadPageTiled<64u, 32u, 7>(s_tblC32, vram, tbp0, effTbw, w, h, outRaw);
+        return true;
+    default:
+        return false;
+    }
+}
+
+void readTextureRawOld(const uint8_t *vram, uint8_t psm, uint32_t tbp0, uint32_t effTbw, uint32_t w, uint32_t h, uint32_t *outRaw) // FIX-RD73
+{
+    GSMem::TexturePageCache pageCache;
+    for (uint32_t y = 0; y < h; ++y)
+    {
+        for (uint32_t x = 0; x < w; ++x)
+            outRaw[static_cast<size_t>(y) * w + x] = GSMem::ReadTexture(pageCache, vram, psm, tbp0, effTbw, x, y);
+    }
+}
+
+void decodeTextureRaw(const uint8_t *vram, uint8_t psm, uint32_t tbp0, uint32_t effTbw, uint32_t tbw, uint32_t w, uint32_t h, uint32_t *outRaw) // FIX-RD73
+{
+    if (!g_bulkDecode)
+    {
+        readTextureRawOld(vram, psm, tbp0, effTbw, w, h, outRaw);
+        return;
+    }
+    if (!bulkReadTextureRaw(vram, psm, tbp0, effTbw, w, h, outRaw))
+    {
+        readTextureRawOld(vram, psm, tbp0, effTbw, w, h, outRaw);
+        return;
+    }
+    if (g_verifyDecode)
+    {
+        static thread_local std::vector<uint32_t> t_oldRaw;
+        const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+        t_oldRaw.resize(n);
+        readTextureRawOld(vram, psm, tbp0, effTbw, w, h, t_oldRaw.data());
+        if (std::memcmp(outRaw, t_oldRaw.data(), n * sizeof(uint32_t)) != 0)
+        {
+            g_rdvfyBad.fetch_add(1ull, std::memory_order_relaxed);
+            if (g_rdvfyMismatchLogs.load(std::memory_order_relaxed) < 20u &&
+                g_rdvfyMismatchLogs.fetch_add(1u, std::memory_order_relaxed) < 20u)
+            {
+                ps2xSafeLog("[rdvfy] MISMATCH psm=%u w=%u h=%u tbw=%u tbp0=%u\n",
+                            static_cast<unsigned>(psm), static_cast<unsigned>(w),
+                            static_cast<unsigned>(h), static_cast<unsigned>(tbw),
+                            static_cast<unsigned>(tbp0));
+            }
+            std::memcpy(outRaw, t_oldRaw.data(), n * sizeof(uint32_t));
+        }
+        else
+        {
+            g_rdvfyOk.fetch_add(1ull, std::memory_order_relaxed);
+        }
+    }
+}
+
+static const bool g_forceClutSync = []() { // FIX-RD77
+    const char *e = std::getenv("PS2X_RD_CLUTSYNC");
+    return e && e[0] == '1';
+}();
+
 constexpr uint32_t kFastSets = 2048u; // FEAT-RD45: 2-way set-associative (4096 entries)
 struct RdFastEntry // FEAT-RD5c / FEAT-RD45
 {
     uint64_t tex0Key = 0, texa = 0, contentId = 0, clutHash = 0;
     uint32_t vramGen = 0, pageSum = 0, clutGen = 0, first = 0, last = 0, cp = 0;
-    bool indexed = false, valid = false;
+    bool indexed = false, vramClut = false, valid = false; // FIX-RD77
 };
 RdFastEntry g_fastCache[kFastSets][2]; // FEAT-RD45 GS thread only
 uint8_t g_fastRepl[kFastSets] = {};    // FEAT-RD45
@@ -434,7 +625,7 @@ void writeSerialRing(uint32_t serial, uint64_t contentId) // FEAT-RD5
     slot.contentId.store(contentId, std::memory_order_relaxed);
     slot.serial.store(serial, std::memory_order_release);
 }
-void storeFast(uint32_t setIdx, uint64_t tex0Key, uint64_t texa, uint64_t cid, uint32_t first, uint32_t last, uint32_t cp, bool indexed, uint64_t clutHash) // FEAT-RD5c / FEAT-RD45
+void storeFast(uint32_t setIdx, uint64_t tex0Key, uint64_t texa, uint64_t cid, uint32_t first, uint32_t last, uint32_t cp, bool indexed, bool vramClut, uint64_t clutHash) // FEAT-RD5c / FEAT-RD45 / FIX-RD77
 {
     uint32_t way = 0u;
     if (g_fastCache[setIdx][0].valid && g_fastCache[setIdx][0].tex0Key == tex0Key && g_fastCache[setIdx][0].texa == texa)
@@ -452,11 +643,11 @@ void storeFast(uint32_t setIdx, uint64_t tex0Key, uint64_t texa, uint64_t cid, u
     }
     RdFastEntry &e = g_fastCache[setIdx][way];
     e.tex0Key = tex0Key; e.texa = texa; e.contentId = cid; e.clutHash = clutHash;
-    e.first = first; e.last = last; e.cp = cp; e.indexed = indexed; e.clutGen = g_rdClutGen; e.vramGen = g_rdVramGen;
+    e.first = first; e.last = last; e.cp = cp; e.indexed = indexed; e.vramClut = vramClut; e.clutGen = g_rdClutGen; e.vramGen = g_rdVramGen; // FIX-RD77
     uint32_t sum = 0;
     for (uint32_t p = first; p <= last; ++p)
         sum += g_rdPageGen[p];
-    if (indexed)
+    if (vramClut) // FIX-RD77
         sum += g_rdPageGen[cp];
     e.pageSum = sum;
     e.valid = true;
@@ -627,6 +818,50 @@ void bt1ReportReuseCid(uint64_t cid, uint64_t tex0, uint64_t tex0Key, uint8_t ps
     bt1Report("reuse", g_bt1CntReuse, false, tex0, tex0Key, psm, info.w, info.h, tbp0, cbp, cpsm,
               indexed, info.clutNoted, info.clutHash, info.clutAllZero, serial, pageSum, true);
 }
+
+// PROBE-RTT0B: per-texture RT sync attribution (PS2X_RD_RTTLOG=1 + logs/gslog_go.flag)
+static const bool g_probeRtt0b = []() { // PROBE-RTT0B
+    const char *e = std::getenv("PS2X_RD_RTTLOG");
+    return e && e[0] == '1';
+}();
+
+struct Rtt0bKey // PROBE-RTT0B
+{
+    uint32_t tbp0, tbw, psm, tw, th, cbp;
+    int clut;
+    bool operator==(const Rtt0bKey &o) const = default;
+};
+
+struct Rtt0bKeyHash // PROBE-RTT0B
+{
+    size_t operator()(const Rtt0bKey &k) const noexcept { return static_cast<size_t>(fnv1a64(&k, sizeof(k))); }
+};
+
+struct Rtt0bVal // PROBE-RTT0B
+{
+    uint32_t count = 0u;
+    uint64_t totalBytes = 0ull;
+    uint32_t minPage = 512u;
+    uint32_t maxPage = 0u;
+};
+
+std::mutex g_rtt0bMutex;                                               // PROBE-RTT0B
+std::unordered_map<Rtt0bKey, Rtt0bVal, Rtt0bKeyHash> g_rtt0bMap;       // PROBE-RTT0B
+
+void rtt0bRecord(uint32_t tbp0, uint32_t tbw, uint32_t psm, uint32_t tw, uint32_t th, uint32_t cbp,
+                 int clut, uint32_t fpFirst, uint32_t fpLast, uint32_t bytes) // PROBE-RTT0B
+{
+    if (!g_probeRtt0b)
+        return;
+    std::lock_guard<std::mutex> lk(g_rtt0bMutex);
+    Rtt0bVal &v = g_rtt0bMap[Rtt0bKey{tbp0, tbw, psm, tw, th, cbp, clut}];
+    ++v.count;
+    v.totalBytes += bytes;
+    if (fpFirst < v.minPage)
+        v.minPage = fpFirst;
+    if (fpLast > v.maxPage)
+        v.maxPage = fpLast;
+}
 } // namespace
 
 void ps2xRdBt2SetKind(int kind) // PROBE-BT2
@@ -741,6 +976,71 @@ void ps2xRdTexTickFrame() // FEAT-RD3
                         static_cast<unsigned>(g_bt2Miss[2][2].exchange(0u, std::memory_order_relaxed)),
                         static_cast<unsigned>(g_bt2Miss[2][3].exchange(0u, std::memory_order_relaxed)),
                         static_cast<unsigned>(g_bt2Miss[2][4].exchange(0u, std::memory_order_relaxed)));
+        }
+        if (g_verifyDecode) // FIX-RD73
+        {
+            ps2xSafeLog("[rdvfy] ok=%llu bad=%llu\n",
+                        static_cast<unsigned long long>(g_rdvfyOk.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(g_rdvfyBad.load(std::memory_order_relaxed)));
+        }
+    }
+
+    if (g_probeRtt0b) // PROBE-RTT0B
+    {
+        static uint32_t s_rtt0bBlocks = 0u;
+        static uint32_t s_lastRtt0bFrame = g_texFrame;
+        static auto s_lastRtt0bLog = std::chrono::steady_clock::now();
+        if (s_rtt0bBlocks < 4u &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastRtt0bLog).count() >= 1000)
+        {
+            s_lastRtt0bLog = now;
+            std::error_code ec;
+            const bool flagOn = std::filesystem::exists("logs/gslog_go.flag", ec);
+            std::unordered_map<Rtt0bKey, Rtt0bVal, Rtt0bKeyHash> snap;
+            {
+                std::lock_guard<std::mutex> lk(g_rtt0bMutex);
+                snap.swap(g_rtt0bMap);
+            }
+            const uint32_t frames = g_texFrame - s_lastRtt0bFrame;
+            s_lastRtt0bFrame = g_texFrame;
+            if (flagOn)
+            {
+                ++s_rtt0bBlocks;
+                const double fr = frames ? static_cast<double>(frames) : 1.0;
+                uint64_t totalSyncs = 0ull, totalBytes = 0ull;
+                std::vector<std::pair<Rtt0bKey, Rtt0bVal>> items;
+                items.reserve(snap.size());
+                for (const auto &kv : snap)
+                {
+                    totalSyncs += kv.second.count;
+                    totalBytes += kv.second.totalBytes;
+                    items.push_back(kv);
+                }
+                std::sort(items.begin(), items.end(), [](const auto &a, const auto &b) {
+                    if (a.second.count != b.second.count)
+                        return a.second.count > b.second.count;
+                    return a.second.totalBytes > b.second.totalBytes;
+                });
+                ps2xSafeLog("[rtt0b] frames=%u syncs/frame=%.1f bytes/frame=%.0f\n",
+                            static_cast<unsigned>(frames),
+                            static_cast<double>(totalSyncs) / fr,
+                            static_cast<double>(totalBytes) / fr);
+                const size_t limit = std::min<size_t>(items.size(), 12u);
+                for (size_t i = 0; i < limit; ++i)
+                {
+                    const Rtt0bKey &k = items[i].first;
+                    const Rtt0bVal &v = items[i].second;
+                    const uint32_t kw = 1u << std::min<uint32_t>(k.tw, 10u);
+                    const uint32_t kh = 1u << std::min<uint32_t>(k.th, 10u);
+                    ps2xSafeLog("[rtt0b] tbp0=%x tbw=%u psm=%u %ux%u cbp=%x clut=%d pages=%u..%u n/frame=%.1f KB/sync=%.1f\n",
+                                static_cast<unsigned>(k.tbp0), static_cast<unsigned>(k.tbw),
+                                static_cast<unsigned>(k.psm), static_cast<unsigned>(kw), static_cast<unsigned>(kh),
+                                static_cast<unsigned>(k.cbp), k.clut,
+                                static_cast<unsigned>(v.minPage), static_cast<unsigned>(v.maxPage),
+                                static_cast<double>(v.count) / fr,
+                                static_cast<double>(v.totalBytes) / (1024.0 * static_cast<double>(v.count)));
+                }
+            }
         }
     }
 }
@@ -901,29 +1201,13 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
         } // FEAT-RD3c
     }
 
+    static thread_local std::vector<uint32_t> t_getRaw; // FIX-RD73
+    const size_t texelCount = static_cast<size_t>(w) * static_cast<size_t>(h); // FIX-RD73
+    t_getRaw.resize(texelCount); // FIX-RD73
     const uint32_t effTbw = std::max<uint32_t>(tbw, 1u);
-    for (uint32_t y = 0; y < h; ++y)
-    {
-        for (uint32_t x = 0; x < w; ++x)
-        {
-            const uint32_t raw = GSMem::ReadTexture(pageCache, vram, psm, tbp0, effTbw, x, y);
-            uint32_t rgba = 0u;
-            if (indexed)
-            {
-                const uint32_t idx = isFourBitPsm(psm) ? (raw & 0x0Fu) : (raw & 0xFFu);
-                rgba = clut[idx];
-            }
-            else if (psm == GS_PSM_CT16 || psm == GS_PSM_CT16S)
-            {
-                rgba = applyTexa(texa, psm, rgba5551ToRgba8888(static_cast<uint16_t>(raw)));
-            }
-            else
-            {
-                rgba = applyTexa(texa, psm, raw);
-            }
-            dst[static_cast<size_t>(y) * w + x] = rgba;
-        }
-    }
+    decodeTextureRaw(vram, psm, tbp0, effTbw, tbw, w, h, t_getRaw.data()); // FIX-RD73
+    for (size_t i = 0; i < texelCount; ++i) // FIX-RD73
+        dst[i] = decodeTexel(t_getRaw[i], psm, texa, indexed, clut); // FIX-RD73
 
     ++g_decodesSinceLog;
 
@@ -1064,23 +1348,44 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
                 if (g_rdpOn) g_rdpRtSubCyc[0] += __rdtsc() - rtA0; // FEAT-RD46
             }
 
+            auto bumpExtraSynced = []() { // FIX-RD76
+                uint16_t extraPages[512];
+                const uint32_t nExtra = ps2xVkTakeExtraSyncedPages(extraPages, 512u);
+                if (nExtra > 512u)
+                {
+                    for (uint32_t p = 0u; p < 512u; ++p)
+                        ++g_rdPageGen[p];
+                }
+                else
+                {
+                    for (uint32_t i = 0u; i < nExtra; ++i)
+                    {
+                        if (extraPages[i] < 512u)
+                            ++g_rdPageGen[extraPages[i]];
+                    }
+                }
+            };
             uint32_t syncedBytes = 0u;
             if (ps2xVkSyncPagesForCpu(fpFirst, fpLast, &syncedBytes))
             {
                 for (uint32_t p = fpFirst; p <= fpLast; ++p)
                     ++g_rdPageGen[p];
+                bumpExtraSynced(); // FIX-RD76
                 g_rdRtSyncs.fetch_add(1u, std::memory_order_relaxed);
                 g_rdRtBytes.fetch_add(syncedBytes, std::memory_order_relaxed);
+                rtt0bRecord(tbp0, tbw, psm, tw, th, cbp, 0, fpFirst, fpLast, syncedBytes); // PROBE-RTT0B
                 syncedFromGpu = true;
             }
-            if (isIndexedPsm(psm) && (fpCp < fpFirst || fpCp > fpLast))
+            if (isIndexedPsm(psm) && (fpCp < fpFirst || fpCp > fpLast) && (g_forceClutSync || clut512 == nullptr)) // FIX-RD77
             {
                 uint32_t clutBytes = 0u;
                 if (ps2xVkSyncPagesForCpu(fpCp, fpCp, &clutBytes))
                 {
                     ++g_rdPageGen[fpCp];
+                    bumpExtraSynced(); // FIX-RD76
                     g_rdRtSyncs.fetch_add(1u, std::memory_order_relaxed);
                     g_rdRtBytes.fetch_add(clutBytes, std::memory_order_relaxed);
+                    rtt0bRecord(tbp0, tbw, psm, tw, th, cbp, 1, fpCp, fpCp, clutBytes); // PROBE-RTT0B
                     syncedFromGpu = true;
                 }
             }
@@ -1090,6 +1395,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
     }
 
     const bool indexed = isIndexedPsm(psm); // FEAT-RD45
+    const bool vramClut = indexed && (g_forceClutSync || clut512 == nullptr); // FIX-RD77
     uint64_t curClutHash = 0ull;            // FEAT-RD45
     if (indexed)
     {
@@ -1112,8 +1418,8 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
             RdFastEntry &fe = g_fastCache[fastIdx][w]; // FEAT-RD5c / FEAT-RD45
             if (fe.valid && fe.tex0Key == tex0Key && fe.texa == texa)
             {
-                bool clutOk = !fe.indexed || (fe.clutGen == g_rdClutGen);
-                if (!clutOk && fe.clutHash == curClutHash)
+                bool clutOk = !fe.indexed || (fe.vramClut == vramClut && fe.clutGen == g_rdClutGen); // FIX-RD77
+                if (!clutOk && fe.vramClut == vramClut && fe.clutHash == curClutHash) // FIX-RD77
                 {
                     fe.clutGen = g_rdClutGen;
                     clutOk = true;
@@ -1126,7 +1432,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
                         uint32_t sum = 0;
                         for (uint32_t p = fe.first; p <= fe.last; ++p)
                             sum += g_rdPageGen[p];
-                        if (fe.indexed)
+                        if (fe.vramClut) // FIX-RD77
                             sum += g_rdPageGen[fe.cp];
                         if (sum == fe.pageSum)
                         {
@@ -1167,7 +1473,8 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
             gh = (gh ^ g_rdPageGen[p]) * 0x100000001b3ull;
         if (indexed)
         {
-            gh = (gh ^ g_rdPageGen[fpCp]) * 0x100000001b3ull;
+            if (vramClut) // FIX-RD77
+                gh = (gh ^ g_rdPageGen[fpCp]) * 0x100000001b3ull;
             if (clut512)
                 gh = fnv1a64(&curClutHash, sizeof(curClutHash), gh); // FEAT-RD45: O(1) cached CLUT hash
         }
@@ -1180,7 +1487,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
             t_lastTex0Key = tex0Key;
             t_lastTexa = texa;
             t_lastContentId = itKey->second;
-            storeFast(fastIdx, tex0Key, texa, itKey->second, fpFirst, fpLast, fpCp, indexed, curClutHash); // FEAT-RD5c / FEAT-RD45
+            storeFast(fastIdx, tex0Key, texa, itKey->second, fpFirst, fpLast, fpCp, indexed, vramClut, curClutHash); // FEAT-RD5c / FEAT-RD45 / FIX-RD77
             if (g_probeBt1 && w >= 16u && h >= 16u) // PROBE-BT1
                 bt1ReportReuseCid(itKey->second, tex0, tex0Key, psm, tbp0, tbw, cbp, cpsm, indexed, serial);
             writeSerialRing(serial, itKey->second);
@@ -1253,7 +1560,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
             t_lastTex0Key = tex0Key;
             t_lastTexa = texa;
             t_lastContentId = itRaw->second;
-            storeFast(fastIdx, tex0Key, texa, itRaw->second, fpFirst, fpLast, fpCp, indexed, curClutHash); // FEAT-RD45
+            storeFast(fastIdx, tex0Key, texa, itRaw->second, fpFirst, fpLast, fpCp, indexed, vramClut, curClutHash); // FEAT-RD45 / FIX-RD77
             if (g_probeBt1 && w >= 16u && h >= 16u) // PROBE-BT1
                 bt1ReportReuseCid(itRaw->second, tex0, tex0Key, psm, tbp0, tbw, cbp, cpsm, indexed, serial);
             writeSerialRing(serial, itRaw->second);
@@ -1295,11 +1602,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
     static thread_local std::vector<uint32_t> t_raw;
     t_raw.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
     const uint32_t effTbw = std::max<uint32_t>(tbw, 1u);
-    for (uint32_t y = 0; y < h; ++y)
-    {
-        for (uint32_t x = 0; x < w; ++x)
-            t_raw[static_cast<size_t>(y) * w + x] = GSMem::ReadTexture(pageCache, vram, psm, tbp0, effTbw, x, y);
-    }
+    decodeTextureRaw(vram, psm, tbp0, effTbw, tbw, w, h, t_raw.data()); // FIX-RD73
 
     const uint32_t fields[7] = {tbp0, tbw, psm, tw, th, cpsm, csa};
     uint64_t contentId = fnv1a64(fields, sizeof(fields));
@@ -1367,7 +1670,7 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
     t_lastTex0Key = tex0Key;
     t_lastTexa = texa;
     t_lastContentId = contentId;
-    storeFast(fastIdx, tex0Key, texa, contentId, fpFirst, fpLast, fpCp, indexed, curClutHash); // FEAT-RD5c / FEAT-RD45
+    storeFast(fastIdx, tex0Key, texa, contentId, fpFirst, fpLast, fpCp, indexed, vramClut, curClutHash); // FEAT-RD5c / FEAT-RD45 / FIX-RD77
     writeSerialRing(serial, contentId);
 }
 
