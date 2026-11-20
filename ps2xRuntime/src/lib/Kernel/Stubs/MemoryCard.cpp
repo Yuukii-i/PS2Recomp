@@ -77,7 +77,30 @@ namespace ps2_stubs
             FILE *file = nullptr;
             int32_t port = 0;
             std::filesystem::path hostPath;
+            std::string guestPath; // PROBE-MC1
         };
+
+        // PROBE-MC1
+        bool isMcDataLogEnabled()
+        {
+            const char *v = std::getenv("PS2X_MC_LOG");
+            return v != nullptr && std::strcmp(v, "1") == 0;
+        }
+
+        // PROBE-MC1
+        uint32_t mcProbeCrc32(const uint8_t *data, size_t len)
+        {
+            uint32_t crc = 0xFFFFFFFFu;
+            for (size_t i = 0; i < len; ++i)
+            {
+                crc ^= data[i];
+                for (int b = 0; b < 8; ++b)
+                {
+                    crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+                }
+            }
+            return crc ^ 0xFFFFFFFFu;
+        }
 
         struct McPortState
         {
@@ -402,7 +425,7 @@ namespace ps2_stubs
             }
         }
 
-        int32_t allocateMcFdLocked(FILE *file, int32_t port, const std::filesystem::path &hostPath)
+        int32_t allocateMcFdLocked(FILE *file, int32_t port, const std::filesystem::path &hostPath, const std::string &guestPath)
         {
             if (!file)
             {
@@ -426,7 +449,7 @@ namespace ps2_stubs
                     continue;
                 }
 
-                g_mcFiles.emplace(fd, McOpenFile{file, port, hostPath});
+                g_mcFiles.emplace(fd, McOpenFile{file, port, hostPath, guestPath});
                 return fd;
             }
 
@@ -1049,7 +1072,7 @@ namespace ps2_stubs
                         }
                         else
                         {
-                            result = allocateMcFdLocked(file, port, hostPath);
+                            result = allocateMcFdLocked(file, port, hostPath, guestPath);
                             if (result < 0)
                             {
                                 std::fclose(file);
@@ -1059,6 +1082,11 @@ namespace ps2_stubs
                 }
             }
             setMcCommandResultLocked(kMcCmdOpen, result);
+        }
+        // PROBE-MC1
+        if (isMcDataLogEnabled())
+        {
+            RUNTIME_LOG("[MCDATA] open path='" << path << "' fd=" << result << " port=" << port << " flags=0x" << std::hex << flags << std::dec);
         }
         setReturnS32(ctx, 0);
     }
@@ -1071,6 +1099,8 @@ namespace ps2_stubs
         uint8_t *dst = (size > 0) ? getMemPtr(rdram, dstAddr) : nullptr;
 
         int32_t result = kMcResultNoEntry;
+        std::string readName; // PROBE-MC1
+        uint32_t readOffset = 0u; // PROBE-MC1
         {
             std::lock_guard<std::mutex> lock(g_mcStateMutex);
             auto it = g_mcFiles.find(fd);
@@ -1088,6 +1118,13 @@ namespace ps2_stubs
             }
             else
             {
+                // PROBE-MC1
+                if (isMcDataLogEnabled())
+                {
+                    readName = it->second.guestPath;
+                    const long pos = std::ftell(it->second.file);
+                    readOffset = (pos >= 0) ? static_cast<uint32_t>(pos) : 0u;
+                }
                 const size_t bytesRead = std::fread(dst, 1u, static_cast<size_t>(size), it->second.file);
                 result = std::ferror(it->second.file) ? kMcResultDeniedPermit : static_cast<int32_t>(bytesRead);
                 if (std::ferror(it->second.file))
@@ -1097,6 +1134,24 @@ namespace ps2_stubs
             }
 
             setMcCommandResultLocked(kMcCmdRead, result);
+        }
+        // PROBE-MC1
+        if (isMcDataLogEnabled() && result >= 0)
+        {
+            const size_t n = static_cast<size_t>(result);
+            const uint32_t crc = (dst && n > 0u) ? mcProbeCrc32(dst, n) : 0u;
+            char headHex[33]{};
+            const size_t headLen = std::min<size_t>(n, 16u);
+            for (size_t i = 0; i < headLen; ++i)
+            {
+                std::snprintf(headHex + i * 2u, 3u, "%02x", dst[i]);
+            }
+            char line[512]{};
+            std::snprintf(line, sizeof(line),
+                          "[MCDATA] read fd=%d name=%s off=%u n=%u crc=%08x head=%s dst=0x%08x",
+                          fd, readName.c_str(), readOffset, static_cast<unsigned>(n),
+                          crc, headHex, dstAddr);
+            RUNTIME_LOG(line);
         }
         setReturnS32(ctx, 0);
     }

@@ -48594,7 +48594,7 @@ static void decompThunkImpl(size_t Index, uint8_t *rdram, R5900Context *ctx, PS2
 
     // Resuming mid-function after a checkpoint yield: re-entrant decomps resume themselves (DECOMP-BV2),
     // all others must run original code.
-    if (ctx->pc != 0u && ctx->pc != entry.addr)
+    if (ctx->pc != 0u && ctx->pc != entry.addr) [[unlikely]] // PERF-EX3
     {
         if (entry.resumable) // DECOMP-BV2
         {
@@ -48607,7 +48607,7 @@ static void decompThunkImpl(size_t Index, uint8_t *rdram, R5900Context *ctx, PS2
         return;
     }
 
-    if (t_inCheck)
+    if (t_inCheck) [[unlikely]] // PERF-EX3
     {
         ++entry.checkCalls; // PROBE-BS
         entry.decomp(rdram, ctx, rt);
@@ -48621,11 +48621,11 @@ static void decompThunkImpl(size_t Index, uint8_t *rdram, R5900Context *ctx, PS2
     // DECOMP-BP3: PS2X_EEDC_CHECK=N is a time budget: first 20 calls always, then one check per (1000/N) ms
     // per entry, plus a global cap of 4*N checks per second.
     bool doCheck = false;
-    if (g_exhaustiveMode) // DECOMP-BZ
+    if (g_exhaustiveMode) [[unlikely]] // DECOMP-BZ // PERF-EX3
     {
         doCheck = entry.exhaustive && !entry.noCheck; // DECOMP-BZ
     }
-    else if (!entry.noCheck && g_checkInterval != 0)
+    else if (g_checkInterval != 0 && !entry.noCheck) [[unlikely]] // PERF-EX3
     {
         int64_t &s_lastCheckNs = entry.lastCheckNs; // DECOMP-DK
         const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -48659,11 +48659,11 @@ static void decompThunkImpl(size_t Index, uint8_t *rdram, R5900Context *ctx, PS2
     }
     // DECOMP-CY: self-recursive 3A85E0 called with ra inside itself (0x3A86B4): the generated original returns to the
     // outer frame's resume pc at the first inner return, so the dual-run compares a truncated original (checker artifact).
-    if (doCheck && entry.addr == 0x003A85E0u && GPR_U32(ctx, 31) >= 0x003A85E0u && GPR_U32(ctx, 31) < 0x003A8708u)
+    if (doCheck && entry.addr == 0x003A85E0u && (GPR_U32(ctx, 31) - 0x003A85E0u) < (0x003A8708u - 0x003A85E0u)) // PERF-EX3
     {
         doCheck = false; // DECOMP-CY
     }
-    if (!doCheck)
+    if (!doCheck) [[likely]] // PERF-EX3
     {
         entry.decomp(rdram, ctx, rt);
         return;

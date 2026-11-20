@@ -304,6 +304,8 @@ std::string ps2xGetIntcSummary()
 static EeScheduler *s_activeScheduler = nullptr;
 static PS2Runtime *s_activeRuntime = nullptr;
 static std::atomic<uint32_t> s_diagEnabledIntcMask{0xFFFFFFFFu};
+std::atomic<int> g_ps2xPause{0};      // FEAT-PA1
+std::atomic<int> g_ps2xStepTokens{0}; // FEAT-PA1
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
     : m_runtime(runtime)
@@ -360,6 +362,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_eeCycle = 0u;
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
+    g_ps2xPause.store(0, std::memory_order_release);      // FEAT-PA1
+    g_ps2xStepTokens.store(0, std::memory_order_release); // FEAT-PA1
     m_checkpointPending.store(false, std::memory_order_release);
     m_debugPublishCountdown = 0u;
     {
@@ -680,31 +684,41 @@ void EeScheduler::postEvent(EeEvent event)
 
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
+    // PERF-EX1: pack checkpointDue TLS state into one struct to avoid multiple TLS lookups/guards.
+    struct CkptTlsCache
+    {
+        const GuestThread *cachedThread = nullptr;
+        int cachedThreadId = -1;
+        uint32_t cachedGen = ~0u;
+        const EeScheduler *cachedOwner = nullptr;
+        uint32_t ckptAcc = 0;
+    };
+    static thread_local CkptTlsCache s_ckptTls;
+
     uint32_t pc = g_currentExecutingFunction;
     bool hasThreadPc = false; // FIX-AU9
-    if (m_currentThreadId != 0)
+    if (m_currentThreadId != 0) [[likely]]
     {
         // PERF-KM: cached record of the running guest thread (was an unordered_map lookup on every checkpoint, ~4.5M/s)
-        static thread_local const GuestThread *s_cachedThread = nullptr;
-        static thread_local int s_cachedThreadId = -1;
-        static thread_local uint32_t s_cachedGen = ~0u;
-        static thread_local const EeScheduler *s_cachedOwner = nullptr;
-        if (s_cachedOwner != this || s_cachedThreadId != m_currentThreadId || s_cachedGen != s_threadMapGen)
+        if (s_ckptTls.cachedOwner != this || s_ckptTls.cachedThreadId != m_currentThreadId || s_ckptTls.cachedGen != s_threadMapGen) [[unlikely]]
         {
-            s_cachedThread = currentThread();
-            s_cachedThreadId = m_currentThreadId;
-            s_cachedGen = s_threadMapGen;
-            s_cachedOwner = this;
+            s_ckptTls.cachedThread = currentThread();
+            s_ckptTls.cachedThreadId = m_currentThreadId;
+            s_ckptTls.cachedGen = s_threadMapGen;
+            s_ckptTls.cachedOwner = this;
         }
-        const GuestThread *running = s_cachedThread;
-        if (running != nullptr)
+        const GuestThread *running = s_ckptTls.cachedThread;
+        if (running != nullptr) [[likely]]
         {
             pc = running->activeContext().pc;
             hasThreadPc = true; // FIX-AU9
         }
     }
-    if ((pc >= 0x003D7000u && pc <= 0x003E5000u) ||
-        (g_currentExecutingFunction >= 0x003D7000u && g_currentExecutingFunction <= 0x003E5000u))
+    // PERF-EX1: single unsigned range check per PC instead of two comparisons.
+    constexpr uint32_t kThrottleBase = 0x003D7000u;
+    constexpr uint32_t kThrottleSpan = 0x003E5000u - 0x003D7000u;
+    if ((pc - kThrottleBase) <= kThrottleSpan ||
+        (g_currentExecutingFunction - kThrottleBase) <= kThrottleSpan) [[unlikely]]
     {
         static thread_local uint32_t s_throttleCount = 0;
         if ((++s_throttleCount & 0x3FFu) != 0)
@@ -713,7 +727,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         }
     }
 
-    if (m_currentThreadId == kMainThreadId && (pc == 0x0010384Cu || (g_currentExecutingFunction == 0x001037E8u && pc >= 0x00103960u)))
+    if (m_currentThreadId == kMainThreadId && (pc == 0x0010384Cu || (g_currentExecutingFunction == 0x001037E8u && pc >= 0x00103960u))) [[unlikely]]
     {
         accountCycles(kVBlankPeriodCycles / 4);
         processPendingEvents();
@@ -729,16 +743,15 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         const char *e = std::getenv("PS2X_CKPT_BATCH");
         return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 256u;
     }();
-    static thread_local uint32_t s_ckptAcc = 0;
-    if (kCkptBatch > cycles)
+    if (kCkptBatch > cycles) [[likely]]
     {
-        s_ckptAcc += cycles;
-        if (s_ckptAcc < kCkptBatch && !m_checkpointPending.load(std::memory_order_acquire) && !m_stopRequested.load(std::memory_order_acquire))
+        s_ckptTls.ckptAcc += cycles;
+        if (s_ckptTls.ckptAcc < kCkptBatch && !m_checkpointPending.load(std::memory_order_acquire) && !m_stopRequested.load(std::memory_order_acquire)) [[likely]]
         {
             return false;
         }
-        cycles = s_ckptAcc;
-        s_ckptAcc = 0;
+        cycles = s_ckptTls.ckptAcc;
+        s_ckptTls.ckptAcc = 0;
     }
 
     accountCycles(cycles);
@@ -759,7 +772,13 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         }
         else if (m_eeCycle >= m_sliceEndCycle) // FIX-AU9
         { // FIX-AU9
-            const GuestThread *running = currentThread();
+            // PERF-EX1: reuse cached GuestThread when valid instead of repeating currentThread() map lookup.
+            const GuestThread *running = (m_currentThreadId != 0 &&
+                                          s_ckptTls.cachedOwner == this &&
+                                          s_ckptTls.cachedThreadId == m_currentThreadId &&
+                                          s_ckptTls.cachedGen == s_threadMapGen)
+                                             ? s_ckptTls.cachedThread
+                                             : currentThread();
             if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
             {
                 m_rescheduleRequested = true;
@@ -774,7 +793,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     } // FIX-AU9
 
     static thread_local uint64_t s_au9ConsecutiveDeferrals = 0; // FIX-AU9
-    if (due) // FIX-AU9
+    if (due) [[unlikely]] // FIX-AU9
     { // FIX-AU9
         if (hasThreadPc && pc != 0u && pc == g_currentExecutingFunction && g_currentExecutingFunction != g_au9SchedulerEntry) // FIX-AU9
         { // FIX-AU9
@@ -814,19 +833,19 @@ void EeScheduler::accountCycles(uint32_t cycles) noexcept
         g_acctPending = 0u;
     }
     const uint64_t t0 = g_profCounts ? __rdtsc() : 0u;
-    const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
+    const uint64_t elapsed = cycles != 0u ? static_cast<uint64_t>(cycles) : 1ull; // PERF-EX1
     m_eeCycle += elapsed;
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
     const uint64_t t1 = g_profCounts ? __rdtsc() : 0u;
     m_runtime.advanceIopEeCycles(elapsed);
-    if (g_profCounts) // PROBE-IJ
+    if (g_profCounts) [[unlikely]] // PROBE-IJ
     {
         const uint64_t t2 = __rdtsc();
         ++g_pcAcctCalls;
         g_pcAcctTicks += t2 - t0;
         g_pcIopTicks += t2 - t1;
     }
-    if (m_pendingEeTimerInterrupts != 0u)
+    if (m_pendingEeTimerInterrupts != 0u) [[unlikely]]
     {
         m_checkpointPending.store(true, std::memory_order_release);
     }
@@ -2442,6 +2461,28 @@ void EeScheduler::processDueDeadlines()
         {
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
+                if (g_ps2xPause.load(std::memory_order_relaxed) != 0) // FEAT-PA1
+                {
+                    while (!m_stopRequested.load(std::memory_order_acquire) &&
+                           g_ps2xPause.load(std::memory_order_acquire) != 0)
+                    {
+                        int tok = g_ps2xStepTokens.load(std::memory_order_acquire);
+                        bool consumed = false;
+                        while (tok > 0)
+                        {
+                            if (g_ps2xStepTokens.compare_exchange_weak(tok, tok - 1, std::memory_order_acq_rel))
+                            {
+                                consumed = true;
+                                break;
+                            }
+                        }
+                        if (consumed)
+                            break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    if (m_stopRequested.load(std::memory_order_acquire))
+                        return;
+                }
                 const auto now = std::chrono::steady_clock::now();
                 const double lateMs = std::chrono::duration<double, std::milli>(now - scheduled.hostDeadline).count();
                 probe_ae::onDc2VBlankStart(lateMs);
@@ -2537,14 +2578,42 @@ bool postPresentLatch(GS &gs)
 }
 } // namespace
 
-static bool isVblankLatchEnabled()
+extern bool ps2xRdTakeoverOn(); // FIX-VL2
+extern bool ps2xRdForceClassic(); // FIX-VL2
+
+bool ps2xVblankLatchEnabled() // FIX-VL3
 {
-    static const bool s_enabled = []() {
-        const char *e = std::getenv("PS2X_VBLANK_LATCH");
-        if (e && std::strcmp(e, "0") == 0) return false;
-        return true;
+    static const int s_mode = []() -> int { // FIX-VL2: 0=env off, 1=always on, 2=takeover skip-from-start
+        if (const char *e = std::getenv("PS2X_VBLANK_LATCH")) // FIX-VL2
+        {
+            if (std::strcmp(e, "0") == 0) // FIX-VL2
+                return 0; // FIX-VL2
+            ps2xSafeLog("[vl2] vblank latch: on\n"); // FIX-VL2
+            return 1; // FIX-VL2
+        }
+        const bool skipFromStart = ps2xRdTakeoverOn(); // FIX-VL2
+        if (!skipFromStart) // FIX-VL2
+        {
+            ps2xSafeLog("[vl2] vblank latch: on\n"); // FIX-VL2
+            return 1; // FIX-VL2
+        }
+        ps2xSafeLog("[vl2] vblank latch: skipped from start (takeover)\n"); // FIX-VL2
+        return 2; // FIX-VL2
     }();
-    return s_enabled;
+    if (s_mode == 0) // FIX-VL2
+        return false; // FIX-VL2
+    if (s_mode == 1) // FIX-VL2
+        return true; // FIX-VL2
+    static std::atomic<bool> s_sticky{false}; // FIX-VL2
+    if (s_sticky.load(std::memory_order_acquire)) // FIX-VL2
+        return true; // FIX-VL2
+    if (ps2xRdForceClassic()) // FIX-VL2
+    {
+        if (!s_sticky.exchange(true, std::memory_order_acq_rel)) // FIX-VL2
+            ps2xSafeLog("[vl2] classic forced -> latch ON (sticky)\n"); // FIX-VL2
+        return true; // FIX-VL2
+    }
+    return false; // FIX-VL2
 }
 
 void EeScheduler::processEvent(const EeEvent &event)
@@ -2614,7 +2683,7 @@ void EeScheduler::processEvent(const EeEvent &event)
             } // PROBE-AW3
         } // PROBE-AW2
 
-        if (isVblankLatchEnabled())
+        if (ps2xVblankLatchEnabled()) // FIX-VL3
         {
             extern std::atomic<uint64_t> g_gsFrameKicks;
             static uint64_t s_lastLatchKicks = ~0ull;

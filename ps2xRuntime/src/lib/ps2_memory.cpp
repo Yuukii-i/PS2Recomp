@@ -1394,21 +1394,27 @@ void PS2Memory::resetEeTimers() noexcept
 
 uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
 {
-    if (eeCycles == 0u)
+    if (eeCycles == 0u) [[unlikely]]
     {
         return 0u;
     }
 
     constexpr uint32_t kGifStat = 0x10003020u;
     constexpr uint32_t kGifFqcMask = 0x1F000000u;
-    if (s_gifStatOwner != this || s_gifStatPtr == nullptr) // PERF-KL: unordered_map elements are node-stable; the only invalidation is clear() (reset above)
+    if (s_gifStatOwner != this || s_gifStatPtr == nullptr) [[unlikely]] // PERF-KL: unordered_map elements are node-stable; the only invalidation is clear() (reset above)
     {
         auto gifStatIt = m_ioRegisters.find(kGifStat);
         s_gifStatOwner = this;
         s_gifStatPtr = gifStatIt != m_ioRegisters.end() ? &gifStatIt->second : nullptr;
     }
-    if (s_gifStatPtr)
+    if (s_gifStatPtr) [[likely]]
         *s_gifStatPtr &= ~kGifFqcMask;
+
+    // PERF-EX1: hoist loop-invariant eeCycles / kEeClockHz and eeCycles % kEeClockHz out of the timer loop,
+    // with a fast path when eeCycles < kEeClockHz (virtually all calls).
+    const bool subSecond = eeCycles < kEeClockHz;
+    const uint64_t wholeSeconds = subSecond ? 0u : (eeCycles / kEeClockHz);
+    const uint64_t remainingCycles = subSecond ? eeCycles : (eeCycles % kEeClockHz);
 
     uint32_t interruptMask = 0u;
     for (size_t index = 0; index < m_eeTimers.size(); ++index)
@@ -1420,11 +1426,10 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
         }
 
         const uint64_t clockHz = kEeTimerClockHz[timer.mode & kEeTimerModeClksMask];
-        const uint64_t wholeSeconds = eeCycles / kEeClockHz;
-        const uint64_t remainingCycles = eeCycles % kEeClockHz;
         const uint64_t scaled = remainingCycles * clockHz + timer.clockRemainder;
-        const uint64_t ticks = wholeSeconds * clockHz + scaled / kEeClockHz;
-        timer.clockRemainder = scaled % kEeClockHz;
+        const uint64_t scaledTicks = scaled / kEeClockHz; // PERF-EX1: single divide for quotient & remainder
+        const uint64_t ticks = wholeSeconds * clockHz + scaledTicks;
+        timer.clockRemainder = scaled - scaledTicks * kEeClockHz;
         if (ticks == 0u)
         {
             continue;
@@ -2790,7 +2795,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 const uint32_t initialTagAddr = tagAddr;
                                 const bool scanOnly = t_vif1ScanOnly;
                                 const bool probeEnabled = !scanOnly && probe_ae::isEnabled();
-                                static const bool s_fkOn = []() { const char *v = std::getenv("PS2X_PROBE_VU3D"); return v && v[0] == '1'; }();
+                                static std::atomic<int8_t> s_fkOnCache{-1}; // PERF-PF1
+                                int8_t fkV = s_fkOnCache.load(std::memory_order_relaxed);
+                                if (fkV < 0) { const char *v = std::getenv("PS2X_PROBE_VU3D"); fkV = (v && v[0] == '1') ? 1 : 0; s_fkOnCache.store(fkV, std::memory_order_relaxed); }
+                                const bool s_fkOn = (fkV != 0);
                                 const bool isVif1 = (channelBase == 0x10009000u);
                                 const bool needSpans = !scanOnly && isVif1 && (probeEnabled || probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify() || s_fkOn);
 
