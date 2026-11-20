@@ -172,7 +172,16 @@ void executeCommandLine(PS2Runtime &rt, const std::string &rawLine) // FEAT-DF
 void commandThreadLoop(PS2Runtime *rt) // FEAT-DF
 {
     const char *envPath = std::getenv("PS2X_DEV_CMD");
-    const std::string cmdPath = (envPath && envPath[0] != '\0') ? std::string(envPath) : std::string("logs\\dev_cmd.txt");
+    if (!envPath || envPath[0] == '\0') // FIX-DC1
+    {
+        std::error_code ec;
+        if (std::filesystem::exists("logs\\dev_cmd.txt", ec) && !ec)
+        {
+            ps2xSafeLog("[dev] command file disabled (set PS2X_DEV_CMD to enable)\n");
+        }
+        return;
+    }
+    const std::string cmdPath(envPath); // FIX-DC1
     uint64_t offset = 0u;
 
     while (!rt->isStopRequested())

@@ -4253,7 +4253,13 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             uint32_t texSerial = 0u;
             if (prim.tme)
             {
-                texSerial = (s_rdCurSerial != 0u) ? s_rdCurSerial : ((s_rd2dTexCounter++ & 0x7FFFFFFFu) | 0x80000000u); // FEAT-RD10
+                static const bool s_rd2dUniqTex = []() {
+                    const char *e = std::getenv("PS2X_RD_2DUNIQTEX");
+                    return !(e && e[0] == '0');
+                }(); // FIX-RD67
+                texSerial = (!s_rd2dUniqTex && s_rdCurSerial != 0u)
+                    ? s_rdCurSerial
+                    : ((s_rd2dTexCounter++ & 0x7FFFFFFFu) | 0x80000000u); // FIX-RD67
                 ps2xRdNoteDraw(texSerial, rawTex0, rawTexa, m_localMemoryStorage, ps2xRdActiveClut());
             }
 

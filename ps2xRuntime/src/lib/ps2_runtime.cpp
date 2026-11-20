@@ -89,6 +89,7 @@ namespace {
 #include <unordered_map>
 #include <sstream>
 #include <mutex>
+#include <condition_variable> // FEAT-FT3
 #include <set>
 #include <map>
 #include <cstdarg>
@@ -99,6 +100,9 @@ extern "C" void ps2_onDuPresent();
 // FEAT-BGWIN: manual decl, windows.h clashes with raylib names
 extern "C" __declspec(dllimport) int __stdcall SetWindowPos(void *hWnd, void *hWndInsertAfter, int X, int Y, int cx, int cy, unsigned int uFlags);
 static inline int ps2x_bgSetWindowPos(void *h, void *after, int x, int y, int cx, int cy, unsigned int f) { return SetWindowPos(h, after, x, y, cx, cy, f); } // FEAT-BGWIN
+extern "C" __declspec(dllimport) int __stdcall QueryPerformanceCounter(long long *lpPerformanceCount); // FEAT-FT3
+extern "C" __declspec(dllimport) int __stdcall QueryPerformanceFrequency(long long *lpFrequency); // FEAT-FT3
+extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void); // FEAT-FT3
 #endif
 
 
@@ -6163,6 +6167,88 @@ void PS2Runtime::run()
         fprintf(stderr, "=== MAIN THREAD RUN LOOP STARTING ===\n");
         fflush(stderr);
     }
+    // FEAT-FT3: in-game frame-time recorder (PS2X_FT=<prefix>)
+    struct Ft3Entry { int64_t qpc; uint8_t tag; };
+    constexpr size_t kFt3Cap = 1u << 20;
+    static const char *s_ft3Env = std::getenv("PS2X_FT");
+    static const bool s_ft3On = (s_ft3Env && s_ft3Env[0] != '\0');
+    uint8_t ft3Tag = 0;
+    std::vector<Ft3Entry> ft3Ring;
+    std::atomic<uint64_t> ft3WriteCount{0};
+    std::mutex ft3Mutex;
+    std::condition_variable ft3Cv;
+    bool ft3Stop = false;
+    std::thread ft3Thread;
+    if (s_ft3On)
+    {
+        ft3Ring.resize(kFt3Cap);
+        std::string outPath = std::string(s_ft3Env) + "_presents.csv";
+        std::error_code ec;
+        std::filesystem::path p(outPath);
+        if (!p.parent_path().empty())
+            std::filesystem::create_directories(p.parent_path(), ec);
+        long long qpcFreq = 0;
+#ifdef _WIN32
+        QueryPerformanceFrequency(&qpcFreq);
+        const unsigned long pid = GetCurrentProcessId();
+#else
+        qpcFreq = 1000000000LL;
+        const unsigned long pid = 0;
+#endif
+        ft3Thread = std::thread([&ft3Ring, &ft3WriteCount, &ft3Mutex, &ft3Cv, &ft3Stop, outPath, qpcFreq, pid, kFt3Cap]() {
+            std::vector<Ft3Entry> snap;
+            snap.reserve(4096);
+            FILE *fp = std::fopen(outPath.c_str(), "w");
+            if (fp)
+            {
+                std::fprintf(fp, "Application,ProcessID,SwapChainAddress,TimeInSeconds,msBetweenPresents,Tag\n");
+                std::fflush(fp);
+            }
+            uint64_t flushed = 0;
+            int64_t qpc0 = 0;
+            int64_t prevQpc = 0;
+            const double invFreqSec = (qpcFreq > 0) ? (1.0 / static_cast<double>(qpcFreq)) : 0.0;
+            const double invFreqMs = invFreqSec * 1000.0;
+            auto flushBatch = [&]() {
+                const uint64_t cur = ft3WriteCount.load(std::memory_order_acquire);
+                if (cur <= flushed || !fp)
+                    return;
+                uint64_t start = flushed;
+                if (cur - start > kFt3Cap)
+                    start = cur - kFt3Cap;
+                snap.clear();
+                for (uint64_t i = start; i < cur; ++i)
+                    snap.push_back(ft3Ring[static_cast<size_t>(i & (kFt3Cap - 1))]);
+                for (size_t idx = 0; idx < snap.size(); ++idx)
+                {
+                    const Ft3Entry &e = snap[idx];
+                    if (flushed == 0 && idx == 0)
+                    {
+                        qpc0 = e.qpc;
+                        prevQpc = e.qpc;
+                    }
+                    const double tSec = static_cast<double>(e.qpc - qpc0) * invFreqSec;
+                    const double dtMs = (flushed == 0 && idx == 0) ? 0.0 : static_cast<double>(e.qpc - prevQpc) * invFreqMs;
+                    prevQpc = e.qpc;
+                    std::fprintf(fp, "ApeEscape3.exe,%lu,0x1,%.6f,%.4f,%u\n", pid, tSec, dtMs, static_cast<unsigned>(e.tag));
+                }
+                std::fflush(fp);
+                flushed = cur;
+            };
+            for (;;)
+            {
+                std::unique_lock<std::mutex> lk(ft3Mutex);
+                ft3Cv.wait_for(lk, std::chrono::seconds(10), [&]() { return ft3Stop; });
+                const bool done = ft3Stop;
+                lk.unlock();
+                flushBatch();
+                if (done)
+                    break;
+            }
+            if (fp)
+                std::fclose(fp);
+        });
+    }
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
         tick++;
@@ -6330,6 +6416,15 @@ void PS2Runtime::run()
             }
         }
         // C312: F9 dumps all EE RAM (32 MB) to logs/ram_f9.bin for diffing against a PCSX2 save state
+        if (s_ft3On) // FEAT-FT3
+        {
+            if (IsKeyPressed(KEY_F1)) ft3Tag = 1;
+            else if (IsKeyPressed(KEY_F2)) ft3Tag = 2;
+            else if (IsKeyPressed(KEY_F3)) ft3Tag = 3;
+            else if (IsKeyPressed(KEY_F4)) ft3Tag = 4;
+            else if (IsKeyPressed(KEY_F5)) ft3Tag = 5;
+            else if (IsKeyPressed(KEY_F6)) ft3Tag = 6;
+        }
         if (IsKeyPressed(KEY_F7)) ps2xPadMarker(); // PROBE-MK
         if (IsKeyPressed(KEY_F8)) // FEAT-DE
         {
@@ -6691,6 +6786,18 @@ void PS2Runtime::run()
             }
             const auto gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT
             EndDrawing();
+            if (s_ft3On) // FEAT-FT3
+            {
+                long long qpcNow = 0;
+#ifdef _WIN32
+                QueryPerformanceCounter(&qpcNow);
+#else
+                qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+                const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
+                ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), ft3Tag};
+                ft3WriteCount.store(idx + 1, std::memory_order_release);
+            }
             const auto presT1 = std::chrono::steady_clock::now();
             if (ps2_gt_enabled()) // PROBE-GT
                 s_gtPresentWaitNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(presT1 - gtEd0).count());
@@ -6897,6 +7004,17 @@ void PS2Runtime::run()
             requestStop();
             break;
         }
+    }
+
+    if (s_ft3On) // FEAT-FT3
+    {
+        {
+            std::lock_guard<std::mutex> lk(ft3Mutex);
+            ft3Stop = true;
+        }
+        ft3Cv.notify_one();
+        if (ft3Thread.joinable())
+            ft3Thread.join();
     }
 
     requestStop();

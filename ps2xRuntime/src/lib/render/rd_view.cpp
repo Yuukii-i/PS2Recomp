@@ -1436,6 +1436,44 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         }
     }
 
+    uint32_t first3dSerial30 = 0x3FFFFFFFu; // FIX-RD66 // FIX-RD65c
+    for (const auto &db : g_rdGpu.drawBatches)
+    {
+        const uint32_t s30 = db.batch.kickSerial & 0x3FFFFFFFu;
+        if (s30 < first3dSerial30)
+            first3dSerial30 = s30;
+    }
+    bool has2dFbp[512]{}; // FIX-RD66 // FIX-RD65c
+    for (const auto &b2 : g_rdGpu.local2dBatches)
+        has2dFbp[b2.frame & 0x1FFull] = true;
+    auto isRdDimOverlay = [&](const Rd2DBatch &b, float vpW, float vpH) -> bool // FIX-RD66 // FIX-RD65c
+    {
+        if (!g_rdDimLateOn || g_rdGpu.drawBatches.empty())
+            return false;
+        if (((b.prim >> 4) & 1ull) == 0ull || ((b.prim >> 6) & 1ull) == 0ull)
+            return false;
+        if ((b.afterSerial & 0x3FFFFFFFu) >= first3dSerial30)
+            return false;
+        const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull);
+        if (((tbp0 & 31u) == 0u) && has2dFbp[tbp0 >> 5])
+            return false;
+        const float cw = (vpW > 0.0f) ? vpW : 512.0f;
+        const float ch = (vpH > 0.0f) ? vpH : 448.0f;
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size());
+        for (size_t vi = b.first; vi < e2; ++vi)
+        {
+            const RdVert &v = g_rdGpu.local2dScratch[vi];
+            x0 = std::min(x0, v.pos[0]); x1 = std::max(x1, v.pos[0]);
+            y0 = std::min(y0, v.pos[1]); y1 = std::max(y1, v.pos[1]);
+        }
+        if (x1 < x0 || y1 < y0)
+            return false;
+        x0 = std::max(0.0f, std::min(x0, cw)); x1 = std::max(0.0f, std::min(x1, cw));
+        y0 = std::max(0.0f, std::min(y0, ch)); y1 = std::max(0.0f, std::min(y1, ch));
+        return (x1 - x0) * (y1 - y0) >= 0.90f * cw * ch;
+    };
+
     if (hasNew2d) // FEAT-RD8
     {
         // FEAT-RD16: Hor+ 2D HUD layout when PS2X_ASPECT=fill (g_rdAspectK > 1)
@@ -1443,6 +1481,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         static const bool s_menuLayer = []{ const char *e = std::getenv("PS2X_RD_MENULAYER"); return !(e && e[0] == '0'); }(); // FIX-RD65
         static uint32_t s_menuLatch = 0u; // FIX-RD65
         static bool s_menuLayerActive = false; // FIX-RD65
+        static const char *s_menuTrigger = "none"; // FIX-RD65c
         if (g_rdAspectK > 1.0f && fbW > 0.0f && fbH > 0.0f && w > 0.0f && h > 0.0f)
         {
             const auto batchBounds = [&](const Rd2DBatch &b, float &minX, float &maxX, float &minY, float &maxY) -> bool {
@@ -1461,34 +1500,93 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 }
                 return true;
             };
-            bool menuHit = false; // FIX-RD65
+            bool tallHit = false; // FIX-RD65 // FIX-RD65c
+            bool dimHit = false; // FIX-RD65c
+            size_t triggerIdx = SIZE_MAX;
+            float trigMinX = 0.0f, trigMaxX = 0.0f, trigMinY = 0.0f, trigMaxY = 0.0f;
             if (s_menuLayer) // FIX-RD65
             {
-                for (const Rd2DBatch &b : g_rdGpu.local2dBatches)
+                for (size_t bi = 0; bi < g_rdGpu.local2dBatches.size(); ++bi)
                 {
+                    const Rd2DBatch &b = g_rdGpu.local2dBatches[bi];
                     float minX, maxX, minY, maxY;
                     if (!batchBounds(b, minX, maxX, minY, maxY))
                         continue;
                     const float bw = maxX - minX;
                     const float bh = maxY - minY;
                     const float dc = 0.5f * (minX + maxX) - 0.5f * fbW;
-                    if (bw >= 0.35f * fbW && bh < 0.9f * fbH && dc >= -0.1f * fbW && dc <= 0.1f * fbW)
+                    if (bw >= 0.35f * fbW && bh >= 0.2f * fbH && bh < 0.9f * fbH && dc >= -0.1f * fbW && dc <= 0.1f * fbW) // FIX-RD65b
                     {
-                        menuHit = true;
+                        tallHit = true;
+                        triggerIdx = bi;
+                        trigMinX = minX;
+                        trigMaxX = maxX;
+                        trigMinY = minY;
+                        trigMaxY = maxY;
                         break;
+                    }
+                    if (!dimHit && isRdDimOverlay(b, fbW, fbH)) // FIX-RD65c
+                    {
+                        dimHit = true;
+                        triggerIdx = bi;
+                        trigMinX = minX;
+                        trigMaxX = maxX;
+                        trigMinY = minY;
+                        trigMaxY = maxY;
                     }
                 }
             }
+            const bool menuHit = tallHit || dimHit; // FIX-RD65 // FIX-RD65c
             const bool latched = (s_menuLatch > 0u); // FIX-RD65
-            if (menuHit) // FIX-RD65
+            if (tallHit) // FIX-RD65
+            {
                 s_menuLatch = 45u;
+                s_menuTrigger = "tall"; // FIX-RD65c
+            }
+            else if (dimHit) // FIX-RD65c
+            {
+                s_menuLatch = (s_menuLatch > 8u) ? (s_menuLatch - 1u) : 8u;
+                s_menuTrigger = "dim";
+            }
             else if (s_menuLatch > 0u)
                 --s_menuLatch;
             const bool menuFrame = menuHit || latched; // FIX-RD65
             if (menuFrame != s_menuLayerActive) // FIX-RD65
             {
                 s_menuLayerActive = menuFrame;
-                ps2xSafeLog("[rd] menuLayer %s\n", menuFrame ? "on" : "off");
+                ps2xSafeLog("[rd] menuLayer %s (%s)\n", menuFrame ? "on" : "off", s_menuTrigger); // FIX-RD65c
+                if (menuFrame && triggerIdx < g_rdGpu.local2dBatches.size())
+                {
+                    const Rd2DBatch &tb = g_rdGpu.local2dBatches[triggerIdx];
+                    ps2xSafeLog("[rd] menuLayer trigger bbox=%d,%d-%d,%d tex=%d abe=%d tex0=%llx fbp=%x\n",
+                                static_cast<int>(trigMinX), static_cast<int>(trigMinY),
+                                static_cast<int>(trigMaxX), static_cast<int>(trigMaxY),
+                                static_cast<int>((tb.prim >> 4) & 1ull),
+                                static_cast<int>((tb.prim >> 6) & 1ull),
+                                static_cast<unsigned long long>(tb.tex0),
+                                static_cast<unsigned int>(tb.frame & 0x1FFull));
+                    int otherLogged = 0;
+                    for (size_t bi = 0; bi < g_rdGpu.local2dBatches.size() && otherLogged < 8; ++bi)
+                    {
+                        if (bi == triggerIdx)
+                            continue;
+                        const Rd2DBatch &b = g_rdGpu.local2dBatches[bi];
+                        float minX, maxX, minY, maxY;
+                        if (!batchBounds(b, minX, maxX, minY, maxY))
+                            continue;
+                        const float bw = maxX - minX;
+                        const float bh = maxY - minY;
+                        if (bw >= 0.8f * fbW && bh >= 0.9f * fbH)
+                            continue;
+                        ps2xSafeLog("[rd] menuLayer other bbox=%d,%d-%d,%d tex=%d abe=%d tex0=%llx\n",
+                                    static_cast<int>(minX), static_cast<int>(minY),
+                                    static_cast<int>(maxX), static_cast<int>(maxY),
+                                    static_cast<int>((b.prim >> 4) & 1ull),
+                                    static_cast<int>((b.prim >> 6) & 1ull),
+                                    static_cast<unsigned long long>(b.tex0));
+                        ++otherLogged;
+                    }
+                }
             }
             const float s = h / fbH;
             const float scaleToShader = (s * fbW) / w;
@@ -1620,16 +1718,6 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         int rd2dReasonPrinted = 0;
         uint32_t min3dSerial = 0xFFFFFFFFu, max3dSerial = 0u;
         std::vector<size_t> deferred2d; // FIX-RD63
-        uint32_t first3dSerial30 = 0x3FFFFFFFu; // FIX-RD66
-        for (const auto &db : g_rdGpu.drawBatches)
-        {
-            const uint32_t s30 = db.batch.kickSerial & 0x3FFFFFFFu;
-            if (s30 < first3dSerial30)
-                first3dSerial30 = s30;
-        }
-        bool has2dFbp[512]{}; // FIX-RD66
-        for (const auto &b2 : g_rdGpu.local2dBatches)
-            has2dFbp[b2.frame & 0x1FFull] = true;
         if (g_rd2dReasonOn)
         {
             static int s_rd2dReasonPrints = 0;
@@ -1783,6 +1871,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 return false;
             const float vpW = (fbSize[0] > 0.0f) ? fbSize[0] : 512.0f;
             const float vpH = (fbSize[1] > 0.0f) ? fbSize[1] : 448.0f;
+            if (isRdDimOverlay(b, vpW, vpH)) // FIX-RD65c
+            {
+                if (isDim)
+                    *isDim = true;
+                return true;
+            }
             float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
             const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size());
             for (size_t vi = b.first; vi < e2; ++vi)
@@ -1797,17 +1891,6 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             y0 = std::max(0.0f, std::min(y0, vpH)); y1 = std::max(0.0f, std::min(y1, vpH));
             if ((x1 - x0) * (y1 - y0) < 0.90f * vpW * vpH)
                 return true;
-            if (g_rdDimLateOn && (b.afterSerial & 0x3FFFFFFFu) < first3dSerial30) // FIX-RD66
-            {
-                const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull);
-                const bool isRtCopy = ((tbp0 & 31u) == 0u) && has2dFbp[tbp0 >> 5];
-                if (!isRtCopy)
-                {
-                    if (isDim)
-                        *isDim = true;
-                    return true;
-                }
-            }
             return false;
         };
         auto emit2dBatch = [&](size_t idx, const Rd2DBatch &b0, uint32_t totalCount, size_t jEnd, bool forceNoZ, bool logReason) // FIX-RD63
