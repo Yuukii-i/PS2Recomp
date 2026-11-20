@@ -653,6 +653,8 @@ bool ps2xRdViewOn() // FEAT-RD1
     int8_t v = s_rdViewOnCache.load(std::memory_order_relaxed);
     if (v < 0)
     {
+        extern void ps2xLoadConfig(); // FIX-CFG1
+        ps2xLoadConfig(); // FIX-CFG1
         const char *e = std::getenv("PS2X_RD_VIEW");
         v = (e && e[0] == '1') ? 1 : 0;
         s_rdViewOnCache.store(v, std::memory_order_relaxed);
@@ -696,6 +698,8 @@ float g_rdAspectK = 1.0f; // FEAT-RD16: published each frame by present loop whe
 bool ps2xRdTakeoverOn() // FEAT-RD12
 {
     static const bool v = []() {
+        extern void ps2xLoadConfig(); // FIX-CFG1
+        ps2xLoadConfig(); // FIX-CFG1
         if (!ps2xRdViewOn())
             return false;
         const char *e = std::getenv("PS2X_RD_TAKEOVER");
@@ -948,7 +952,11 @@ static std::vector<uint16_t> g_rd24Idx[kRdSlotCount]; // PROBE-RD24 // FEAT-RD34
 static const bool g_rdBlendOn = []{ const char *e = std::getenv("PS2X_RD_BLENDLOG"); return e && e[0] == '1'; }(); // PROBE-RD29
 static const bool g_rdReasonOn = []{ const char *e = std::getenv("PS2X_RD_DRAWREASON"); return e && e[0] == '1'; }(); // PROBE-RD59
 static const bool g_rd2dReasonOn = []{ const char *e = std::getenv("PS2X_RD_2DREASON"); return e && e[0] == '1'; }(); // PROBE-RD62
-static const bool g_rd2dLateOn = []{ const char *e = std::getenv("PS2X_RD_2DLATE"); return e && e[0] == '1'; }(); // FIX-RD63
+static inline bool g_rd2dLateOn() // FIX-CFG2
+{
+    static const bool s_on = [] { extern void ps2xLoadConfig(); ps2xLoadConfig(); const char *e = std::getenv("PS2X_RD_2DLATE"); return e && e[0] == '1'; }(); // FIX-RD63 // FIX-CFG2
+    return s_on;
+}
 static const bool g_rdDimLateOn = []{ const char *e = std::getenv("PS2X_RD_DIMLATE"); return !(e && e[0] == '0'); }(); // FIX-RD66
 static const bool g_rdNoZTest = []{ const char *e = std::getenv("PS2X_RD_NOZTEST"); return e && e[0] == '1'; }(); // PROBE-RD59
 static const float g_rdZBias = []{ const char *e = std::getenv("PS2X_RD_ZBIAS"); return (e && *e) ? static_cast<float>(std::atof(e)) : 0.0f; }(); // PROBE-RD59
@@ -1881,7 +1889,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         {
             if (isDim)
                 *isDim = false;
-            if (!g_rd2dLateOn || g_rdGpu.drawBatches.empty() || drawn3dThisFrame != 0u)
+            if (!g_rd2dLateOn() || g_rdGpu.drawBatches.empty() || drawn3dThisFrame != 0u) // FIX-CFG2
                 return false;
             if (((b.prim >> 4) & 1ull) == 0ull || ((b.prim >> 6) & 1ull) == 0ull)
                 return false;

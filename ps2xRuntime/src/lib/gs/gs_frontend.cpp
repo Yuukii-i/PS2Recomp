@@ -114,6 +114,8 @@ static inline bool rdViewOnFast()
     int8_t v = s_rdViewOnCache.load(std::memory_order_relaxed);
     if (v < 0)
     {
+        extern void ps2xLoadConfig(); // FIX-CFG1
+        ps2xLoadConfig(); // FIX-CFG1
         v = ps2xRdViewOn() ? 1 : 0;
         s_rdViewOnCache.store(v, std::memory_order_relaxed);
     }
@@ -2030,7 +2032,7 @@ void GS::latchHostPresentationFrame()
             static const bool s_rd2dLog = []() { const char *e = std::getenv("PS2X_RD_2DLOG"); return e && e[0] == '1'; }();
             static const bool s_rd2dKeepAll = []() { const char *e = std::getenv("PS2X_RD_2DKEEPALL"); return e && e[0] == '1'; }();
             static const bool s_rd2dKeepSmall = []() { const char *e = std::getenv("PS2X_RD_2DKEEPSMALL"); return e && e[0] == '1'; }(); // FIX-RD58
-            static const bool s_rd2dFeedback = []() { const char *e = std::getenv("PS2X_RD_2DFEEDBACK"); return e && e[0] == '1'; }(); // FIX-RD61
+            static const bool s_rd2dFeedback = []() { extern void ps2xLoadConfig(); ps2xLoadConfig(); const char *e = std::getenv("PS2X_RD_2DFEEDBACK"); return e && e[0] == '1'; }(); // FIX-RD61 // FIX-CFG2
             static uint32_t s_rd2dLogPrints = 0u;
             static std::chrono::steady_clock::time_point s_rd2dLogLast{};
             bool do2dLog = false;

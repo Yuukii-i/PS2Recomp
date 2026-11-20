@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex> // FIX-CFG1
 #include <string>
 
 namespace
@@ -62,10 +63,8 @@ const char *kDefaultIni =
 
 void ps2xLoadConfig()
 {
-    static bool done = false;
-    if (done)
-        return;
-    done = true;
+    static std::once_flag s_once; // FIX-CFG1
+    std::call_once(s_once, []() { // FIX-CFG1
     if (const char *nc = std::getenv("PS2X_NO_CONFIG"))
         if (nc[0] == '1')
             return;
@@ -132,6 +131,8 @@ void ps2xLoadConfig()
     {
         setEnvDefault("PS2X_RD_VIEW", "1");
         setEnvDefault("PS2X_RD_TAKEOVER", "1");
+        setEnvDefault("PS2X_RD_2DFEEDBACK", "1"); // FIX-CFG2
+        setEnvDefault("PS2X_RD_2DLATE", "1"); // FIX-CFG2
     }
 
     std::string aspect = lower(get("graphics.aspect"));
@@ -167,4 +168,5 @@ void ps2xLoadConfig()
               << " aspect=" << eff("PS2X_ASPECT")
               << " msaa=" << eff("PS2X_MSAA")
               << " window=" << eff("PS2X_WINDOW_SIZE") << std::endl;
+    }); // FIX-CFG1
 }
