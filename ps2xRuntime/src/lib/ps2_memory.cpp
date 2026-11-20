@@ -1394,21 +1394,27 @@ void PS2Memory::resetEeTimers() noexcept
 
 uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
 {
-    if (eeCycles == 0u)
+    if (eeCycles == 0u) [[unlikely]]
     {
         return 0u;
     }
 
     constexpr uint32_t kGifStat = 0x10003020u;
     constexpr uint32_t kGifFqcMask = 0x1F000000u;
-    if (s_gifStatOwner != this || s_gifStatPtr == nullptr) // PERF-KL: unordered_map elements are node-stable; the only invalidation is clear() (reset above)
+    if (s_gifStatOwner != this || s_gifStatPtr == nullptr) [[unlikely]] // PERF-KL: unordered_map elements are node-stable; the only invalidation is clear() (reset above)
     {
         auto gifStatIt = m_ioRegisters.find(kGifStat);
         s_gifStatOwner = this;
         s_gifStatPtr = gifStatIt != m_ioRegisters.end() ? &gifStatIt->second : nullptr;
     }
-    if (s_gifStatPtr)
+    if (s_gifStatPtr) [[likely]]
         *s_gifStatPtr &= ~kGifFqcMask;
+
+    // PERF-EX1: hoist loop-invariant eeCycles / kEeClockHz and eeCycles % kEeClockHz out of the timer loop,
+    // with a fast path when eeCycles < kEeClockHz (virtually all calls).
+    const bool subSecond = eeCycles < kEeClockHz;
+    const uint64_t wholeSeconds = subSecond ? 0u : (eeCycles / kEeClockHz);
+    const uint64_t remainingCycles = subSecond ? eeCycles : (eeCycles % kEeClockHz);
 
     uint32_t interruptMask = 0u;
     for (size_t index = 0; index < m_eeTimers.size(); ++index)
@@ -1420,11 +1426,10 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
         }
 
         const uint64_t clockHz = kEeTimerClockHz[timer.mode & kEeTimerModeClksMask];
-        const uint64_t wholeSeconds = eeCycles / kEeClockHz;
-        const uint64_t remainingCycles = eeCycles % kEeClockHz;
         const uint64_t scaled = remainingCycles * clockHz + timer.clockRemainder;
-        const uint64_t ticks = wholeSeconds * clockHz + scaled / kEeClockHz;
-        timer.clockRemainder = scaled % kEeClockHz;
+        const uint64_t scaledTicks = scaled / kEeClockHz; // PERF-EX1: single divide for quotient & remainder
+        const uint64_t ticks = wholeSeconds * clockHz + scaledTicks;
+        timer.clockRemainder = scaled - scaledTicks * kEeClockHz;
         if (ticks == 0u)
         {
             continue;

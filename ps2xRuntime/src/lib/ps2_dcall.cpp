@@ -57,33 +57,43 @@ bool ps2DcallContinue(uint8_t *rdram,
                       uint32_t fallthrough)
 {
     (void)target;
+    // PERF-EX1: hoist immutable function-table globals into locals so they are not reloaded across indirect calls.
+    const uint32_t tableBase = g_ps2RecompiledFunctionTableBase;
+    const uint32_t tableEnd = g_ps2RecompiledFunctionTableEnd;
+    const uint32_t slotCount = g_ps2RecompiledFunctionTableSlotCount;
+    const auto *const table = g_ps2RecompiledFunctionTable;
+
     uint32_t chainSteps = 0;
     while (ctx->pc != fallthrough && !runtime->isStopRequested() && ctx->pc != 0u)
     {
         const uint32_t nextPc = ctx->pc;
         if ((nextPc & 3u) != 0u ||
-            nextPc < g_ps2RecompiledFunctionTableBase ||
-            nextPc >= g_ps2RecompiledFunctionTableEnd)
+            nextPc < tableBase ||
+            nextPc >= tableEnd) [[unlikely]]
         {
             break;
         }
-        const uint32_t slot = (nextPc - g_ps2RecompiledFunctionTableBase) >> 2;
-        if (slot >= g_ps2RecompiledFunctionTableSlotCount ||
-            g_ps2RecompiledFunctionTable[slot] == nullptr)
+        const uint32_t slot = (nextPc - tableBase) >> 2;
+        if (slot >= slotCount) [[unlikely]]
         {
             break;
         }
-        if (++chainSteps > 1000u)
+        const auto fn = table[slot]; // PERF-EX1: load slot once instead of before & after ps2DcallFlushAcct
+        if (fn == nullptr) [[unlikely]]
+        {
+            break;
+        }
+        if (++chainSteps > 1000u) [[unlikely]]
         {
             break;
         }
         g_acctPending += kPs2DcallDispatchCycles;
-        if (g_acctPending >= 256u)
+        if (g_acctPending >= 256u) [[unlikely]]
         {
             ps2DcallFlushAcct(runtime);
         }
-        g_ps2RecompiledFunctionTable[slot](rdram, ctx, runtime);
-        if (ctx->pc == nextPc)
+        fn(rdram, ctx, runtime);
+        if (ctx->pc == nextPc) [[unlikely]]
         {
             break;
         }

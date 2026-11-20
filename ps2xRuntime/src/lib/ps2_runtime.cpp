@@ -4350,17 +4350,17 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      const char *debugName)
 {
     EeProfilerScope eeScope;
-    if (g_profCounts) // PROBE-IJ
+    if (g_profCounts) [[unlikely]] // PROBE-IJ, PERF-EX2
         ++g_pcDispatch[static_cast<int>(kind) % 5];
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
 
-    if (dispatchAnyProbeEnabled())
+    if (dispatchAnyProbeEnabled()) [[unlikely]] // PERF-EX2
         dispatchGuestBranchProbes(rdram, ctx, targetPc, sourcePc, isCall);
     // vf0 is hardwired {0,0,0,1}; contexts built via R5900Context() start with it zeroed. (Hack Ledger: HW-faithful backstop)
-    if (ctx)
+    if (ctx) [[likely]] // PERF-EX2
         ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
-    if (targetPc >= 0x00120000u && targetPc < 0x0013F800u)
+    if ((targetPc - 0x00120000u) < (0x0013F800u - 0x00120000u)) [[unlikely]] // PERF-EX2
     {
         static uint32_t s_range120kBranchHitCount = 0;
         s_range120kBranchHitCount++;
@@ -5632,12 +5632,12 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
-    if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    if (g_profCounts) [[unlikely]] ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ // PERF-EX3
     acctFlushForIo(vaddr); // PERF-LM
-    if (vaddr & 15u) // PROBE-IZ: R5900 lq ignores the low 4 address bits
+    if (vaddr & 15u) [[unlikely]] // PROBE-IZ: R5900 lq ignores the low 4 address bits // PERF-EX3
     {
         static std::atomic<int> s_n{0};
-        if (s_n.fetch_add(1) < 5)
+        if (s_n.load(std::memory_order_relaxed) < 5 && s_n.fetch_add(1, std::memory_order_relaxed) < 5) // PERF-EX3
             std::fprintf(stderr, "[probe] lq unaligned vaddr=0x%08X pc=0x%X ra=0x%llX\n", vaddr, ctx->pc, (unsigned long long)_mm_cvtsi128_si64(ctx->r[31]));
         vaddr &= ~15u;
     }
@@ -5649,7 +5649,7 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     }
     {
         static std::atomic<int> s_q{0}; // PROBE-JB: first slow-path 128-bit loads (non-fast addresses only)
-        if (s_q.fetch_add(1) < 12)
+        if (s_q.load(std::memory_order_relaxed) < 12 && s_q.fetch_add(1, std::memory_order_relaxed) < 12) [[unlikely]] // PERF-EX3
             std::fprintf(stderr, "[probe] Load128 slow vaddr=0x%08X ctx=%p pc=0x%X this=%p\n", vaddr, (void *)ctx, ctx->pc, (void *)this);
     }
     try
@@ -5935,16 +5935,16 @@ thread_local uint64_t g_ps2xCheckpointYields = 0;   // DECOMP-CT
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
-    if (g_ps2xSuppressCheckpoint) // DECOMP-CM
+    if (g_ps2xSuppressCheckpoint) [[unlikely]] // DECOMP-CM // PERF-EX3
     {
         return false;
     }
     const bool due = m_eeScheduler ? m_eeScheduler->checkpointDue(cycles) : false;
-    if (due)
+    if (due) [[unlikely]] // PERF-EX3
     {
         ++g_ps2xCheckpointYields; // DECOMP-CT
     }
-    if (g_profCounts) // PROBE-IJ
+    if (g_profCounts) [[unlikely]] // PROBE-IJ // PERF-EX3
     {
         ++g_pcCkpt;
         g_pcCkptTrue += due ? 1u : 0u;
