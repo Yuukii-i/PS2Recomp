@@ -848,14 +848,11 @@ namespace ps2_stubs
 }
 
 
-static bool isVblankLatchEnabled()
+extern bool ps2xVblankLatchEnabled(); // FIX-VL3
+
+static bool isVblankLatchEnabled() // FIX-VL3
 {
-    static const bool s_enabled = []() {
-        const char *e = std::getenv("PS2X_VBLANK_LATCH");
-        if (e && std::strcmp(e, "0") == 0) return false;
-        return true;
-    }();
-    return s_enabled;
+    return ps2xVblankLatchEnabled(); // FIX-VL3
 }
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight, uint64_t renderTick = 0u, bool skipLatch = false) // FEAT-RD18

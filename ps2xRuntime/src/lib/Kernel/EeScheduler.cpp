@@ -2578,14 +2578,42 @@ bool postPresentLatch(GS &gs)
 }
 } // namespace
 
-static bool isVblankLatchEnabled()
+extern bool ps2xRdTakeoverOn(); // FIX-VL2
+extern bool ps2xRdForceClassic(); // FIX-VL2
+
+bool ps2xVblankLatchEnabled() // FIX-VL3
 {
-    static const bool s_enabled = []() {
-        const char *e = std::getenv("PS2X_VBLANK_LATCH");
-        if (e && std::strcmp(e, "0") == 0) return false;
-        return true;
+    static const int s_mode = []() -> int { // FIX-VL2: 0=env off, 1=always on, 2=takeover skip-from-start
+        if (const char *e = std::getenv("PS2X_VBLANK_LATCH")) // FIX-VL2
+        {
+            if (std::strcmp(e, "0") == 0) // FIX-VL2
+                return 0; // FIX-VL2
+            ps2xSafeLog("[vl2] vblank latch: on\n"); // FIX-VL2
+            return 1; // FIX-VL2
+        }
+        const bool skipFromStart = ps2xRdTakeoverOn(); // FIX-VL2
+        if (!skipFromStart) // FIX-VL2
+        {
+            ps2xSafeLog("[vl2] vblank latch: on\n"); // FIX-VL2
+            return 1; // FIX-VL2
+        }
+        ps2xSafeLog("[vl2] vblank latch: skipped from start (takeover)\n"); // FIX-VL2
+        return 2; // FIX-VL2
     }();
-    return s_enabled;
+    if (s_mode == 0) // FIX-VL2
+        return false; // FIX-VL2
+    if (s_mode == 1) // FIX-VL2
+        return true; // FIX-VL2
+    static std::atomic<bool> s_sticky{false}; // FIX-VL2
+    if (s_sticky.load(std::memory_order_acquire)) // FIX-VL2
+        return true; // FIX-VL2
+    if (ps2xRdForceClassic()) // FIX-VL2
+    {
+        if (!s_sticky.exchange(true, std::memory_order_acq_rel)) // FIX-VL2
+            ps2xSafeLog("[vl2] classic forced -> latch ON (sticky)\n"); // FIX-VL2
+        return true; // FIX-VL2
+    }
+    return false; // FIX-VL2
 }
 
 void EeScheduler::processEvent(const EeEvent &event)
@@ -2655,7 +2683,7 @@ void EeScheduler::processEvent(const EeEvent &event)
             } // PROBE-AW3
         } // PROBE-AW2
 
-        if (isVblankLatchEnabled())
+        if (ps2xVblankLatchEnabled()) // FIX-VL3
         {
             extern std::atomic<uint64_t> g_gsFrameKicks;
             static uint64_t s_lastLatchKicks = ~0ull;
