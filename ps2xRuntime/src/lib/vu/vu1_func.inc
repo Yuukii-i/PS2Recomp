@@ -2446,11 +2446,13 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
 // the caller restores the undo log) for every case lbFull declines or that it does not model: N outside 4..67, DIV by zero, any aliasing between the output
 // buffer and anything the real (software-pipelined) routine reads after its first stores, kick failure.
 // 1EE0 (vi10 = 0) and 1EF0 (vi10 = 1: reads S from 796+idx in both skinned 2210 and rigid 2670).
-static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t s2base, uint32_t s3base, const int32_t *idxs,
-                               __m128 vf2, __m128 vf16, const Fv8V &k2, const Fv8V &k16,
-                               ::RdVert *outVerts, uint32_t *outIndices, uint32_t baseIndex, uint32_t &outIdxCount) // FEAT-RD40
+template <bool VI10>
+static void buildLeanSkinVertsImpl(const uint8_t *vu, int32_t N, uint32_t s2base, uint32_t s3base, const int32_t *idxs,
+                                   __m128 vf2, __m128 vf16, const Fv8V &k2, const Fv8V &k16,
+                                   ::RdVert *outVerts, uint32_t *outIndices, uint32_t baseIndex, uint32_t &outIdxCount) // FEAT-RD40 // PERF-PF1
 {
     const __m128 zero = _mm_setzero_ps();
+    const __m256 z8v = _mm256_setzero_ps();
     const __m128i v255 = _mm_set1_epi32(255);
     uint32_t ic = 0u;
     for (int32_t t0 = 0; t0 < N; t0 += 8)
@@ -2464,23 +2466,32 @@ static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t
             gA[j] = ldq(vu, static_cast<uint32_t>(636 + idx));
             gB[j] = ldq(vu, static_cast<uint32_t>(716 + idx));
             gS3[j] = ldq(vu, s3base + static_cast<uint32_t>(s));
-            gS2[j] = vi10 ? ldq(vu, static_cast<uint32_t>(796 + idx)) : ldq(vu, s2base + static_cast<uint32_t>(s));
+            gS2[j] = VI10 ? ldq(vu, static_cast<uint32_t>(796 + idx)) : ldq(vu, s2base + static_cast<uint32_t>(s));
         }
         Fv8V B = fv8FromRows(gB), S3 = fv8FromRows(gS3), S2 = fv8FromRows(gS2);
         for (int c = 0; c < 4; ++c)
         {
             B.c[c] = fv8N(B.c[c]);
             S3.c[c] = fv8N(S3.c[c]);
-            S2.c[c] = fv8N(S2.c[c]);
         }
+        // PERF-PF1: S2.c[3] is unused; compute UV = (S/Q, T/Q) in 8-wide AVX2 (bit-exact IEEE-754 div)
+        S2.c[0] = fv8N(S2.c[0]);
+        S2.c[1] = fv8N(S2.c[1]);
+        S2.c[2] = fv8N(S2.c[2]);
+        const __m256 nz8 = _mm256_cmp_ps(S2.c[2], z8v, _CMP_NEQ_OQ);
+        const __m256 u8 = _mm256_and_ps(_mm256_div_ps(S2.c[0], S2.c[2]), nz8);
+        const __m256 v8 = _mm256_and_ps(_mm256_div_ps(S2.c[1], S2.c[2]), nz8);
+        alignas(32) float uArr[8], vArr[8];
+        _mm256_store_ps(uArr, u8);
+        _mm256_store_ps(vArr, v8);
+
         Fv8V z8;
-        z8.c[0] = z8.c[1] = z8.c[2] = z8.c[3] = _mm256_setzero_ps();
+        z8.c[0] = z8.c[1] = z8.c[2] = z8.c[3] = z8v;
         __m256i bad = _mm256_setzero_si256();
         const Fv8V bv = fv8Op<15, false>(B, k16, z8, bad);
         const Fv8V in = fv8Op<15, true>(k2, k16, bv, bad);
         const Fv8V pr = fv8Op<15, false>(S3, in, z8, bad);
-        __m128 oPr[8], oS2[8];
-        fv8ToRows(S2, oS2);
+        __m128 oPr[8];
         if (!fv8Any(bad))
         {
             Fv8V prOut;
@@ -2508,10 +2519,8 @@ static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t
             const __m128i p8 = _mm_packus_epi16(p16, p16);
             const uint32_t packed = static_cast<uint32_t>(_mm_cvtsi128_si32(p8));
             std::memcpy(rv.rgba, &packed, 4);
-            const __m128 q = _mm_shuffle_ps(oS2[j], oS2[j], _MM_SHUFFLE(2, 2, 2, 2));
-            const __m128 d = _mm_div_ps(oS2[j], q);
-            const __m128 nz = _mm_cmpneq_ps(q, zero);
-            _mm_storel_pi(reinterpret_cast<__m64 *>(rv.uv), _mm_and_ps(d, nz));
+            rv.uv[0] = uArr[j];
+            rv.uv[1] = vArr[j];
             if (v >= 2 && !(static_cast<uint32_t>(idxs[v]) & 0x8000u))
             {
                 outIndices[ic++] = baseIndex + static_cast<uint32_t>(v - 2);
@@ -2521,6 +2530,16 @@ static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t
         }
     }
     outIdxCount = ic;
+}
+
+static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t s2base, uint32_t s3base, const int32_t *idxs,
+                               __m128 vf2, __m128 vf16, const Fv8V &k2, const Fv8V &k16,
+                               ::RdVert *outVerts, uint32_t *outIndices, uint32_t baseIndex, uint32_t &outIdxCount) // FEAT-RD40
+{
+    if (vi10)
+        buildLeanSkinVertsImpl<true>(vu, N, s2base, s3base, idxs, vf2, vf16, k2, k16, outVerts, outIndices, baseIndex, outIdxCount);
+    else
+        buildLeanSkinVertsImpl<false>(vu, N, s2base, s3base, idxs, vf2, vf16, k2, k16, outVerts, outIndices, baseIndex, outIdxCount);
 }
 
 static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool vi10, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)

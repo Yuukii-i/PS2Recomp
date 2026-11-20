@@ -94,15 +94,30 @@ bool g_rdCurDrawIsGeom = false;             // FEAT-RD18
 std::atomic<bool> g_rdForceClassic{false};  // FEAT-RD48
 std::atomic<uint64_t> g_rdFrameRtSyncCyc{0ull}; // FEAT-RD48
 static std::atomic<uint32_t> s_rdLatchPrims{0u}; // FEAT-RD50
-static int rdForceClassicMode() // FEAT-RD48: 0=never, 1=always, 2=auto
+static std::atomic<int8_t> s_rdForceClassicModeCache{-1}; // PERF-PF1
+static inline int rdForceClassicMode() // FEAT-RD48: 0=never, 1=always, 2=auto
 {
-    static const int mode = []() {
+    int8_t v = s_rdForceClassicModeCache.load(std::memory_order_relaxed);
+    if (v < 0)
+    {
         const char *e = std::getenv("PS2X_RD_FORCECLASSIC");
-        if (e && e[0] == '0') return 0;
-        if (e && e[0] == '1') return 1;
-        return 2;
-    }();
-    return mode;
+        if (e && e[0] == '0') v = 0;
+        else if (e && e[0] == '1') v = 1;
+        else v = 2;
+        s_rdForceClassicModeCache.store(v, std::memory_order_relaxed);
+    }
+    return v;
+}
+static std::atomic<int8_t> s_rdViewOnCache{-1}; // PERF-PF1
+static inline bool rdViewOnFast()
+{
+    int8_t v = s_rdViewOnCache.load(std::memory_order_relaxed);
+    if (v < 0)
+    {
+        v = ps2xRdViewOn() ? 1 : 0;
+        s_rdViewOnCache.store(v, std::memory_order_relaxed);
+    }
+    return v != 0;
 }
 bool ps2xRdForceClassic() // FEAT-RD48
 {
@@ -303,6 +318,139 @@ struct RdKickRec // FEAT-RD33
 static bool rdScissorQualifies(uint32_t w, uint32_t h) // FEAT-RD33b: >=90% of 512x448 (fallback thresholds 500x400)
 {
     return w >= 500u && h >= 400u;
+}
+
+static const bool s_rdGsDrawLogOn = []() { // PROBE-RD60
+    const char *e = std::getenv("PS2X_RD_GSDRAWLOG");
+    return e && e[0] == '1';
+}();
+struct RdGsDrawAgg // PROBE-RD60
+{
+    uint32_t n = 0u;
+    uint32_t v = 0u;
+    float minX = 1e9f;
+    float minY = 1e9f;
+    float maxX = -1e9f;
+    float maxY = -1e9f;
+    bool hasBbox = false;
+};
+static std::mutex s_rdGsDrawLogMutex; // PROBE-RD60
+static std::unordered_map<uint64_t, RdGsDrawAgg> s_rdGsDrawAgg; // PROBE-RD60
+static std::atomic<bool> s_rdGsDrawLogDone{false}; // PROBE-RD60
+static const auto s_rdGsDrawLogStart = std::chrono::steady_clock::now(); // PROBE-RD60
+
+static void rdGsDrawLogRecord(const GSContext &ctx, const GSPrimReg &prim, const GSVertex *vtxQueue,
+                              uint8_t vertexCount, uint32_t curSerial, bool isGeomKick) // PROBE-RD60
+{
+    if (s_rdGsDrawLogDone.load(std::memory_order_relaxed))
+        return;
+    const uint8_t srcCode = ((curSerial & 0x40000000u) != 0u) ? 0u : ((curSerial == 0u) ? 1u : 2u);
+    bool captured = false;
+    if (isGeomKick)
+    {
+        const uint32_t maskedS = curSerial & 0x3FFFFFFFu;
+        const uint32_t scW = (ctx.scissor.x1 >= ctx.scissor.x0) ? (static_cast<uint32_t>(ctx.scissor.x1) + 1u - ctx.scissor.x0) : 0u;
+        const uint32_t scH = (ctx.scissor.y1 >= ctx.scissor.y0) ? (static_cast<uint32_t>(ctx.scissor.y1) + 1u - ctx.scissor.y0) : 0u;
+        captured = (maskedS != 0u && rdViewOnFast() && rdScissorQualifies(scW, scH));
+    }
+    else if (ps2xRdActive())
+    {
+        captured = (prim.type == GS_PRIM_SPRITE && vertexCount >= 2u) ||
+                   ((prim.type == GS_PRIM_TRIANGLE || prim.type == GS_PRIM_TRISTRIP || prim.type == GS_PRIM_TRIFAN) && vertexCount >= 3u);
+    }
+    const uint64_t key =
+        (static_cast<uint64_t>(ctx.frame.fbp & 0x1FFu)) |
+        (static_cast<uint64_t>(ctx.tex0.tbp0 & 0x3FFFu) << 9) |
+        (static_cast<uint64_t>(ctx.tex0.psm & 0x3Fu) << 23) |
+        (static_cast<uint64_t>(prim.type & 0x7u) << 29) |
+        (static_cast<uint64_t>(prim.tme ? 1u : 0u) << 32) |
+        (static_cast<uint64_t>(prim.abe ? 1u : 0u) << 33) |
+        (static_cast<uint64_t>(srcCode & 0x3u) << 34) |
+        (static_cast<uint64_t>(captured ? 1u : 0u) << 36);
+    const float ofx = static_cast<float>(ctx.xyoffset.ofx) * (1.0f / 16.0f);
+    const float ofy = static_cast<float>(ctx.xyoffset.ofy) * (1.0f / 16.0f);
+    std::lock_guard<std::mutex> lk(s_rdGsDrawLogMutex);
+    RdGsDrawAgg &agg = s_rdGsDrawAgg[key];
+    ++agg.n;
+    agg.v += vertexCount;
+    for (uint8_t i = 0u; i < vertexCount; ++i)
+    {
+        const float sx = vtxQueue[i].x - ofx;
+        const float sy = vtxQueue[i].y - ofy;
+        agg.minX = std::min(agg.minX, sx);
+        agg.minY = std::min(agg.minY, sy);
+        agg.maxX = std::max(agg.maxX, sx);
+        agg.maxY = std::max(agg.maxY, sy);
+        agg.hasBbox = true;
+    }
+}
+
+static void rdGsDrawLogOnFrame() // PROBE-RD60
+{
+    if (s_rdGsDrawLogDone.load(std::memory_order_relaxed))
+        return;
+    std::unordered_map<uint64_t, RdGsDrawAgg> frameMap;
+    {
+        std::lock_guard<std::mutex> lk(s_rdGsDrawLogMutex);
+        frameMap.swap(s_rdGsDrawAgg);
+    }
+    static int s_printed = 0;
+    static std::chrono::steady_clock::time_point s_lastPrint;
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsedS = std::chrono::duration<double>(now - s_rdGsDrawLogStart).count();
+    if (s_printed == 0)
+    {
+        static std::chrono::steady_clock::time_point s_lastCheck;
+        static bool s_hasChecked = false;
+        if (s_hasChecked && std::chrono::duration<double>(now - s_lastCheck).count() < 1.0)
+            return;
+        s_hasChecked = true;
+        s_lastCheck = now;
+        FILE *f = std::fopen("logs\\gslog_go.flag", "rb");
+        if (!f)
+            return;
+        std::fclose(f);
+    }
+    else if (s_printed == 1)
+    {
+        if (std::chrono::duration<double>(now - s_lastPrint).count() < 1.0)
+            return;
+    }
+    else
+    {
+        return;
+    }
+    ++s_printed;
+    s_lastPrint = now;
+    if (s_printed >= 2)
+        s_rdGsDrawLogDone.store(true, std::memory_order_relaxed);
+    std::vector<std::pair<uint64_t, RdGsDrawAgg>> rows(frameMap.begin(), frameMap.end());
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) {
+        return a.second.n > b.second.n;
+    });
+    const size_t limit = std::min<size_t>(rows.size(), 40u);
+    ps2xSafeLog("[rdgs] frame=%d t=%.1fs keys=%zu\n", s_printed, elapsedS, rows.size());
+    static const char *const kSrcNames[3] = {"vu1kick", "direct", "other"};
+    for (size_t i = 0u; i < limit; ++i)
+    {
+        const uint64_t k = rows[i].first;
+        const RdGsDrawAgg &a = rows[i].second;
+        const unsigned fbp = static_cast<unsigned>(k & 0x1FFull);
+        const unsigned tbp = static_cast<unsigned>((k >> 9) & 0x3FFFull);
+        const int psm = static_cast<int>((k >> 23) & 0x3Full);
+        const int prim = static_cast<int>((k >> 29) & 0x7ull);
+        const int tme = static_cast<int>((k >> 32) & 0x1ull);
+        const int abe = static_cast<int>((k >> 33) & 0x1ull);
+        const unsigned srcIdx = static_cast<unsigned>((k >> 34) & 0x3ull);
+        const int cap = static_cast<int>((k >> 36) & 0x1ull);
+        const int x0 = a.hasBbox ? static_cast<int>(std::floor(a.minX)) : 0;
+        const int y0 = a.hasBbox ? static_cast<int>(std::floor(a.minY)) : 0;
+        const int x1 = a.hasBbox ? static_cast<int>(std::ceil(a.maxX)) : 0;
+        const int y1 = a.hasBbox ? static_cast<int>(std::ceil(a.maxY)) : 0;
+        ps2xSafeLog("[rdgs] fbp=%x tbp=%x psm=%d prim=%d tme=%d abe=%d src=%s cap=%d n=%u v=%u bbox=%d,%d-%d,%d\n",
+                    fbp, tbp, psm, prim, tme, abe, kSrcNames[srcIdx < 3u ? srcIdx : 2u], cap,
+                    a.n, a.v, x0, y0, x1, y1);
+    }
 }
 
 static std::mutex s_rd2dCapMutex; // FEAT-RD8
@@ -1470,6 +1618,7 @@ void GS::latchHostPresentationFrame()
     const uint64_t pjStart = __rdtsc(); // PERF-JD
     struct GwPres { uint64_t t0; ~GwPres() { if (g_gwOn) { g_gwPresentT.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); g_gwFrames.fetch_add(1, std::memory_order_relaxed); } } } gwPres{pjStart}; // PROBE-GW
     const bool takeover = ps2xRdTakeoverOn(); // FEAT-RD12
+    if (s_rdGsDrawLogOn) rdGsDrawLogOnFrame(); // PROBE-RD60
     const bool frameHasGeom = s_rdFrameHasGeom.exchange(false, std::memory_order_acq_rel); // FEAT-RD18
     rdRollPassFrame(); // FEAT-RD23
     static uint32_t s_rdEmptyLatches = 0u; // FEAT-RD33c
@@ -1848,13 +1997,123 @@ void GS::latchHostPresentationFrame()
                 s_pubKickRecs.clear();
             }
             const uint32_t filterFbp = (frameHasGeom && frameGeomFbp != 0xFFFFFFFFu) ? frameGeomFbp : ((displayFbp != 0xFFFFFFFFu) ? displayFbp : s_rdMainFbp); // FEAT-RD18b
+            // PROBE-RD57: 2D batch filter logging & keep-all test switch
+            static const bool s_rd2dLog = []() { const char *e = std::getenv("PS2X_RD_2DLOG"); return e && e[0] == '1'; }();
+            static const bool s_rd2dKeepAll = []() { const char *e = std::getenv("PS2X_RD_2DKEEPALL"); return e && e[0] == '1'; }();
+            static const bool s_rd2dKeepSmall = []() { const char *e = std::getenv("PS2X_RD_2DKEEPSMALL"); return e && e[0] == '1'; }(); // FIX-RD58
+            static const bool s_rd2dFeedback = []() { const char *e = std::getenv("PS2X_RD_2DFEEDBACK"); return e && e[0] == '1'; }(); // FIX-RD61
+            static uint32_t s_rd2dLogPrints = 0u;
+            static std::chrono::steady_clock::time_point s_rd2dLogLast{};
+            bool do2dLog = false;
+            std::chrono::steady_clock::time_point logNow{};
+            if (s_rd2dLog && s_rd2dLogPrints < 6u)
+            {
+                logNow = std::chrono::steady_clock::now();
+                if (s_rd2dLogPrints == 0u || std::chrono::duration_cast<std::chrono::milliseconds>(logNow - s_rd2dLogLast).count() >= 2000)
+                    do2dLog = true;
+            }
+            struct Rd2dLogRow
+            {
+                bool kept;
+                size_t idx;
+                uint32_t fbp;
+                uint32_t count;
+                float x0, y0, x1, y1;
+                int tex;
+                int abe;
+                uint32_t afterSerial;
+            };
+            std::vector<Rd2dLogRow> logRows;
+            if (do2dLog)
+                logRows.reserve(39u);
+
+            auto computeBatchBbox = [&](const Rd2DBatch &batch, float &x0, float &y0, float &x1, float &y1) -> bool
+            {
+                if (batch.count == 0u || static_cast<size_t>(batch.first) >= s_pubVerts.size())
+                    return false;
+                x0 = x1 = s_pubVerts[batch.first].pos[0];
+                y0 = y1 = s_pubVerts[batch.first].pos[1];
+                const size_t vEnd = std::min(s_pubVerts.size(), static_cast<size_t>(batch.first) + static_cast<size_t>(batch.count));
+                for (size_t vi = static_cast<size_t>(batch.first) + 1u; vi < vEnd; ++vi)
+                {
+                    x0 = std::min(x0, s_pubVerts[vi].pos[0]);
+                    x1 = std::max(x1, s_pubVerts[vi].pos[0]);
+                    y0 = std::min(y0, s_pubVerts[vi].pos[1]);
+                    y1 = std::max(y1, s_pubVerts[vi].pos[1]);
+                }
+                return true;
+            };
+
+            static std::vector<uint32_t> s_copySrcFbps; // FIX-RD61
+            s_copySrcFbps.clear();
+            if (s_rd2dFeedback && filterFbp != 0xFFFFFFFFu) // FIX-RD61
+            {
+                constexpr float kCopyMinArea = 0.9f * 512.0f * 448.0f;
+                for (const Rd2DBatch &cb : s_pubBatches)
+                {
+                    const uint32_t cbFbp = static_cast<uint32_t>(cb.frame & 0x1FFull);
+                    const int cTex = static_cast<int>((cb.prim >> 4) & 1ull);
+                    if (cbFbp != filterFbp || cTex != 1)
+                        continue;
+                    float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+                    if (!computeBatchBbox(cb, x0, y0, x1, y1))
+                        continue;
+                    const float area = (x1 > x0 && y1 > y0) ? ((x1 - x0) * (y1 - y0)) : 0.0f;
+                    if (area < kCopyMinArea)
+                        continue;
+                    const uint32_t tbp0 = static_cast<uint32_t>(cb.tex0 & 0x3FFFull);
+                    if ((tbp0 % 32u) == 0u)
+                    {
+                        const uint32_t srcFbp = tbp0 / 32u;
+                        if (srcFbp != filterFbp &&
+                            std::find(s_copySrcFbps.begin(), s_copySrcFbps.end(), srcFbp) == s_copySrcFbps.end())
+                        {
+                            s_copySrcFbps.push_back(srcFbp);
+                        }
+                    }
+                }
+            }
+
             size_t keptVerts = 0u;
             size_t keptBatches = 0u;
             for (size_t i = 0u; i < s_pubBatches.size(); ++i)
             {
                 Rd2DBatch b = s_pubBatches[i];
                 const uint32_t bFbp = static_cast<uint32_t>(b.frame & 0x1FFull);
-                if (filterFbp != 0xFFFFFFFFu && bFbp == filterFbp)
+                const int tex = static_cast<int>((b.prim >> 4) & 1ull);
+                const int abe = static_cast<int>((b.prim >> 6) & 1ull);
+                bool keepBatch = s_rd2dKeepAll || (filterFbp != 0xFFFFFFFFu && bFbp == filterFbp); // PROBE-RD57
+                if (!keepBatch && s_rd2dFeedback && !s_copySrcFbps.empty() &&
+                    (tex == 1 || abe == 1) &&
+                    std::find(s_copySrcFbps.begin(), s_copySrcFbps.end(), bFbp) != s_copySrcFbps.end()) // FIX-RD61
+                {
+                    keepBatch = true;
+                }
+                const bool needBbox = (do2dLog && logRows.size() < 39u) || (!keepBatch && s_rd2dKeepSmall && tex == 1); // FIX-RD58
+                float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+                if (needBbox)
+                    computeBatchBbox(b, x0, y0, x1, y1);
+                if (!keepBatch && s_rd2dKeepSmall && tex == 1 && b.count > 0u) // FIX-RD58
+                {
+                    const float area = (x1 - x0) * (y1 - y0);
+                    constexpr float kMaxSmallArea = 0.25f * 512.0f * 448.0f;
+                    if (area <= kMaxSmallArea)
+                        keepBatch = true;
+                }
+                if (do2dLog && logRows.size() < 39u) // PROBE-RD57
+                {
+                    logRows.push_back({
+                        keepBatch,
+                        i,
+                        bFbp,
+                        b.count,
+                        x0, y0, x1, y1,
+                        tex,
+                        abe,
+                        b.afterSerial
+                    });
+                }
+                if (keepBatch)
                 {
                     if (keptVerts != b.first && b.count > 0u)
                         std::memmove(&s_pubVerts[keptVerts], &s_pubVerts[b.first], b.count * sizeof(RdVert));
@@ -1867,6 +2126,21 @@ void GS::latchHostPresentationFrame()
                 {
                     ++droppedAtFlip;
                     ++rtSk;
+                }
+            }
+            if (do2dLog) // PROBE-RD57
+            {
+                s_rd2dLogLast = logNow;
+                ++s_rd2dLogPrints;
+                ps2xSafeLog("[rd2d] filterFbp=%x displayFbp=%x geomFbp=%x mainFbp=%x kept=%u dropped=%u\n",
+                            filterFbp, displayFbp, frameGeomFbp, s_rdMainFbp, keptAtFlip, droppedAtFlip);
+                for (const Rd2dLogRow &r : logRows)
+                {
+                    ps2xSafeLog("[rd2d] %s i=%zu fbp=%x count=%u bbox=%.1f,%.1f,%.1f,%.1f tex=%d abe=%d afterSerial=%u\n",
+                                r.kept ? "keep" : "drop",
+                                r.idx, r.fbp, r.count,
+                                r.x0, r.y0, r.x1, r.y1,
+                                r.tex, r.abe, r.afterSerial);
                 }
             }
             s_pubVerts.resize(keptVerts);
@@ -3458,7 +3732,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         else
         {
             s_rdCurSerial = 0u; // FEAT-RD49
-            if (ps2xRdViewOn() && (value & 0x40000000ull) != 0ull) // FEAT-RD49: keep stage-transition detector alive while forced
+            if (rdViewOnFast() && (value & 0x40000000ull) != 0ull) // FEAT-RD49: keep stage-transition detector alive while forced // PERF-PF1
                 s_rdFrameHasGeom.store(true, std::memory_order_relaxed);
         }
         break;
@@ -3825,7 +4099,7 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
     const uint32_t maskedS = s_rdCurSerial & 0x3FFFFFFFu; // FEAT-RD13 // FEAT-RD55
     if (maskedS != 0u) // FEAT-RD13 // FEAT-RD55: single capLock for GMin/GMax + KickRecs
     {
-        const bool recordKick = isGeomKick && ps2xRdViewOn();
+        const bool recordKick = isGeomKick && rdViewOnFast(); // PERF-PF1
         const GSScissorReg &sc = ctx.scissor; // FEAT-RD33b
         const uint32_t scW = (sc.x1 >= sc.x0) ? (static_cast<uint32_t>(sc.x1) + 1u - sc.x0) : 0u;
         const uint32_t scH = (sc.y1 >= sc.y0) ? (static_cast<uint32_t>(sc.y1) + 1u - sc.y0) : 0u;
@@ -3853,7 +4127,7 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
         if (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(ctx.frame.fbp)) // FEAT-RD19
             s_rdFrameGeomFbp.store(ctx.frame.fbp, std::memory_order_relaxed); // FEAT-RD18b
     }
-    if (ps2xRdViewOn() && s_rdCurSerial != 0u) // FEAT-RD17
+    if (rdViewOnFast() && s_rdCurSerial != 0u) // FEAT-RD17 // PERF-PF1
     {
         const uint64_t rawFrame = rdPackFrame(ctx.frame);
         if (s_rdCurSerial != s_rdLastStateSerial)
@@ -3884,7 +4158,7 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
             g_rdStateChangesInKick.fetch_add(1u, std::memory_order_relaxed);
         }
     }
-    if (ps2xRdViewOn() && isGeomKick) // FEAT-RD5 // FEAT-RD10
+    if (rdViewOnFast() && isGeomKick) // FEAT-RD5 // FEAT-RD10 // PERF-PF1
     {
         if (s_rdCurSerial != s_rdLastNotedSerial && prim.tme)
         {
@@ -3901,6 +4175,8 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
     const bool isGeomKick = rdNoteKickBookkeeping(batch.state.context, batch.state.prim, batch.state.texa, m_localMemoryStorage); // FEAT-RD42
+    if (s_rdGsDrawLogOn) // PROBE-RD60
+        rdGsDrawLogRecord(batch.state.context, batch.state.prim, m_vtxQueue, batch.vertexCount, s_rdCurSerial, isGeomKick);
     if (ps2xRdActive() && !isGeomKick) // FEAT-RD8 // FEAT-RD10 // FEAT-RD18 // FEAT-RD49: capture all 2D candidates; FBP filtered at flip time
     {
         const GSContext &ctx = batch.state.context;
