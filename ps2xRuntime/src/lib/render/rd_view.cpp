@@ -23,6 +23,7 @@ static bool g_rdAlwaysFunc = false; // FEAT-RD20
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD1
 extern unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t texa); // FEAT-RD5
+extern void ps2xRdBt2SetKind(int kind); // PROBE-BT2
 extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD19
 extern bool ps2xRdHasDisplayFbp(); // FEAT-RD19
 extern bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_t &test, uint64_t &frame,
@@ -1986,6 +1987,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             unsigned int texId = 0u;
             if ((b0.prim >> 4) & 1ull)
             {
+                ps2xRdBt2SetKind(1); // PROBE-BT2
                 texId = ps2xRdGetTextureForBatch(b0.texSerial, b0.tex0, b0.texa);
                 if (texId != 0u)
                 {
@@ -2139,6 +2141,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     ++i2d;
                     continue;
                 }
+                ps2xRdBt2SetKind(1); // PROBE-BT2
                 const unsigned int texId0 = ((b0.prim >> 4) & 1ull) ? ps2xRdGetTextureForBatch(b0.texSerial, b0.tex0, b0.texa) : 0u;
                 uint32_t totalCount = b0.count;
                 size_t j = i2d + 1;
@@ -2152,7 +2155,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         bn.clamp != b0.clamp || bn.tex1 != b0.tex1 || bn.alpha != b0.alpha ||
                         bn.test != b0.test || bn.frame != b0.frame || bn.zbuf != b0.zbuf || bn.scissor != b0.scissor) // FEAT-RD22
                         break;
-                    if (texId0 != 0u && ps2xRdGetTextureForBatch(bn.texSerial, bn.tex0, bn.texa) != texId0)
+                    if (texId0 != 0u && (ps2xRdBt2SetKind(1), ps2xRdGetTextureForBatch(bn.texSerial, bn.tex0, bn.texa)) != texId0) // PROBE-BT2
                         break;
                     totalCount += bn.count;
                     ++j;
@@ -2496,6 +2499,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             int tccVal = 0;
             if ((prim >> 4) & 1ull)
             {
+                ps2xRdBt2SetKind(0); // PROBE-BT2
                 const unsigned int texId = ps2xRdGetTextureForBatch(batch.kickSerial, tex0, texa); // FEAT-RD5
                 if (texId != 0u)
                 {
