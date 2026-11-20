@@ -324,6 +324,8 @@ int applyRdDate(uint64_t test, uint64_t prim, int blendState) // FEAT-RD25
 // FEAT-RD15: GL state cache (redundant call elimination)
 struct RdGlCache
 {
+    static constexpr unsigned int kFastTexCap = 16384u; // PERF-EX5
+    std::vector<uint32_t> texParamsVec;                 // PERF-EX5: direct lookup for normal GL texIds
     std::unordered_map<unsigned int, uint32_t> texParams;
     unsigned int bound = 0u;
     int depthTest = -1, depthMask = -1;
@@ -336,7 +338,10 @@ struct RdGlCache
         bound = 0u; depthTest = -1; depthMask = -1;
         std::memset(uniValid, 0, sizeof(uniValid));
         if ((++frame % 600u) == 0u)
+        {
+            std::fill(texParamsVec.begin(), texParamsVec.end(), 0u); // PERF-EX5
             texParams.clear();
+        }
     }
 } g_rdc; // FEAT-RD15
 
@@ -367,7 +372,18 @@ void rdDepthMask(bool on) // FEAT-RD15
 }
 void rdBindTex(unsigned int texId, uint32_t params) // FEAT-RD15
 {
-    uint32_t &cached = g_rdc.texParams[texId];
+    uint32_t *cachedPtr = nullptr; // PERF-EX5
+    if (texId < RdGlCache::kFastTexCap)
+    {
+        if (texId >= g_rdc.texParamsVec.size())
+            g_rdc.texParamsVec.resize(texId + 1u, 0u);
+        cachedPtr = &g_rdc.texParamsVec[texId];
+    }
+    else
+    {
+        cachedPtr = &g_rdc.texParams[texId];
+    }
+    uint32_t &cached = *cachedPtr;
     const uint32_t want = params | 0x80000000u;
     if (cached != want)
     {

@@ -471,30 +471,33 @@ void ps2xRdTexTickFrame() // FEAT-RD3
 {
     ++g_texFrame;
     ++g_texFramesSinceLog; // FEAT-RD5
-    for (auto it = g_texCache.begin(); it != g_texCache.end();)
+    if ((g_texFrame & 15u) == 0u) // PERF-EX5: amortise full-cache eviction scan (600-frame threshold unchanged)
     {
-        if ((g_texFrame - it->second.lastFrame) >= 600u)
+        for (auto it = g_texCache.begin(); it != g_texCache.end();)
         {
-            if (it->second.glId != 0u)
-                rlUnloadTexture(it->second.glId);
-            it = g_texCache.erase(it);
+            if ((g_texFrame - it->second.lastFrame) >= 600u)
+            {
+                if (it->second.glId != 0u)
+                    rlUnloadTexture(it->second.glId);
+                it = g_texCache.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
-        else
+        for (auto it = g_glByContentId.begin(); it != g_glByContentId.end();) // FEAT-RD5
         {
-            ++it;
-        }
-    }
-    for (auto it = g_glByContentId.begin(); it != g_glByContentId.end();) // FEAT-RD5
-    {
-        if ((g_texFrame - it->second.lastFrame) >= 600u)
-        {
-            if (it->second.glId != 0u)
-                rlUnloadTexture(it->second.glId);
-            it = g_glByContentId.erase(it);
-        }
-        else
-        {
-            ++it;
+            if ((g_texFrame - it->second.lastFrame) >= 600u)
+            {
+                if (it->second.glId != 0u)
+                    rlUnloadTexture(it->second.glId);
+                it = g_glByContentId.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
     }
 
@@ -563,19 +566,15 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
     const RdTexKey key{tex0Key, texa};
 
     // FEAT-RD3c: noted CLUT (the one the GS had active at draw time)
-    RdClutNote note{};
-    bool haveNote = false;
+    // PERF-EX5: only read clutHash on the hot lookup path; defer 1 KB RdClutNote copy to cache misses.
+    uint64_t curClutHash = 0ull; // FEAT-RD3c
     if (isIndexedPsm(psm))
     {
         std::lock_guard<std::mutex> lk(g_clutMutex);
         auto nit = g_clutNotes.find(RdClutKey{tbp0, tbw, psm, tw, th});
         if (nit != g_clutNotes.end())
-        {
-            note = nit->second;
-            haveNote = true;
-        }
+            curClutHash = nit->second.clutHash;
     }
-    const uint64_t curClutHash = haveNote ? note.clutHash : 0ull; // FEAT-RD3c
 
     auto it = g_texCache.find(key);
     if (it != g_texCache.end() && it->second.clutHash == curClutHash) // FEAT-RD3c
@@ -586,6 +585,24 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
         {
             it->second.lastFrame = g_texFrame;
             return it->second.glId;
+        }
+    }
+
+    RdClutNote note{};
+    bool haveNote = false;
+    if (isIndexedPsm(psm)) // PERF-EX5
+    {
+        std::lock_guard<std::mutex> lk(g_clutMutex);
+        auto nit = g_clutNotes.find(RdClutKey{tbp0, tbw, psm, tw, th});
+        if (nit != g_clutNotes.end())
+        {
+            note = nit->second;
+            curClutHash = note.clutHash;
+            haveNote = true;
+        }
+        else
+        {
+            curClutHash = 0ull;
         }
     }
 
