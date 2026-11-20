@@ -1684,9 +1684,32 @@ void GS::latchHostPresentationFrame()
     const bool useClassic = takeover && (useClassicForced || (!frameHasGeom && !useRepeat)); // FEAT-RD18 // FEAT-RD33c // FEAT-RD48
     if (takeover && rdForceClassicMode() == 2 && !forcedNow) // FEAT-RD48
     {
+        // FIX-RD71: measured with the vblank latch gone, the new renderer beats classic in every stage even at an rtSync EMA of 9.5 ms (ciscocity_c on 4 cores: new 52.5 fps vs classic 43.6), so the guard is only a safety valve for pathological sync cost.
+        static const double s_classicSyncMs = []() {
+            const char *e = std::getenv("PS2X_RD_CLASSIC_SYNC_MS");
+            if (e && *e)
+            {
+                char *end = nullptr;
+                const double v = std::strtod(e, &end);
+                if (end != e && std::isfinite(v) && v > 0.0)
+                    return v;
+            }
+            return 16.0;
+        }();
+        static const uint32_t s_classicSyncFrames = []() {
+            const char *e = std::getenv("PS2X_RD_CLASSIC_SYNC_FRAMES");
+            if (e && *e)
+            {
+                char *end = nullptr;
+                const unsigned long v = std::strtoul(e, &end, 10);
+                if (end != e && v > 0ul)
+                    return static_cast<uint32_t>(v);
+            }
+            return 60u;
+        }();
         s_rdRtSyncEma = 0.9 * s_rdRtSyncEma + 0.1 * rtSyncMs;
-        if (s_rdRtSyncEma > 6.0) ++s_rdRtSyncHighCnt; else s_rdRtSyncHighCnt = 0u;
-        if (s_rdRtSyncHighCnt >= 30u && s_rdResetCooldown == 0u) // FEAT-RD50
+        if (s_rdRtSyncEma > s_classicSyncMs) ++s_rdRtSyncHighCnt; else s_rdRtSyncHighCnt = 0u;
+        if (s_rdRtSyncHighCnt >= s_classicSyncFrames && s_rdResetCooldown == 0u) // FEAT-RD50
         {
             g_rdForceClassic.store(true, std::memory_order_release);
             s_rdForceWarmup = 1u; // FEAT-RD48: wait 1 latch for in-flight kicks to finish full raster
