@@ -154,6 +154,11 @@ static inline bool rdIsPureVertexPackedReg(uint8_t reg) // FEAT-RD38
 }
 bool g_rdClassicPresentRequested = false;   // FEAT-RD18
 std::atomic<bool> g_rdFrameIsClassic{false}; // FEAT-RD18
+std::atomic<bool> g_rdLastFrameClassic{true}; // FIX-VL1
+bool ps2xRdLastFrameClassic()                 // FIX-VL1
+{
+    return g_rdLastFrameClassic.load(std::memory_order_acquire);
+}
 extern std::atomic<uint32_t> g_rdRepeatFrames;       // FEAT-RD33c
 extern std::atomic<uint32_t> g_rdClassicFramesTotal; // FEAT-RD33c
 static std::atomic<bool> s_rdFrameHasGeom{false}; // FEAT-RD18
@@ -1776,6 +1781,7 @@ void GS::latchHostPresentationFrame()
         ps2xRdSetPresentSize(width, height);
     }
     g_rdFrameIsClassic.store(useClassic, std::memory_order_release); // FEAT-RD18
+    g_rdLastFrameClassic.store(useClassic, std::memory_order_release); // FIX-VL1
     {
         std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
         m_hostPresentationFrame = std::move(frame.pixels);

@@ -6168,7 +6168,7 @@ void PS2Runtime::run()
         fflush(stderr);
     }
     // FEAT-FT3: in-game frame-time recorder (PS2X_FT=<prefix>)
-    struct Ft3Entry { int64_t qpc; uint8_t tag; };
+    struct Ft3Entry { int64_t qpc; int64_t epochMs; uint8_t tag; }; // FEAT-HP2
     constexpr size_t kFt3Cap = 1u << 20;
     static const char *s_ft3Env = std::getenv("PS2X_FT");
     static const bool s_ft3On = (s_ft3Env && s_ft3Env[0] != '\0');
@@ -6201,7 +6201,7 @@ void PS2Runtime::run()
             FILE *fp = std::fopen(outPath.c_str(), "w");
             if (fp)
             {
-                std::fprintf(fp, "Application,ProcessID,SwapChainAddress,TimeInSeconds,msBetweenPresents,Tag\n");
+                std::fprintf(fp, "Application,ProcessID,SwapChainAddress,TimeInSeconds,msBetweenPresents,Tag,EpochMs\n"); // FEAT-HP2
                 std::fflush(fp);
             }
             uint64_t flushed = 0;
@@ -6230,7 +6230,7 @@ void PS2Runtime::run()
                     const double tSec = static_cast<double>(e.qpc - qpc0) * invFreqSec;
                     const double dtMs = (flushed == 0 && idx == 0) ? 0.0 : static_cast<double>(e.qpc - prevQpc) * invFreqMs;
                     prevQpc = e.qpc;
-                    std::fprintf(fp, "ApeEscape3.exe,%lu,0x1,%.6f,%.4f,%u\n", pid, tSec, dtMs, static_cast<unsigned>(e.tag));
+                    std::fprintf(fp, "ApeEscape3.exe,%lu,0x1,%.6f,%.4f,%u,%lld\n", pid, tSec, dtMs, static_cast<unsigned>(e.tag), static_cast<long long>(e.epochMs)); // FEAT-HP2
                 }
                 std::fflush(fp);
                 flushed = cur;
@@ -6794,8 +6794,9 @@ void PS2Runtime::run()
 #else
                 qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 #endif
+                const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); // FEAT-HP2
                 const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
-                ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), ft3Tag};
+                ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag}; // FEAT-HP2
                 ft3WriteCount.store(idx + 1, std::memory_order_release);
             }
             const auto presT1 = std::chrono::steady_clock::now();
