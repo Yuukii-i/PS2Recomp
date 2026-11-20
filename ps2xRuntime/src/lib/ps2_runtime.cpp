@@ -6370,6 +6370,32 @@ void PS2Runtime::run()
                 }
             }
         }
+        extern std::atomic<int> g_ps2xPause;      // FEAT-PA1
+        extern std::atomic<int> g_ps2xStepTokens; // FEAT-PA1
+        static const bool s_pauseKeysOn = []() {  // FEAT-PA1
+            const char *e = std::getenv("PS2X_PAUSE_KEYS");
+            return !(e && e[0] == '0');
+        }();
+        bool pauseToggled = false; // FEAT-PA1
+        if (s_pauseKeysOn) // FEAT-PA1
+        {
+            if (IsKeyPressed(KEY_F9))
+            {
+                const int next = (g_ps2xPause.load(std::memory_order_relaxed) == 0) ? 1 : 0;
+                g_ps2xPause.store(next, std::memory_order_release);
+                if (next == 0)
+                    g_ps2xStepTokens.store(0, std::memory_order_release);
+                pauseToggled = true;
+                ps2xSafeLog("[pause] %s\n", next ? "PAUSED" : "RESUMED");
+            }
+            if (IsKeyPressed(KEY_F10) && g_ps2xPause.load(std::memory_order_relaxed) != 0)
+            {
+                g_ps2xStepTokens.fetch_add(1, std::memory_order_acq_rel);
+                ps2xSafeLog("[pause] step 1 frame\n");
+            }
+        }
+        else
+        {
         if (IsKeyPressed(KEY_F9))
         {
             FILE *rf = std::fopen("logs/ram_f9.bin", "wb");
@@ -6415,6 +6441,7 @@ void PS2Runtime::run()
                 }
             }
         }
+        }
         // Sample real keyboard state from Raylib window thread
         uint16_t activeButtons = 0;
         if (IsKeyDown(KEY_ENTER)) activeButtons |= (1u << 3); // START
@@ -6448,9 +6475,9 @@ void PS2Runtime::run()
         const auto timeSinceLastPresent = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastPresentTime).count();
         const bool vblankLatchOn = isVblankLatchEnabled();
         constexpr int64_t kIdleRepresentMs = 250; // PERF-IR2: re-present an unchanged frame only every 250 ms (was 33 ms: ~25 redundant sync+de-swizzle presents/s at the title, kd)
-        const bool shouldPresent = vblankLatchOn
+        const bool shouldPresent = pauseToggled || (vblankLatchOn // FEAT-PA1
             ? ((currentPresentSeq != s_lastPresentedSeq) || (timeSinceLastPresent >= kIdleRepresentMs))
-            : ((currentGsKicks != s_lastPresentedGsKicks) || (timeSinceLastPresent >= kIdleRepresentMs));
+            : ((currentGsKicks != s_lastPresentedGsKicks) || (timeSinceLastPresent >= kIdleRepresentMs)));
 
         if (shouldPresent)
         {
@@ -6656,6 +6683,11 @@ void PS2Runtime::run()
             if (m_debugUiInitialized && m_debugUiDrawCallback)
             {
                 m_debugUiDrawCallback(*this, m_debugUiUserData);
+            }
+            if (g_ps2xPause.load(std::memory_order_relaxed) != 0) // FEAT-PA1
+            {
+                DrawRectangle(8, 8, 220, 28, Color{0, 0, 0, 180});
+                DrawText("PAUSED (F10 = step)", 16, 14, 16, YELLOW);
             }
             const auto gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT
             EndDrawing();

@@ -304,6 +304,8 @@ std::string ps2xGetIntcSummary()
 static EeScheduler *s_activeScheduler = nullptr;
 static PS2Runtime *s_activeRuntime = nullptr;
 static std::atomic<uint32_t> s_diagEnabledIntcMask{0xFFFFFFFFu};
+std::atomic<int> g_ps2xPause{0};      // FEAT-PA1
+std::atomic<int> g_ps2xStepTokens{0}; // FEAT-PA1
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
     : m_runtime(runtime)
@@ -360,6 +362,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_eeCycle = 0u;
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
+    g_ps2xPause.store(0, std::memory_order_release);      // FEAT-PA1
+    g_ps2xStepTokens.store(0, std::memory_order_release); // FEAT-PA1
     m_checkpointPending.store(false, std::memory_order_release);
     m_debugPublishCountdown = 0u;
     {
@@ -2442,6 +2446,28 @@ void EeScheduler::processDueDeadlines()
         {
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
+                if (g_ps2xPause.load(std::memory_order_relaxed) != 0) // FEAT-PA1
+                {
+                    while (!m_stopRequested.load(std::memory_order_acquire) &&
+                           g_ps2xPause.load(std::memory_order_acquire) != 0)
+                    {
+                        int tok = g_ps2xStepTokens.load(std::memory_order_acquire);
+                        bool consumed = false;
+                        while (tok > 0)
+                        {
+                            if (g_ps2xStepTokens.compare_exchange_weak(tok, tok - 1, std::memory_order_acq_rel))
+                            {
+                                consumed = true;
+                                break;
+                            }
+                        }
+                        if (consumed)
+                            break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    if (m_stopRequested.load(std::memory_order_acquire))
+                        return;
+                }
                 const auto now = std::chrono::steady_clock::now();
                 const double lateMs = std::chrono::duration<double, std::milli>(now - scheduled.hostDeadline).count();
                 probe_ae::onDc2VBlankStart(lateMs);
