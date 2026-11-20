@@ -5,6 +5,10 @@
 #include "rlgl.h"
 #ifdef _WIN32
 extern "C" __declspec(dllimport) void __stdcall glDepthFunc(unsigned int func); // FEAT-RD20 (opengl32 export; rlgl.h does not expose glad here)
+extern "C" __declspec(dllimport) void * __stdcall wglGetProcAddress(const char *name); // FIX-RD79
+extern "C" __declspec(dllimport) void __stdcall glGetIntegerv(unsigned int pname, int *data); // FIX-RD79
+extern "C" __declspec(dllimport) void __stdcall glClearColor(float r, float g, float b, float a); // FIX-RD79
+extern "C" __declspec(dllimport) void __stdcall glClear(unsigned int mask); // FIX-RD79
 #endif
 static bool g_rdAlwaysFunc = false; // FEAT-RD20
 
@@ -33,7 +37,51 @@ extern bool ps2xRdLookupScissor(uint32_t serial, uint64_t &scis); // FEAT-RD22
 extern bool ps2xRdIsMainPass(uint32_t fbp, uint64_t xyoffset); // FEAT-RD23
 extern uint64_t ps2xRdMainXyoff(); // FEAT-RD23
 extern bool ps2xRdIsFbFeedback(uint32_t serial); // FEAT-RD28b
+extern uint32_t ps2xRdFbPageRanges(uint32_t *first, uint32_t *last); // FIX-RD79
 static uint32_t s_fbFeedbackSkipped = 0u; // FEAT-RD28b
+static uint32_t s_fbTexUsed = 0u; // FIX-RD79
+static uint32_t s_fbTexCopies = 0u; // FIX-RD79
+static unsigned int s_prevTexId = 0u; // FIX-RD79
+static uint32_t s_fbTexBlendCount = 0u; // FIX-RD80
+static float s_fbTexLastF = 1.0f; // FIX-RD80
+static std::atomic<uint32_t> s_rdDisplayBlendBits{0x3F800000u}; // FIX-RD80
+
+void ps2xRdSetDisplayBlend(float f) // FIX-RD80
+{
+    uint32_t bits = 0x3F800000u;
+    std::memcpy(&bits, &f, sizeof(bits));
+    s_rdDisplayBlendBits.store(bits, std::memory_order_release);
+}
+
+static float rdGetDisplayBlend() // FIX-RD80
+{
+    const uint32_t bits = s_rdDisplayBlendBits.load(std::memory_order_acquire);
+    float f = 1.0f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+static bool rdFbTexOn() // FIX-RD79
+{
+    static const bool s_on = []() {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_FBTEX");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+
+static bool rdFbTexSubstOn() // FIX-RD80
+{
+    static const bool s_on = []() {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_FBTEX_SUBST");
+        return !(e && e[0] == '0');
+    }();
+    return s_on;
+}
 extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
 extern std::atomic<uint32_t> g_rdMergedSpan;        // FEAT-RD17
 extern void ps2xRdTexTickFrame(); // FEAT-RD3
@@ -692,6 +740,7 @@ void ps2xRdResetState() // FEAT-RD49
     g_rd2dFrames[0] = Rd2DFrame{};
     g_rd2dFrames[1] = Rd2DFrame{};
     g_rdNeedGpuReset.store(true, std::memory_order_release);
+    ps2xRdSetDisplayBlend(1.0f); // FIX-RD80
 }
 
 float g_rdAspectK = 1.0f; // FEAT-RD16: published each frame by present loop when PS2X_ASPECT=fill & takeover
@@ -1060,6 +1109,28 @@ bool isRd3dBatchDrawable(const RdBatch &batch, const RdGpuSlot &slot, float fbW,
 }
 
 Rd35Stats g_rd35; // PROBE-RD35
+
+static bool isRdFbTexDisplayBatch(const Rd2DBatch &b) // FIX-RD79
+{
+    if (!rdFbTexOn() || !rdFbTexSubstOn() || s_prevTexId == 0u) // FIX-RD80
+        return false;
+    if (((b.prim >> 4) & 1ull) == 0ull || !ps2xRdIsFbFeedback(b.texSerial))
+        return false;
+    if (ps2xRdIsDisplayFbp(static_cast<uint32_t>(b.frame & 0x1FFull)))
+        return false;
+    const uint32_t psm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full);
+    if (psm != 0u && psm != 1u && psm != 2u && psm != 10u) // CT32, CT24, CT16, CT16S
+        return false;
+    const uint32_t page = static_cast<uint32_t>(b.tex0 & 0x3FFFull) / 32u;
+    uint32_t fbF[8], fbL[8];
+    const uint32_t nfb = ps2xRdFbPageRanges(fbF, fbL);
+    for (uint32_t k = 0u; k < nfb; ++k)
+    {
+        if (ps2xRdIsDisplayFbp(fbF[k]) && page >= fbF[k] && page <= fbL[k])
+            return true;
+    }
+    return false;
+}
 
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
@@ -1987,8 +2058,16 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             unsigned int texId = 0u;
             if ((b0.prim >> 4) & 1ull)
             {
-                ps2xRdBt2SetKind(1); // PROBE-BT2
-                texId = ps2xRdGetTextureForBatch(b0.texSerial, b0.tex0, b0.texa);
+                if (isRdFbTexDisplayBatch(b0)) // FIX-RD79
+                {
+                    texId = s_prevTexId;
+                    ++s_fbTexUsed;
+                }
+                else
+                {
+                    ps2xRdBt2SetKind(1); // PROBE-BT2
+                    texId = ps2xRdGetTextureForBatch(b0.texSerial, b0.tex0, b0.texa);
+                }
                 if (texId != 0u)
                 {
                     const uint32_t wms = static_cast<uint32_t>(b0.clamp & 3ull);
@@ -2098,7 +2177,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     ++i2d;
                     continue;
                 }
-                if (((b0.prim >> 4) & 1ull) && ps2xRdIsFbFeedback(b0.texSerial)) // FEAT-RD28b
+                if (((b0.prim >> 4) & 1ull) && ps2xRdIsFbFeedback(b0.texSerial) && !isRdFbTexDisplayBatch(b0)) // FEAT-RD28b // FIX-RD79
                 {
                     if (rdbDump) rdb2d(b0, 1, b0.count); // PROBE-RD29
                     log2dReason(i2d, b0, "skip-fbFeedback"); // PROBE-RD62
@@ -2141,8 +2220,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     ++i2d;
                     continue;
                 }
-                ps2xRdBt2SetKind(1); // PROBE-BT2
-                const unsigned int texId0 = ((b0.prim >> 4) & 1ull) ? ps2xRdGetTextureForBatch(b0.texSerial, b0.tex0, b0.texa) : 0u;
+                auto resolve2dTexId = [&](const Rd2DBatch &b) -> unsigned int { // FIX-RD79
+                    if (((b.prim >> 4) & 1ull) == 0ull)
+                        return 0u;
+                    if (isRdFbTexDisplayBatch(b))
+                        return s_prevTexId;
+                    ps2xRdBt2SetKind(1); // PROBE-BT2
+                    return ps2xRdGetTextureForBatch(b.texSerial, b.tex0, b.texa);
+                };
+                const unsigned int texId0 = resolve2dTexId(b0); // FIX-RD79
                 uint32_t totalCount = b0.count;
                 size_t j = i2d + 1;
                 while (j < n2d && (drawAll || (g_rdGpu.local2dBatches[j].afterSerial & 0x3FFFFFFFu) < maxS)) // FEAT-RD10
@@ -2155,7 +2241,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         bn.clamp != b0.clamp || bn.tex1 != b0.tex1 || bn.alpha != b0.alpha ||
                         bn.test != b0.test || bn.frame != b0.frame || bn.zbuf != b0.zbuf || bn.scissor != b0.scissor) // FEAT-RD22
                         break;
-                    if (texId0 != 0u && (ps2xRdBt2SetKind(1), ps2xRdGetTextureForBatch(bn.texSerial, bn.tex0, bn.texa)) != texId0) // PROBE-BT2
+                    if (((bn.prim >> 4) & 1ull) && ps2xRdIsFbFeedback(bn.texSerial) && !isRdFbTexDisplayBatch(bn)) // FIX-RD79
+                        break;
+                    if (texId0 != 0u && resolve2dTexId(bn) != texId0) // PROBE-BT2 // FIX-RD79
                         break;
                     totalCount += bn.count;
                     ++j;
@@ -2774,6 +2862,109 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     rlEnableBackfaceCulling();
     rlViewport(0, 0, rw, rh);
 
+#ifdef _WIN32
+    if (rdFbTexOn() && vw > 0 && vh > 0) // FIX-RD79 // FIX-RD80
+    {
+        static int s_prevW = 0, s_prevH = 0, s_resW = 0, s_resH = 0;
+        static bool s_prevFilled = false; // FIX-RD80
+        const int wantW = vw;
+        const int wantH = static_cast<int>((static_cast<int64_t>(vh) * 512 + 224) / 448);
+        const float dispF = rdGetDisplayBlend(); // FIX-RD80
+        s_fbTexLastF = dispF; // FIX-RD80
+        if (dispF < 0.999f && s_prevFilled && s_prevTexId != 0u && s_prevW == wantW && s_prevH == wantH) // FIX-RD80
+        {
+            const float clampedF = (dispF < 0.0f) ? 0.0f : dispF;
+            const int aInt = static_cast<int>((1.0f - clampedF) * 255.0f + 0.5f);
+            const unsigned char alphaByte = static_cast<unsigned char>(aInt < 0 ? 0 : (aInt > 255 ? 255 : aInt));
+            Texture2D prevTex{};
+            prevTex.id = s_prevTexId;
+            prevTex.width = s_prevW;
+            prevTex.height = s_prevH;
+            prevTex.mipmaps = 1;
+            prevTex.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+            const Rectangle srcRec{0.0f, 0.0f, static_cast<float>(s_prevW), static_cast<float>(s_prevH) * (448.0f / 512.0f)};
+            const Rectangle dstRec{x, y, w, h};
+            const Color tint{255, 255, 255, alphaByte};
+            rlDisableBackfaceCulling();
+            DrawTexturePro(prevTex, srcRec, dstRec, Vector2{0.0f, 0.0f}, 0.0f, tint);
+            rlDrawRenderBatchActive();
+            rlEnableBackfaceCulling();
+            ++s_fbTexBlendCount;
+        }
+        using PFN_glGenFramebuffers = void(__stdcall *)(int, unsigned int *);
+        using PFN_glBindFramebuffer = void(__stdcall *)(unsigned int, unsigned int);
+        using PFN_glFramebufferTexture2D = void(__stdcall *)(unsigned int, unsigned int, unsigned int, unsigned int, int);
+        using PFN_glBlitFramebuffer = void(__stdcall *)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
+        static auto pGenFbo = reinterpret_cast<PFN_glGenFramebuffers>(wglGetProcAddress("glGenFramebuffers"));
+        static auto pBindFbo = reinterpret_cast<PFN_glBindFramebuffer>(wglGetProcAddress("glBindFramebuffer"));
+        static auto pFbTex2D = reinterpret_cast<PFN_glFramebufferTexture2D>(wglGetProcAddress("glFramebufferTexture2D"));
+        static auto pBlitFbo = reinterpret_cast<PFN_glBlitFramebuffer>(wglGetProcAddress("glBlitFramebuffer"));
+        if (pGenFbo && pBindFbo && pFbTex2D && pBlitFbo)
+        {
+            static unsigned int s_prevFbo = 0u, s_resFbo = 0u, s_resTex = 0u;
+            int prevReadFbo = 0, prevDrawFbo = 0, sampleBufs = 0;
+            glGetIntegerv(0x8CAAu, &prevReadFbo); // GL_READ_FRAMEBUFFER_BINDING
+            glGetIntegerv(0x8CA6u, &prevDrawFbo); // GL_DRAW_FRAMEBUFFER_BINDING
+            glGetIntegerv(0x80A8u, &sampleBufs);  // GL_SAMPLE_BUFFERS
+            if (s_prevTexId == 0u || s_prevW != wantW || s_prevH != wantH)
+            {
+                if (s_prevTexId != 0u)
+                    rlUnloadTexture(s_prevTexId);
+                s_prevTexId = rlLoadTexture(nullptr, wantW, wantH, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                s_prevW = wantW;
+                s_prevH = wantH;
+                if (s_prevTexId != 0u)
+                {
+                    rlTextureParameters(s_prevTexId, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+                    rlTextureParameters(s_prevTexId, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+                    rlTextureParameters(s_prevTexId, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                    rlTextureParameters(s_prevTexId, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                    if (s_prevFbo == 0u)
+                        pGenFbo(1, &s_prevFbo);
+                    pBindFbo(0x8CA9u, s_prevFbo); // GL_DRAW_FRAMEBUFFER
+                    pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, s_prevTexId, 0);
+                    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                    glClear(0x00004000u);
+                }
+            }
+            if (s_prevTexId != 0u && s_prevFbo != 0u)
+            {
+                if (sampleBufs > 0)
+                {
+                    if (s_resTex == 0u || s_resW != vw || s_resH != vh)
+                    {
+                        if (s_resTex != 0u)
+                            rlUnloadTexture(s_resTex);
+                        s_resTex = rlLoadTexture(nullptr, vw, vh, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                        s_resW = vw;
+                        s_resH = vh;
+                        if (s_resFbo == 0u)
+                            pGenFbo(1, &s_resFbo);
+                        pBindFbo(0x8CA9u, s_resFbo);
+                        pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, s_resTex, 0);
+                    }
+                    pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
+                    pBindFbo(0x8CA9u, s_resFbo);
+                    pBlitFbo(vx, vy, vx + vw, vy + vh, 0, 0, vw, vh, 0x00004000u, 0x2600u);
+                    pBindFbo(0x8CA8u, s_resFbo);
+                    pBindFbo(0x8CA9u, s_prevFbo);
+                    pBlitFbo(0, vh, vw, 0, 0, 0, vw, vh, 0x00004000u, 0x2600u);
+                }
+                else
+                {
+                    pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
+                    pBindFbo(0x8CA9u, s_prevFbo);
+                    pBlitFbo(vx, vy + vh, vx + vw, vy, 0, 0, vw, vh, 0x00004000u, 0x2600u);
+                }
+                ++s_fbTexCopies;
+                s_prevFilled = true; // FIX-RD80
+            }
+            pBindFbo(0x8CA8u, static_cast<unsigned int>(prevReadFbo));
+            pBindFbo(0x8CA9u, static_cast<unsigned int>(prevDrawFbo));
+        }
+    }
+#endif
+
     if (s_passLog) // FEAT-RD22
     {
         static std::chrono::steady_clock::time_point s_lastPass{};
@@ -2908,6 +3099,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         g_rdGpu.rtSkipped3d = 0u;
         g_rdGpu.gsStateCount = 0u;
         g_rdGpu.parsedFallbackCount = 0u;
+    }
+    if (rdFbTexOn()) // FIX-RD79
+    {
+        static auto s_fbTexLastLog = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_fbTexLastLog).count() >= 2000)
+        {
+            s_fbTexLastLog = now;
+            ps2xSafeLog("[rdfb] used=%u copies=%u blend=%u lastf=%.3f\n", s_fbTexUsed, s_fbTexCopies, s_fbTexBlendCount, s_fbTexLastF); // FIX-RD79 // FIX-RD80
+        }
     }
     return true;
 }

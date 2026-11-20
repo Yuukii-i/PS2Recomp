@@ -73,6 +73,17 @@ extern bool ps2xRdActive(); // FEAT-RD49
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern void ps2xRdResetState(); // FEAT-RD49
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD12
+extern void ps2xRdSetDisplayBlend(float f); // FIX-RD80
+static bool rd80FbTexOn() // FIX-RD80
+{
+    static const bool s_on = []() {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_FBTEX");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
 extern void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t *vram, const uint16_t *clut512); // FEAT-RD5
 extern void ps2xRdNoteState(uint32_t serial, uint64_t prim, uint64_t alpha, uint64_t test, uint64_t frame,
                             uint64_t zbuf, uint64_t tex0, uint64_t tex1, uint64_t clamp, uint64_t texa, uint64_t fba); // FEAT-RD17
@@ -80,6 +91,44 @@ extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
 extern void ps2xRdNoteXyoff(uint32_t serial, uint64_t xyoff); // FEAT-RD21
 extern void ps2xRdNoteScissor(uint32_t serial, uint64_t scis); // FEAT-RD22
 extern const uint16_t *ps2xRdActiveClut(); // FEAT-RD5
+extern bool ps2xRdIsFbFeedback(uint32_t serial); // PROBE-RD78
+extern std::atomic<uint32_t> g_devWarpSeq; // PROBE-RD78
+static const int s_rd78TrLogMode = []() { // PROBE-RD78C
+    const char *e = std::getenv("PS2X_RD_TRLOG");
+    if (!e) return 0;
+    if (e[0] == '2') return 2;
+    if (e[0] == '1') return 1;
+    return 0;
+}();
+static const bool s_rd78TrLogOn = (s_rd78TrLogMode == 1); // PROBE-RD78
+struct Rd78GeomRec // PROBE-RD78
+{
+    uint32_t fbp;
+    uint8_t kept;
+    uint8_t tme;
+    uint8_t abe;
+    uint8_t prim;
+    uint64_t alpha;
+    uint64_t tex0;
+    uint64_t test;
+    uint32_t count;
+    int x0, y0, x1, y1;
+    uint32_t rgba0;
+    uint32_t tbw; // PROBE-RD78C
+    uint32_t serial; // PROBE-RD78C
+    uint8_t isFb; // PROBE-RD78C
+    uint32_t vtxCnt; // PROBE-RD78C
+    float vx[3], vy[3], vu[3], vv[3]; // PROBE-RD78C
+    uint32_t fbmsk; // PROBE-RD78D
+    uint8_t fpsm; // PROBE-RD78D
+    uint8_t fba; // PROBE-RD78D
+    uint8_t zmsk; // PROBE-RD78D
+    uint32_t zbp; // PROBE-RD78D
+    uint32_t rgba1; // PROBE-RD78D
+    uint32_t rgba2; // PROBE-RD78D
+};
+static std::atomic<bool> s_rd78Armed{false}; // PROBE-RD78
+static std::vector<Rd78GeomRec> s_rd78GeomRecs; // PROBE-RD78
 static uint32_t s_rdCurSerial = 0u;       // FEAT-RD5
 static uint32_t s_rdLastNotedSerial = 0u; // FEAT-RD5
 static uint32_t s_rdLastStateSerial = 0u; // FEAT-RD17
@@ -746,6 +795,7 @@ static void rtt0OnFrame() // PROBE-RTT0
 static std::mutex s_rd2dCapMutex; // FEAT-RD8
 static std::vector<RdVert> s_rd2dVerts; // FEAT-RD8
 static std::vector<Rd2DBatch> s_rd2dBatches; // FEAT-RD8
+static std::vector<uint8_t> s_rd2dFba; // PROBE-RD78D
 static uint32_t s_rd2dRtSkipped = 0u; // FEAT-RD8
 static uint32_t s_rd2dPointLineSkipped = 0u; // FEAT-RD8
 static uint32_t s_rd2dGMin = 0u; // FEAT-RD13
@@ -1952,6 +2002,7 @@ void GS::latchHostPresentationFrame()
                 std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
                 s_rd2dVerts.clear();
                 s_rd2dBatches.clear();
+                s_rd2dFba.clear(); // PROBE-RD78D
                 s_rdKickRecs.clear();
                 s_rdLastKickRecSerial = 0u;
                 s_rdCurSerial = 0u;
@@ -1959,6 +2010,7 @@ void GS::latchHostPresentationFrame()
                 s_rdLastStateSerial = 0u;
                 rdResetBoundariesLocked(); // FEAT-RD54
                 ps2xRdResetState();
+                if (rd80FbTexOn()) ps2xRdSetDisplayBlend(1.0f); // FIX-RD80
             }
             ps2xSafeLog("[rd] forceClassic OFF (stage transition, prims/latch=%u)\n", latchPrims);
         }
@@ -2003,6 +2055,7 @@ void GS::latchHostPresentationFrame()
                 std::lock_guard<std::mutex> capLock(s_rd2dCapMutex); // FEAT-RD49
                 s_rd2dVerts.clear();
                 s_rd2dBatches.clear();
+                s_rd2dFba.clear(); // PROBE-RD78D
                 s_rdKickRecs.clear();
                 s_rdLastKickRecSerial = 0u;
                 s_rdCurSerial = 0u;
@@ -2010,6 +2063,7 @@ void GS::latchHostPresentationFrame()
                 s_rdLastStateSerial = 0u;
                 rdResetBoundariesLocked(); // FEAT-RD54
                 ps2xRdResetState();
+                if (rd80FbTexOn()) ps2xRdSetDisplayBlend(1.0f); // FIX-RD80
             }
             ps2xSafeLog("[rd] forceClassic ON (rtSync ema=%.1f ms)\n", s_rdRtSyncEma);
         }
@@ -2018,6 +2072,7 @@ void GS::latchHostPresentationFrame()
     if (useClassic) // FEAT-RD33c // FEAT-RD54
     {
         g_rdClassicFramesTotal.fetch_add(1, std::memory_order_relaxed);
+        if (rd80FbTexOn()) ps2xRdSetDisplayBlend(1.0f); // FIX-RD80
         std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
         rdResetBoundariesLocked();
     }
@@ -2108,10 +2163,68 @@ void GS::latchHostPresentationFrame()
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp != 0xFFFFFFFFu ? displayFbp : 0u, sourceFbp, width, height, usedPreferred);
         g_hostPresentSeq.fetch_add(1, std::memory_order_release);
+        static uint32_t s_rd78LastWarpSeq = 0u; // PROBE-RD78
+        static uint32_t s_rd78FramesLeft = 0u; // PROBE-RD78
+        static uint32_t s_rd78ArmFrame = 0u; // PROBE-RD78
+        static uint32_t s_rd78LinesTotal = 0u; // PROBE-RD78
+        static std::chrono::steady_clock::time_point s_rd78LastSecPrint{}; // PROBE-RD78
+        static bool s_rd78HasSecPrint = false; // PROBE-RD78
+        if (s_rd78TrLogOn) // PROBE-RD78
+        {
+            const uint32_t dwNow = g_devWarpSeq.load(std::memory_order_acquire);
+            if (dwNow != s_rd78LastWarpSeq)
+            {
+                s_rd78LastWarpSeq = dwNow;
+                s_rd78FramesLeft = 420u;
+                s_rd78ArmFrame = 0u;
+                s_rd78LinesTotal = 0u;
+                s_rd78HasSecPrint = false;
+                s_rd78Armed.store(true, std::memory_order_release);
+            }
+            if (s_rd78FramesLeft > 0u)
+            {
+                const auto trNow = std::chrono::steady_clock::now();
+                if (!s_rd78HasSecPrint || std::chrono::duration_cast<std::chrono::milliseconds>(trNow - s_rd78LastSecPrint).count() >= 1000)
+                {
+                    s_rd78HasSecPrint = true;
+                    s_rd78LastSecPrint = trNow;
+                    ps2xSafeLog("[rd78] frame f=%u presented=%d classic=%d forced=%d empty=%u disp=%x geom=%x\n",
+                                s_rd78ArmFrame, hasFrame ? 1 : 0, useClassic ? 1 : 0, forcedNow ? 1 : 0, s_rdEmptyLatches,
+                                displayFbp, frameGeomFbp); // PROBE-RD78B
+                }
+            }
+            else
+            {
+                s_rd78Armed.store(false, std::memory_order_release);
+            }
+        }
+        static uint32_t s_rd78cLastWarpSeq = 0u; // PROBE-RD78C
+        if (s_rd78TrLogMode == 2) // PROBE-RD78C
+        {
+            const uint32_t dwNow = g_devWarpSeq.load(std::memory_order_acquire);
+            if (dwNow != s_rd78cLastWarpSeq)
+            {
+                s_rd78cLastWarpSeq = dwNow;
+                ps2xSafeLog("[rd78c] MARK warp g=%u\n",
+                            static_cast<unsigned>(g_hostPresentSeq.load(std::memory_order_relaxed)));
+            }
+        }
+        std::vector<Rd78GeomRec> rd78PubGeoms; // PROBE-RD78
+        if ((s_rd78TrLogOn && s_rd78FramesLeft > 0u) || s_rd78TrLogMode == 2) // PROBE-RD78 // PROBE-RD78C
+        {
+            std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+            rd78PubGeoms.swap(s_rd78GeomRecs);
+        }
+        else if (!s_rd78GeomRecs.empty())
+        {
+            std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+            s_rd78GeomRecs.clear();
+        }
         if (ps2xRdActive() && !useRepeat) // FEAT-RD8 // FEAT-RD18 // FEAT-RD33c // FEAT-RD49: repeat frames publish nothing (previous composition + 2D list redrawn)
         {
             static std::vector<RdVert> s_pubVerts;
             static std::vector<Rd2DBatch> s_pubBatches;
+            static std::vector<uint8_t> s_pubFba; // PROBE-RD78D
             static std::vector<RdKickRec> s_pubKickRecs; // FEAT-RD33
             static std::vector<uint32_t> s_pubSerials;   // FEAT-RD33
             static std::vector<uint32_t> s_pubRanges;    // FEAT-RD33
@@ -2143,6 +2256,7 @@ void GS::latchHostPresentationFrame()
                             s_rdBoundaries.clear();
                             s_pubVerts.swap(s_rd2dVerts);
                             s_pubBatches.swap(s_rd2dBatches);
+                            s_pubFba.swap(s_rd2dFba); // PROBE-RD78D
                             s_pubKickRecs.swap(s_rdKickRecs);
                             s_rdLastKickRecSerial = 0u;
                             rtSk = s_rd2dRtSkipped;
@@ -2185,6 +2299,16 @@ void GS::latchHostPresentationFrame()
                             }
                         }
                         s_pubBatches.resize(kb);
+                        s_pubFba.swap(s_rd2dFba); // PROBE-RD78D
+                        if (keptBatchCnt > 0u && s_pubFba.size() >= kb + keptBatchCnt) // PROBE-RD78D
+                        {
+                            s_rd2dFba.resize(keptBatchCnt);
+                            for (size_t i = 0u; i < keptBatchCnt; ++i)
+                                s_rd2dFba[i] = s_pubFba[kb + i];
+                        }
+                        else
+                            s_rd2dFba.clear();
+                        if (s_pubFba.size() > kb) s_pubFba.resize(kb); // PROBE-RD78D
 
                         s_pubKickRecs.swap(s_rdKickRecs);
                         s_rdKickRecs.clear();
@@ -2224,6 +2348,7 @@ void GS::latchHostPresentationFrame()
                     s_rdBoundaries.clear();
                     s_pubVerts.swap(s_rd2dVerts);
                     s_pubBatches.swap(s_rd2dBatches);
+                    s_pubFba.swap(s_rd2dFba); // PROBE-RD78D
                     s_pubKickRecs.swap(s_rdKickRecs); // FEAT-RD33
                     s_rdLastKickRecSerial = 0u;       // FEAT-RD33
                     rtSk = s_rd2dRtSkipped;
@@ -2391,20 +2516,171 @@ void GS::latchHostPresentationFrame()
 
             size_t keptVerts = 0u;
             size_t keptBatches = 0u;
+            const bool rd78LogFrame = s_rd78TrLogOn && s_rd78FramesLeft > 0u && s_rd78LinesTotal < 500u; // PROBE-RD78
+            static uint32_t s_rd78cLinesTotal = 0u; // PROBE-RD78C
+            const bool rd78cFrame = (s_rd78TrLogMode == 2) && (s_rd78cLinesTotal < 600u); // PROBE-RD78C // PROBE-RD78D
+            struct Rd78cSig // PROBE-RD78C
+            {
+                uint32_t fbp;
+                uint8_t whyId;
+                uint8_t tme;
+                uint8_t abe;
+                uint32_t alphaLo;
+                uint8_t fix;
+                uint32_t tbp0;
+                uint8_t psm;
+                uint8_t tw;
+                uint8_t th;
+                uint8_t prim;
+                uint8_t nBucket;
+                uint8_t areaBucket;
+                uint32_t fbmsk; // PROBE-RD78D
+                uint64_t test;  // PROBE-RD78D
+                uint8_t fba;    // PROBE-RD78D
+                uint8_t zmsk;   // PROBE-RD78D
+                uint8_t fpsm;   // PROBE-RD78D
+                uint32_t zbp;   // PROBE-RD78D
+                bool operator==(const Rd78cSig &o) const
+                {
+                    return fbp == o.fbp && whyId == o.whyId && tme == o.tme && abe == o.abe &&
+                           alphaLo == o.alphaLo && fix == o.fix && tbp0 == o.tbp0 && psm == o.psm &&
+                           tw == o.tw && th == o.th && prim == o.prim && nBucket == o.nBucket &&
+                           areaBucket == o.areaBucket &&
+                           fbmsk == o.fbmsk && test == o.test && fba == o.fba &&
+                           zmsk == o.zmsk && fpsm == o.fpsm && zbp == o.zbp; // PROBE-RD78D
+                }
+            };
+            struct Rd78cSigHash // PROBE-RD78C
+            {
+                size_t operator()(const Rd78cSig &s) const
+                {
+                    uint64_t h = 14695981039346656037ull;
+                    auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ull; };
+                    mix(s.fbp); mix(s.whyId); mix(s.tme); mix(s.abe);
+                    mix(s.alphaLo); mix(s.fix); mix(s.tbp0); mix(s.psm);
+                    mix(s.tw); mix(s.th); mix(s.prim); mix(s.nBucket); mix(s.areaBucket);
+                    mix(s.fbmsk); mix(s.test); mix(s.fba); mix(s.zmsk); mix(s.fpsm); mix(s.zbp); // PROBE-RD78D
+                    return static_cast<size_t>(h);
+                }
+            };
+            static std::unordered_map<Rd78cSig, uint8_t, Rd78cSigHash> s_rd78cSeen; // PROBE-RD78C
+            auto rd78cWhyId = [](const char *w) -> uint8_t { // PROBE-RD78C
+                if (std::strcmp(w, "kept-all") == 0) return 0u;
+                if (std::strcmp(w, "kept-main") == 0) return 1u;
+                if (std::strcmp(w, "kept-feedback") == 0) return 2u;
+                if (std::strcmp(w, "kept-small") == 0) return 3u;
+                if (std::strcmp(w, "dropped-feedback") == 0) return 4u;
+                if (std::strcmp(w, "dropped-offscreen-fbp") == 0) return 5u;
+                if (std::strcmp(w, "dropped-other") == 0) return 6u;
+                if (std::strcmp(w, "kept-3d") == 0) return 7u;
+                if (std::strcmp(w, "dropped-3d") == 0) return 8u;
+                return 9u;
+            };
+            auto rd78cLogSig = [&](uint32_t fbp, int kept, const char *why, int tme, int abe,
+                                   uint64_t alpha, uint32_t tbp0, uint8_t psm, uint32_t tw, uint32_t th,
+                                   uint32_t prim, uint32_t n, int x0, int y0, int x1, int y1, float area,
+                                   int fb, uint32_t fbmsk, int fba, uint64_t test,
+                                   int zmsk, uint32_t fpsm, uint32_t zbp,
+                                   uint32_t rgba0, uint32_t rgba1, uint32_t rgba2,
+                                   const float *vx, const float *vy,
+                                   const float *vu, const float *vv, uint32_t vcnt) // PROBE-RD78C // PROBE-RD78D
+            {
+                if (s_rd78cLinesTotal >= 600u) // PROBE-RD78D
+                    return;
+                const uint8_t nBkt = (n <= 6u) ? 0u : ((n <= 24u) ? 1u : ((n <= 100u) ? 2u : 3u));
+                const float pct = (area / (640.0f * 448.0f)) * 100.0f;
+                const uint8_t aBkt = static_cast<uint8_t>(std::min(10, std::max(0, static_cast<int>(pct / 10.0f))));
+                const uint8_t fix = static_cast<uint8_t>((alpha >> 32) & 0xFFull);
+                const Rd78cSig sig{
+                    fbp, rd78cWhyId(why), static_cast<uint8_t>(tme), static_cast<uint8_t>(abe),
+                    static_cast<uint32_t>(alpha & 0xFFFFFFFFull), fix, tbp0, psm,
+                    static_cast<uint8_t>(tw), static_cast<uint8_t>(th), static_cast<uint8_t>(prim),
+                    nBkt, aBkt,
+                    fbmsk, test, static_cast<uint8_t>(fba & 1), static_cast<uint8_t>(zmsk & 1),
+                    static_cast<uint8_t>(fpsm & 0x3Fu), zbp // PROBE-RD78D
+                };
+                if (s_rd78cSeen.find(sig) != s_rd78cSeen.end())
+                    return;
+                s_rd78cSeen.emplace(sig, 1u);
+                ++s_rd78cLinesTotal;
+                const int date = static_cast<int>((test >> 14) & 1ull); // PROBE-RD78D
+                const int datm = static_cast<int>((test >> 15) & 1ull); // PROBE-RD78D
+                const int atst = static_cast<int>((test >> 1) & 7ull);  // PROBE-RD78D
+                const unsigned aref = static_cast<unsigned>((test >> 4) & 0xFFull); // PROBE-RD78D
+                const int afail = static_cast<int>((test >> 12) & 3ull); // PROBE-RD78D
+                const int ztest = static_cast<int>((test >> 16) & 1ull); // PROBE-RD78D
+                const float x0v = (vcnt > 0u) ? vx[0] : 0.0f, y0v = (vcnt > 0u) ? vy[0] : 0.0f, u0v = (vcnt > 0u) ? vu[0] : 0.0f, v0v = (vcnt > 0u) ? vv[0] : 0.0f;
+                const float x1v = (vcnt > 1u) ? vx[1] : 0.0f, y1v = (vcnt > 1u) ? vy[1] : 0.0f, u1v = (vcnt > 1u) ? vu[1] : 0.0f, v1v = (vcnt > 1u) ? vv[1] : 0.0f;
+                const float x2v = (vcnt > 2u) ? vx[2] : 0.0f, y2v = (vcnt > 2u) ? vy[2] : 0.0f, u2v = (vcnt > 2u) ? vu[2] : 0.0f, v2v = (vcnt > 2u) ? vv[2] : 0.0f;
+                ps2xSafeLog("[rd78c] g=%u disp=%x geom=%x fbp=%x kept=%d why=%s tme=%d abe=%d alpha=%016llx fix=%02x tbp0=%x psm=%u %ux%u prim=%u n=%u bbox=%d,%d-%d,%d fb=%d fbmsk=%08x fba=%d test=%016llx date=%d datm=%d atst=%d aref=%02x afail=%d zmsk=%d fpsm=%u zbp=%x ztest=%d rgba0=%08x rgba1=%08x rgba2=%08x v0=(%.1f,%.1f,%.1f,%.1f) v1=(%.1f,%.1f,%.1f,%.1f) v2=(%.1f,%.1f,%.1f,%.1f)\n",
+                            static_cast<unsigned>(g_hostPresentSeq.load(std::memory_order_relaxed)),
+                            displayFbp, frameGeomFbp, fbp, kept, why, tme, abe,
+                            static_cast<unsigned long long>(alpha), static_cast<unsigned>(fix),
+                            tbp0, static_cast<unsigned>(psm), tw, th, prim, n,
+                            x0, y0, x1, y1, fb,
+                            fbmsk, fba, static_cast<unsigned long long>(test),
+                            date, datm, atst, aref, afail, zmsk, fpsm, zbp, ztest,
+                            rgba0, rgba1, rgba2,
+                            x0v, y0v, u0v, v0v, x1v, y1v, u1v, v1v, x2v, y2v, u2v, v2v); // PROBE-RD78D
+            };
+            uint32_t rd78FrameLines = 0u; // PROBE-RD78
+            uint32_t rd78FbFirst[5]{}; // PROBE-RD78
+            uint32_t rd78FbLast[5]{}; // PROBE-RD78
+            const uint32_t rd78FbCnt = (rd78LogFrame || rd78cFrame || rd80FbTexOn()) ? ps2xRdFbPageRanges(rd78FbFirst, rd78FbLast) : 0u; // PROBE-RD78 // PROBE-RD78C // FIX-RD80
+            float rd80DisplayBlend = 1.0f; // FIX-RD80
+            struct Rd78BatchRec // PROBE-RD78B
+            {
+                uint32_t fbp;
+                bool keepBatch;
+                const char *why;
+                int tex, abe;
+                uint64_t alpha;
+                uint32_t tbp0;
+                uint8_t psm;
+                uint32_t tw, th, prim, count;
+                int x0, y0, x1, y1;
+                uint32_t rgba0;
+                int isFb, zte, ztst;
+                uint32_t cnt;
+                uint32_t vtxCnt;
+                float vx[4], vy[4], vu[4], vv[4];
+            };
+            std::vector<Rd78BatchRec> rd78BatchRecs; // PROBE-RD78B
+            if (rd78LogFrame) // PROBE-RD78B
+            {
+                ps2xSafeLog("[rd78] disp=%x geom=%x filt=%x frameHasGeom=%d dispfb1=%016llx dispfb2=%016llx pmode=%016llx\n",
+                            displayFbp, frameGeomFbp, filterFbp, frameHasGeom ? 1 : 0,
+                            static_cast<unsigned long long>(request.dispfb1),
+                            static_cast<unsigned long long>(request.dispfb2),
+                            static_cast<unsigned long long>(request.pmode));
+                ++s_rd78LinesTotal;
+            }
             for (size_t i = 0u; i < s_pubBatches.size(); ++i)
             {
                 Rd2DBatch b = s_pubBatches[i];
                 const uint32_t bFbp = static_cast<uint32_t>(b.frame & 0x1FFull);
                 const int tex = static_cast<int>((b.prim >> 4) & 1ull);
                 const int abe = static_cast<int>((b.prim >> 6) & 1ull);
-                bool keepBatch = s_rd2dKeepAll || (filterFbp != 0xFFFFFFFFu && bFbp == filterFbp); // PROBE-RD57
+                const char *rd78Why = "dropped-other"; // PROBE-RD78
+                bool keepBatch = false;
+                if (s_rd2dKeepAll) // PROBE-RD57
+                {
+                    keepBatch = true;
+                    rd78Why = "kept-all"; // PROBE-RD78
+                }
+                else if (filterFbp != 0xFFFFFFFFu && bFbp == filterFbp)
+                {
+                    keepBatch = true;
+                    rd78Why = "kept-main"; // PROBE-RD78
+                }
                 if (!keepBatch && s_rd2dFeedback && !s_copySrcFbps.empty() &&
                     (tex == 1 || abe == 1) &&
                     std::find(s_copySrcFbps.begin(), s_copySrcFbps.end(), bFbp) != s_copySrcFbps.end()) // FIX-RD61
                 {
                     keepBatch = true;
+                    rd78Why = "kept-feedback"; // PROBE-RD78
                 }
-                const bool needBbox = (do2dLog && logRows.size() < 39u) || (!keepBatch && s_rd2dKeepSmall && tex == 1); // FIX-RD58
+                const bool needBbox = rd78LogFrame || rd78cFrame || (do2dLog && logRows.size() < 39u) || (!keepBatch && s_rd2dKeepSmall && tex == 1); // FIX-RD58 // PROBE-RD78 // PROBE-RD78C
                 float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
                 if (needBbox)
                     computeBatchBbox(b, x0, y0, x1, y1);
@@ -2413,7 +2689,189 @@ void GS::latchHostPresentationFrame()
                     const float area = (x1 - x0) * (y1 - y0);
                     constexpr float kMaxSmallArea = 0.25f * 512.0f * 448.0f;
                     if (area <= kMaxSmallArea)
+                    {
                         keepBatch = true;
+                        rd78Why = "kept-small"; // PROBE-RD78
+                    }
+                }
+                if (!keepBatch && rd80FbTexOn() && displayFbp != 0xFFFFFFFFu && bFbp == displayFbp &&
+                    tex == 1 && abe == 1 && (b.alpha & 0xFFull) == 0x64ull) // FIX-RD80
+                {
+                    const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull);
+                    const uint32_t tbw = static_cast<uint32_t>((b.tex0 >> 14) & 0x3Full);
+                    const uint8_t psm = static_cast<uint8_t>((b.tex0 >> 20) & 0x3Full);
+                    const uint32_t tw = static_cast<uint32_t>((b.tex0 >> 26) & 0xFull);
+                    const uint32_t th = static_cast<uint32_t>((b.tex0 >> 30) & 0xFull);
+                    bool fbOverlap = false;
+                    if (rd78FbCnt > 0u)
+                    {
+                        uint32_t tf = 0u, tl = 0u;
+                        rtt0PageRange(tbp0, tbw, psm, 1u << std::min<uint32_t>(tw, 10u), 1u << std::min<uint32_t>(th, 10u), tf, tl);
+                        for (uint32_t fi = 0u; fi < rd78FbCnt; ++fi)
+                        {
+                            if (tf <= rd78FbLast[fi] && tl >= rd78FbFirst[fi]) { fbOverlap = true; break; }
+                        }
+                    }
+                    if (fbOverlap || ps2xRdIsFbFeedback(b.texSerial))
+                    {
+                        if (!needBbox)
+                            computeBatchBbox(b, x0, y0, x1, y1);
+                        const float area = (x1 > x0 && y1 > y0) ? ((x1 - x0) * (y1 - y0)) : 0.0f;
+                        if (area >= (0.90f * 512.0f * 448.0f))
+                        {
+                            const uint32_t fix = static_cast<uint32_t>((b.alpha >> 32) & 0xFFull);
+                            rd80DisplayBlend = static_cast<float>(std::min<uint32_t>(fix, 128u)) / 128.0f;
+                        }
+                    }
+                }
+                if (rd78LogFrame) // PROBE-RD78 // PROBE-RD78B
+                {
+                    const float area = (x1 > x0 && y1 > y0) ? ((x1 - x0) * (y1 - y0)) : 0.0f;
+                    const bool bigArea = area >= (0.25f * 640.0f * 448.0f);
+                    const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull);
+                    const uint32_t tbw = static_cast<uint32_t>((b.tex0 >> 14) & 0x3Full);
+                    const uint8_t psm = static_cast<uint8_t>((b.tex0 >> 20) & 0x3Full);
+                    const uint32_t tw = static_cast<uint32_t>((b.tex0 >> 26) & 0xFull);
+                    const uint32_t th = static_cast<uint32_t>((b.tex0 >> 30) & 0xFull);
+                    bool fbOverlap = false;
+                    if (tex == 1 && rd78FbCnt > 0u)
+                    {
+                        uint32_t tf = 0u, tl = 0u;
+                        rtt0PageRange(tbp0, tbw, psm, 1u << std::min<uint32_t>(tw, 10u), 1u << std::min<uint32_t>(th, 10u), tf, tl);
+                        for (uint32_t fi = 0u; fi < rd78FbCnt; ++fi)
+                        {
+                            if (tf <= rd78FbLast[fi] && tl >= rd78FbFirst[fi])
+                            {
+                                fbOverlap = true;
+                                break;
+                            }
+                        }
+                    }
+                    const int isFb = (tex == 1 && (fbOverlap || ps2xRdIsFbFeedback(b.texSerial))) ? 1 : 0; // PROBE-RD78B
+                    if (bigArea || isFb != 0 || (tex == 0 && abe == 1))
+                    {
+                        if (!keepBatch)
+                        {
+                            if (isFb != 0) rd78Why = "dropped-feedback";
+                            else if (bFbp != filterFbp) rd78Why = "dropped-offscreen-fbp";
+                        }
+                        bool found = false;
+                        for (Rd78BatchRec &rec : rd78BatchRecs)
+                        {
+                            if (rec.fbp == bFbp && rec.count == b.count && rec.alpha == b.alpha && rec.isFb == isFb)
+                            {
+                                ++rec.cnt;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found && rd78BatchRecs.size() < 64u)
+                        {
+                            Rd78BatchRec rec{};
+                            rec.fbp = bFbp;
+                            rec.keepBatch = keepBatch;
+                            rec.why = rd78Why;
+                            rec.tex = tex;
+                            rec.abe = abe;
+                            rec.alpha = b.alpha;
+                            rec.tbp0 = tbp0;
+                            rec.psm = psm;
+                            rec.tw = tw;
+                            rec.th = th;
+                            rec.prim = static_cast<uint32_t>(b.prim & 0x7ull);
+                            rec.count = b.count;
+                            rec.x0 = static_cast<int>(std::floor(x0));
+                            rec.y0 = static_cast<int>(std::floor(y0));
+                            rec.x1 = static_cast<int>(std::ceil(x1));
+                            rec.y1 = static_cast<int>(std::ceil(y1));
+                            if (b.count > 0u && static_cast<size_t>(b.first) < s_pubVerts.size())
+                            {
+                                const RdVert &v0 = s_pubVerts[b.first];
+                                rec.rgba0 = (static_cast<uint32_t>(v0.rgba[0]) << 24) |
+                                            (static_cast<uint32_t>(v0.rgba[1]) << 16) |
+                                            (static_cast<uint32_t>(v0.rgba[2]) << 8) |
+                                            static_cast<uint32_t>(v0.rgba[3]);
+                                if (isFb != 0)
+                                {
+                                    const size_t avail = s_pubVerts.size() - static_cast<size_t>(b.first);
+                                    rec.vtxCnt = static_cast<uint32_t>(std::min<size_t>(4u, std::min<size_t>(b.count, avail)));
+                                    for (uint32_t vi = 0u; vi < rec.vtxCnt; ++vi)
+                                    {
+                                        const RdVert &rv = s_pubVerts[static_cast<size_t>(b.first) + vi];
+                                        rec.vx[vi] = rv.pos[0];
+                                        rec.vy[vi] = rv.pos[1];
+                                        rec.vu[vi] = rv.uv[0];
+                                        rec.vv[vi] = rv.uv[1];
+                                    }
+                                }
+                            }
+                            rec.isFb = isFb;
+                            rec.zte = static_cast<int>((b.test >> 16) & 1ull);
+                            rec.ztst = static_cast<int>((b.test >> 17) & 3ull);
+                            rec.cnt = 1u;
+                            rd78BatchRecs.push_back(rec);
+                        }
+                    }
+                }
+                if (rd78cFrame) // PROBE-RD78C
+                {
+                    const float area = (x1 > x0 && y1 > y0) ? ((x1 - x0) * (y1 - y0)) : 0.0f;
+                    const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull);
+                    const uint32_t tbw = static_cast<uint32_t>((b.tex0 >> 14) & 0x3Full);
+                    const uint8_t psm = static_cast<uint8_t>((b.tex0 >> 20) & 0x3Full);
+                    const uint32_t tw = static_cast<uint32_t>((b.tex0 >> 26) & 0xFull);
+                    const uint32_t th = static_cast<uint32_t>((b.tex0 >> 30) & 0xFull);
+                    bool fbOverlap = false;
+                    if (tex == 1 && rd78FbCnt > 0u)
+                    {
+                        uint32_t tf = 0u, tl = 0u;
+                        rtt0PageRange(tbp0, tbw, psm, 1u << std::min<uint32_t>(tw, 10u), 1u << std::min<uint32_t>(th, 10u), tf, tl);
+                        for (uint32_t fi = 0u; fi < rd78FbCnt; ++fi)
+                        {
+                            if (tf <= rd78FbLast[fi] && tl >= rd78FbFirst[fi]) { fbOverlap = true; break; }
+                        }
+                    }
+                    const int isFb = (tex == 1 && (fbOverlap || ps2xRdIsFbFeedback(b.texSerial))) ? 1 : 0;
+                    const bool qualifies = (area >= (0.08f * 640.0f * 448.0f)) || (isFb != 0) ||
+                                           (tex == 1 && b.count >= 24u && area >= (0.03f * 640.0f * 448.0f));
+                    if (qualifies)
+                    {
+                        const char *why = rd78Why;
+                        if (!keepBatch)
+                        {
+                            if (isFb != 0) why = "dropped-feedback";
+                            else if (bFbp != filterFbp) why = "dropped-offscreen-fbp";
+                        }
+                        uint32_t rgba[3]{}; // PROBE-RD78D
+                        float vx[3]{}, vy[3]{}, vu[3]{}, vv[3]{};
+                        uint32_t vcnt = 0u;
+                        if (b.count > 0u && static_cast<size_t>(b.first) < s_pubVerts.size())
+                        {
+                            const size_t avail = s_pubVerts.size() - static_cast<size_t>(b.first);
+                            vcnt = static_cast<uint32_t>(std::min<size_t>(3u, std::min<size_t>(b.count, avail)));
+                            for (uint32_t vi = 0u; vi < vcnt; ++vi)
+                            {
+                                const RdVert &rv = s_pubVerts[static_cast<size_t>(b.first) + vi];
+                                rgba[vi] = (static_cast<uint32_t>(rv.rgba[0]) << 24) |
+                                           (static_cast<uint32_t>(rv.rgba[1]) << 16) |
+                                           (static_cast<uint32_t>(rv.rgba[2]) << 8) |
+                                           static_cast<uint32_t>(rv.rgba[3]); // PROBE-RD78D
+                                vx[vi] = rv.pos[0]; vy[vi] = rv.pos[1];
+                                vu[vi] = rv.uv[0]; vv[vi] = rv.uv[1];
+                            }
+                        }
+                        const uint32_t bFbmsk = static_cast<uint32_t>((b.frame >> 32) & 0xFFFFFFFFull); // PROBE-RD78D
+                        const int bFba = (i < s_pubFba.size()) ? static_cast<int>(s_pubFba[i]) : 0; // PROBE-RD78D
+                        const int bZmsk = static_cast<int>((b.zbuf >> 32) & 1ull); // PROBE-RD78D
+                        const uint32_t bFpsm = static_cast<uint32_t>((b.frame >> 24) & 0x3Full); // PROBE-RD78D
+                        const uint32_t bZbp = static_cast<uint32_t>(b.zbuf & 0x1FFull); // PROBE-RD78D
+                        rd78cLogSig(bFbp, keepBatch ? 1 : 0, why, tex, abe, b.alpha,
+                                    tbp0, psm, tw, th, static_cast<uint32_t>(b.prim & 0x7ull),
+                                    b.count, static_cast<int>(std::floor(x0)), static_cast<int>(std::floor(y0)),
+                                    static_cast<int>(std::ceil(x1)), static_cast<int>(std::ceil(y1)),
+                                    area, isFb, bFbmsk, bFba, b.test, bZmsk, bFpsm, bZbp,
+                                    rgba[0], rgba[1], rgba[2], vx, vy, vu, vv, vcnt); // PROBE-RD78D
+                    }
                 }
                 if (do2dLog && logRows.size() < 39u) // PROBE-RD57
                 {
@@ -2458,11 +2916,95 @@ void GS::latchHostPresentationFrame()
                                 r.tex, r.abe, r.afterSerial);
                 }
             }
+            if (rd78LogFrame && !rd78BatchRecs.empty()) // PROBE-RD78B
+            {
+                for (int pass = 0; pass < 2; ++pass)
+                {
+                    const int wantFb = (pass == 0) ? 1 : 0;
+                    for (const Rd78BatchRec &r : rd78BatchRecs)
+                    {
+                        if (r.isFb != wantFb)
+                            continue;
+                        if (rd78FrameLines >= 6u || s_rd78LinesTotal >= 500u)
+                            break;
+                        char vbuf[256] = "";
+                        if (r.isFb != 0 && r.vtxCnt > 0u)
+                        {
+                            int pos = 0;
+                            for (uint32_t vi = 0u; vi < r.vtxCnt; ++vi)
+                            {
+                                const int rem = static_cast<int>(sizeof(vbuf)) - pos;
+                                if (rem <= 1) break;
+                                const int n = std::snprintf(vbuf + pos, static_cast<size_t>(rem), " v%u=(%.1f,%.1f,%.1f,%.1f)",
+                                                            vi, r.vx[vi], r.vy[vi], r.vu[vi], r.vv[vi]);
+                                if (n > 0) pos += std::min(n, rem - 1);
+                            }
+                        }
+                        ps2xSafeLog("[rd78] f=%u dw=%u fbp=%x filt=%x disp=%x geom=%x kept=%d why=%s cnt=%u tme=%d abe=%d alpha=%016llx fix=%02x tbp0=%x psm=%u tw=%u th=%u prim=%u n=%u bbox=%d,%d-%d,%d rgba0=%08x fb=%d zte=%d ztst=%d%s\n",
+                                    s_rd78ArmFrame, s_rd78LastWarpSeq, r.fbp, filterFbp, displayFbp, frameGeomFbp,
+                                    r.keepBatch ? 1 : 0, r.why, r.cnt,
+                                    r.tex, r.abe, static_cast<unsigned long long>(r.alpha),
+                                    static_cast<unsigned>((r.alpha >> 32) & 0xFFull),
+                                    r.tbp0, static_cast<unsigned>(r.psm), r.tw, r.th,
+                                    r.prim, r.count,
+                                    r.x0, r.y0, r.x1, r.y1,
+                                    r.rgba0, r.isFb, r.zte, r.ztst, vbuf);
+                        ++rd78FrameLines;
+                        ++s_rd78LinesTotal;
+                    }
+                }
+            }
+            if (rd78LogFrame && !rd78PubGeoms.empty()) // PROBE-RD78
+            {
+                for (const Rd78GeomRec &g : rd78PubGeoms)
+                {
+                    if (rd78FrameLines >= 6u || s_rd78LinesTotal >= 500u)
+                        break;
+                    const uint32_t tbp0 = static_cast<uint32_t>(g.tex0 & 0x3FFFull);
+                    const uint32_t psm = static_cast<uint32_t>((g.tex0 >> 20) & 0x3Full);
+                    const uint32_t tw = static_cast<uint32_t>((g.tex0 >> 26) & 0xFull);
+                    const uint32_t th = static_cast<uint32_t>((g.tex0 >> 30) & 0xFull);
+                    ps2xSafeLog("[rd78] f=%u dw=%u fbp=%x filt=%x disp=%x geom=%x kept=%d why=%s tme=%d abe=%d alpha=%016llx fix=%02x tbp0=%x psm=%u tw=%u th=%u prim=%u n=%u bbox=%d,%d-%d,%d rgba0=%08x fb=%d zte=%d ztst=%d\n",
+                                s_rd78ArmFrame, s_rd78LastWarpSeq, g.fbp, filterFbp, displayFbp, frameGeomFbp,
+                                static_cast<int>(g.kept),
+                                g.kept ? "kept-3d" : "dropped-3d",
+                                static_cast<int>(g.tme), static_cast<int>(g.abe),
+                                static_cast<unsigned long long>(g.alpha),
+                                static_cast<unsigned>((g.alpha >> 32) & 0xFFull),
+                                tbp0, psm, tw, th, static_cast<unsigned>(g.prim), g.count,
+                                g.x0, g.y0, g.x1, g.y1, g.rgba0, 0,
+                                static_cast<int>((g.test >> 16) & 1ull), static_cast<int>((g.test >> 17) & 3ull)); // PROBE-RD78B
+                    ++rd78FrameLines;
+                    ++s_rd78LinesTotal;
+                }
+            }
+            if (rd78cFrame && !rd78PubGeoms.empty()) // PROBE-RD78C
+            {
+                for (const Rd78GeomRec &g : rd78PubGeoms)
+                {
+                    const uint32_t tbp0 = static_cast<uint32_t>(g.tex0 & 0x3FFFull);
+                    const uint8_t psm = static_cast<uint8_t>((g.tex0 >> 20) & 0x3Full);
+                    const uint32_t tw = static_cast<uint32_t>((g.tex0 >> 26) & 0xFull);
+                    const uint32_t th = static_cast<uint32_t>((g.tex0 >> 30) & 0xFull);
+                    const float gw = (g.x1 > g.x0) ? static_cast<float>(g.x1 - g.x0) : 0.0f;
+                    const float gh = (g.y1 > g.y0) ? static_cast<float>(g.y1 - g.y0) : 0.0f;
+                    rd78cLogSig(g.fbp, static_cast<int>(g.kept), g.kept ? "kept-3d" : "dropped-3d",
+                                static_cast<int>(g.tme), static_cast<int>(g.abe), g.alpha,
+                                tbp0, psm, tw, th, static_cast<uint32_t>(g.prim), g.count,
+                                g.x0, g.y0, g.x1, g.y1, gw * gh, static_cast<int>(g.isFb),
+                                g.fbmsk, static_cast<int>(g.fba), g.test,
+                                static_cast<int>(g.zmsk), static_cast<uint32_t>(g.fpsm), g.zbp,
+                                g.rgba0, g.rgba1, g.rgba2, g.vx, g.vy, g.vu, g.vv, g.vtxCnt); // PROBE-RD78D
+                }
+            }
             s_pubVerts.resize(keptVerts);
             s_pubBatches.resize(keptBatches);
+            if (rd80FbTexOn()) // FIX-RD80
+                ps2xRdSetDisplayBlend(rd80DisplayBlend);
             ps2xRdPublish2D(s_pubVerts.data(), s_pubVerts.size(), s_pubBatches.data(), s_pubBatches.size(), rtSk, plSk, gMin, gMax, s_pubRanges.data(), s_pubRanges.size() / 2u); // FEAT-RD13 // FEAT-RD33
             s_pubVerts.clear();
             s_pubBatches.clear();
+            s_pubFba.clear(); // PROBE-RD78D
             s_pubRanges.clear();
             } // FEAT-RD54: end if (!skipPublishHold)
 
@@ -2502,9 +3044,16 @@ void GS::latchHostPresentationFrame()
         ps2_gt_count(4, 1); // PROBE-GT: latched
         ft2OnPresent(); // PERF-LN
         if (g_ps2Ft2On) ps2_ft2_ev(12, g_hostPresentSeq.load(std::memory_order_relaxed)); // PROBE-FT2: GS_FRAME_DONE
+        if (s_rd78TrLogOn && s_rd78FramesLeft > 0u) // PROBE-RD78
+        {
+            ++s_rd78ArmFrame;
+            if (--s_rd78FramesLeft == 0u)
+                s_rd78Armed.store(false, std::memory_order_release);
+        }
     }
     else
     {
+        if (rd80FbTexOn()) ps2xRdSetDisplayBlend(1.0f); // FIX-RD80
         ps2_gt_count(2, 1); // PROBE-GT: skip_empty
     }
 
@@ -4494,6 +5043,116 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
         rdGsDrawLogRecord(batch.state.context, batch.state.prim, m_vtxQueue, batch.vertexCount, s_rdCurSerial, isGeomKick);
     if (s_rtt0LogOn) // PROBE-RTT0
         rtt0RecordDraw(batch.state.context, batch.state.prim);
+    if ((s_rd78TrLogOn || s_rd78TrLogMode == 2) && isGeomKick && ps2xRdActive() && batch.vertexCount >= 3u &&
+        (s_rd78TrLogMode == 2 || s_rd78Armed.load(std::memory_order_relaxed))) // PROBE-RD78 // PROBE-RD78C
+    {
+        const GSContext &gctx = batch.state.context;
+        const GSPrimReg &gprim = batch.state.prim;
+        const float ofx = static_cast<float>(gctx.xyoffset.ofx) * (1.0f / 16.0f);
+        const float ofy = static_cast<float>(gctx.xyoffset.ofy) * (1.0f / 16.0f);
+        float gx0 = m_vtxQueue[0].x - ofx, gx1 = gx0;
+        float gy0 = m_vtxQueue[0].y - ofy, gy1 = gy0;
+        for (uint8_t vi = 1u; vi < batch.vertexCount; ++vi)
+        {
+            const float sx = m_vtxQueue[vi].x - ofx;
+            const float sy = m_vtxQueue[vi].y - ofy;
+            gx0 = std::min(gx0, sx); gx1 = std::max(gx1, sx);
+            gy0 = std::min(gy0, sy); gy1 = std::max(gy1, sy);
+        }
+        const float garea = (gx1 > gx0 && gy1 > gy0) ? ((gx1 - gx0) * (gy1 - gy0)) : 0.0f;
+        uint8_t gIsFb = 0u; // PROBE-RD78C
+        if (s_rd78TrLogMode == 2 && gprim.tme) // PROBE-RD78C
+        {
+            uint32_t fbF[5]{}, fbL[5]{};
+            const uint32_t fbC = ps2xRdFbPageRanges(fbF, fbL);
+            if (fbC > 0u)
+            {
+                uint32_t tf = 0u, tl = 0u;
+                rtt0PageRange(gctx.tex0.tbp0, gctx.tex0.tbw, gctx.tex0.psm,
+                              1u << std::min<uint32_t>(gctx.tex0.tw, 10u),
+                              1u << std::min<uint32_t>(gctx.tex0.th, 10u), tf, tl);
+                for (uint32_t fi = 0u; fi < fbC; ++fi)
+                {
+                    if (tf <= fbL[fi] && tl >= fbF[fi]) { gIsFb = 1u; break; }
+                }
+            }
+            if (gIsFb == 0u && ps2xRdIsFbFeedback(s_rdCurSerial))
+                gIsFb = 1u;
+        }
+        const bool gQualifies = (s_rd78TrLogMode == 2)
+            ? (garea >= (0.08f * 640.0f * 448.0f) || gIsFb != 0u ||
+               (gprim.tme && batch.vertexCount >= 24u && garea >= (0.03f * 640.0f * 448.0f)))
+            : (garea >= (0.5f * 640.0f * 448.0f)); // PROBE-RD78C
+        if (gQualifies)
+        {
+            const uint32_t scW = (gctx.scissor.x1 >= gctx.scissor.x0) ? (static_cast<uint32_t>(gctx.scissor.x1) + 1u - gctx.scissor.x0) : 0u;
+            const uint32_t scH = (gctx.scissor.y1 >= gctx.scissor.y0) ? (static_cast<uint32_t>(gctx.scissor.y1) + 1u - gctx.scissor.y0) : 0u;
+            const bool gkept = (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(gctx.frame.fbp)) &&
+                rdScissorQualifies(scW, scH) &&
+                ps2xRdIsMainPass(gctx.frame.fbp, static_cast<uint64_t>(gctx.xyoffset.ofx) | (static_cast<uint64_t>(gctx.xyoffset.ofy) << 32));
+            auto packVtxRgba = [](const GSVertex &v) -> uint32_t { // PROBE-RD78D
+                return (static_cast<uint32_t>(v.r) << 24) |
+                       (static_cast<uint32_t>(v.g) << 16) |
+                       (static_cast<uint32_t>(v.b) << 8) |
+                       static_cast<uint32_t>(v.a);
+            };
+            Rd78GeomRec rec{
+                gctx.frame.fbp & 0x1FFu,
+                static_cast<uint8_t>(gkept ? 1u : 0u),
+                static_cast<uint8_t>(gprim.tme ? 1u : 0u),
+                static_cast<uint8_t>(gprim.abe ? 1u : 0u),
+                static_cast<uint8_t>(gprim.type & 0x7u),
+                gctx.alpha,
+                rdPackTex0(gctx.tex0),
+                gctx.test,
+                batch.vertexCount,
+                static_cast<int>(std::floor(gx0)), static_cast<int>(std::floor(gy0)),
+                static_cast<int>(std::ceil(gx1)), static_cast<int>(std::ceil(gy1)),
+                packVtxRgba(m_vtxQueue[0]),
+                gctx.tex0.tbw,
+                s_rdCurSerial,
+                gIsFb,
+                0u, {}, {}, {}, {},
+                gctx.frame.fbmsk,
+                gctx.frame.psm,
+                static_cast<uint8_t>(gctx.fba & 1ull),
+                static_cast<uint8_t>(gctx.zbuf.zmask ? 1u : 0u),
+                static_cast<uint32_t>(gctx.zbuf.zbp & 0x1FFu),
+                packVtxRgba(m_vtxQueue[1]),
+                packVtxRgba(m_vtxQueue[2]) // PROBE-RD78D
+            };
+            if (s_rd78TrLogMode == 2) // PROBE-RD78C
+            {
+                const float gtexW = static_cast<float>(1u << std::min<uint32_t>(gctx.tex0.tw, 10u));
+                const float gtexH = static_cast<float>(1u << std::min<uint32_t>(gctx.tex0.th, 10u));
+                rec.vtxCnt = std::min<uint32_t>(3u, batch.vertexCount);
+                for (uint32_t vi = 0u; vi < rec.vtxCnt; ++vi)
+                {
+                    const GSVertex &gv = m_vtxQueue[vi];
+                    rec.vx[vi] = gv.x - ofx;
+                    rec.vy[vi] = gv.y - ofy;
+                    if (gprim.tme)
+                    {
+                        if (gprim.fst)
+                        {
+                            rec.vu[vi] = (static_cast<float>(gv.u) / 16.0f) / gtexW;
+                            rec.vv[vi] = (static_cast<float>(gv.v) / 16.0f) / gtexH;
+                        }
+                        else
+                        {
+                            const float invQ = (gv.q != 0.0f) ? (1.0f / gv.q) : 1.0f;
+                            rec.vu[vi] = gv.s * invQ;
+                            rec.vv[vi] = gv.t * invQ;
+                        }
+                    }
+                }
+            }
+            const size_t maxRecs = (s_rd78TrLogMode == 2) ? 256u : 16u; // PROBE-RD78C
+            std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+            if (s_rd78GeomRecs.size() < maxRecs)
+                s_rd78GeomRecs.push_back(rec);
+        }
+    }
     if (ps2xRdActive() && !isGeomKick) // FEAT-RD8 // FEAT-RD10 // FEAT-RD18 // FEAT-RD49: capture all 2D candidates; FBP filtered at flip time
     {
         const GSContext &ctx = batch.state.context;
@@ -4667,6 +5326,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             }
             s_rd2dVerts.insert(s_rd2dVerts.end(), triVerts, triVerts + addCount);
             s_rd2dBatches.push_back(b2d);
+            if (s_rd78TrLogMode == 2) s_rd2dFba.push_back(static_cast<uint8_t>(ctx.fba & 1ull)); // PROBE-RD78D
         }
     }
     if (g_rdpOn) { ++s_rdpQueueDraws; if ((s_rdpQueueDraws & 1023u) == 0u) rdpMaybeReport(); } // PROBE-RDP

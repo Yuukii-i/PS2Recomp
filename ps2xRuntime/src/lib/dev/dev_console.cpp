@@ -18,6 +18,7 @@
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-DF
 extern std::atomic<int> g_mcPendingChoice;     // FEAT-DF (defined in RPC.cpp, FEAT-DE)
+std::atomic<uint32_t> g_devWarpSeq{0u};        // PROBE-RD78
 
 namespace
 {
@@ -328,6 +329,7 @@ resume_after_8bf4:
         }
 
         ps2xSafeLog("[dev] warp -> '%s' spawn '%s' obj=0x%08x\n", s_activeStage, s_activeSpawn, resObj);
+        g_devWarpSeq.fetch_add(1u, std::memory_order_release); // PROBE-RD78
     }
 }
 
