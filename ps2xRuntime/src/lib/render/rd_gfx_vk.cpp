@@ -3009,8 +3009,8 @@ void drawClassicAdditive(const uint8_t *rgba, int w, int h, int strideBytes) // 
     const int tw = static_cast<int>(s_vk.targetW);
     const int th = static_cast<int>(s_vk.targetH);
     prepareCompositeState(tw, th, true,
-                          rdgfx::BlendFactor::One, rdgfx::BlendFactor::One,
-                          rdgfx::BlendFactor::One, rdgfx::BlendFactor::One); // FIX-FXC4
+                          rdgfx::BlendFactor::SrcAlpha, rdgfx::BlendFactor::OneMinusSrcAlpha,
+                          rdgfx::BlendFactor::SrcAlpha, rdgfx::BlendFactor::OneMinusSrcAlpha); // FIX-FXC5
 
     if (s_vk.classicTexId == 0u || s_vk.classicTexW != w || s_vk.classicTexH != h)
     {
@@ -3039,15 +3039,18 @@ void drawClassicAdditive(const uint8_t *rgba, int w, int h, int strideBytes) // 
     BufferCopy staging{};
     if (!createHostBuffer(totalBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging))
         return;
-    if (srcStride == rowBytes)
+    auto *dst = static_cast<uint8_t *>(staging.mapped); // FIX-FXC5
+    for (int y = 0; y < h; ++y)
     {
-        std::memcpy(staging.mapped, rgba, static_cast<size_t>(totalBytes));
-    }
-    else
-    {
-        auto *dst = static_cast<uint8_t *>(staging.mapped);
-        for (int y = 0; y < h; ++y)
-            std::memcpy(dst + static_cast<size_t>(y) * rowBytes, rgba + static_cast<size_t>(y) * srcStride, rowBytes);
+        const uint8_t *srcRow = rgba + static_cast<size_t>(y) * srcStride;
+        uint8_t *dstRow = dst + static_cast<size_t>(y) * rowBytes;
+        std::memcpy(dstRow, srcRow, rowBytes);
+        for (int x = 0; x < w; ++x)
+        {
+            uint8_t *px = dstRow + static_cast<size_t>(x) * 4u;
+            const uint8_t maxRgb = std::max(px[0], std::max(px[1], px[2]));
+            px[3] = (maxRgb > 6u) ? 255u : 0u;
+        }
     }
 
     if (s_vk.inRenderPass)
@@ -3109,15 +3112,16 @@ void drawClassicAdditive(const uint8_t *rgba, int w, int h, int strideBytes) // 
     const float dstX = (screenWidth - dstWidth) * 0.5f;
     const float dstY = (screenHeight - dstHeight) * 0.5f;
 
-    const PushConstants pc = makeCompositePc(screenWidth, screenHeight, 0, 0); // FIX-FXC4
+    PushConstants pc = makeCompositePc(screenWidth, screenHeight, 0, 0); // FIX-FXC5
+    pc.uTcc = 1; // FIX-FXC5
 
     drawQuad2d(s_vk.classicTexId,
                0.0f, 0.0f, 1.0f, 1.0f,
                dstX, dstY, dstWidth, dstHeight,
                pc,
                true,
-               rdgfx::BlendFactor::One, rdgfx::BlendFactor::One,
-               rdgfx::BlendFactor::One, rdgfx::BlendFactor::One);
+               rdgfx::BlendFactor::SrcAlpha, rdgfx::BlendFactor::OneMinusSrcAlpha,
+               rdgfx::BlendFactor::SrcAlpha, rdgfx::BlendFactor::OneMinusSrcAlpha); // FIX-FXC5
 }
 
 bool canCopyBackbuffer() { return s_vk.initialized; }

@@ -36,7 +36,7 @@ void main() {
         if (pc.uPalMode == 1) {
             float l = dot(t.rgb, vec3(0.299, 0.587, 0.114));
             if (pc.uPalFallback != 0)
-                t.rgb = vec3(0.40, 0.46, 0.80) * l + vec3(0.0, 0.01, 0.05);
+                t.rgb = vec3(0.25, 0.25, 0.45) * l + vec3(0.031, 0.031, 0.055); // FIX-FXC5
             else
                 t = texture(uPalTex, vec2((floor(l * 255.0) + 0.5) / 256.0, 0.5));
         }
