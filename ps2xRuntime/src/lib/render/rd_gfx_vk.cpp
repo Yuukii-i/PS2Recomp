@@ -40,6 +40,26 @@ double ps2xSdlVkLastBeginWaitMs(); // PROBE-RDG4P
 VkImageView ps2xSdlVkCurrentSwapView();
 bool ps2xSdlImGuiRecord(VkCommandBuffer cb, VkImage swapImage, VkImageView swapView, uint32_t w, uint32_t h);
 
+// PROBE-V3B: Pause composite timing probe
+namespace probe_v3b
+{
+    uint32_t n = 0;
+    double aSum = 0.0, aMax = 0.0;
+    double bSum = 0.0, bMax = 0.0;
+    double cSum = 0.0, cMax = 0.0;
+    double dSum = 0.0, dMax = 0.0;
+    double eSum = 0.0, eMax = 0.0;
+    double fSum = 0.0, fMax = 0.0;
+    uint32_t waits = 0;
+    double waitMs = 0.0;
+    uint32_t allocs = 0;
+
+    uint32_t cntQueueWait = 0, cntDevWait = 0, cntFenceWait = 0, cntMapMem = 0;
+    double msQueueWait = 0.0, msDevWait = 0.0, msFenceWait = 0.0, msMapMem = 0.0;
+    uint32_t cntAllocMem = 0, cntCrTex = 0;
+    double msAllocMem = 0.0, msCrTex = 0.0;
+} // PROBE-V3B
+
 namespace rdgfx_vk
 {
 namespace
@@ -573,7 +593,14 @@ void endOneTimeCmd(VkCommandBuffer cmd)
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
     vkQueueSubmit(s_vk.queue, 1, &si, VK_NULL_HANDLE);
+    const auto t_w0 = std::chrono::steady_clock::now(); // PROBE-V3B
     vkQueueWaitIdle(s_vk.queue);
+    const auto t_w1 = std::chrono::steady_clock::now(); // PROBE-V3B
+    const double ms = std::chrono::duration<double, std::milli>(t_w1 - t_w0).count(); // PROBE-V3B
+    probe_v3b::cntQueueWait++; // PROBE-V3B
+    probe_v3b::msQueueWait += ms; // PROBE-V3B
+    probe_v3b::waits++; // PROBE-V3B
+    probe_v3b::waitMs += ms; // PROBE-V3B
     vkFreeCommandBuffers(s_vk.device, s_vk.uploadPool, 1, &cmd);
 }
 
@@ -726,7 +753,14 @@ bool ensureTargets(uint32_t w, uint32_t h)
     if (s_vk.colorImage != VK_NULL_HANDLE && s_vk.targetW == w && s_vk.targetH == h)
         return true;
 
+    const auto t_dw0 = std::chrono::steady_clock::now(); // PROBE-V3B
     vkDeviceWaitIdle(s_vk.device);
+    const auto t_dw1 = std::chrono::steady_clock::now(); // PROBE-V3B
+    const double dwMs = std::chrono::duration<double, std::milli>(t_dw1 - t_dw0).count(); // PROBE-V3B
+    probe_v3b::cntDevWait++; // PROBE-V3B
+    probe_v3b::msDevWait += dwMs; // PROBE-V3B
+    probe_v3b::waits++; // PROBE-V3B
+    probe_v3b::waitMs += dwMs; // PROBE-V3B
     destroyTargets();
 
     const bool useMsaa = (s_vk.msaaSamples > VK_SAMPLE_COUNT_1_BIT); // RDG2B
@@ -1119,11 +1153,26 @@ bool createHostBuffer(VkDeviceSize size, VkBufferUsageFlags usage, BufferCopy &o
     mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     mai.allocationSize = req.size;
     mai.memoryTypeIndex = memType;
-    if (vkAllocateMemory(s_vk.device, &mai, nullptr, &out.memory) != VK_SUCCESS)
+    const auto t_am0 = std::chrono::steady_clock::now(); // PROBE-V3B
+    const VkResult allocRes = vkAllocateMemory(s_vk.device, &mai, nullptr, &out.memory); // PROBE-V3B
+    const auto t_am1 = std::chrono::steady_clock::now(); // PROBE-V3B
+    const double amMs = std::chrono::duration<double, std::milli>(t_am1 - t_am0).count(); // PROBE-V3B
+    probe_v3b::cntAllocMem++; // PROBE-V3B
+    probe_v3b::msAllocMem += amMs; // PROBE-V3B
+    probe_v3b::allocs++; // PROBE-V3B
+    if (allocRes != VK_SUCCESS)
         return false;
     if (vkBindBufferMemory(s_vk.device, out.buffer, out.memory, 0) != VK_SUCCESS)
         return false;
-    if (vkMapMemory(s_vk.device, out.memory, 0, size, 0, &out.mapped) != VK_SUCCESS)
+    const auto t_mm0 = std::chrono::steady_clock::now(); // PROBE-V3B
+    const VkResult mapRes = vkMapMemory(s_vk.device, out.memory, 0, size, 0, &out.mapped); // PROBE-V3B
+    const auto t_mm1 = std::chrono::steady_clock::now(); // PROBE-V3B
+    const double mmMs = std::chrono::duration<double, std::milli>(t_mm1 - t_mm0).count(); // PROBE-V3B
+    probe_v3b::cntMapMem++; // PROBE-V3B
+    probe_v3b::msMapMem += mmMs; // PROBE-V3B
+    probe_v3b::waits++; // PROBE-V3B
+    probe_v3b::waitMs += mmMs; // PROBE-V3B
+    if (mapRes != VK_SUCCESS)
         return false;
     return true;
 }
@@ -3027,7 +3076,13 @@ void drawClassicAdditive(const uint8_t *rgba, int w, int h, int strideBytes) // 
         }
         SamplerKey samp{rdgfx::TextureFilter::Linear, rdgfx::TextureFilter::Linear,
                         rdgfx::TextureWrap::Clamp, rdgfx::TextureWrap::Clamp};
+        const auto t_ct0 = std::chrono::steady_clock::now(); // PROBE-V3B
         s_vk.classicTexId = createTexture2DInternal(nullptr, w, h, 1u, samp, false);
+        const auto t_ct1 = std::chrono::steady_clock::now(); // PROBE-V3B
+        const double ctMs = std::chrono::duration<double, std::milli>(t_ct1 - t_ct0).count(); // PROBE-V3B
+        probe_v3b::cntCrTex++; // PROBE-V3B
+        probe_v3b::msCrTex += ctMs; // PROBE-V3B
+        probe_v3b::allocs++; // PROBE-V3B
         if (s_vk.classicTexId == 0u)
             return;
         s_vk.classicTexW = w;
@@ -3042,23 +3097,36 @@ void drawClassicAdditive(const uint8_t *rgba, int w, int h, int strideBytes) // 
     const uint32_t srcStride = (strideBytes > 0) ? static_cast<uint32_t>(strideBytes) : rowBytes;
     const VkDeviceSize totalBytes = static_cast<VkDeviceSize>(rowBytes) * static_cast<uint32_t>(h);
 
+    const auto t_c0 = std::chrono::steady_clock::now(); // PROBE-V3B
     BufferCopy staging{};
     if (!createHostBuffer(totalBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging))
         return;
-    auto *dst = static_cast<uint8_t *>(staging.mapped); // FIX-FXC5
+    const auto t_c1 = std::chrono::steady_clock::now(); // PROBE-V3B
+
+    const auto t_b0 = std::chrono::steady_clock::now(); // PROBE-V3B
+    auto *dst = static_cast<uint8_t *>(staging.mapped); // FIX-V3C
     for (int y = 0; y < h; ++y)
     {
         const uint8_t *srcRow = rgba + static_cast<size_t>(y) * srcStride;
-        uint8_t *dstRow = dst + static_cast<size_t>(y) * rowBytes;
-        std::memcpy(dstRow, srcRow, rowBytes);
+        auto *dstRow = reinterpret_cast<uint32_t *>(dst + static_cast<size_t>(y) * rowBytes);
         for (int x = 0; x < w; ++x)
         {
-            uint8_t *px = dstRow + static_cast<size_t>(x) * 4u;
-            const uint8_t maxRgb = std::max(px[0], std::max(px[1], px[2]));
-            px[3] = (maxRgb > 6u) ? 255u : 0u;
+            const uint8_t r = srcRow[x * 4 + 0];
+            const uint8_t g = srcRow[x * 4 + 1];
+            const uint8_t b = srcRow[x * 4 + 2];
+            const uint8_t a = (std::max(r, std::max(g, b)) > 6u) ? 255u : 0u;
+            dstRow[x] = static_cast<uint32_t>(r) |
+                        (static_cast<uint32_t>(g) << 8) |
+                        (static_cast<uint32_t>(b) << 16) |
+                        (static_cast<uint32_t>(a) << 24);
         }
     }
+    const auto t_b1 = std::chrono::steady_clock::now(); // PROBE-V3B
+    const double cur_bMs = std::chrono::duration<double, std::milli>(t_b1 - t_b0).count(); // PROBE-V3B
+    probe_v3b::bSum += cur_bMs; // PROBE-V3B
+    if (cur_bMs > probe_v3b::bMax) probe_v3b::bMax = cur_bMs; // PROBE-V3B
 
+    const auto t_c2 = std::chrono::steady_clock::now(); // PROBE-V3B
     if (s_vk.inRenderPass)
     {
         vkCmdEndRendering(s_vk.cmd);
@@ -3083,6 +3151,10 @@ void drawClassicAdditive(const uint8_t *rgba, int w, int h, int strideBytes) // 
 
     vkUnmapMemory(s_vk.device, staging.memory);
     s_vk.garbageBuffers[s_vk.curFrame].push_back({staging.buffer, staging.memory});
+    const auto t_c3 = std::chrono::steady_clock::now(); // PROBE-V3B
+    const double cur_cMs = std::chrono::duration<double, std::milli>((t_c1 - t_c0) + (t_c3 - t_c2)).count(); // PROBE-V3B
+    probe_v3b::cSum += cur_cMs; // PROBE-V3B
+    if (cur_cMs > probe_v3b::cMax) probe_v3b::cMax = cur_cMs; // PROBE-V3B
 
     const float srcWidth = static_cast<float>(w);
     const float srcHeight = static_cast<float>(h);

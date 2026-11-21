@@ -38,6 +38,21 @@ extern void ps2xSdlPresent();
 extern const uint8_t *ps2xSdlLastFrameRgba(uint32_t &w, uint32_t &h, uint32_t &strideBytes); // FXC1
 extern void ps2xSdlSetTitle(const char *t);
 extern void ps2xSdlShutdown();
+
+// PROBE-V3B: Pause composite timing probe
+namespace probe_v3b
+{
+    extern uint32_t n;
+    extern double aSum, aMax;
+    extern double bSum, bMax;
+    extern double cSum, cMax;
+    extern double dSum, dMax;
+    extern double eSum, eMax;
+    extern double fSum, fMax;
+    extern uint32_t waits;
+    extern double waitMs;
+    extern uint32_t allocs;
+} // PROBE-V3B
 #else
 inline bool ps2xSdlWanted() { return false; }
 inline bool ps2xSdlInit(const char *, int, int) { return false; }
@@ -7274,11 +7289,15 @@ void PS2Runtime::run()
                     int prevW = 0, prevH = 0; // FXC1
                     uint32_t fxW = 0u, fxH = 0u, fxStride = 0u; // FXC1
                     const uint8_t *fxRgba = nullptr; // FXC1
+                    const auto t_a0 = std::chrono::steady_clock::now(); // PROBE-V3B
                     const bool hasPrev = ps2xRdGetPrevFrame(prevTex, prevW, prevH); // PROBE-FXC2
                     fxRgba = ps2xSdlLastFrameRgba(fxW, fxH, fxStride); // PROBE-FXC2
+                    const auto t_a1 = std::chrono::steady_clock::now(); // PROBE-V3B
+                    const double cur_aMs = std::chrono::duration<double, std::milli>(t_a1 - t_a0).count(); // PROBE-V3B
                     const bool hasRgba = (fxRgba != nullptr); // PROBE-FXC2
                     static uint32_t s_fxcClassicFrames = 0u, s_fxcFxFlag = 0u, s_fxcPrevOk = 0u, s_fxcRgbaOk = 0u, s_fxcComposited = 0u; // PROBE-FXC2
                     static auto s_fxcLastLog = std::chrono::steady_clock::now(); // PROBE-FXC2
+                    static auto s_fxtLastLog = std::chrono::steady_clock::now(); // PROBE-V3B
                     ++s_fxcClassicFrames; // PROBE-FXC2
                     if (rdFx) ++s_fxcFxFlag; // PROBE-FXC2
                     if (hasPrev) ++s_fxcPrevOk; // PROBE-FXC2
@@ -7286,14 +7305,36 @@ void PS2Runtime::run()
                     if (rdgfx_vk::active() && rdFx && hasPrev && hasRgba) // FXC1 // PROBE-FXC2
                     {
                         ++s_fxcComposited; // PROBE-FXC2
+                        const auto t_e0 = std::chrono::steady_clock::now(); // PROBE-V3B
                         rdgfx_vk::beginFrame(); // FXC1
                         rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 1.0f); // FXC1
+                        const auto t_e1 = std::chrono::steady_clock::now(); // PROBE-V3B
+                        const double cur_eMs = std::chrono::duration<double, std::milli>(t_e1 - t_e0).count(); // PROBE-V3B
+
+                        const auto t_d0 = std::chrono::steady_clock::now(); // PROBE-V3B
                         rdgfx_vk::drawFxBackground(prevTex, prevW, prevH); // FXC1
+                        const auto t_d1 = std::chrono::steady_clock::now(); // PROBE-V3B
+                        const double cur_dMs = std::chrono::duration<double, std::milli>(t_d1 - t_d0).count(); // PROBE-V3B
+
                         rdgfx_vk::drawClassicAdditive(fxRgba, static_cast<int>(fxW), static_cast<int>(fxH), static_cast<int>(fxStride)); // FXC1
                         if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
                             m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
+
+                        const auto t_f0 = std::chrono::steady_clock::now(); // PROBE-V3B
                         rdgfx_vk::endFrame(); // FXC1
                         ps2xSdlForcePoll(); // FXC1
+                        const auto t_f1 = std::chrono::steady_clock::now(); // PROBE-V3B
+                        const double cur_fMs = std::chrono::duration<double, std::milli>(t_f1 - t_f0).count(); // PROBE-V3B
+
+                        ++probe_v3b::n; // PROBE-V3B
+                        probe_v3b::aSum += cur_aMs; // PROBE-V3B
+                        if (cur_aMs > probe_v3b::aMax) probe_v3b::aMax = cur_aMs; // PROBE-V3B
+                        probe_v3b::dSum += cur_dMs; // PROBE-V3B
+                        if (cur_dMs > probe_v3b::dMax) probe_v3b::dMax = cur_dMs; // PROBE-V3B
+                        probe_v3b::eSum += cur_eMs; // PROBE-V3B
+                        if (cur_eMs > probe_v3b::eMax) probe_v3b::eMax = cur_eMs; // PROBE-V3B
+                        probe_v3b::fSum += cur_fMs; // PROBE-V3B
+                        if (cur_fMs > probe_v3b::fMax) probe_v3b::fMax = cur_fMs; // PROBE-V3B
                     }
                     else
                     {
@@ -7309,6 +7350,25 @@ void PS2Runtime::run()
                         ps2xSafeLog("[fxc] classicFrames=%u fxFlag=%u prevOk=%u rgbaOk=%u composited=%u\n",
                                     s_fxcClassicFrames, s_fxcFxFlag, s_fxcPrevOk, s_fxcRgbaOk, s_fxcComposited); // PROBE-FXC2
                     }
+                    static const bool s_probeV3bLogOn = []() { // PROBE-V3B
+                        const char *e = std::getenv("PS2X_RDVK_LOG"); // PROBE-V3B
+                        return (e && std::strcmp(e, "1") == 0); // PROBE-V3B
+                    }(); // PROBE-V3B
+                    if (s_probeV3bLogOn && std::chrono::duration_cast<std::chrono::milliseconds>(fxcNow - s_fxtLastLog).count() >= 1000) // PROBE-V3B
+                    {
+                        s_fxtLastLog = fxcNow; // PROBE-V3B
+                        const uint32_t cnt = probe_v3b::n; // PROBE-V3B
+                        const double invN = (cnt > 0) ? (1.0 / static_cast<double>(cnt)) : 0.0; // PROBE-V3B
+                        ps2xSafeLog("[fxt] n=%u a=%.2f/%.2f b=%.2f/%.2f c=%.2f/%.2f d=%.2f/%.2f e=%.2f/%.2f f=%.2f/%.2f waits=%u waitMs=%.2f  allocs=%u\n",
+                                    cnt,
+                                    probe_v3b::aSum * invN, probe_v3b::aMax,
+                                    probe_v3b::bSum * invN, probe_v3b::bMax,
+                                    probe_v3b::cSum * invN, probe_v3b::cMax,
+                                    probe_v3b::dSum * invN, probe_v3b::dMax,
+                                    probe_v3b::eSum * invN, probe_v3b::eMax,
+                                    probe_v3b::fSum * invN, probe_v3b::fMax,
+                                    probe_v3b::waits, probe_v3b::waitMs, probe_v3b::allocs); // PROBE-V3B
+                    } // PROBE-V3B
                 }
 #endif // RDG3
                 gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};

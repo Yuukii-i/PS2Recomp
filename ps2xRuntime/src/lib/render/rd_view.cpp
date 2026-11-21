@@ -275,6 +275,10 @@ struct RdSnapSlot // FIX-RD81
     int h = 0;
     bool valid = false;
     uint64_t lastUsedFrame = 0ull;
+    int reqW = 0; // PROBE-V3A
+    int reqH = 0; // PROBE-V3A
+    int dstW = 0; // PROBE-V3A
+    int dstH = 0; // PROBE-V3A
 };
 static constexpr size_t kRdSnapSlots = 4u; // FIX-RD81
 static std::mutex s_snapMutex; // FIX-RD81
@@ -3509,6 +3513,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             slot.destFbp = req.destFbp;
                             slot.valid = true;
                             slot.lastUsedFrame = s_snapFrameSeq;
+                            slot.reqW = req.w; // PROBE-V3A
+                            slot.reqH = req.h; // PROBE-V3A
+                            slot.dstW = dstW; // PROBE-V3A
+                            slot.dstH = dstH; // PROBE-V3A
                             ++s_snapCount;
                         }
                     }
@@ -3528,6 +3536,30 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                                       0.0f, 0.0f, static_cast<float>(s_prevW), static_cast<float>(s_prevH) * (448.0f / 512.0f),
                                       x, y, w, h, alphaByte); // RDG1
             ++s_fbTexBlendCount;
+        }
+        static const bool s_snapShowOn = []() { // PROBE-V3A
+            const char *e = std::getenv("PS2X_RD_SNAPSHOW"); // PROBE-V3A
+            return e && e[0] == '1'; // PROBE-V3A
+        }(); // PROBE-V3A
+        if (s_snapShowOn) // PROBE-V3A
+        {
+            static uint32_t s_snapShowFrames = 0u; // PROBE-V3A
+            const bool logThisFrame = (++s_snapShowFrames % 60u) == 1u; // PROBE-V3A
+            for (size_t si = 0u; si < kRdSnapSlots; ++si) // PROBE-V3A
+            {
+                const RdSnapSlot &slot = s_snapSlots[si]; // PROBE-V3A
+                if (!slot.valid || slot.texId == 0u) // PROBE-V3A
+                    continue; // PROBE-V3A
+                rdgfx::drawTextureOverlay(slot.texId, slot.w, slot.h, // PROBE-V3A
+                                          0.0f, 0.0f, static_cast<float>(slot.w), static_cast<float>(slot.h), // PROBE-V3A
+                                          x + static_cast<float>(si) * (w / 4.0f), y, w / 4.0f, h / 4.0f, 255); // PROBE-V3A
+                if (logThisFrame) // PROBE-V3A
+                {
+                    ps2xSafeLog("[snapshow] si=%u fbp=0x%x texId=%u slot=%dx%d want=%dx%d dst=%dx%d reqWH=%dx%d\n", // PROBE-V3A
+                                static_cast<unsigned int>(si), slot.destFbp, slot.texId, // PROBE-V3A
+                                slot.w, slot.h, wantW, wantH, slot.dstW, slot.dstH, slot.reqW, slot.reqH); // PROBE-V3A
+                }
+            }
         }
         if (copyState.valid) // RDG1
         {
