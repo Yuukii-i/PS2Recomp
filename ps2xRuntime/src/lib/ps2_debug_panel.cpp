@@ -14,6 +14,13 @@
 #include "imgui.h"
 #include "rlImGui.h"
 #include "raylib.h"
+// FIX-DBG1C
+extern bool ps2xSdlActive();
+extern bool ps2xSdlImGuiInit();
+extern void ps2xSdlImGuiNewFrame();
+extern void ps2xSdlImGuiEndFrame();
+extern void ps2xSdlImGuiShutdown();
+extern bool ps2xSdlKeyPressedEdge(int sdlScancode);
 #endif
 
 #include <algorithm>
@@ -2181,8 +2188,15 @@ void PS2DebugPanel::initialize()
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
     if (!m_initialized)
     {
-        rlImGuiSetup(true);
-        m_initialized = true;
+        if (ps2xSdlActive()) // DBG1
+        {
+            m_initialized = ps2xSdlImGuiInit();
+        }
+        else
+        {
+            rlImGuiSetup(true);
+            m_initialized = true;
+        }
     }
 #endif
 }
@@ -2192,7 +2206,14 @@ void PS2DebugPanel::shutdown()
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
     if (m_initialized)
     {
-        rlImGuiShutdown();
+        if (ps2xSdlActive()) // DBG1
+        {
+            ps2xSdlImGuiShutdown();
+        }
+        else
+        {
+            rlImGuiShutdown();
+        }
         m_initialized = false;
     }
 #endif
@@ -2206,7 +2227,7 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
         return;
     }
 
-    if (IsKeyPressed(KEY_F1))
+    if (ps2xSdlActive() ? ps2xSdlKeyPressedEdge(58) : IsKeyPressed(KEY_F1)) // DBG1
     {
         toggleVisible();
     }
@@ -2216,7 +2237,14 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
         return;
     }
 
-    rlImGuiBegin();
+    if (ps2xSdlActive()) // DBG1
+    {
+        ps2xSdlImGuiNewFrame();
+    }
+    else
+    {
+        rlImGuiBegin();
+    }
 
     ImGui::SetNextWindowSize(ImVec2(780.0f, 620.0f), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Runtime Debugger", &m_visible, ImGuiWindowFlags_MenuBar))
@@ -2303,7 +2331,14 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
     }
     ImGui::End();
 
-    rlImGuiEnd();
+    if (ps2xSdlActive()) // DBG1
+    {
+        ps2xSdlImGuiEndFrame();
+    }
+    else
+    {
+        rlImGuiEnd();
+    }
 #else
     (void)runtime;
 #endif

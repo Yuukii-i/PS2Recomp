@@ -14,6 +14,12 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
+#if defined(PS2X_HAS_IMGUI) // DBG1
+#include "imgui.h"
+#include "backends/imgui_impl_sdl3.h"
+#include "backends/imgui_impl_vulkan.h"
+#endif // DBG1
+
 #include <algorithm>
 #include <atomic> // FIX-RDG4Q
 #include <chrono> // FIX-RDG4Q
@@ -39,6 +45,15 @@ void ps2xSdlShutdown();
 bool ps2xSdlReadPad(uint16_t *btnsActiveLow, uint8_t *sticks);
 bool ps2xSdlAudioStart(void (*fill)(void *buffer, unsigned frames));
 void ps2xSdlAudioStop();
+bool ps2xSdlImGuiInit(); // FIX-DBG1C
+void ps2xSdlImGuiNewFrame();
+void ps2xSdlImGuiEndFrame();
+void ps2xSdlImGuiShutdown();
+bool ps2xSdlImGuiWantsKeyboard();
+bool ps2xSdlKeyPressedEdge(int sdlScancode);
+#if defined(PS2X_HAS_IMGUI) // DBG1
+bool ps2xSdlImGuiRecord(VkCommandBuffer cb, VkImage swapImage, VkImageView swapView, uint32_t w, uint32_t h);
+#endif // DBG1
 
 namespace
 {
@@ -56,6 +71,7 @@ namespace
         SDL_Gamepad *gamepad = nullptr;
         SDL_JoystickID gamepadId = 0;
         std::atomic<bool> keys[SDL_SCANCODE_COUNT]{}; // FIX-RDG4Q: read from game thread without tearing
+        bool prevKeys[SDL_SCANCODE_COUNT]{}; // DBG1
 
         SDL_AudioStream *audioStream = nullptr;
         AudioFillFn audioFill = nullptr;
@@ -107,6 +123,12 @@ namespace
         bool rdFrameOpen = false; // RDG2
         double rdLastBeginWaitMs = 0.0; // PROBE-RDG4P
 
+#if defined(PS2X_HAS_IMGUI) // DBG1
+        bool imguiInitialized = false;
+        bool imguiDrawPending = false;
+        VkDescriptorPool imguiPool = VK_NULL_HANDLE;
+#endif // DBG1
+
         void reset()
         {
             active = false;
@@ -120,6 +142,7 @@ namespace
             {
                 k.store(false, std::memory_order_relaxed);
             }
+            std::memset(prevKeys, 0, sizeof(prevKeys)); // DBG1
 
             audioStream = nullptr;
             audioFill = nullptr;
@@ -170,6 +193,11 @@ namespace
             rdSuboptimal = false;
             rdFrameOpen = false;
             rdLastBeginWaitMs = 0.0;
+#if defined(PS2X_HAS_IMGUI) // DBG1
+            imguiInitialized = false;
+            imguiDrawPending = false;
+            imguiPool = VK_NULL_HANDLE;
+#endif // DBG1
         }
     };
 
@@ -998,6 +1026,12 @@ namespace // FIX-RDG4Q
         SDL_Event ev{};
         while (SDL_PollEvent(&ev))
         {
+#if defined(PS2X_HAS_IMGUI) // DBG1
+            if (g_sdl.imguiInitialized)
+            {
+                ImGui_ImplSDL3_ProcessEvent(&ev);
+            }
+#endif // DBG1
             switch (ev.type)
             {
             case SDL_EVENT_QUIT:
@@ -1047,6 +1081,12 @@ namespace // FIX-RDG4Q
 
 bool ps2xSdlShouldClose()
 {
+    // DBG1: snapshot previous key states once per frame before polling new events.
+    for (int i = 0; i < SDL_SCANCODE_COUNT; ++i)
+    {
+        g_sdl.prevKeys[i] = g_sdl.keys[i].load(std::memory_order_relaxed);
+    }
+
     // FIX-RDG4Q: throttle SDL_PollEvent on the ~1 kHz main loop (matching PS2X_IDLE_POLL_MS).
     if (g_sdl.shouldClose)
         return true;
@@ -1210,10 +1250,23 @@ void ps2xSdlPresent()
         vkCmdBeginRendering(cmd, &ri);
         vkCmdEndRendering(cmd);
 
+#if defined(PS2X_HAS_IMGUI) // DBG1
+        ImageBarrier(cmd, swapImg,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        ps2xSdlImGuiRecord(cmd, swapImg, g_sdl.swapchainImageViews[imageIndex],
+                          g_sdl.swapchainExtent.width, g_sdl.swapchainExtent.height);
+        ImageBarrier(cmd, swapImg,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+#else
         ImageBarrier(cmd, swapImg,
                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                      VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0,
                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+#endif
     }
     else
     {
@@ -1276,6 +1329,11 @@ void ps2xSdlPresent()
                        g_sdl.srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        swapImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        1, &blit, VK_FILTER_LINEAR);
+
+#if defined(PS2X_HAS_IMGUI) // DBG1
+        ps2xSdlImGuiRecord(cmd, swapImg, g_sdl.swapchainImageViews[imageIndex],
+                          g_sdl.swapchainExtent.width, g_sdl.swapchainExtent.height);
+#endif // DBG1
 
         ImageBarrier(cmd, swapImg,
                      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -1362,6 +1420,9 @@ void ps2xSdlShutdown()
     if (g_sdl.device != VK_NULL_HANDLE)
     {
         vkDeviceWaitIdle(g_sdl.device);
+#if defined(PS2X_HAS_IMGUI) // DBG1
+        ps2xSdlImGuiShutdown();
+#endif // DBG1
         DestroySrcImage();
         DestroyStagingBuffer();
         DestroySwapchain();
@@ -1518,46 +1579,54 @@ bool ps2xSdlReadPad(uint16_t *btnsActiveLow, uint8_t *sticks)
         localSticks[3] = stick(normAxis(SDL_GetGamepadAxis(g_sdl.gamepad, SDL_GAMEPAD_AXIS_LEFTY)));
     }
 
-    auto keyAxis = [](uint8_t &out, SDL_Scancode neg, SDL_Scancode pos)
+#if defined(PS2X_HAS_IMGUI) // DBG1
+    const bool ignoreKeyboard = ps2xSdlImGuiWantsKeyboard();
+#else
+    const bool ignoreKeyboard = false;
+#endif
+    if (!ignoreKeyboard)
     {
-        if (g_sdl.keys[neg])
-            out = 0;
-        else if (g_sdl.keys[pos])
-            out = 255;
-    };
-    keyAxis(localSticks[2], SDL_SCANCODE_A, SDL_SCANCODE_D);
-    keyAxis(localSticks[3], SDL_SCANCODE_W, SDL_SCANCODE_S);
-    keyAxis(localSticks[0], SDL_SCANCODE_J, SDL_SCANCODE_L);
-    keyAxis(localSticks[1], SDL_SCANCODE_I, SDL_SCANCODE_K);
+        auto keyAxis = [](uint8_t &out, SDL_Scancode neg, SDL_Scancode pos)
+        {
+            if (g_sdl.keys[neg])
+                out = 0;
+            else if (g_sdl.keys[pos])
+                out = 255;
+        };
+        keyAxis(localSticks[2], SDL_SCANCODE_A, SDL_SCANCODE_D);
+        keyAxis(localSticks[3], SDL_SCANCODE_W, SDL_SCANCODE_S);
+        keyAxis(localSticks[0], SDL_SCANCODE_J, SDL_SCANCODE_L);
+        keyAxis(localSticks[1], SDL_SCANCODE_I, SDL_SCANCODE_K);
 
-    if (g_sdl.keys[SDL_SCANCODE_UP])
-        clearBit(PAD_UP);
-    if (g_sdl.keys[SDL_SCANCODE_DOWN])
-        clearBit(PAD_DOWN);
-    if (g_sdl.keys[SDL_SCANCODE_LEFT])
-        clearBit(PAD_LEFT);
-    if (g_sdl.keys[SDL_SCANCODE_RIGHT])
-        clearBit(PAD_RIGHT);
-    if (g_sdl.keys[SDL_SCANCODE_X] || g_sdl.keys[SDL_SCANCODE_SPACE])
-        clearBit(PAD_CROSS);
-    if (g_sdl.keys[SDL_SCANCODE_C] || g_sdl.keys[SDL_SCANCODE_ESCAPE])
-        clearBit(PAD_CIRCLE);
-    if (g_sdl.keys[SDL_SCANCODE_Z] || g_sdl.keys[SDL_SCANCODE_KP_0])
-        clearBit(PAD_SQUARE);
-    if (g_sdl.keys[SDL_SCANCODE_V] || g_sdl.keys[SDL_SCANCODE_KP_1])
-        clearBit(PAD_TRIANGLE);
-    if (g_sdl.keys[SDL_SCANCODE_Q])
-        clearBit(PAD_L1);
-    if (g_sdl.keys[SDL_SCANCODE_E])
-        clearBit(PAD_R1);
-    if (g_sdl.keys[SDL_SCANCODE_LSHIFT])
-        clearBit(PAD_L2);
-    if (g_sdl.keys[SDL_SCANCODE_RSHIFT])
-        clearBit(PAD_R2);
-    if (g_sdl.keys[SDL_SCANCODE_RETURN])
-        clearBit(PAD_START);
-    if (g_sdl.keys[SDL_SCANCODE_TAB])
-        clearBit(PAD_SELECT);
+        if (g_sdl.keys[SDL_SCANCODE_UP])
+            clearBit(PAD_UP);
+        if (g_sdl.keys[SDL_SCANCODE_DOWN])
+            clearBit(PAD_DOWN);
+        if (g_sdl.keys[SDL_SCANCODE_LEFT])
+            clearBit(PAD_LEFT);
+        if (g_sdl.keys[SDL_SCANCODE_RIGHT])
+            clearBit(PAD_RIGHT);
+        if (g_sdl.keys[SDL_SCANCODE_X] || g_sdl.keys[SDL_SCANCODE_SPACE])
+            clearBit(PAD_CROSS);
+        if (g_sdl.keys[SDL_SCANCODE_C] || g_sdl.keys[SDL_SCANCODE_ESCAPE])
+            clearBit(PAD_CIRCLE);
+        if (g_sdl.keys[SDL_SCANCODE_Z] || g_sdl.keys[SDL_SCANCODE_KP_0])
+            clearBit(PAD_SQUARE);
+        if (g_sdl.keys[SDL_SCANCODE_V] || g_sdl.keys[SDL_SCANCODE_KP_1])
+            clearBit(PAD_TRIANGLE);
+        if (g_sdl.keys[SDL_SCANCODE_Q])
+            clearBit(PAD_L1);
+        if (g_sdl.keys[SDL_SCANCODE_E])
+            clearBit(PAD_R1);
+        if (g_sdl.keys[SDL_SCANCODE_LSHIFT])
+            clearBit(PAD_L2);
+        if (g_sdl.keys[SDL_SCANCODE_RSHIFT])
+            clearBit(PAD_R2);
+        if (g_sdl.keys[SDL_SCANCODE_RETURN])
+            clearBit(PAD_START);
+        if (g_sdl.keys[SDL_SCANCODE_TAB])
+            clearBit(PAD_SELECT);
+    }
 
     if (btnsActiveLow)
         *btnsActiveLow = btns;
@@ -1747,6 +1816,202 @@ void ps2xSdlVkEndRdFrame()
 
     g_sdl.frameInFlight = (g_sdl.frameInFlight + 1) % kMaxFramesInFlight;
     ++g_sdl.presentCount;
+}
+
+VkImageView ps2xSdlVkCurrentSwapView() // DBG1
+{
+    if (!g_sdl.rdFrameOpen || g_sdl.rdImageIndex >= g_sdl.swapchainImageViews.size())
+        return VK_NULL_HANDLE;
+    return g_sdl.swapchainImageViews[g_sdl.rdImageIndex];
+}
+
+#if defined(PS2X_HAS_IMGUI) // DBG1
+bool ps2xSdlImGuiInit()
+{
+    if (!ps2xSdlActive())
+        return false;
+    if (g_sdl.imguiInitialized)
+        return true;
+
+    if (!ImGui::GetCurrentContext())
+    {
+        ImGui::CreateContext();
+    }
+    ImGuiIO &io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSize.descriptorCount = 64;
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = 64;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+
+    if (vkCreateDescriptorPool(g_sdl.device, &poolInfo, nullptr, &g_sdl.imguiPool) != VK_SUCCESS)
+    {
+        g_sdl.imguiPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    if (!ImGui_ImplSDL3_InitForVulkan(g_sdl.window))
+    {
+        vkDestroyDescriptorPool(g_sdl.device, g_sdl.imguiPool, nullptr);
+        g_sdl.imguiPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    const uint32_t imgCount = std::max<uint32_t>(2u, static_cast<uint32_t>(g_sdl.swapchainImages.size()));
+    VkPipelineRenderingCreateInfoKHR prci{};
+    prci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+    prci.colorAttachmentCount = 1;
+    prci.pColorAttachmentFormats = &g_sdl.swapchainFormat;
+
+    ImGui_ImplVulkan_InitInfo initInfo{};
+    initInfo.ApiVersion = VK_API_VERSION_1_3;
+    initInfo.Instance = g_sdl.instance;
+    initInfo.PhysicalDevice = g_sdl.physicalDevice;
+    initInfo.Device = g_sdl.device;
+    initInfo.QueueFamily = g_sdl.queueFamily;
+    initInfo.Queue = g_sdl.queue;
+    initInfo.DescriptorPool = g_sdl.imguiPool;
+    initInfo.MinImageCount = imgCount;
+    initInfo.ImageCount = imgCount;
+    initInfo.UseDynamicRendering = true;
+    initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    initInfo.PipelineInfoMain.PipelineRenderingCreateInfo = prci;
+
+    if (!ImGui_ImplVulkan_Init(&initInfo))
+    {
+        ImGui_ImplSDL3_Shutdown();
+        vkDestroyDescriptorPool(g_sdl.device, g_sdl.imguiPool, nullptr);
+        g_sdl.imguiPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    // ImGui v1.92+ uses ImGuiBackendFlags_RendererHasTextures; font atlas textures are uploaded automatically.
+    g_sdl.imguiInitialized = true;
+    g_sdl.imguiDrawPending = false;
+    return true;
+}
+
+void ps2xSdlImGuiNewFrame()
+{
+    if (!g_sdl.imguiInitialized)
+        return;
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+}
+
+void ps2xSdlImGuiEndFrame()
+{
+    if (!g_sdl.imguiInitialized)
+        return;
+    ImGui::Render();
+    g_sdl.imguiDrawPending = true;
+}
+
+// Layout contract: expects swapImage in VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL on entry
+// and transitions it back to VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL on exit.
+bool ps2xSdlImGuiRecord(VkCommandBuffer cb, VkImage swapImage, VkImageView swapView, uint32_t w, uint32_t h)
+{
+    if (!g_sdl.imguiInitialized || !g_sdl.imguiDrawPending || cb == VK_NULL_HANDLE || swapImage == VK_NULL_HANDLE || w == 0 || h == 0)
+    {
+        g_sdl.imguiDrawPending = false;
+        return false;
+    }
+    g_sdl.imguiDrawPending = false;
+
+    if (swapView == VK_NULL_HANDLE)
+    {
+        swapView = ps2xSdlVkCurrentSwapView();
+    }
+    if (swapView == VK_NULL_HANDLE)
+        return false;
+
+    ImDrawData *drawData = ImGui::GetDrawData();
+    if (!drawData || drawData->TotalVtxCount <= 0)
+        return false;
+
+    ImageBarrier(cb, swapImage,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    VkRenderingAttachmentInfo colorAtt{};
+    colorAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAtt.imageView = swapView;
+    colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo ri{};
+    ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    ri.renderArea = {{0, 0}, {w, h}};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &colorAtt;
+
+    vkCmdBeginRendering(cb, &ri);
+    ImGui_ImplVulkan_RenderDrawData(drawData, cb);
+    vkCmdEndRendering(cb);
+
+    ImageBarrier(cb, swapImage,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    return true;
+}
+
+void ps2xSdlImGuiShutdown()
+{
+    if (!g_sdl.imguiInitialized)
+        return;
+    if (g_sdl.device != VK_NULL_HANDLE)
+    {
+        vkDeviceWaitIdle(g_sdl.device);
+    }
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+    if (ImGui::GetCurrentContext())
+    {
+        ImGui::DestroyContext();
+    }
+    if (g_sdl.imguiPool != VK_NULL_HANDLE && g_sdl.device != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorPool(g_sdl.device, g_sdl.imguiPool, nullptr);
+        g_sdl.imguiPool = VK_NULL_HANDLE;
+    }
+    g_sdl.imguiInitialized = false;
+    g_sdl.imguiDrawPending = false;
+}
+
+bool ps2xSdlImGuiWantsKeyboard()
+{
+    if (!g_sdl.imguiInitialized || !ImGui::GetCurrentContext())
+        return false;
+    return ImGui::GetIO().WantCaptureKeyboard;
+}
+#else // FIX-DBG1C
+bool ps2xSdlImGuiInit() { return false; }
+void ps2xSdlImGuiNewFrame() {}
+void ps2xSdlImGuiEndFrame() {}
+void ps2xSdlImGuiShutdown() {}
+bool ps2xSdlImGuiWantsKeyboard() { return false; }
+#endif // DBG1
+
+bool ps2xSdlKeyPressedEdge(int sdlScancode) // FIX-DBG1C
+{
+    if (sdlScancode < 0 || sdlScancode >= SDL_SCANCODE_COUNT)
+        return false;
+    return g_sdl.keys[sdlScancode].load(std::memory_order_relaxed) && !g_sdl.prevKeys[sdlScancode];
 }
 
 #endif // PS2X_HAS_SDL3

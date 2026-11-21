@@ -552,6 +552,16 @@ target_include_directories(ps2_runtime PUBLIC
 
 find_package(Vulkan REQUIRED) # PERF-VK: GS Vulkan backend (docs/VULKAN_PLAN.md)
 target_link_libraries(ps2_runtime PRIVATE Vulkan::Vulkan)
+
+if(PS2X_ENABLE_SDL3 AND PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # DBG1
+    target_sources(imgui PRIVATE # DBG1
+        "${PS2X_IMGUI_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp" # DBG1
+        "${PS2X_IMGUI_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp" # DBG1
+    ) # DBG1
+    target_link_libraries(imgui PRIVATE SDL3::SDL3-static Vulkan::Vulkan) # DBG1
+    target_link_libraries(ps2_runtime PRIVATE imgui) # DBG1
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_HAS_IMGUI=1) # DBG1
+endif() # DBG1
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
 target_link_libraries(ps2EntryRunner
     PRIVATE

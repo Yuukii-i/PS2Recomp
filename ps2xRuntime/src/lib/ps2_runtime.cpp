@@ -1984,11 +1984,13 @@ bool PS2Runtime::initialize(const char *title)
         if (!sdlMode) // SDL-FE
         {
             SetTargetFPS(isPaceEnabled() ? getPaceRlFps() : 60); // FIX-PACE1 // PROBE-PACE5
-            if (m_debugUiInitCallback)
-            {
-                m_debugUiInitCallback(*this, m_debugUiUserData);
-                m_debugUiInitialized = true;
-            }
+        }
+        const char *sdlUi = sdlMode ? std::getenv("PS2X_SDL_UI") : nullptr; // DBG1
+        const bool debugUiWanted = !sdlMode || !(sdlUi && sdlUi[0] == '0'); // DBG1
+        if (debugUiWanted && m_debugUiInitCallback) // DBG1
+        {
+            m_debugUiInitCallback(*this, m_debugUiUserData);
+            m_debugUiInitialized = true;
         }
 
         return true;
@@ -7261,6 +7263,8 @@ void PS2Runtime::run()
                     const float dstX = (screenWidth - dstWidth) * 0.5f; // RDG3
                     const float dstY = (screenHeight - dstHeight) * 0.5f; // RDG3
                     (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight); // RDG3
+                    if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
+                        m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
                     rdgfx_vk::endFrame(); // RDG3
                     ps2xSdlForcePoll(); // FIX-RDG4Q
                 }
@@ -7286,11 +7290,15 @@ void PS2Runtime::run()
                         rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 1.0f); // FXC1
                         rdgfx_vk::drawFxBackground(prevTex, prevW, prevH); // FXC1
                         rdgfx_vk::drawClassicAdditive(fxRgba, static_cast<int>(fxW), static_cast<int>(fxH), static_cast<int>(fxStride)); // FXC1
+                        if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
+                            m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
                         rdgfx_vk::endFrame(); // FXC1
                         ps2xSdlForcePoll(); // FXC1
                     }
                     else
                     {
+                        if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
+                            m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
                         ps2xSdlPresent();
                         ps2xSdlForcePoll(); // FIX-RDG4Q
                     }

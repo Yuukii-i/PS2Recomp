@@ -37,6 +37,8 @@ uint32_t ps2xSdlVkFramesInFlight();
 bool ps2xSdlVkBeginRdFrame(VkCommandBuffer *cb, VkImage *swapImage, uint32_t *w, uint32_t *h, uint32_t *frameIdx);
 void ps2xSdlVkEndRdFrame();
 double ps2xSdlVkLastBeginWaitMs(); // PROBE-RDG4P
+VkImageView ps2xSdlVkCurrentSwapView();
+bool ps2xSdlImGuiRecord(VkCommandBuffer cb, VkImage swapImage, VkImageView swapView, uint32_t w, uint32_t h);
 
 namespace rdgfx_vk
 {
@@ -1752,6 +1754,10 @@ void endFrame()
                    srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    s_vk.swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1, &blit, VK_FILTER_NEAREST);
+
+#if defined(PS2X_HAS_IMGUI) // DBG1
+    ps2xSdlImGuiRecord(s_vk.cmd, s_vk.swapImage, ps2xSdlVkCurrentSwapView(), s_vk.targetW, s_vk.targetH);
+#endif // DBG1
 
     imageBarrier(s_vk.cmd, s_vk.swapImage, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
