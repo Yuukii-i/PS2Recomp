@@ -14,6 +14,9 @@ extern "C" __declspec(dllimport) void __stdcall glBindTexture(unsigned int targe
 extern "C" __declspec(dllimport) void __stdcall glTexImage2D(unsigned int target, int level, int internalformat, int width, int height, int border, unsigned int format, unsigned int type, const void *pixels); // FIX-RD82G
 extern "C" __declspec(dllimport) void __stdcall glTexSubImage2D(unsigned int target, int level, int xoffset, int yoffset, int width, int height, unsigned int format, unsigned int type, const void *pixels); // FIX-RD82G
 extern "C" __declspec(dllimport) void __stdcall glTexParameteri(unsigned int target, unsigned int pname, int param); // FIX-RD82G
+extern "C" __declspec(dllimport) void __stdcall glDrawElements(unsigned int mode, int count, unsigned int type, const void *indices); // FIX-RD90
+extern "C" __declspec(dllimport) int __stdcall QueryPerformanceCounter(long long *lpPerformanceCount); // FIX-RD90
+extern "C" __declspec(dllimport) int __stdcall QueryPerformanceFrequency(long long *lpFrequency); // FIX-RD90
 #endif
 static bool g_rdAlwaysFunc = false; // FEAT-RD20
 
@@ -32,6 +35,58 @@ static bool g_rdAlwaysFunc = false; // FEAT-RD20
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD1
 extern unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t texa); // FEAT-RD5
+
+// PROBE-PACE2
+static inline bool pace2Enabled()
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_PACE_LOG");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+static inline int64_t pace2QpcNow()
+{
+#ifdef _WIN32
+    long long t = 0;
+    QueryPerformanceCounter(&t);
+    return static_cast<int64_t>(t);
+#else
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+}
+struct Pace2Scope
+{
+    int64_t *dst;
+    int64_t t0;
+    explicit Pace2Scope(int64_t &target, bool on) : dst(on ? &target : nullptr), t0(on ? pace2QpcNow() : 0) {}
+    ~Pace2Scope()
+    {
+        if (dst)
+            *dst += (pace2QpcNow() - t0);
+    }
+    Pace2Scope(const Pace2Scope &) = delete;
+    Pace2Scope &operator=(const Pace2Scope &) = delete;
+};
+static struct Pace2RdState
+{
+    int64_t total = 0;
+    int64_t b1 = 0;
+    int64_t b2 = 0;
+    int64_t b3 = 0;
+    int64_t b4 = 0;
+    int64_t b5 = 0;
+} g_pace2Rd;
+extern "C" void ps2xRdPace2Take(int64_t *out6)
+{
+    out6[0] = g_pace2Rd.total;
+    out6[1] = g_pace2Rd.b1;
+    out6[2] = g_pace2Rd.b2;
+    out6[3] = g_pace2Rd.b3;
+    out6[4] = g_pace2Rd.b4;
+    out6[5] = g_pace2Rd.b5;
+    g_pace2Rd = Pace2RdState{};
+}
 extern void ps2xRdBt2SetKind(int kind); // PROBE-BT2
 extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD19
 extern bool ps2xRdHasDisplayFbp(); // FEAT-RD19
@@ -358,6 +413,8 @@ struct Rd2DFrame // FEAT-RD13
     bool valid = false;
 };
 
+static bool rdIdx32On(); // FIX-RD90
+
 namespace
 {
 constexpr size_t kRdSlotCount = 6u; // FEAT-RD34
@@ -485,6 +542,7 @@ struct RdGpuState
     float vpScaleZ = 0.0f;  // FEAT-RD11
     float vpOffsetZ = 0.0f; // FEAT-RD11
     int fixLoc = -1; // FEAT-RD7
+    double totalUploadMs = 0.0; // FIX-RD90
     std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
 };
 RdGpuState g_rdGpu;
@@ -796,75 +854,100 @@ void uploadRdSlot(RdGpuSlot &slot, const std::vector<RdVert> &verts, const std::
         return;
     }
 
-    auto &idx16 = g_rdGpu.idx16Scratch;
-    if (nv <= 65536u)
+#ifdef _WIN32 // FIX-RD90
+    static const long long s_qpcFreq = []() {
+        long long f = 0;
+        QueryPerformanceFrequency(&f);
+        return f > 0 ? f : 1;
+    }();
+    long long t0 = 0;
+    QueryPerformanceCounter(&t0);
+#endif
+
+    const bool idx32 = rdIdx32On(); // FIX-RD90
+    size_t nIdx = 0;
+    const void *idxPtr = nullptr;
+    if (idx32) // FIX-RD90
     {
-        idx16.resize(ni);
-        const uint32_t *src = indices.data();
-        uint16_t *dst = idx16.data();
-        for (size_t i = 0; i < ni; ++i)
-            dst[i] = static_cast<uint16_t>(src[i]);
-        for (RdBatch &b : batches) // FEAT-RD14b
+        for (RdBatch &b : batches)
             b.baseVertex = 0u;
+        nIdx = ni;
+        idxPtr = indices.data();
     }
     else
     {
-        idx16.clear();
-        idx16.reserve(ni);
-        auto &split = g_rdGpu.splitBatchScratch;
-        split.clear();
-        split.reserve(batches.size() + 8u);
-        for (const RdBatch &b : batches)
+        auto &idx16 = g_rdGpu.idx16Scratch;
+        if (nv <= 65536u)
         {
-            if (b.count < 3u)
-                continue;
-            const uint32_t end = b.first + b.count;
-            uint32_t chunkStartTri = b.first;
-            uint32_t minV = indices[b.first];
-            uint32_t maxV = indices[b.first];
-            for (uint32_t t = b.first; t + 2u < end; t += 3u)
+            idx16.resize(ni);
+            const uint32_t *src = indices.data();
+            uint16_t *dst = idx16.data();
+            for (size_t i = 0; i < ni; ++i)
+                dst[i] = static_cast<uint16_t>(src[i]);
+            for (RdBatch &b : batches) // FEAT-RD14b
+                b.baseVertex = 0u;
+        }
+        else
+        {
+            idx16.clear();
+            idx16.reserve(ni);
+            auto &split = g_rdGpu.splitBatchScratch;
+            split.clear();
+            split.reserve(batches.size() + 8u);
+            for (const RdBatch &b : batches)
             {
-                const uint32_t i0 = indices[t];
-                const uint32_t i1 = indices[t + 1u];
-                const uint32_t i2 = indices[t + 2u];
-                const uint32_t tMin = std::min(i0, std::min(i1, i2));
-                const uint32_t tMax = std::max(i0, std::max(i1, i2));
-                const uint32_t nextMin = std::min(minV, tMin);
-                const uint32_t nextMax = std::max(maxV, tMax);
-                if (nextMax - nextMin >= 65536u && t > chunkStartTri)
+                if (b.count < 3u)
+                    continue;
+                const uint32_t end = b.first + b.count;
+                uint32_t chunkStartTri = b.first;
+                uint32_t minV = indices[b.first];
+                uint32_t maxV = indices[b.first];
+                for (uint32_t t = b.first; t + 2u < end; t += 3u)
+                {
+                    const uint32_t i0 = indices[t];
+                    const uint32_t i1 = indices[t + 1u];
+                    const uint32_t i2 = indices[t + 2u];
+                    const uint32_t tMin = std::min(i0, std::min(i1, i2));
+                    const uint32_t tMax = std::max(i0, std::max(i1, i2));
+                    const uint32_t nextMin = std::min(minV, tMin);
+                    const uint32_t nextMax = std::max(maxV, tMax);
+                    if (nextMax - nextMin >= 65536u && t > chunkStartTri)
+                    {
+                        RdBatch nb = b;
+                        nb.first = static_cast<uint32_t>(idx16.size());
+                        nb.count = t - chunkStartTri;
+                        nb.baseVertex = minV;
+                        for (uint32_t k = chunkStartTri; k < t; ++k)
+                            idx16.push_back(static_cast<uint16_t>(indices[k] - minV));
+                        split.push_back(nb);
+                        chunkStartTri = t;
+                        minV = tMin;
+                        maxV = tMax;
+                    }
+                    else
+                    {
+                        minV = nextMin;
+                        maxV = nextMax;
+                    }
+                }
+                if (chunkStartTri < end)
                 {
                     RdBatch nb = b;
                     nb.first = static_cast<uint32_t>(idx16.size());
-                    nb.count = t - chunkStartTri;
+                    nb.count = end - chunkStartTri;
                     nb.baseVertex = minV;
-                    for (uint32_t k = chunkStartTri; k < t; ++k)
+                    for (uint32_t k = chunkStartTri; k < end; ++k)
                         idx16.push_back(static_cast<uint16_t>(indices[k] - minV));
                     split.push_back(nb);
-                    chunkStartTri = t;
-                    minV = tMin;
-                    maxV = tMax;
-                }
-                else
-                {
-                    minV = nextMin;
-                    maxV = nextMax;
                 }
             }
-            if (chunkStartTri < end)
-            {
-                RdBatch nb = b;
-                nb.first = static_cast<uint32_t>(idx16.size());
-                nb.count = end - chunkStartTri;
-                nb.baseVertex = minV;
-                for (uint32_t k = chunkStartTri; k < end; ++k)
-                    idx16.push_back(static_cast<uint16_t>(indices[k] - minV));
-                split.push_back(nb);
-            }
+            batches.swap(split);
         }
-        batches.swap(split);
+        nIdx = idx16.size();
+        idxPtr = idx16.data();
     }
 
-    const size_t nIdx = idx16.size();
+    const size_t idxElemSize = idx32 ? sizeof(uint32_t) : sizeof(uint16_t); // FIX-RD90
     bool rebindVao = false;
     if (nv > slot.vboCapVerts)
     {
@@ -880,7 +963,7 @@ void uploadRdSlot(RdGpuSlot &slot, const std::vector<RdVert> &verts, const std::
         if (slot.ebo != 0)
             rlUnloadVertexBuffer(slot.ebo);
         const size_t newCap = std::max<size_t>(nIdx, slot.eboCapIndices ? slot.eboCapIndices * 2 : 8192);
-        slot.ebo = rlLoadVertexBufferElement(nullptr, static_cast<int>(newCap * sizeof(uint16_t)), true);
+        slot.ebo = rlLoadVertexBufferElement(nullptr, static_cast<int>(newCap * idxElemSize), true); // FIX-RD90
         slot.eboCapIndices = newCap;
         rebindVao = true;
     }
@@ -902,9 +985,15 @@ void uploadRdSlot(RdGpuSlot &slot, const std::vector<RdVert> &verts, const std::
     }
     rlUpdateVertexBuffer(slot.vbo, verts.data(), static_cast<int>(nv * sizeof(RdVert)), 0);
     if (nIdx > 0)
-        rlUpdateVertexBufferElements(slot.ebo, idx16.data(), static_cast<int>(nIdx * sizeof(uint16_t)), 0);
+        rlUpdateVertexBufferElements(slot.ebo, idxPtr, static_cast<int>(nIdx * idxElemSize), 0); // FIX-RD90
     slot.vertCount = nv;
     slot.indexCount = nIdx;
+
+#ifdef _WIN32 // FIX-RD90
+    long long t1 = 0;
+    QueryPerformanceCounter(&t1);
+    g_rdGpu.totalUploadMs += static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(s_qpcFreq);
+#endif
 }
 } // namespace
 
@@ -1219,6 +1308,30 @@ static std::vector<RdVert> g_rd24Verts[kRdSlotCount]; // PROBE-RD24 // FEAT-RD34
 static std::vector<uint16_t> g_rd24Idx[kRdSlotCount]; // PROBE-RD24 // FEAT-RD34
 static const bool g_rdBlendOn = []{ const char *e = std::getenv("PS2X_RD_BLENDLOG"); return e && e[0] == '1'; }(); // PROBE-RD29
 static const bool g_rdReasonOn = []{ const char *e = std::getenv("PS2X_RD_DRAWREASON"); return e && e[0] == '1'; }(); // PROBE-RD59
+static bool rdIdx32On() // FIX-RD90
+{
+    static const bool s_on = []() {
+        if (g_rd24On || g_rdCamOn || g_rdBlendOn || g_rdReasonOn)
+            return false;
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_IDX32");
+        return !(e && e[0] == '0');
+    }();
+    return s_on;
+}
+static inline void rdDrawElems(uint32_t first, uint32_t count) // FIX-RD90
+{
+#ifdef _WIN32
+    if (rdIdx32On())
+    {
+        glDrawElements(0x0004u /*GL_TRIANGLES*/, static_cast<int>(count), 0x1405u /*GL_UNSIGNED_INT*/,
+                       reinterpret_cast<const void *>(static_cast<size_t>(first) * sizeof(uint32_t)));
+        return;
+    }
+#endif
+    rlDrawVertexArrayElements(static_cast<int>(first), static_cast<int>(count), nullptr);
+}
 static const bool g_rd2dReasonOn = []{ const char *e = std::getenv("PS2X_RD_2DREASON"); return e && e[0] == '1'; }(); // PROBE-RD62
 static const bool g_rd2dReasonBig = []{ const char *e = std::getenv("PS2X_RD_2DREASON_BIG"); return e && e[0] == '1'; }(); // PROBE-RD62B
 static const int g_rd2dMax = []{ const char *e = std::getenv("PS2X_RD_2DMAX"); return (e && *e) ? std::atoi(e) : 0; }(); // PROBE-RD83
@@ -1464,6 +1577,10 @@ static bool isRdCopyBufSkip(const Rd2DBatch &b) // FIX-RD87 // FIX-RD87B
 
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
+    const bool pace2On = pace2Enabled(); // PROBE-PACE2
+    if (pace2On) // PROBE-PACE2
+        g_pace2Rd = Pace2RdState{};
+    Pace2Scope pace2TotalScope(g_pace2Rd.total, pace2On); // PROBE-PACE2
     g_rd35.valid = false; // PROBE-RD35
     g_rd35.n2d = 0u;
     g_rd35.n3d = 0u;
@@ -1475,6 +1592,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     bool pendingUpload[kRdSlotCount] = {}; // FEAT-RD14 // FEAT-RD34
     uint32_t evictedMaxSnap = 0u; // FEAT-RD34
     {
+        Pace2Scope pace2B1Scope(g_pace2Rd.b1, pace2On); // PROBE-PACE2
         std::lock_guard<std::mutex> lock(g_rdMutex);
         if (!g_rdEverPublished && !g_rdGpu.everUploaded)
         {
@@ -1710,19 +1828,22 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         g_rdGpu.vao2d = rlLoadVertexArray(); // FEAT-RD8
     }
 
-    for (size_t idx = 0; idx < kRdSlotCount; ++idx) // FEAT-RD14 // FEAT-RD34
-    {
-        if (pendingUpload[idx])
+    { // PROBE-PACE2
+        Pace2Scope pace2B2Scope(g_pace2Rd.b2, pace2On); // PROBE-PACE2
+        for (size_t idx = 0; idx < kRdSlotCount; ++idx) // FEAT-RD14 // FEAT-RD34
         {
-            g_rdGpu.everUploaded = true;
-            uploadRdSlot(g_rdGpu.slots[idx], g_rdGpu.pendingVerts[idx], g_rdGpu.pendingIndices[idx], g_rdGpu.slots[idx].batches);
-            if (g_rd24On || g_rdCamOn || g_rdBlendOn || g_rdReasonOn) // PROBE-RD24 // PROBE-RD29 // PROBE-RD26 // PROBE-RD59: CPU copy of uploaded verts + final 16-bit indices (relative to batch.baseVertex)
+            if (pendingUpload[idx])
             {
-                g_rd24Verts[idx] = g_rdGpu.pendingVerts[idx];
-                if (g_rdGpu.slots[idx].indexCount != 0)
-                    g_rd24Idx[idx] = g_rdGpu.idx16Scratch;
-                else
-                    g_rd24Idx[idx].clear();
+                g_rdGpu.everUploaded = true;
+                uploadRdSlot(g_rdGpu.slots[idx], g_rdGpu.pendingVerts[idx], g_rdGpu.pendingIndices[idx], g_rdGpu.slots[idx].batches);
+                if (g_rd24On || g_rdCamOn || g_rdBlendOn || g_rdReasonOn) // PROBE-RD24 // PROBE-RD29 // PROBE-RD26 // PROBE-RD59: CPU copy of uploaded verts + final 16-bit indices (relative to batch.baseVertex)
+                {
+                    g_rd24Verts[idx] = g_rdGpu.pendingVerts[idx];
+                    if (g_rdGpu.slots[idx].indexCount != 0)
+                        g_rd24Idx[idx] = g_rdGpu.idx16Scratch;
+                    else
+                        g_rd24Idx[idx].clear();
+                }
             }
         }
     }
@@ -2751,6 +2872,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             const uint32_t maxS = maxSerial & 0x3FFFFFFFu; // FEAT-RD10
             if (i2d >= n2d || (!drawAll && (g_rdGpu.local2dBatches[i2d].afterSerial & 0x3FFFFFFFu) >= maxS))
                 return;
+            Pace2Scope pace2B4Scope(g_pace2Rd.b4, pace2On); // PROBE-PACE2
             mode2d = 1;
             if (g_rdGpu.mode2dLoc >= 0)
                 rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
@@ -2901,7 +3023,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             }
         }
         float prevZBias = 0.0f; // PROBE-RD59
-        for (const RdDrawBatch &db : g_rdGpu.drawBatches) // FEAT-RD2 // FEAT-RD14
+        const int64_t pace2B4Before3d = pace2On ? g_pace2Rd.b4 : 0; // PROBE-PACE2
+        { // PROBE-PACE2
+            Pace2Scope pace2B3Scope(g_pace2Rd.b3, pace2On); // PROBE-PACE2
+            for (const RdDrawBatch &db : g_rdGpu.drawBatches) // FEAT-RD2 // FEAT-RD14
         {
             const RdBatch &batch = db.batch;
             draw2dUntil(batch.kickSerial, false); // FEAT-RD8
@@ -3325,16 +3450,16 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (atst == 0u)
                 {
                     rdApplyAfailWrites(afail, zOff, sMask);
-                    rlDrawVertexArrayElements(static_cast<int>(batch.first), static_cast<int>(batch.count), nullptr);
+                    rdDrawElems(batch.first, batch.count); // FIX-RD90
                     ++g_rdAfailNever;
                 }
                 else
                 {
-                    rlDrawVertexArrayElements(static_cast<int>(batch.first), static_cast<int>(batch.count), nullptr);
+                    rdDrawElems(batch.first, batch.count); // FIX-RD90
                     if (g_rdAtInvLoc >= 0)
                         rdSetUniform(g_rdAtInvLoc, &one, RL_SHADER_UNIFORM_INT, 1);
                     rdApplyAfailWrites(afail, zOff, sMask);
-                    rlDrawVertexArrayElements(static_cast<int>(batch.first), static_cast<int>(batch.count), nullptr);
+                    rdDrawElems(batch.first, batch.count); // FIX-RD90
                     if (g_rdAtInvLoc >= 0)
                         rdSetUniform(g_rdAtInvLoc, &zero, RL_SHADER_UNIFORM_INT, 1);
                     ++g_rdAfail2Pass;
@@ -3343,8 +3468,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdDepthMask(sDepth != 0);
             }
             else
-                rlDrawVertexArrayElements(static_cast<int>(batch.first), static_cast<int>(batch.count), nullptr); // FEAT-RD14
+                rdDrawElems(batch.first, batch.count); // FEAT-RD14 // FIX-RD90
+            }
         }
+        if (pace2On) // PROBE-PACE2
+            g_pace2Rd.b3 -= (g_pace2Rd.b4 - pace2B4Before3d);
         if (rd24Dump) // PROBE-RD24
         {
             const size_t nRef = std::min<size_t>(3u, rd24Ref.size());
@@ -3405,6 +3533,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         }
         if (!deferred2d.empty()) // FIX-RD63
         {
+            Pace2Scope pace2B4DefScope(g_pace2Rd.b4, pace2On); // PROBE-PACE2
             mode2d = 1;
             if (g_rdGpu.mode2dLoc >= 0)
                 rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
@@ -3473,6 +3602,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 #ifdef _WIN32
     if (rdFbTexOn() && vw > 0 && vh > 0) // FIX-RD79 // FIX-RD80 // FIX-RD81
     {
+        Pace2Scope pace2B5Scope(g_pace2Rd.b5, pace2On); // PROBE-PACE2
         static int s_prevW = 0, s_prevH = 0, s_resW = 0, s_resH = 0, s_lastW = 0, s_lastH = 0; // FIX-RD85
         static bool s_prevFilled = false; // FIX-RD80
         const int wantW = vw;
@@ -3824,7 +3954,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     static_cast<double>(g_rdGpu.totalMaskedDraws) / fr,
                     static_cast<double>(g_rdGpu.totalUnsupportedBlend) / fr,
                     static_cast<double>(g_rdGpu.totalApproxAd) / fr); // FEAT-RD7 // FEAT-RD14
-        ps2xSafeLog("[rd] glcalls/frame=%.0f\n", static_cast<double>(g_rdc.totalCalls) / fr); // FEAT-RD15
+        ps2xSafeLog("[rd] glcalls/frame=%.0f idx32=%d uploadMs=%.2f\n", static_cast<double>(g_rdc.totalCalls) / fr, rdIdx32On() ? 1 : 0, g_rdGpu.totalUploadMs / fr); // FEAT-RD15 // FIX-RD90
         ps2xSafeLog("[rd] afail2pass/frame=%.1f afailNever/frame=%.1f\n", static_cast<double>(g_rdAfail2Pass) / fr, static_cast<double>(g_rdAfailNever) / fr); // FEAT-RD30
         ps2xSafeLog("[rd] date/frame=%.1f dateWithAbe/frame=%.1f\n", static_cast<double>(g_rdDateCount) / fr, static_cast<double>(g_rdDateAbeCount) / fr); // FEAT-RD25
         { // FEAT-RD23

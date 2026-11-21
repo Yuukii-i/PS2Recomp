@@ -12,6 +12,7 @@ extern bool ps2xRdViewOn(); // FEAT-RD1
 extern bool ps2xRdActive(); // FEAT-RD49
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
+extern "C" void ps2xRdPace2Take(int64_t *out6); // PROBE-PACE2
 extern "C" __declspec(dllimport) void __stdcall glReadPixels(int, int, int, int, unsigned int, unsigned int, void *); // PROBE-RD35
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
 extern void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h); // FEAT-RD12
@@ -103,7 +104,119 @@ static inline int ps2x_bgSetWindowPos(void *h, void *after, int x, int y, int cx
 extern "C" __declspec(dllimport) int __stdcall QueryPerformanceCounter(long long *lpPerformanceCount); // FEAT-FT3
 extern "C" __declspec(dllimport) int __stdcall QueryPerformanceFrequency(long long *lpFrequency); // FEAT-FT3
 extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void); // FEAT-FT3
+extern "C" __declspec(dllimport) void *__stdcall CreateWaitableTimerExW(void *lpTimerAttributes, const wchar_t *lpTimerName, unsigned long dwFlags, unsigned long dwDesiredAccess); // FIX-PACE1
+extern "C" __declspec(dllimport) int __stdcall SetWaitableTimer(void *hTimer, const long long *lpDueTime, long lPeriod, void *pfnCompletionRoutine, void *lpArgToCompletionRoutine, int fResume); // FIX-PACE1
+extern "C" __declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void *hHandle, unsigned long dwMilliseconds); // FIX-PACE1
+extern "C" __declspec(dllimport) void __stdcall Sleep(unsigned long dwMilliseconds); // FIX-PACE1
 #endif
+
+// FIX-PACE1 / FIX-PACE4: swap-time frame pacing & telemetry helpers
+static inline bool isPaceEnabled()
+{
+    static const bool s_pace = []() {
+        const char *e = std::getenv("PS2X_PACE");
+        return !(e && e[0] == '0'); // FIX-PACE4: default ON unless '0'
+    }();
+    return s_pace;
+}
+
+static inline double getPaceHz()
+{
+    static const double s_hz = []() {
+        const char *e = std::getenv("PS2X_PACE_HZ");
+        if (!e || !*e) return 60.0;
+        const double v = std::atof(e);
+        return (v > 1.0 && v <= 1000.0) ? v : 60.0;
+    }();
+    return s_hz;
+}
+
+static inline bool isPaceLogEnabled()
+{
+    static const bool s_log = []() {
+        const char *e = std::getenv("PS2X_PACE_LOG"); // FIX-PACE4: telemetry stays default off
+        return e && e[0] == '1';
+    }();
+    return s_log;
+}
+
+static inline bool isPaceNowaitEnabled() // PROBE-PACE5
+{
+    static const bool s_nowait = []() {
+        const char *e = std::getenv("PS2X_PACE_NOWAIT");
+        return e && e[0] == '1';
+    }();
+    return s_nowait;
+}
+
+static inline int getPaceRlFps() // PROBE-PACE5
+{
+    static const int s_rlfps = []() {
+        const char *e = std::getenv("PS2X_PACE_RLFPS");
+        if (!e || !*e) return 0;
+        const int v = std::atoi(e);
+        return (v > 0) ? v : 0;
+    }();
+    return s_rlfps;
+}
+
+static inline bool isPaceYieldEnabled() // PROBE-PACE5
+{
+    static const bool s_yield = []() {
+        const char *e = std::getenv("PS2X_PACE_YIELD");
+        return e && e[0] == '1';
+    }();
+    return s_yield;
+}
+
+static inline int64_t paceQpcNow()
+{
+#ifdef _WIN32
+    long long t = 0;
+    QueryPerformanceCounter(&t);
+    return static_cast<int64_t>(t);
+#else
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+}
+
+static inline int64_t paceQpcFreq()
+{
+    static const int64_t s_freq = []() -> int64_t {
+#ifdef _WIN32
+        long long f = 0;
+        QueryPerformanceFrequency(&f);
+        return (f > 0) ? static_cast<int64_t>(f) : 10000000LL;
+#else
+        return 1000000000LL;
+#endif
+    }();
+    return s_freq;
+}
+
+// PROBE-PACE2
+static inline bool isPace2Enabled()
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_PACE_LOG");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+
+struct Pace2Scope
+{
+    int64_t *dst;
+    int64_t t0;
+    explicit Pace2Scope(int64_t &target, bool on) : dst(on ? &target : nullptr), t0(on ? paceQpcNow() : 0) {}
+    ~Pace2Scope()
+    {
+        if (dst)
+            *dst += (paceQpcNow() - t0);
+    }
+    Pace2Scope(const Pace2Scope &) = delete;
+    Pace2Scope &operator=(const Pace2Scope &) = delete;
+};
 
 
 static std::mutex s_logMutex;
@@ -1795,7 +1908,7 @@ bool PS2Runtime::initialize(const char *title)
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         ps2x::audio::startSpu2Output(); // PERF-AU2
 #endif
-        SetTargetFPS(60);
+        SetTargetFPS(isPaceEnabled() ? getPaceRlFps() : 60); // FIX-PACE1 // PROBE-PACE5
         if (m_debugUiInitCallback)
         {
             m_debugUiInitCallback(*this, m_debugUiUserData);
@@ -6567,9 +6680,8 @@ void PS2Runtime::run()
         const auto timeSinceLastPresent = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastPresentTime).count();
         const bool vblankLatchOn = isVblankLatchEnabled();
         constexpr int64_t kIdleRepresentMs = 250; // PERF-IR2: re-present an unchanged frame only every 250 ms (was 33 ms: ~25 redundant sync+de-swizzle presents/s at the title, kd)
-        const bool shouldPresent = pauseToggled || (vblankLatchOn // FEAT-PA1
-            ? ((currentPresentSeq != s_lastPresentedSeq) || (timeSinceLastPresent >= kIdleRepresentMs))
-            : ((currentGsKicks != s_lastPresentedGsKicks) || (timeSinceLastPresent >= kIdleRepresentMs)));
+        const bool hasNewFrame = vblankLatchOn ? (currentPresentSeq != s_lastPresentedSeq) : (currentGsKicks != s_lastPresentedGsKicks); // FIX-PACE1
+        const bool shouldPresent = pauseToggled || hasNewFrame || (timeSinceLastPresent >= kIdleRepresentMs); // FEAT-PA1 // FIX-PACE1
 
         if (shouldPresent)
         {
@@ -6614,6 +6726,10 @@ void PS2Runtime::run()
             }
 
             const auto presT0 = std::chrono::steady_clock::now();
+            const int64_t presT0Qpc = (isPaceLogEnabled() || isPaceEnabled()) ? paceQpcNow() : 0; // FIX-PACE1
+            const bool pace2On = isPace2Enabled(); // PROBE-PACE2
+            int64_t pace2A = 0, pace2C = 0, pace2C1 = 0; // PROBE-PACE2
+            const int64_t pace2AStart = pace2On ? presT0Qpc : 0; // PROBE-PACE2
             uint32_t presentWidth = FB_WIDTH;
             uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
             bool rdClassic = false; // FEAT-RD18
@@ -6720,6 +6836,7 @@ void PS2Runtime::run()
             if (ps2xRdActive() && (s_rdShow || ps2xRdTakeoverOn()) && !rdClassic) // FEAT-RD1 // FEAT-RD12 // FEAT-RD18 // FEAT-RD49
             {
                 rlClearScreenBuffers();
+                if (pace2On) pace2A = paceQpcNow() - pace2AStart; // PROBE-PACE2
                 if (!ps2xRdDraw(dstRect.x, dstRect.y, dstRect.width, dstRect.height))
                 {
                     DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
@@ -6730,59 +6847,254 @@ void PS2Runtime::run()
             }
             else
             {
+                if (pace2On) pace2A = paceQpcNow() - pace2AStart; // PROBE-PACE2
                 DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
                 rd35Path = rdClassic ? 'c' : 'd'; // PROBE-RD35
             }
-            if (ps2xRdActive()) // PROBE-RD35 // FEAT-RD49
+            { // PROBE-PACE2
+                Pace2Scope pace2CScope(pace2C, pace2On); // PROBE-PACE2
+                static const bool s_rdBlackProbe = []() { // FIX-PACE3
+                    const char *e = std::getenv("PS2X_RD_BLACKPROBE");
+                    return e && e[0] == '1';
+                }();
+                if (s_rdBlackProbe && ps2xRdActive()) // FIX-PACE3 // PROBE-RD35 // FEAT-RD49
+                {
+                    Pace2Scope pace2C1Scope(pace2C1, pace2On); // PROBE-PACE2
+                    extern void ps2xRd35Describe(char *buf, size_t cap);
+                    static uint32_t s_rb35Frames = 0u, s_rb35Black = 0u, s_rb35A = 0u, s_rb35B = 0u, s_rb35C = 0u, s_rb35Detail = 0u;
+                    static auto s_rb35Last = std::chrono::steady_clock::now();
+                    rlDrawRenderBatchActive();
+                    ++s_rb35Frames;
+                    if (rd35Path == 'a') ++s_rb35A; else if (rd35Path == 'b') ++s_rb35B; else if (rd35Path == 'c') ++s_rb35C;
+                    unsigned sum = 0u;
+                    unsigned maxv = 0u;
+                    for (int gy = 0; gy < 8; ++gy)
+                        for (int gx = 0; gx < 8; ++gx)
+                        {
+                            unsigned char px[4] = {0, 0, 0, 0};
+                            const int sx = static_cast<int>(dstRect.x + dstRect.width * ((static_cast<float>(gx) + 0.5f) / 8.0f));
+                            const int sy = static_cast<int>(screenHeight - (dstRect.y + dstRect.height * ((static_cast<float>(gy) + 0.5f) / 8.0f)));
+                            glReadPixels(sx, sy, 1, 1, 0x1908u, 0x1401u, px);
+                            sum += px[0] + px[1] + px[2];
+                            maxv = std::max<unsigned>(maxv, std::max<unsigned>(px[0], std::max<unsigned>(px[1], px[2])));
+                        }
+                    if (maxv < 12u)
+                    {
+                        ++s_rb35Black;
+                        if (s_rb35Frames > 600u && s_rb35Detail < 8u)
+                        {
+                            ++s_rb35Detail;
+                            char d[1024];
+                            ps2xRd35Describe(d, sizeof(d));
+                            ps2xSafeLog("[rdblack] #%u path=%c uploadFrame=%d classic=%d takeover=%d sum=%u max=%u frame=%u %s\n", s_rb35Black, rd35Path,
+                                        rd35Upload ? 1 : 0, rdClassic ? 1 : 0, ps2xRdTakeoverOn() ? 1 : 0, sum, maxv, s_rb35Frames, d);
+                        }
+                    }
+                    const auto nowRb = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(nowRb - s_rb35Last).count() >= 5000)
+                    {
+                        s_rb35Last = nowRb;
+                        ps2xSafeLog("[rdblack] frames=%u black=%u pathA=%u pathB=%u pathC=%u\n", s_rb35Frames, s_rb35Black, s_rb35A, s_rb35B, s_rb35C);
+                    }
+                }
+                if (m_debugUiInitialized && m_debugUiDrawCallback)
+                {
+                    m_debugUiDrawCallback(*this, m_debugUiUserData);
+                }
+                if (g_ps2xPause.load(std::memory_order_relaxed) != 0) // FEAT-PA1
+                {
+                    DrawRectangle(8, 8, 220, 28, Color{0, 0, 0, 180});
+                    DrawText("PAUSED (F10 = step)", 16, 14, 16, YELLOW);
+                }
+            } // PROBE-PACE2
+            // FIX-PACE1 / FIX-PACE4: swap-time frame pacing + real swap-interval telemetry
+            const bool paceOn = isPaceEnabled();
+            const bool paceLogOn = isPaceLogEnabled();
+            const bool isPaused = (g_ps2xPause.load(std::memory_order_relaxed) != 0);
+            const bool skipPace = isPaused || !IsWindowFocused() || IsWindowMinimized(); // FIX-PACE4
+            static int64_t s_nextSwapQpc = 0;
+            static int64_t s_prevSwapStampQpc = 0;
+            static int64_t s_paceLogLastQpc = 0;
+            static std::vector<double> s_paceSwapMs;
+            static std::vector<double> s_paceDrawMs;
+            static double s_paceWaitSumMs = 0.0;
+            static uint32_t s_paceWaitCount = 0;
+            static uint32_t s_paceResyncs = 0;
+            static uint32_t s_paceLate2ms = 0;
+            const int64_t qpcFreq = (paceOn || paceLogOn) ? paceQpcFreq() : 0;
+            const int64_t periodTicks = paceOn ? static_cast<int64_t>(std::llround(static_cast<double>(qpcFreq) / getPaceHz())) : 0;
+            const int64_t minAdvanceTicks = paceOn ? static_cast<int64_t>(std::llround(0.7 * static_cast<double>(qpcFreq) / getPaceHz())) : 0;
+            int64_t prevNextSwapQpc = 0;
+            bool resyncedThisFrame = false;
+            double waitMsThisFrame = 0.0;
+            if (paceOn && !skipPace && hasNewFrame) // FIX-PACE4
             {
-                extern void ps2xRd35Describe(char *buf, size_t cap);
-                static uint32_t s_rb35Frames = 0u, s_rb35Black = 0u, s_rb35A = 0u, s_rb35B = 0u, s_rb35C = 0u, s_rb35Detail = 0u;
-                static auto s_rb35Last = std::chrono::steady_clock::now();
+                const bool paceNowait = isPaceNowaitEnabled(); // PROBE-PACE5
+                const bool paceYield = isPaceYieldEnabled(); // PROBE-PACE5
+                bool didWait = false; // PROBE-PACE5
                 rlDrawRenderBatchActive();
-                ++s_rb35Frames;
-                if (rd35Path == 'a') ++s_rb35A; else if (rd35Path == 'b') ++s_rb35B; else if (rd35Path == 'c') ++s_rb35C;
-                unsigned sum = 0u;
-                unsigned maxv = 0u;
-                for (int gy = 0; gy < 8; ++gy)
-                    for (int gx = 0; gx < 8; ++gx)
-                    {
-                        unsigned char px[4] = {0, 0, 0, 0};
-                        const int sx = static_cast<int>(dstRect.x + dstRect.width * ((static_cast<float>(gx) + 0.5f) / 8.0f));
-                        const int sy = static_cast<int>(screenHeight - (dstRect.y + dstRect.height * ((static_cast<float>(gy) + 0.5f) / 8.0f)));
-                        glReadPixels(sx, sy, 1, 1, 0x1908u, 0x1401u, px);
-                        sum += px[0] + px[1] + px[2];
-                        maxv = std::max<unsigned>(maxv, std::max<unsigned>(px[0], std::max<unsigned>(px[1], px[2])));
-                    }
-                if (maxv < 12u)
+                int64_t nowQpc = paceQpcNow();
+                if (s_nextSwapQpc == 0)
                 {
-                    ++s_rb35Black;
-                    if (s_rb35Frames > 600u && s_rb35Detail < 8u)
+                    s_nextSwapQpc = nowQpc;
+                }
+                else if (nowQpc > s_nextSwapQpc + periodTicks)
+                {
+                    s_nextSwapQpc = nowQpc;
+                    ++s_paceResyncs;
+                    resyncedThisFrame = true;
+                }
+                else if (nowQpc < s_nextSwapQpc)
+                {
+                    if ((s_nextSwapQpc - nowQpc) > periodTicks) // FIX-PACE4: never block longer than one period
+                        s_nextSwapQpc = nowQpc + periodTicks;
+                    if (!paceNowait) // PROBE-PACE5
                     {
-                        ++s_rb35Detail;
-                        char d[1024];
-                        ps2xRd35Describe(d, sizeof(d));
-                        ps2xSafeLog("[rdblack] #%u path=%c uploadFrame=%d classic=%d takeover=%d sum=%u max=%u frame=%u %s\n", s_rb35Black, rd35Path,
-                                    rd35Upload ? 1 : 0, rdClassic ? 1 : 0, ps2xRdTakeoverOn() ? 1 : 0, sum, maxv, s_rb35Frames, d);
+                        didWait = true; // PROBE-PACE5
+                        const int64_t waitStartQpc = nowQpc;
+                        const int64_t coarseMarginTicks = qpcFreq / 1000;
+                        const int64_t coarseTargetQpc = s_nextSwapQpc - coarseMarginTicks;
+                        if (nowQpc < coarseTargetQpc)
+                        {
+#ifdef _WIN32
+                            static void *s_hiResTimer = []() -> void * {
+                                void *h = CreateWaitableTimerExW(nullptr, nullptr, 0x2u, 0x1F0003u);
+                                if (!h)
+                                    timeBeginPeriod(1);
+                                return h;
+                            }();
+                            if (s_hiResTimer)
+                            {
+                                const double remSec = static_cast<double>(coarseTargetQpc - nowQpc) / static_cast<double>(qpcFreq);
+                                long long due100ns = -static_cast<long long>(remSec * 10000000.0);
+                                const unsigned long maxWaitMs = static_cast<unsigned long>((periodTicks * 1000LL) / qpcFreq) + 2ul; // FIX-PACE4
+                                if (due100ns < 0 && SetWaitableTimer(s_hiResTimer, &due100ns, 0, nullptr, nullptr, 0))
+                                    WaitForSingleObject(s_hiResTimer, maxWaitMs); // FIX-PACE4
+                            }
+                            else
+                            {
+                                const unsigned long ms = static_cast<unsigned long>((coarseTargetQpc - nowQpc) * 1000LL / qpcFreq);
+                                if (ms > 0)
+                                    Sleep(ms);
+                            }
+#else
+                            const auto targetTp = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(coarseTargetQpc));
+                            std::this_thread::sleep_until(targetTp);
+#endif
+                        }
+                        while (paceQpcNow() < s_nextSwapQpc && (paceQpcNow() - waitStartQpc) < periodTicks) // FIX-PACE4
+                        {
+#if defined(_WIN32) || defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+                            _mm_pause();
+#else
+                            std::this_thread::yield();
+#endif
+                        }
+                        waitMsThisFrame = static_cast<double>(paceQpcNow() - waitStartQpc) * 1000.0 / static_cast<double>(qpcFreq);
                     }
                 }
-                const auto nowRb = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(nowRb - s_rb35Last).count() >= 5000)
+                if (paceYield && !didWait) // PROBE-PACE5
                 {
-                    s_rb35Last = nowRb;
-                    ps2xSafeLog("[rdblack] frames=%u black=%u pathA=%u pathB=%u pathC=%u\n", s_rb35Frames, s_rb35Black, s_rb35A, s_rb35B, s_rb35C);
+#ifdef _WIN32
+                    Sleep(1);
+#else
+                    std::this_thread::yield();
+#endif
                 }
+                prevNextSwapQpc = s_nextSwapQpc;
             }
-            if (m_debugUiInitialized && m_debugUiDrawCallback)
+            if (paceLogOn)
             {
-                m_debugUiDrawCallback(*this, m_debugUiUserData);
-            }
-            if (g_ps2xPause.load(std::memory_order_relaxed) != 0) // FEAT-PA1
-            {
-                DrawRectangle(8, 8, 220, 28, Color{0, 0, 0, 180});
-                DrawText("PAUSED (F10 = step)", 16, 14, 16, YELLOW);
+                static std::array<std::vector<double>, 9> s_pace2Ms; // PROBE-PACE2
+                if (pace2On) // PROBE-PACE2
+                {
+                    int64_t b[6] = {};
+                    ps2xRdPace2Take(b);
+                    const int64_t bSum = b[1] + b[2] + b[3] + b[4] + b[5];
+                    const int64_t b6 = (b[0] > bSum) ? (b[0] - bSum) : 0;
+                    const double toMs = 1000.0 / static_cast<double>(qpcFreq);
+                    const int64_t ticks[9] = {pace2A, b[1], b[2], b[3], b[4], b[5], b6, pace2C, pace2C1};
+                    for (size_t i = 0; i < 9; ++i)
+                        s_pace2Ms[i].push_back(static_cast<double>(ticks[i]) * toMs);
+                }
+                const int64_t swapStampQpc = paceQpcNow();
+                if (s_paceLogLastQpc == 0)
+                    s_paceLogLastQpc = swapStampQpc;
+                if (s_prevSwapStampQpc != 0)
+                {
+                    const int64_t diffTicks = swapStampQpc - s_prevSwapStampQpc;
+                    if (diffTicks > 0 && diffTicks <= qpcFreq)
+                        s_paceSwapMs.push_back(static_cast<double>(diffTicks) * 1000.0 / static_cast<double>(qpcFreq));
+                }
+                s_prevSwapStampQpc = swapStampQpc;
+                const double drawMs = static_cast<double>(swapStampQpc - presT0Qpc) * 1000.0 / static_cast<double>(qpcFreq) - waitMsThisFrame;
+                s_paceDrawMs.push_back(drawMs > 0.0 ? drawMs : 0.0);
+                s_paceWaitSumMs += waitMsThisFrame;
+                ++s_paceWaitCount;
+                if (paceOn && !skipPace && hasNewFrame && !resyncedThisFrame && prevNextSwapQpc != 0) // FIX-PACE4
+                {
+                    const int64_t lateTicks = swapStampQpc - prevNextSwapQpc;
+                    if (lateTicks > (2 * qpcFreq / 1000))
+                        ++s_paceLate2ms;
+                }
+                if ((swapStampQpc - s_paceLogLastQpc) >= (5 * qpcFreq) && !s_paceSwapMs.empty())
+                {
+                    std::vector<double> sv(s_paceSwapMs);
+                    std::sort(sv.begin(), sv.end());
+                    const auto sat = [&](double q) { return sv[std::min<size_t>(sv.size() - 1, static_cast<size_t>(q * static_cast<double>(sv.size())))]; };
+                    double sum = 0.0;
+                    for (double x : sv) sum += x;
+                    const double mean = sum / static_cast<double>(sv.size());
+                    double var = 0.0;
+                    for (double x : sv) { const double d = x - mean; var += d * d; }
+                    const double stdev = std::sqrt(var / static_cast<double>(sv.size()));
+                    std::vector<double> dv(s_paceDrawMs);
+                    std::sort(dv.begin(), dv.end());
+                    const auto dat = [&](double q) { return dv[std::min<size_t>(dv.size() - 1, static_cast<size_t>(q * static_cast<double>(dv.size())))]; };
+                    const double waitAvg = s_paceWaitCount ? (s_paceWaitSumMs / static_cast<double>(s_paceWaitCount)) : 0.0;
+                    ps2xSafeLog("[pace] n=%u swap p50=%.2f p95=%.2f p99=%.2f max=%.2f ms stdev=%.2f | draw p50=%.2f p95=%.2f max=%.2f | waitAvg=%.2f resyncs=%u late>2ms=%u pace=%d\n",
+                                static_cast<unsigned>(sv.size()), sat(0.50), sat(0.95), sat(0.99), sv.back(), stdev,
+                                dat(0.50), dat(0.95), dv.back(), waitAvg, s_paceResyncs, s_paceLate2ms, paceOn ? 1 : 0);
+                    if (pace2On && !s_pace2Ms[0].empty()) // PROBE-PACE2
+                    {
+                        double p50[9] = {}, p95[9] = {};
+                        for (size_t i = 0; i < 9; ++i)
+                        {
+                            std::sort(s_pace2Ms[i].begin(), s_pace2Ms[i].end());
+                            const size_t n = s_pace2Ms[i].size();
+                            p50[i] = s_pace2Ms[i][std::min<size_t>(n - 1, static_cast<size_t>(0.50 * static_cast<double>(n)))];
+                            p95[i] = s_pace2Ms[i][std::min<size_t>(n - 1, static_cast<size_t>(0.95 * static_cast<double>(n)))];
+                            s_pace2Ms[i].clear();
+                        }
+                        ps2xSafeLog("[pace2] A=%.2f/%.2f B1=%.2f/%.2f B2=%.2f/%.2f B3=%.2f/%.2f B4=%.2f/%.2f B5=%.2f/%.2f B6=%.2f/%.2f C=%.2f/%.2f C1=%.2f/%.2f (p50/p95 ms)\n",
+                                    p50[0], p95[0], p50[1], p95[1], p50[2], p95[2], p50[3], p95[3],
+                                    p50[4], p95[4], p50[5], p95[5], p50[6], p95[6], p50[7], p95[7], p50[8], p95[8]);
+                    }
+                    s_paceSwapMs.clear();
+                    s_paceDrawMs.clear();
+                    s_paceWaitSumMs = 0.0;
+                    s_paceWaitCount = 0;
+                    s_paceResyncs = 0;
+                    s_paceLate2ms = 0;
+                    s_paceLogLastQpc = swapStampQpc;
+                }
             }
             const auto gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT
             EndDrawing();
+            if (paceOn) // FIX-PACE1
+            {
+                if (!skipPace && hasNewFrame) // FIX-PACE4
+                {
+                    const int64_t afterSwapQpc = paceQpcNow();
+                    const int64_t cand1 = prevNextSwapQpc + periodTicks;
+                    const int64_t cand2 = afterSwapQpc + minAdvanceTicks;
+                    s_nextSwapQpc = (cand1 > cand2) ? cand1 : cand2;
+                }
+                else
+                {
+                    s_nextSwapQpc = 0;
+                }
+            }
             if (s_ft3On) // FEAT-FT3
             {
                 long long qpcNow = 0;
