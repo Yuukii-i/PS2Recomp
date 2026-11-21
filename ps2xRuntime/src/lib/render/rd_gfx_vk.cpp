@@ -58,6 +58,7 @@ namespace probe_v3b
     double msQueueWait = 0.0, msDevWait = 0.0, msFenceWait = 0.0, msMapMem = 0.0;
     uint32_t cntAllocMem = 0, cntCrTex = 0;
     double msAllocMem = 0.0, msCrTex = 0.0;
+    uint32_t cntAsyncUpload = 0; // FIX-V3D
 } // PROBE-V3B
 
 namespace rdgfx_vk
@@ -392,6 +393,9 @@ struct RdVkState
 
     std::vector<std::vector<GarbageBuffer>> garbageBuffers;
     std::vector<std::vector<GarbageTexture>> garbageTextures;
+    std::vector<std::vector<VkCommandBuffer>> garbageCmds; // FIX-V3D
+    std::vector<BufferCopy> stagingRings; // FIX-V3D
+    std::vector<VkDeviceSize> stagingCursors; // FIX-V3D
 
     // Debug stats
     bool logEnabled = false;
@@ -602,6 +606,20 @@ void endOneTimeCmd(VkCommandBuffer cmd)
     probe_v3b::waits++; // PROBE-V3B
     probe_v3b::waitMs += ms; // PROBE-V3B
     vkFreeCommandBuffers(s_vk.device, s_vk.uploadPool, 1, &cmd);
+}
+
+void endOneTimeCmdAsync(VkCommandBuffer cmd) // FIX-V3D
+{
+    if (cmd == VK_NULL_HANDLE)
+        return;
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(s_vk.queue, 1, &si, VK_NULL_HANDLE);
+    probe_v3b::cntAsyncUpload++; // FIX-V3D
+    s_vk.garbageCmds[s_vk.curFrame].push_back(cmd);
 }
 
 std::vector<uint8_t> readBinaryFile(const std::filesystem::path &path)
@@ -1271,6 +1289,15 @@ void flushGarbage(uint32_t frameIdx)
 {
     if (frameIdx >= s_vk.framesInFlight)
         return;
+    // FIX-V3D: free async upload command buffers
+    if (frameIdx < s_vk.garbageCmds.size() && !s_vk.garbageCmds[frameIdx].empty())
+    {
+        vkFreeCommandBuffers(s_vk.device, s_vk.uploadPool,
+                             static_cast<uint32_t>(s_vk.garbageCmds[frameIdx].size()),
+                             s_vk.garbageCmds[frameIdx].data());
+        s_vk.garbageCmds[frameIdx].clear();
+    }
+
     for (const auto &gb : s_vk.garbageBuffers[frameIdx])
     {
         if (gb.buffer != VK_NULL_HANDLE)
@@ -1653,6 +1680,9 @@ bool init()
 
     s_vk.garbageBuffers.resize(s_vk.framesInFlight);
     s_vk.garbageTextures.resize(s_vk.framesInFlight);
+    s_vk.garbageCmds.resize(s_vk.framesInFlight); // FIX-V3D
+    s_vk.stagingRings.resize(s_vk.framesInFlight); // FIX-V3D
+    s_vk.stagingCursors.assign(s_vk.framesInFlight, 0); // FIX-V3D
 
     // RDG2B: MSAA setup (PS2X_MSAA >= 2 -> 4x)
     s_vk.msaaSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -1743,6 +1773,7 @@ void beginFrame()
     s_vk.descPoolIdx[frameIdx] = 0;
     s_vk.descCaches[frameIdx].clear();
     flushGarbage(frameIdx);
+    s_vk.stagingCursors[frameIdx] = 0; // FIX-V3D
     applyPendingBufferWrites(frameIdx);
     s_vk.overlayVertexCursor = 0; // RDG2B
 
@@ -1849,7 +1880,7 @@ void endFrame()
             const double invFrames = s_vk.winFrames > 0 ? (1.0 / static_cast<double>(s_vk.winFrames)) : 0.0; // PROBE-RDG4P
             std::printf("[rdvk] frames=%llu draws=%llu pipelines=%zu bufMB=%.2f"
                         " dIdx=%llu dArr=%llu noFrame=%llu noPass=%llu noPipeline=%llu noVb=%llu noIb=%llu noDesc=%llu zeroCount=%llu"
-                        " clears=%llu binds=%llu texCreated=%llu vbUpd=%llu uniformSets=%llu passBegun=%llu"
+                        " clears=%llu binds=%llu texCreated=%llu vbUpd=%llu uniformSets=%llu passBegun=%llu asyncUp=%u"
                         " t_wait=%.2f/%.2f t_rec=%.2f/%.2f t_draw=%.2f/%.2f t_tex=%.2f/%.2f t_end=%.2f/%.2f"
                         " draws/f=%.1f/%llu descSets/f=%.1f+%.1f(max=%llu+%llu)\n",
                         static_cast<unsigned long long>(s_vk.statFrames),
@@ -1871,6 +1902,7 @@ void endFrame()
                         static_cast<unsigned long long>(s_vk.statVbUpd),
                         static_cast<unsigned long long>(s_vk.statUniformSets),
                         static_cast<unsigned long long>(s_vk.statPassBegun),
+                        probe_v3b::cntAsyncUpload, // FIX-V3D
                         s_vk.winWaitSumMs * invFrames, s_vk.winWaitMaxMs,
                         s_vk.winRecSumMs * invFrames, s_vk.winRecMaxMs,
                         s_vk.winDrawSumMs * invFrames, s_vk.winDrawMaxMs,
@@ -2393,18 +2425,47 @@ uint32_t createTexture2DInternal(const void *data, int w, int h, uint32_t mipLev
         return 0;
     }
 
-    BufferCopy staging{};
+    // FIX-V3D: Staging ring with fallback
     const VkDeviceSize byteSize = static_cast<VkDeviceSize>(w) * h * 4;
+    VkBuffer uploadBuf = VK_NULL_HANDLE;
+    VkDeviceSize uploadOffset = 0;
+    BufferCopy fallbackStaging{};
+    bool usedRing = false;
+
     if (data)
     {
-        if (!createHostBuffer(byteSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging))
+        if (s_vk.frameActive)
         {
-            vkDestroyImageView(s_vk.device, tex.view, nullptr);
-            vkFreeMemory(s_vk.device, tex.memory, nullptr);
-            vkDestroyImage(s_vk.device, tex.image, nullptr);
-            return 0;
+            const VkDeviceSize ringSize = 64ULL * 1024 * 1024;
+            BufferCopy &ring = s_vk.stagingRings[s_vk.curFrame];
+            if (ring.buffer == VK_NULL_HANDLE)
+                createHostBuffer(ringSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, ring);
+
+            const VkDeviceSize align = 16;
+            const VkDeviceSize aligned = (s_vk.stagingCursors[s_vk.curFrame] + (align - 1)) & ~(align - 1);
+            if (ring.buffer != VK_NULL_HANDLE && ring.mapped != nullptr && aligned + byteSize <= ringSize)
+            {
+                usedRing = true;
+                uploadBuf = ring.buffer;
+                uploadOffset = aligned;
+                std::memcpy(static_cast<uint8_t *>(ring.mapped) + aligned, data, static_cast<size_t>(byteSize));
+                s_vk.stagingCursors[s_vk.curFrame] = aligned + byteSize;
+            }
         }
-        std::memcpy(staging.mapped, data, static_cast<size_t>(byteSize));
+
+        if (!usedRing)
+        {
+            if (!createHostBuffer(byteSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, fallbackStaging))
+            {
+                vkDestroyImageView(s_vk.device, tex.view, nullptr);
+                vkFreeMemory(s_vk.device, tex.memory, nullptr);
+                vkDestroyImage(s_vk.device, tex.image, nullptr);
+                return 0;
+            }
+            uploadBuf = fallbackStaging.buffer;
+            uploadOffset = 0;
+            std::memcpy(fallbackStaging.mapped, data, static_cast<size_t>(byteSize));
+        }
     }
 
     VkCommandBuffer cmd = beginOneTimeCmd();
@@ -2416,9 +2477,10 @@ uint32_t createTexture2DInternal(const void *data, int w, int h, uint32_t mipLev
                      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
         VkBufferImageCopy region{};
+        region.bufferOffset = uploadOffset;
         region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
-        vkCmdCopyBufferToImage(cmd, staging.buffer, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        vkCmdCopyBufferToImage(cmd, uploadBuf, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
         imageBarrier(cmd, tex.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels,
                      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -2448,13 +2510,24 @@ uint32_t createTexture2DInternal(const void *data, int w, int h, uint32_t mipLev
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
                      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
-    endOneTimeCmd(cmd);
 
-    if (data)
+    if (s_vk.frameActive)
+        endOneTimeCmdAsync(cmd); // FIX-V3D
+    else
+        endOneTimeCmd(cmd);
+
+    if (data && !usedRing)
     {
-        vkUnmapMemory(s_vk.device, staging.memory);
-        vkDestroyBuffer(s_vk.device, staging.buffer, nullptr);
-        vkFreeMemory(s_vk.device, staging.memory, nullptr);
+        vkUnmapMemory(s_vk.device, fallbackStaging.memory);
+        if (s_vk.frameActive)
+        {
+            s_vk.garbageBuffers[s_vk.curFrame].push_back({fallbackStaging.buffer, fallbackStaging.memory}); // FIX-V3D
+        }
+        else
+        {
+            vkDestroyBuffer(s_vk.device, fallbackStaging.buffer, nullptr);
+            vkFreeMemory(s_vk.device, fallbackStaging.memory, nullptr);
+        }
     }
 
     const uint32_t id = s_vk.textures.allocate(std::move(tex)); // PERF-RDG4R
@@ -2551,7 +2624,10 @@ void generateMipmaps(uint32_t texId, int w, int h)
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    endOneTimeCmd(cmd);
+    if (s_vk.frameActive)
+        endOneTimeCmdAsync(cmd); // FIX-V3D
+    else
+        endOneTimeCmd(cmd);
 }
 
 void setTextureWrap(uint32_t texId, bool isT, rdgfx::TextureWrap wrap)
