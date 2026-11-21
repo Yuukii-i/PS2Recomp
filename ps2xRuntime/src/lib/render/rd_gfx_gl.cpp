@@ -1,6 +1,9 @@
 // RDG1: OpenGL / rlgl implementation of rdgfx:: interface.
 
 #include "rd_gfx.h"
+#if defined(PS2X_HAS_SDL3) // RDG3
+#include "rd_gfx_vk.h" // RDG3
+#endif // RDG3
 #include "raylib.h"
 #include "rlgl.h"
 
@@ -205,6 +208,9 @@ void getFboFns(PFN_glGenFramebuffers &genFbo, PFN_glBindFramebuffer &bindFbo,
 
 bool initShader()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::initShader(); // RDG3
+#endif // RDG3
     s_shader = LoadShaderFromMemory(kVs, kFs);
     s_uniLoc[static_cast<size_t>(Uniform::Flip)] = GetShaderLocation(s_shader, "uFlip");
     s_uniLoc[static_cast<size_t>(Uniform::Mode2d)] = GetShaderLocation(s_shader, "uMode2d");
@@ -239,26 +245,41 @@ bool initShader()
 
 bool isShaderReady()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::isShaderReady(); // RDG3
+#endif // RDG3
     return s_shader.id != 0;
 }
 
 void enableShader()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::enableShader(); // RDG3
+#endif // RDG3
     rlEnableShader(s_shader.id);
 }
 
 void disableShader()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::disableShader(); // RDG3
+#endif // RDG3
     rlDisableShader();
 }
 
 bool hasUniform(Uniform u)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::hasUniform(u); // RDG3
+#endif // RDG3
     return s_uniLoc[static_cast<size_t>(u)] >= 0;
 }
 
 void setUniformInt(Uniform u, int v)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setUniformInt(u, v); // RDG3
+#endif // RDG3
     const int loc = s_uniLoc[static_cast<size_t>(u)];
     if (loc >= 0)
         rlSetUniform(loc, &v, RL_SHADER_UNIFORM_INT, 1);
@@ -266,6 +287,9 @@ void setUniformInt(Uniform u, int v)
 
 void setUniformFloat(Uniform u, float v)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setUniformFloat(u, v); // RDG3
+#endif // RDG3
     const int loc = s_uniLoc[static_cast<size_t>(u)];
     if (loc >= 0)
         rlSetUniform(loc, &v, RL_SHADER_UNIFORM_FLOAT, 1);
@@ -273,6 +297,9 @@ void setUniformFloat(Uniform u, float v)
 
 void setUniformVec2(Uniform u, const float *v)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setUniformVec2(u, v); // RDG3
+#endif // RDG3
     const int loc = s_uniLoc[static_cast<size_t>(u)];
     if (loc >= 0)
         rlSetUniform(loc, v, RL_SHADER_UNIFORM_VEC2, 1);
@@ -280,6 +307,9 @@ void setUniformVec2(Uniform u, const float *v)
 
 void setUniformVec3Immediate(Uniform u, const float *v)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setUniformVec3Immediate(u, v); // RDG3
+#endif // RDG3
     const int loc = s_uniLoc[static_cast<size_t>(u)];
     if (loc >= 0)
         SetShaderValue(s_shader, loc, v, SHADER_UNIFORM_VEC3);
@@ -287,6 +317,9 @@ void setUniformVec3Immediate(Uniform u, const float *v)
 
 void setUniformVec4(Uniform u, const float *v)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setUniformVec4(u, v); // RDG3
+#endif // RDG3
     const int loc = s_uniLoc[static_cast<size_t>(u)];
     if (loc >= 0)
         rlSetUniform(loc, v, RL_SHADER_UNIFORM_VEC4, 1);
@@ -294,22 +327,43 @@ void setUniformVec4(Uniform u, const float *v)
 
 void flushBatch()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::flushBatch(); // RDG3
+#endif // RDG3
     rlDrawRenderBatchActive();
 }
 
 void getBackbufferSize(int &rw, int &rh)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::getBackbufferSize(rw, rh); // RDG3
+#endif // RDG3
     rw = GetRenderWidth();
     rh = GetRenderHeight();
 }
 
+void getWindowSize(int &w, int &h) // FIX-RDG3D
+{
+#if defined(PS2X_HAS_SDL3) // FIX-RDG3D
+    if (rdgfx_vk::active()) return rdgfx_vk::getWindowSize(w, h); // FIX-RDG3D
+#endif // FIX-RDG3D
+    w = GetScreenWidth();
+    h = GetScreenHeight();
+}
+
 void setViewport(int x, int y, int w, int h)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setViewport(x, y, w, h); // RDG3
+#endif // RDG3
     rlViewport(x, y, w, h);
 }
 
 void setScissorTest(bool on)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setScissorTest(on); // RDG3
+#endif // RDG3
     if (on)
         rlEnableScissorTest();
     else
@@ -318,16 +372,25 @@ void setScissorTest(bool on)
 
 void setScissorRect(int x, int y, int w, int h)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setScissorRect(x, y, w, h); // RDG3
+#endif // RDG3
     rlScissor(x, y, w, h);
 }
 
 void setColorMask(bool r, bool g, bool b, bool a)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setColorMask(r, g, b, a); // RDG3
+#endif // RDG3
     rlColorMask(r, g, b, a);
 }
 
 void setDepthTest(bool on)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setDepthTest(on); // RDG3
+#endif // RDG3
     if (on)
         rlEnableDepthTest();
     else
@@ -336,6 +399,9 @@ void setDepthTest(bool on)
 
 void setDepthMask(bool on)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setDepthMask(on); // RDG3
+#endif // RDG3
     if (on)
         rlEnableDepthMask();
     else
@@ -344,6 +410,9 @@ void setDepthMask(bool on)
 
 void setDepthFunc(DepthFunc func)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setDepthFunc(func); // RDG3
+#endif // RDG3
 #ifdef _WIN32
     glDepthFunc(func == DepthFunc::Always ? 0x0207u : 0x0203u); // GL_ALWAYS : GL_LEQUAL
 #else
@@ -353,6 +422,9 @@ void setDepthFunc(DepthFunc func)
 
 void setBlendAlpha()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setBlendAlpha(); // RDG3
+#endif // RDG3
     rlEnableColorBlend();
     rlSetBlendMode(RL_BLEND_ALPHA);
 }
@@ -365,6 +437,9 @@ void setBlend(bool enable,
               BlendEq eqRgb,
               BlendEq eqAlpha)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setBlend(enable, srcRgb, dstRgb, srcAlpha, dstAlpha, eqRgb, eqAlpha); // RDG3
+#endif // RDG3
     if (!enable)
     {
         rlDisableColorBlend();
@@ -379,6 +454,9 @@ void setBlend(bool enable,
 
 void setBackfaceCulling(bool on)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setBackfaceCulling(on); // RDG3
+#endif // RDG3
     if (on)
         rlEnableBackfaceCulling();
     else
@@ -387,6 +465,9 @@ void setBackfaceCulling(bool on)
 
 void clearScreenBuffers(float r, float g, float b, float a)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::clearScreenBuffers(r, g, b, a); // RDG3
+#endif // RDG3
     rlClearColor(static_cast<unsigned char>(r * 255.0f),
                  static_cast<unsigned char>(g * 255.0f),
                  static_cast<unsigned char>(b * 255.0f),
@@ -396,11 +477,17 @@ void clearScreenBuffers(float r, float g, float b, float a)
 
 uint32_t createVertexArray()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::createVertexArray(); // RDG3
+#endif // RDG3
     return rlLoadVertexArray();
 }
 
 void bindVertexArray(uint32_t vao)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::bindVertexArray(vao); // RDG3
+#endif // RDG3
     if (vao != 0u)
         rlEnableVertexArray(vao);
     else
@@ -409,36 +496,57 @@ void bindVertexArray(uint32_t vao)
 
 uint32_t createVertexBuffer(const void *data, int sizeBytes, bool dynamic)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::createVertexBuffer(data, sizeBytes, dynamic); // RDG3
+#endif // RDG3
     return rlLoadVertexBuffer(data, sizeBytes, dynamic);
 }
 
 void updateVertexBuffer(uint32_t vbo, const void *data, int sizeBytes, int offsetBytes)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::updateVertexBuffer(vbo, data, sizeBytes, offsetBytes); // RDG3
+#endif // RDG3
     rlUpdateVertexBuffer(vbo, data, sizeBytes, offsetBytes);
 }
 
 void freeVertexBuffer(uint32_t vbo)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::freeVertexBuffer(vbo); // RDG3
+#endif // RDG3
     rlUnloadVertexBuffer(vbo);
 }
 
 uint32_t createIndexBuffer(const void *data, int sizeBytes, bool dynamic)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::createIndexBuffer(data, sizeBytes, dynamic); // RDG3
+#endif // RDG3
     return rlLoadVertexBufferElement(data, sizeBytes, dynamic);
 }
 
 void updateIndexBuffer(uint32_t ebo, const void *data, int sizeBytes, int offsetBytes)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::updateIndexBuffer(ebo, data, sizeBytes, offsetBytes); // RDG3
+#endif // RDG3
     rlUpdateVertexBufferElements(ebo, data, sizeBytes, offsetBytes);
 }
 
 void freeIndexBuffer(uint32_t ebo)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::freeIndexBuffer(ebo); // RDG3
+#endif // RDG3
     rlUnloadVertexBuffer(ebo);
 }
 
 void bindVertexBuffer(uint32_t vbo)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::bindVertexBuffer(vbo); // RDG3
+#endif // RDG3
     if (vbo != 0u)
         rlEnableVertexBuffer(vbo);
     else
@@ -447,6 +555,9 @@ void bindVertexBuffer(uint32_t vbo)
 
 void bindIndexBuffer(uint32_t ebo)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::bindIndexBuffer(ebo); // RDG3
+#endif // RDG3
     if (ebo != 0u)
         rlEnableVertexBufferElement(ebo);
     else
@@ -455,23 +566,35 @@ void bindIndexBuffer(uint32_t ebo)
 
 void setVertexAttribute(uint32_t index, int compCount, VertexAttrFormat type, bool normalized, int strideBytes, int offsetBytes)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setVertexAttribute(index, compCount, type, normalized, strideBytes, offsetBytes); // RDG3
+#endif // RDG3
     const int rlType = (type == VertexAttrFormat::UnsignedByte) ? RL_UNSIGNED_BYTE : RL_FLOAT;
     rlSetVertexAttribute(index, compCount, rlType, normalized, strideBytes, offsetBytes);
 }
 
 void enableVertexAttribute(uint32_t index)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::enableVertexAttribute(index); // RDG3
+#endif // RDG3
     rlEnableVertexAttribute(index);
 }
 
 void drawArrays(PrimitiveTopology topo, int first, int count)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::drawArrays(topo, first, count); // RDG3
+#endif // RDG3
     (void)topo;
     rlDrawVertexArray(first, count);
 }
 
 void drawIndexed(PrimitiveTopology topo, uint32_t first, uint32_t count, bool idx32)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::drawIndexed(topo, first, count, idx32); // RDG3
+#endif // RDG3
     (void)topo;
 #ifdef _WIN32
     if (idx32)
@@ -488,32 +611,50 @@ void drawIndexed(PrimitiveTopology topo, uint32_t first, uint32_t count, bool id
 
 uint32_t createTextureRGBA8(const void *data, int w, int h)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::createTextureRGBA8(data, w, h); // RDG3
+#endif // RDG3
     return rlLoadTexture(data, w, h, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
 }
 
 void freeTexture(uint32_t texId)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::freeTexture(texId); // RDG3
+#endif // RDG3
     rlUnloadTexture(texId);
 }
 
 void generateMipmaps(uint32_t texId, int w, int h)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::generateMipmaps(texId, w, h); // RDG3
+#endif // RDG3
     int mips = 1;
     rlGenTextureMipmaps(texId, w, h, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, &mips);
 }
 
 void setTextureWrap(uint32_t texId, bool isT, TextureWrap wrap)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setTextureWrap(texId, isT, wrap); // RDG3
+#endif // RDG3
     rlTextureParameters(texId, isT ? RL_TEXTURE_WRAP_T : RL_TEXTURE_WRAP_S, toRlWrap(wrap));
 }
 
 void setTextureFilter(uint32_t texId, bool isMin, TextureFilter filter)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::setTextureFilter(texId, isMin, filter); // RDG3
+#endif // RDG3
     rlTextureParameters(texId, isMin ? RL_TEXTURE_MIN_FILTER : RL_TEXTURE_MAG_FILTER, toRlFilter(filter));
 }
 
 void bindTexture(uint32_t unit, uint32_t texId)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::bindTexture(unit, texId); // RDG3
+#endif // RDG3
     rlActiveTextureSlot(static_cast<int>(unit));
     if (texId != 0u)
         rlEnableTexture(texId);
@@ -523,6 +664,9 @@ void bindTexture(uint32_t unit, uint32_t texId)
 
 bool isPaletteTextureSupported()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::isPaletteTextureSupported(); // RDG3
+#endif // RDG3
 #ifdef _WIN32
     return getActiveTexFn() != nullptr;
 #else
@@ -532,6 +676,9 @@ bool isPaletteTextureSupported()
 
 bool uploadPaletteTexture(const uint32_t *rgba256)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::uploadPaletteTexture(rgba256); // RDG3
+#endif // RDG3
 #ifdef _WIN32
     auto pActiveTex = getActiveTexFn();
     if (!pActiveTex)
@@ -579,6 +726,9 @@ bool uploadPaletteTexture(const uint32_t *rgba256)
 
 void unbindPaletteTexture()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::unbindPaletteTexture(); // RDG3
+#endif // RDG3
 #ifdef _WIN32
     auto pActiveTex = getActiveTexFn();
     if (pActiveTex)
@@ -595,6 +745,9 @@ void drawTextureOverlay(uint32_t texId, int texW, int texH,
                         float dstX, float dstY, float dstW, float dstH,
                         uint8_t alpha)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::drawTextureOverlay(texId, texW, texH, srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH, alpha); // RDG3
+#endif // RDG3
     Texture2D prevTex{};
     prevTex.id = texId;
     prevTex.width = texW;
@@ -612,6 +765,9 @@ void drawTextureOverlay(uint32_t texId, int texW, int texH,
 
 bool canCopyBackbuffer()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::canCopyBackbuffer(); // RDG3
+#endif // RDG3
 #ifdef _WIN32
     PFN_glGenFramebuffers pGenFbo = nullptr;
     PFN_glBindFramebuffer pBindFbo = nullptr;
@@ -626,6 +782,9 @@ bool canCopyBackbuffer()
 
 bool beginBackbufferCopy(BackbufferCopyState &state)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::beginBackbufferCopy(state); // RDG3
+#endif // RDG3
     state = BackbufferCopyState{};
 #ifdef _WIN32
     if (!canCopyBackbuffer())
@@ -648,6 +807,9 @@ bool copyBackbufferToTexture(BackbufferCopyState &state,
                              int dstW, int dstH,
                              bool linearFilter)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::copyBackbufferToTexture(state, texId, auxId, texW, texH, wantW, wantH, vx, vy, vw, vh, dstW, dstH, linearFilter); // RDG3
+#endif // RDG3
 #ifdef _WIN32
     PFN_glGenFramebuffers pGenFbo = nullptr;
     PFN_glBindFramebuffer pBindFbo = nullptr;
@@ -732,6 +894,9 @@ bool copyBackbufferToTexture(BackbufferCopyState &state,
 
 void endBackbufferCopy(const BackbufferCopyState &state)
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::endBackbufferCopy(state); // RDG3
+#endif // RDG3
 #ifdef _WIN32
     PFN_glGenFramebuffers pGenFbo = nullptr;
     PFN_glBindFramebuffer pBindFbo = nullptr;
@@ -750,6 +915,9 @@ void endBackbufferCopy(const BackbufferCopyState &state)
 
 uint32_t getLastError()
 {
+#if defined(PS2X_HAS_SDL3) // RDG3
+    if (rdgfx_vk::active()) return rdgfx_vk::getLastError(); // RDG3
+#endif // RDG3
 #ifdef _WIN32
     return glGetError();
 #else

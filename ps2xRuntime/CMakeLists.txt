@@ -569,14 +569,14 @@ if(PS2X_ENABLE_SDL3 AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # RDG2
         set(PS2X_RD_FRAG_SPV "${CMAKE_BINARY_DIR}/shaders/rd.frag.spv") # RDG2
         add_custom_command( # RDG2
             OUTPUT "${PS2X_RD_VERT_SPV}" # RDG2
-            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.3 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.vert" -o "${PS2X_RD_VERT_SPV}" # RDG2
+            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.2 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.vert" -o "${PS2X_RD_VERT_SPV}" # RDG2 FIX-RDG3C
             DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.vert" # RDG2
             COMMENT "Compiling rd.vert -> rd.vert.spv" # RDG2
             VERBATIM # RDG2
         ) # RDG2
         add_custom_command( # RDG2
             OUTPUT "${PS2X_RD_FRAG_SPV}" # RDG2
-            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.3 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.frag" -o "${PS2X_RD_FRAG_SPV}" # RDG2
+            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.2 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.frag" -o "${PS2X_RD_FRAG_SPV}" # RDG2 FIX-RDG3C
             DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.frag" # RDG2
             COMMENT "Compiling rd.frag -> rd.frag.spv" # RDG2
             VERBATIM # RDG2

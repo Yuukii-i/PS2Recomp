@@ -47,6 +47,8 @@ namespace
         AudioFillFn audioFill = nullptr;
 
         VkInstance instance = VK_NULL_HANDLE;
+        VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE; // PROBE-RDG3B
+        uint32_t vkValMsgCount = 0; // PROBE-RDG3B
         VkSurfaceKHR surface = VK_NULL_HANDLE;
         VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
         uint32_t queueFamily = UINT32_MAX;
@@ -435,6 +437,31 @@ namespace
         SDL_free(ids);
     }
 
+    // PROBE-RDG3B
+    VKAPI_ATTR VkBool32 VKAPI_CALL VkValidationCallback(
+        VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+        VkDebugUtilsMessageTypeFlagsEXT,
+        const VkDebugUtilsMessengerCallbackDataEXT *callbackData,
+        void *)
+    {
+        if ((severity & (VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                         VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)) == 0)
+        {
+            return VK_FALSE;
+        }
+        const char *sevStr = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "ERROR" : "WARNING";
+        ++g_sdl.vkValMsgCount;
+        if (g_sdl.vkValMsgCount <= 200)
+        {
+            std::printf("[vkval] %s %s\n", sevStr, (callbackData && callbackData->pMessage) ? callbackData->pMessage : "");
+        }
+        else if (g_sdl.vkValMsgCount == 201)
+        {
+            std::printf("[vkval] ... message limit (200) reached, counting remaining\n");
+        }
+        return VK_FALSE;
+    }
+
     bool InitVulkan(std::string &err)
     {
         Uint32 extCount = 0;
@@ -445,6 +472,42 @@ namespace
             return false;
         }
 
+        // PROBE-RDG3B
+        const char *valEnv = std::getenv("PS2X_VK_VALIDATE");
+        const bool wantValidation = (valEnv && valEnv[0] == '1');
+        std::vector<const char *> exts(sdlExts, sdlExts + extCount);
+        std::vector<const char *> layers;
+        bool hasDebugUtils = false;
+        if (wantValidation)
+        {
+            uint32_t layerCount = 0;
+            vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+            std::vector<VkLayerProperties> availLayers(layerCount);
+            vkEnumerateInstanceLayerProperties(&layerCount, availLayers.data());
+            for (const auto &lp : availLayers)
+            {
+                if (std::strcmp(lp.layerName, "VK_LAYER_KHRONOS_validation") == 0)
+                {
+                    layers.push_back("VK_LAYER_KHRONOS_validation");
+                    break;
+                }
+            }
+
+            uint32_t instExtCount = 0;
+            vkEnumerateInstanceExtensionProperties(nullptr, &instExtCount, nullptr);
+            std::vector<VkExtensionProperties> availExts(instExtCount);
+            vkEnumerateInstanceExtensionProperties(nullptr, &instExtCount, availExts.data());
+            for (const auto &ep : availExts)
+            {
+                if (std::strcmp(ep.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0)
+                {
+                    exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+                    hasDebugUtils = true;
+                    break;
+                }
+            }
+        }
+
         VkApplicationInfo appInfo{};
         appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         appInfo.pApplicationName = "PS2Recomp";
@@ -453,16 +516,44 @@ namespace
         appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
         appInfo.apiVersion = VK_API_VERSION_1_3;
 
+        VkDebugUtilsMessengerCreateInfoEXT dbgCi{};
+        dbgCi.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        dbgCi.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        dbgCi.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                            VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                            VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        dbgCi.pfnUserCallback = VkValidationCallback;
+
         VkInstanceCreateInfo ici{};
         ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         ici.pApplicationInfo = &appInfo;
-        ici.enabledExtensionCount = extCount;
-        ici.ppEnabledExtensionNames = sdlExts;
+        ici.enabledExtensionCount = static_cast<uint32_t>(exts.size());
+        ici.ppEnabledExtensionNames = exts.data();
+        if (!layers.empty())
+        {
+            ici.enabledLayerCount = static_cast<uint32_t>(layers.size());
+            ici.ppEnabledLayerNames = layers.data();
+        }
+        if (wantValidation && hasDebugUtils)
+        {
+            ici.pNext = &dbgCi;
+        }
 
         if (vkCreateInstance(&ici, nullptr, &g_sdl.instance) != VK_SUCCESS)
         {
             err = "vkCreateInstance failed";
             return false;
+        }
+
+        if (wantValidation && hasDebugUtils)
+        {
+            auto createDbg = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(g_sdl.instance, "vkCreateDebugUtilsMessengerEXT"));
+            if (createDbg)
+            {
+                createDbg(g_sdl.instance, &dbgCi, nullptr, &g_sdl.debugMessenger);
+            }
         }
 
         if (!SDL_Vulkan_CreateSurface(g_sdl.window, g_sdl.instance, nullptr, &g_sdl.surface))
@@ -1135,6 +1226,21 @@ void ps2xSdlShutdown()
 
     if (g_sdl.instance != VK_NULL_HANDLE)
     {
+        // PROBE-RDG3B
+        if (g_sdl.vkValMsgCount > 200)
+        {
+            std::printf("[vkval] total=%u suppressed=%u\n", g_sdl.vkValMsgCount, g_sdl.vkValMsgCount - 200);
+        }
+        if (g_sdl.debugMessenger != VK_NULL_HANDLE)
+        {
+            auto destroyDbg = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(g_sdl.instance, "vkDestroyDebugUtilsMessengerEXT"));
+            if (destroyDbg)
+            {
+                destroyDbg(g_sdl.instance, g_sdl.debugMessenger, nullptr);
+            }
+            g_sdl.debugMessenger = VK_NULL_HANDLE;
+        }
         vkDestroyInstance(g_sdl.instance, nullptr);
         g_sdl.instance = VK_NULL_HANDLE;
     }

@@ -25,6 +25,7 @@ extern "C" void ps2_gt_count(int what, uint64_t n); // PROBE-GT
 extern "C" void ps2_gt_take_counts(uint64_t *out); // PROBE-GT
 extern "C" void ps2_gt_vk_take(double *outFrameAvg, double *outFrameMax, double *outPresAvg, double *outPresMax, double *outFenceMs, bool *outTsOk, double *outTsPeriodNs); // PROBE-GT
 #if defined(PS2X_HAS_SDL3) // SDL-FE
+#include "render/rd_gfx_vk.h" // RDG3
 extern bool ps2xSdlWanted();
 extern bool ps2xSdlInit(const char *title, int w, int h);
 extern bool ps2xSdlActive();
@@ -1924,6 +1925,16 @@ bool PS2Runtime::initialize(const char *title)
         {
             if (!ps2xSdlInit(title, winW, winH))
                 return false;
+#if defined(PS2X_HAS_SDL3) // RDG3
+            const char *sdlRd = std::getenv("PS2X_SDL_RD"); // RDG3
+            if (sdlRd && sdlRd[0] == '1') // RDG3
+            {
+                if (rdgfx_vk::init()) // RDG3
+                    std::printf("[rdvk] active\n"); // RDG3
+                else // RDG3
+                    std::printf("[rdvk] init failed, using classic\n"); // RDG3
+            }
+#endif // RDG3
             m_audioBackend.setAudioReady(true);
             ps2x::audio::startSpu2Output();
         }
@@ -7178,7 +7189,77 @@ void PS2Runtime::run()
             }
             else // SDL-FE
             {
-                ps2xSdlPresent();
+#if defined(PS2X_HAS_SDL3) // RDG3
+                if (rdgfx_vk::active() && ps2xRdTakeoverOn() && !rdClassic) // RDG3
+                {
+                    rdgfx_vk::beginFrame(); // RDG3
+                    rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 1.0f); // RDG3
+                    int rw = 0, rh = 0; // RDG3
+                    rdgfx::getBackbufferSize(rw, rh); // RDG3
+                    const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth)); // RDG3
+                    const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight)); // RDG3
+                    const float screenWidth = static_cast<float>(rw); // RDG3
+                    const float screenHeight = static_cast<float>(rh); // RDG3
+                    static const float s_aspect = []() { // RDG3
+                        const char *a = getenv("PS2X_ASPECT");
+                        if (!a || !*a) return 4.0f / 3.0f;
+                        if (!std::strcmp(a, "native")) return 0.0f;
+                        if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f;
+                        if (!std::strcmp(a, "16:10")) return 1.6f;
+                        if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f;
+                        if (!std::strcmp(a, "fill")) return -1.0f;
+                        return 0.0f;
+                    }();
+                    float dstWidth, dstHeight; // RDG3
+                    extern float g_rdAspectK; // RDG3
+                    if (s_aspect > 0.0f || s_aspect < 0.0f) // RDG3
+                    {
+                        const float winAspect = (screenHeight > 0.0f) ? (screenWidth / screenHeight) : (4.0f / 3.0f);
+                        const float k = winAspect / (4.0f / 3.0f);
+                        float boxAspect = (s_aspect > 0.0f) ? s_aspect : winAspect;
+                        if (s_aspect < 0.0f && ps2xRdTakeoverOn())
+                        {
+                            if (k >= 1.0f)
+                            {
+                                boxAspect = winAspect;
+                                g_rdAspectK = k;
+                            }
+                            else
+                            {
+                                boxAspect = 4.0f / 3.0f;
+                                g_rdAspectK = 1.0f;
+                            }
+                            static bool s_aspectLogged = false;
+                            if (!s_aspectLogged)
+                            {
+                                s_aspectLogged = true;
+                                ps2xSafeLog("[aspect] fill k=%.3f\n", k);
+                            }
+                        }
+                        else
+                        {
+                            g_rdAspectK = 1.0f;
+                        }
+                        dstWidth = std::min(screenWidth, screenHeight * boxAspect);
+                        dstHeight = dstWidth / boxAspect;
+                    }
+                    else
+                    {
+                        g_rdAspectK = 1.0f;
+                        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+                        dstWidth = srcWidth * scale;
+                        dstHeight = srcHeight * scale;
+                    }
+                    const float dstX = (screenWidth - dstWidth) * 0.5f; // RDG3
+                    const float dstY = (screenHeight - dstHeight) * 0.5f; // RDG3
+                    (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight); // RDG3
+                    rdgfx_vk::endFrame(); // RDG3
+                }
+                else // RDG3
+#endif // RDG3
+                {
+                    ps2xSdlPresent();
+                }
                 gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             }
             const auto presT1 = std::chrono::steady_clock::now();

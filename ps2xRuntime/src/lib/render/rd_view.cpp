@@ -2078,8 +2078,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
     int rw = 0, rh = 0;
     rdgfx::getBackbufferSize(rw, rh); // RDG1
-    const int sw = GetScreenWidth();
-    const int sh = GetScreenHeight();
+    int sw = 0, sh = 0; // FIX-RDG3D
+    rdgfx::getWindowSize(sw, sh); // FIX-RDG3D
     const float scaleX = (sw > 0) ? (static_cast<float>(rw) / static_cast<float>(sw)) : 1.0f;
     const float scaleY = (sh > 0) ? (static_cast<float>(rh) / static_cast<float>(sh)) : 1.0f;
     const int vx = static_cast<int>(x * scaleX);

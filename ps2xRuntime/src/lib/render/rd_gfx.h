@@ -99,6 +99,7 @@ void setUniformVec4(Uniform u, const float *v);
 
 void flushBatch();
 void getBackbufferSize(int &rw, int &rh);
+void getWindowSize(int &w, int &h); // FIX-RDG3D
 void setViewport(int x, int y, int w, int h);
 void setScissorTest(bool on);
 void setScissorRect(int x, int y, int w, int h);

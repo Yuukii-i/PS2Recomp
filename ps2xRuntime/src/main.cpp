@@ -236,15 +236,42 @@ int main(int argc, char *argv[])
 {
     if (ps2xSdlWanted()) // SDL-FE
     {
+        const char *sdlRd = std::getenv("PS2X_SDL_RD"); // RDG3
+        const bool sdlRdOn = sdlRd && sdlRd[0] == '1'; // RDG3
+        auto setEnvIfUnset = [](const char *name, const char *val) { // RDG3
+            if (!std::getenv(name)) // RDG3
+            {
+#if defined(_WIN32)
+                _putenv_s(name, val);
+#else
+                setenv(name, val, 1);
+#endif
+            }
+        };
 #if defined(_WIN32)
         _putenv_s("PS2X_NO_CONFIG", "1");
-        _putenv_s("PS2X_RD_VIEW", "0");
-        _putenv_s("PS2X_RD_TAKEOVER", "0");
 #else
         setenv("PS2X_NO_CONFIG", "1", 1);
-        setenv("PS2X_RD_VIEW", "0", 1);
-        setenv("PS2X_RD_TAKEOVER", "0", 1);
 #endif
+        if (sdlRdOn) // RDG3
+        {
+            setEnvIfUnset("PS2X_RD_VIEW", "1"); // RDG3
+            setEnvIfUnset("PS2X_RD_TAKEOVER", "1"); // RDG3
+            setEnvIfUnset("PS2X_RD_2DFEEDBACK", "1"); // RDG3
+            setEnvIfUnset("PS2X_RD_2DLATE", "1"); // RDG3
+            setEnvIfUnset("PS2X_RD_FORCECLASSIC", "0"); // RDG3
+            setEnvIfUnset("PS2X_RD_FBTEX", "0"); // RDG3
+        }
+        else // RDG3
+        {
+#if defined(_WIN32)
+            _putenv_s("PS2X_RD_VIEW", "0");
+            _putenv_s("PS2X_RD_TAKEOVER", "0");
+#else
+            setenv("PS2X_RD_VIEW", "0", 1);
+            setenv("PS2X_RD_TAKEOVER", "0", 1);
+#endif
+        }
     }
     fprintf(stderr, "[boot] runner started\n");
     extern const uint32_t g_ps2RecompiledFunctionTableBase;

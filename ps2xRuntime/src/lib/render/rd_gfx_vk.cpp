@@ -151,6 +151,41 @@ struct GarbageTexture
     VkDeviceMemory memory = VK_NULL_HANDLE;
 };
 
+// FIX-RDG3C
+struct DescCacheKey
+{
+    uint32_t tex0 = 0;
+    uint32_t tex1 = 0;
+    uint32_t samp0 = 0;
+    uint32_t samp1 = 0;
+
+    bool operator==(const DescCacheKey &o) const
+    {
+        return tex0 == o.tex0 && tex1 == o.tex1 && samp0 == o.samp0 && samp1 == o.samp1;
+    }
+};
+
+struct DescCacheKeyHash
+{
+    size_t operator()(const DescCacheKey &k) const
+    {
+        uint64_t h1 = (static_cast<uint64_t>(k.tex0) << 32) | k.tex1;
+        uint64_t h2 = (static_cast<uint64_t>(k.samp0) << 32) | k.samp1;
+        h1 ^= h2 * 0x9e3779b97f4a7c15ull;
+        h1 ^= h1 >> 30;
+        h1 *= 0xbf58476d1ce4e5b9ull;
+        h1 ^= h1 >> 27;
+        return static_cast<size_t>(h1);
+    }
+};
+
+struct GpuVao
+{
+    uint32_t vbo = 0;
+    uint32_t ebo = 0;
+    VkDeviceSize vbOffset = 0;
+};
+
 struct RdVkState
 {
     bool initialized = false;
@@ -170,7 +205,11 @@ struct RdVkState
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     std::unordered_map<uint64_t, VkPipeline> pipelines;
 
-    std::vector<VkDescriptorPool> descPools;
+    // FIX-RDG3C
+    std::vector<std::vector<VkDescriptorPool>> descPools;
+    std::vector<size_t> descPoolIdx;
+    std::vector<std::unordered_map<DescCacheKey, VkDescriptorSet, DescCacheKeyHash>> descCaches;
+    bool descAllocFailLogged = false;
     std::unordered_map<uint32_t, VkSampler> samplers;
 
     // Offscreen render targets
@@ -205,6 +244,11 @@ struct RdVkState
     uint32_t boundEbo = 0;
     uint32_t boundTex[2] = {0, 0};
 
+    // FIX-RDG3C
+    uint32_t boundVao = 0;
+    uint32_t nextVaoId = 1;
+    std::unordered_map<uint32_t, GpuVao> vaos;
+
     // Resource tables
     uint32_t nextBufId = 1;
     std::unordered_map<uint32_t, GpuBuffer> vbos;
@@ -223,6 +267,24 @@ struct RdVkState
     uint64_t statDraws = 0;
     uint64_t totalBufBytes = 0;
     std::chrono::steady_clock::time_point lastLogTime{};
+
+    // PROBE-RDG3B
+    uint64_t statDrawIdx = 0;
+    uint64_t statDrawArr = 0;
+    uint64_t statNoFrame = 0;
+    uint64_t statNoPass = 0;
+    uint64_t statNoPipeline = 0;
+    uint64_t statNoVb = 0;
+    uint64_t statNoIb = 0;
+    uint64_t statNoDesc = 0;
+    uint64_t statZeroCount = 0;
+    uint64_t statClears = 0;
+    uint64_t statBinds = 0;
+    uint64_t statTexCreated = 0;
+    uint64_t statVbUpd = 0;
+    uint64_t statUniformSets = 0;
+    uint64_t statPassBegun = 0;
+    bool firstDrawLogged = false;
 };
 
 RdVkState s_vk;
@@ -561,6 +623,7 @@ void ensureRenderPass(bool forceClear, float r, float g, float b, float a)
     ri.pDepthAttachment = &depthAtt;
 
     vkCmdBeginRendering(s_vk.cmd, &ri);
+    ++s_vk.statPassBegun; // PROBE-RDG3B
     s_vk.inRenderPass = true;
     s_vk.firstPassInFrame = false;
     s_vk.boundPipeline = VK_NULL_HANDLE;
@@ -904,16 +967,106 @@ void applyPendingBufferWrites(uint32_t frameIdx)
     applyMap(s_vk.ebos);
 }
 
-bool prepareDraw()
+// FIX-RDG3C
+VkDescriptorPool createDescriptorPool()
 {
-    if (!s_vk.frameActive || !s_vk.shaderReady)
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384u * 2u};
+    VkDescriptorPoolCreateInfo dpci{};
+    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpci.maxSets = 16384u;
+    dpci.poolSizeCount = 1;
+    dpci.pPoolSizes = &poolSize;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (vkCreateDescriptorPool(s_vk.device, &dpci, nullptr, &pool) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+    return pool;
+}
+
+bool allocDescriptorSet(uint32_t frameIdx, VkDescriptorSet &outDs)
+{
+    if (frameIdx >= s_vk.descPools.size() || s_vk.descPools[frameIdx].empty())
         return false;
 
+    auto tryAlloc = [&](VkDescriptorPool pool, VkResult &outRes) -> bool
+    {
+        VkDescriptorSetAllocateInfo dsai{};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = pool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &s_vk.descSetLayout;
+        outRes = vkAllocateDescriptorSets(s_vk.device, &dsai, &outDs);
+        return outRes == VK_SUCCESS;
+    };
+
+    size_t &idx = s_vk.descPoolIdx[frameIdx];
+    VkResult res = VK_SUCCESS;
+    if (tryAlloc(s_vk.descPools[frameIdx][idx], res))
+        return true;
+
+    if (!s_vk.descAllocFailLogged)
+    {
+        s_vk.descAllocFailLogged = true;
+        std::printf("[rdvk] descAlloc failed: %d\n", static_cast<int>(res));
+    }
+
+    ++idx;
+    if (idx >= s_vk.descPools[frameIdx].size())
+    {
+        VkDescriptorPool newPool = createDescriptorPool();
+        if (newPool == VK_NULL_HANDLE)
+            return false;
+        s_vk.descPools[frameIdx].push_back(newPool);
+    }
+    return tryAlloc(s_vk.descPools[frameIdx][idx], res);
+}
+
+uint32_t resolveBoundVbo(VkDeviceSize *outOffset = nullptr)
+{
+    if (outOffset)
+        *outOffset = 0;
+    if (s_vk.boundVao != 0)
+    {
+        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end() && it->second.vbo != 0)
+        {
+            if (outOffset)
+                *outOffset = it->second.vbOffset;
+            return it->second.vbo;
+        }
+    }
+    return s_vk.boundVbo;
+}
+
+uint32_t resolveBoundEbo()
+{
+    if (s_vk.boundVao != 0)
+    {
+        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end() && it->second.ebo != 0)
+            return it->second.ebo;
+    }
+    return s_vk.boundEbo;
+}
+
+bool prepareDraw()
+{
+    if (!s_vk.frameActive || !s_vk.shaderReady || s_vk.cmd == VK_NULL_HANDLE)
+    {
+        ++s_vk.statNoFrame; // PROBE-RDG3B
+        return false;
+    }
+
     ensureRenderPass(false, 0.0f, 0.0f, 0.0f, 1.0f);
+    if (!s_vk.inRenderPass)
+    {
+        ++s_vk.statNoPass; // PROBE-RDG3B
+        return false;
+    }
 
     VkPipeline pipe = getOrCreatePipeline(s_vk.pipeKey);
     if (pipe == VK_NULL_HANDLE)
+    {
+        ++s_vk.statNoPipeline; // PROBE-RDG3B
         return false;
+    }
     if (pipe != s_vk.boundPipeline)
     {
         vkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
@@ -922,61 +1075,96 @@ bool prepareDraw()
 
     applyViewportAndScissor();
 
-    VkDescriptorSetAllocateInfo dsai{};
-    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    dsai.descriptorPool = s_vk.descPools[s_vk.curFrame];
-    dsai.descriptorSetCount = 1;
-    dsai.pSetLayouts = &s_vk.descSetLayout;
-
-    VkDescriptorSet ds = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(s_vk.device, &dsai, &ds) != VK_SUCCESS)
-        return false;
-
-    auto resolveTex = [](uint32_t id) -> const GpuTexture *
+    // FIX-RDG3C: resolve unit 0/1 textures (fallback to 1x1 white) and reuse cached per-frame descriptor sets.
+    auto resolveTex = [](uint32_t id, uint32_t &outId) -> const GpuTexture *
     {
         auto it = s_vk.textures.find(id);
         if (it != s_vk.textures.end())
+        {
+            outId = id;
             return &it->second;
+        }
         auto defIt = s_vk.textures.find(s_vk.defaultWhiteTex);
-        return (defIt != s_vk.textures.end()) ? &defIt->second : nullptr;
+        if (defIt != s_vk.textures.end())
+        {
+            outId = s_vk.defaultWhiteTex;
+            return &defIt->second;
+        }
+        outId = 0;
+        return nullptr;
     };
 
-    const GpuTexture *tex0 = resolveTex(s_vk.boundTex[0]);
-    const GpuTexture *tex1 = resolveTex(s_vk.boundTex[1]);
-    if (!tex0 || !tex1)
+    uint32_t effId0 = 0, effId1 = 0;
+    const GpuTexture *tex0 = resolveTex(s_vk.boundTex[0], effId0);
+    const GpuTexture *tex1 = resolveTex(s_vk.boundTex[1], effId1);
+    if (!tex0 || !tex1 || tex0->view == VK_NULL_HANDLE || tex1->view == VK_NULL_HANDLE)
+    {
+        ++s_vk.statNoDesc; // PROBE-RDG3B
         return false;
+    }
 
-    VkDescriptorImageInfo imgInfos[2]{};
-    imgInfos[0] = {getOrCreateSampler(tex0->sampler), tex0->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    imgInfos[1] = {getOrCreateSampler(tex1->sampler), tex1->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkSampler samp0 = getOrCreateSampler(tex0->sampler);
+    VkSampler samp1 = getOrCreateSampler(tex1->sampler);
+    if (samp0 == VK_NULL_HANDLE || samp1 == VK_NULL_HANDLE)
+    {
+        ++s_vk.statNoDesc; // PROBE-RDG3B
+        return false;
+    }
 
-    VkWriteDescriptorSet writes[2]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = ds;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[0].pImageInfo = &imgInfos[0];
+    const DescCacheKey cacheKey{effId0, effId1, tex0->sampler.pack(), tex1->sampler.pack()};
+    auto &cache = s_vk.descCaches[s_vk.curFrame];
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    if (auto cit = cache.find(cacheKey); cit != cache.end())
+    {
+        ds = cit->second;
+    }
+    else
+    {
+        if (!allocDescriptorSet(s_vk.curFrame, ds))
+        {
+            ++s_vk.statNoDesc; // PROBE-RDG3B
+            return false;
+        }
 
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = ds;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].pImageInfo = &imgInfos[1];
+        VkDescriptorImageInfo imgInfos[2]{};
+        imgInfos[0] = {samp0, tex0->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        imgInfos[1] = {samp1, tex1->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
-    vkUpdateDescriptorSets(s_vk.device, 2, writes, 0, nullptr);
+        VkWriteDescriptorSet writes[2]{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = ds;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].pImageInfo = &imgInfos[0];
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = ds;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo = &imgInfos[1];
+
+        vkUpdateDescriptorSets(s_vk.device, 2, writes, 0, nullptr);
+        cache.emplace(cacheKey, ds);
+    }
+
     vkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vk.pipelineLayout, 0, 1, &ds, 0, nullptr);
 
     vkCmdPushConstants(s_vk.cmd, s_vk.pipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &s_vk.pc);
 
-    auto vboIt = s_vk.vbos.find(s_vk.boundVbo);
-    if (vboIt == s_vk.vbos.end())
-        return false;
-    VkBuffer vb = vboIt->second.copies[s_vk.curFrame].buffer;
+    // FIX-RDG3C: resolve VBO from bound VAO (or fallback to boundVbo).
     VkDeviceSize offset = 0;
+    const uint32_t activeVbo = resolveBoundVbo(&offset);
+    auto vboIt = s_vk.vbos.find(activeVbo);
+    if (vboIt == s_vk.vbos.end())
+    {
+        ++s_vk.statNoVb; // PROBE-RDG3B
+        return false;
+    }
+    VkBuffer vb = vboIt->second.copies[s_vk.curFrame].buffer;
     vkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &vb, &offset);
 
     ++s_vk.statDraws;
@@ -1046,17 +1234,16 @@ bool init()
     if (vkCreatePipelineLayout(s_vk.device, &plci, nullptr, &s_vk.pipelineLayout) != VK_SUCCESS)
         return false;
 
-    s_vk.descPools.resize(s_vk.framesInFlight, VK_NULL_HANDLE);
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192};
-    VkDescriptorPoolCreateInfo dpci{};
-    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpci.maxSets = 4096;
-    dpci.poolSizeCount = 1;
-    dpci.pPoolSizes = &poolSize;
+    // FIX-RDG3C
+    s_vk.descPools.resize(s_vk.framesInFlight);
+    s_vk.descPoolIdx.assign(s_vk.framesInFlight, 0);
+    s_vk.descCaches.resize(s_vk.framesInFlight);
     for (uint32_t i = 0; i < s_vk.framesInFlight; ++i)
     {
-        if (vkCreateDescriptorPool(s_vk.device, &dpci, nullptr, &s_vk.descPools[i]) != VK_SUCCESS)
+        VkDescriptorPool pool = createDescriptorPool();
+        if (pool == VK_NULL_HANDLE)
             return false;
+        s_vk.descPools[i].push_back(pool);
     }
 
     s_vk.garbageBuffers.resize(s_vk.framesInFlight);
@@ -1109,7 +1296,11 @@ void beginFrame()
         return;
     }
 
-    vkResetDescriptorPool(s_vk.device, s_vk.descPools[frameIdx], 0);
+    // FIX-RDG3C: reset all per-frame descriptor pools and clear per-frame cache after the frame fence.
+    for (VkDescriptorPool pool : s_vk.descPools[frameIdx])
+        vkResetDescriptorPool(s_vk.device, pool, 0);
+    s_vk.descPoolIdx[frameIdx] = 0;
+    s_vk.descCaches[frameIdx].clear();
     flushGarbage(frameIdx);
     applyPendingBufferWrites(frameIdx);
 
@@ -1171,11 +1362,28 @@ void endFrame()
         if (std::chrono::duration_cast<std::chrono::seconds>(now - s_vk.lastLogTime).count() >= 1)
         {
             double bufMB = static_cast<double>(s_vk.totalBufBytes) / (1024.0 * 1024.0);
-            std::printf("[rdvk] frames=%llu draws=%llu pipelines=%zu bufMB=%.2f\n",
+            std::printf("[rdvk] frames=%llu draws=%llu pipelines=%zu bufMB=%.2f"
+                        " dIdx=%llu dArr=%llu noFrame=%llu noPass=%llu noPipeline=%llu noVb=%llu noIb=%llu noDesc=%llu zeroCount=%llu"
+                        " clears=%llu binds=%llu texCreated=%llu vbUpd=%llu uniformSets=%llu passBegun=%llu\n",
                         static_cast<unsigned long long>(s_vk.statFrames),
                         static_cast<unsigned long long>(s_vk.statDraws),
                         s_vk.pipelines.size(),
-                        bufMB);
+                        bufMB,
+                        static_cast<unsigned long long>(s_vk.statDrawIdx),
+                        static_cast<unsigned long long>(s_vk.statDrawArr),
+                        static_cast<unsigned long long>(s_vk.statNoFrame),
+                        static_cast<unsigned long long>(s_vk.statNoPass),
+                        static_cast<unsigned long long>(s_vk.statNoPipeline),
+                        static_cast<unsigned long long>(s_vk.statNoVb),
+                        static_cast<unsigned long long>(s_vk.statNoIb),
+                        static_cast<unsigned long long>(s_vk.statNoDesc),
+                        static_cast<unsigned long long>(s_vk.statZeroCount),
+                        static_cast<unsigned long long>(s_vk.statClears),
+                        static_cast<unsigned long long>(s_vk.statBinds),
+                        static_cast<unsigned long long>(s_vk.statTexCreated),
+                        static_cast<unsigned long long>(s_vk.statVbUpd),
+                        static_cast<unsigned long long>(s_vk.statUniformSets),
+                        static_cast<unsigned long long>(s_vk.statPassBegun));
             s_vk.lastLogTime = now;
         }
     }
@@ -1190,6 +1398,7 @@ bool hasUniform(rdgfx::Uniform) { return true; }
 
 void setUniformInt(rdgfx::Uniform u, int v)
 {
+    ++s_vk.statUniformSets; // PROBE-RDG3B
     switch (u)
     {
     case rdgfx::Uniform::Mode2d: s_vk.pc.uMode2d = v; break;
@@ -1207,6 +1416,7 @@ void setUniformInt(rdgfx::Uniform u, int v)
 
 void setUniformFloat(rdgfx::Uniform u, float v)
 {
+    ++s_vk.statUniformSets; // PROBE-RDG3B
     switch (u)
     {
     case rdgfx::Uniform::ZBias: s_vk.pc.uZBias = v; break;
@@ -1218,6 +1428,7 @@ void setUniformFloat(rdgfx::Uniform u, float v)
 void setUniformVec2(rdgfx::Uniform u, const float *v)
 {
     if (!v) return;
+    ++s_vk.statUniformSets; // PROBE-RDG3B
     if (u == rdgfx::Uniform::FbSize)
     {
         s_vk.pc.uFbSize[0] = v[0];
@@ -1233,6 +1444,7 @@ void setUniformVec2(rdgfx::Uniform u, const float *v)
 void setUniformVec3Immediate(rdgfx::Uniform u, const float *v)
 {
     if (!v) return;
+    ++s_vk.statUniformSets; // PROBE-RDG3B
     if (u == rdgfx::Uniform::Flip)
     {
         s_vk.pc.uFlip[0] = v[0];
@@ -1245,6 +1457,7 @@ void setUniformVec3Immediate(rdgfx::Uniform u, const float *v)
 void setUniformVec4(rdgfx::Uniform u, const float *v)
 {
     if (!v) return;
+    ++s_vk.statUniformSets; // PROBE-RDG3B
     if (u == rdgfx::Uniform::VpA)
         std::memcpy(s_vk.pc.uVpA, v, 4 * sizeof(float));
     else if (u == rdgfx::Uniform::VpB)
@@ -1257,6 +1470,12 @@ void getBackbufferSize(int &rw, int &rh)
 {
     rw = static_cast<int>(s_vk.targetW);
     rh = static_cast<int>(s_vk.targetH);
+}
+
+void getWindowSize(int &w, int &h) // FIX-RDG3D
+{
+    w = static_cast<int>(s_vk.targetW);
+    h = static_cast<int>(s_vk.targetH);
 }
 
 void setViewport(int x, int y, int w, int h)
@@ -1329,6 +1548,7 @@ void setBackfaceCulling(bool on) { s_vk.pipeKey.cull = on; }
 
 void clearScreenBuffers(float r, float g, float b, float a)
 {
+    ++s_vk.statClears; // PROBE-RDG3B
     if (!s_vk.frameActive)
         return;
     if (!s_vk.inRenderPass)
@@ -1356,8 +1576,18 @@ void clearScreenBuffers(float r, float g, float b, float a)
         vkCmdClearAttachments(s_vk.cmd, 2, atts, 1, &rect);
 }
 
-uint32_t createVertexArray() { return 1u; }
-void bindVertexArray(uint32_t) {}
+// FIX-RDG3C: emulate GL VAO state (stores VBO on set/enableVertexAttribute and EBO on bindIndexBuffer).
+uint32_t createVertexArray()
+{
+    const uint32_t id = s_vk.nextVaoId++;
+    s_vk.vaos.emplace(id, GpuVao{});
+    return id;
+}
+
+void bindVertexArray(uint32_t vao)
+{
+    s_vk.boundVao = vao;
+}
 
 uint32_t createVertexBuffer(const void *data, int sizeBytes, bool)
 {
@@ -1366,6 +1596,7 @@ uint32_t createVertexBuffer(const void *data, int sizeBytes, bool)
 
 void updateVertexBuffer(uint32_t vbo, const void *data, int sizeBytes, int offsetBytes)
 {
+    ++s_vk.statVbUpd; // PROBE-RDG3B
     updateDynBuffer(s_vk.vbos, vbo, data, sizeBytes, offsetBytes);
 }
 
@@ -1390,24 +1621,108 @@ void freeIndexBuffer(uint32_t ebo)
 }
 
 void bindVertexBuffer(uint32_t vbo) { s_vk.boundVbo = vbo; }
-void bindIndexBuffer(uint32_t ebo) { s_vk.boundEbo = ebo; }
-void setVertexAttribute(uint32_t, int, rdgfx::VertexAttrFormat, bool, int, int) {}
-void enableVertexAttribute(uint32_t) {}
+
+// FIX-RDG3C
+void bindIndexBuffer(uint32_t ebo)
+{
+    s_vk.boundEbo = ebo;
+    if (s_vk.boundVao != 0)
+    {
+        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end())
+            it->second.ebo = ebo;
+    }
+}
+
+void setVertexAttribute(uint32_t index, int, rdgfx::VertexAttrFormat, bool, int, int offsetBytes)
+{
+    if (s_vk.boundVao != 0 && s_vk.boundVbo != 0)
+    {
+        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end())
+        {
+            it->second.vbo = s_vk.boundVbo;
+            if (index == 0)
+                it->second.vbOffset = static_cast<VkDeviceSize>(std::max(0, offsetBytes));
+        }
+    }
+}
+
+void enableVertexAttribute(uint32_t)
+{
+    if (s_vk.boundVao != 0 && s_vk.boundVbo != 0)
+    {
+        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end())
+            it->second.vbo = s_vk.boundVbo;
+    }
+}
+
+    // PROBE-RDG3B
+    auto logFirstDraw = [](const char *kind, uint32_t first, uint32_t count)
+    {
+        if (!s_vk.logEnabled || s_vk.firstDrawLogged)
+            return;
+        s_vk.firstDrawLogged = true;
+        VkRect2D vkSc = computeVkScissor();
+        const uint32_t activeVbo = resolveBoundVbo(); // FIX-RDG3C
+        const uint32_t activeEbo = resolveBoundEbo(); // FIX-RDG3C
+        uint64_t vbHandle = 0;
+        int vbSize = 0;
+        if (auto it = s_vk.vbos.find(activeVbo); it != s_vk.vbos.end() && s_vk.curFrame < it->second.copies.size())
+        {
+            vbHandle = reinterpret_cast<uint64_t>(it->second.copies[s_vk.curFrame].buffer);
+            vbSize = it->second.sizeBytes;
+        }
+        uint64_t ibHandle = 0;
+        int ibSize = 0;
+        if (auto it = s_vk.ebos.find(activeEbo); it != s_vk.ebos.end() && s_vk.curFrame < it->second.copies.size())
+        {
+            ibHandle = reinterpret_cast<uint64_t>(it->second.copies[s_vk.curFrame].buffer);
+            ibSize = it->second.sizeBytes;
+        }
+        std::printf("[rdvk] firstDraw=%s target=%ux%u vp=(%d,%d,%d,%d) scOn=%d sc=(%d,%d,%d,%d) vkSc=(%d,%d,%u,%u)"
+                    " vbId=%u vb=0x%llx vbSize=%d ibId=%u ib=0x%llx ibSize=%d first=%u count=%u\n",
+                    kind,
+                    s_vk.targetW, s_vk.targetH,
+                    s_vk.vpX, s_vk.vpY, s_vk.vpW, s_vk.vpH,
+                    s_vk.scissorTest ? 1 : 0,
+                    s_vk.scX, s_vk.scY, s_vk.scW, s_vk.scH,
+                    vkSc.offset.x, vkSc.offset.y, vkSc.extent.width, vkSc.extent.height,
+                    activeVbo, static_cast<unsigned long long>(vbHandle), vbSize,
+                    activeEbo, static_cast<unsigned long long>(ibHandle), ibSize,
+                    first, count);
+    };
 
 void drawArrays(rdgfx::PrimitiveTopology, int first, int count)
 {
-    if (count <= 0 || !prepareDraw())
+    ++s_vk.statDrawArr; // PROBE-RDG3B
+    logFirstDraw("drawArrays", static_cast<uint32_t>(first), static_cast<uint32_t>(std::max(0, count)));
+    if (count <= 0)
+    {
+        ++s_vk.statZeroCount; // PROBE-RDG3B
+        return;
+    }
+    if (!prepareDraw())
         return;
     vkCmdDraw(s_vk.cmd, static_cast<uint32_t>(count), 1, static_cast<uint32_t>(first), 0);
 }
 
 void drawIndexed(rdgfx::PrimitiveTopology, uint32_t first, uint32_t count, bool idx32)
 {
-    if (count == 0 || !prepareDraw())
+    ++s_vk.statDrawIdx; // PROBE-RDG3B
+    logFirstDraw("drawIndexed", first, count);
+    if (count == 0)
+    {
+        ++s_vk.statZeroCount; // PROBE-RDG3B
         return;
-    auto eboIt = s_vk.ebos.find(s_vk.boundEbo);
+    }
+    if (!prepareDraw())
+        return;
+    const uint32_t activeEbo = resolveBoundEbo(); // FIX-RDG3C
+    auto eboIt = s_vk.ebos.find(activeEbo);
     if (eboIt == s_vk.ebos.end())
+    {
+        ++s_vk.statNoIb; // PROBE-RDG3B
         return;
+    }
     VkBuffer eb = eboIt->second.copies[s_vk.curFrame].buffer;
     vkCmdBindIndexBuffer(s_vk.cmd, eb, 0, idx32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     vkCmdDrawIndexed(s_vk.cmd, count, 1, first, 0, 0);
@@ -1525,6 +1840,7 @@ uint32_t createTextureRGBA8(const void *data, int w, int h)
 
     const uint32_t id = s_vk.nextTexId++;
     s_vk.textures.emplace(id, tex);
+    ++s_vk.statTexCreated; // PROBE-RDG3B
     return id;
 }
 
@@ -1622,6 +1938,7 @@ void setTextureFilter(uint32_t texId, bool isMin, rdgfx::TextureFilter filter)
 
 void bindTexture(uint32_t unit, uint32_t texId)
 {
+    ++s_vk.statBinds; // PROBE-RDG3B
     if (unit < 2)
         s_vk.boundTex[unit] = texId;
 }
