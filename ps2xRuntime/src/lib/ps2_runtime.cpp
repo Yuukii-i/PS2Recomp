@@ -34,6 +34,7 @@ extern bool ps2xSdlActive();
 extern bool ps2xSdlShouldClose();
 extern void ps2xSdlForcePoll(); // FIX-RDG4Q
 extern void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t strideBytes);
+extern void ps2xSdlSetPresentRegion(uint32_t w, uint32_t h); // FIX-R5
 extern void ps2xSdlPresent();
 extern const uint8_t *ps2xSdlLastFrameRgba(uint32_t &w, uint32_t &h, uint32_t &strideBytes); // FXC1
 extern void ps2xSdlSetTitle(const char *t);
@@ -60,6 +61,7 @@ inline bool ps2xSdlActive() { return false; }
 inline bool ps2xSdlShouldClose() { return false; }
 inline void ps2xSdlForcePoll() {} // FIX-RDG4Q
 inline void ps2xSdlUploadFrame(const uint8_t *, uint32_t, uint32_t, uint32_t) {}
+inline void ps2xSdlSetPresentRegion(uint32_t, uint32_t) {} // FIX-R5
 inline void ps2xSdlPresent() {}
 inline const uint8_t *ps2xSdlLastFrameRgba(uint32_t &, uint32_t &, uint32_t &) { return nullptr; } // FXC1
 inline void ps2xSdlSetTitle(const char *) {}
@@ -7114,6 +7116,26 @@ void PS2Runtime::run()
                 if (!std::strcmp(a, "fill")) return -1.0f;
                 return 0.0f;
             }();
+            static const float s_aspectMax = []() { // FIX-R6
+                const char *a = getenv("PS2X_ASPECT_MAX"); // FIX-R6
+                if (!a || !*a) return 21.0f / 9.0f; // FIX-R6
+                if (!std::strcmp(a, "21:9")) return 21.0f / 9.0f; // FIX-R6
+                if (!std::strcmp(a, "32:9")) return 32.0f / 9.0f; // FIX-R6
+                if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f; // FIX-R6
+                if (!std::strcmp(a, "16:10")) return 1.6f; // FIX-R6
+                if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f; // FIX-R6
+                if (!std::strcmp(a, "none") || !std::strcmp(a, "NONE")) return 0.0f; // FIX-R6
+                const char *colon = std::strchr(a, ':'); // FIX-R6
+                if (colon) { // FIX-R6
+                    float num = std::strtof(a, nullptr); // FIX-R6
+                    float den = std::strtof(colon + 1, nullptr); // FIX-R6
+                    if (num > 0.0f && den > 0.0f) return num / den; // FIX-R6
+                } // FIX-R6
+                char *end = nullptr; // FIX-R6
+                float v = std::strtof(a, &end); // FIX-R6
+                if (end != a && v > 0.0f) return v; // FIX-R6
+                return 21.0f / 9.0f; // FIX-R6
+            }(); // FIX-R6
             float dstWidth, dstHeight;
             extern float g_rdAspectK; // FEAT-RD16
             if (s_aspect > 0.0f || s_aspect < 0.0f)
@@ -7123,7 +7145,18 @@ void PS2Runtime::run()
                 float boxAspect = (s_aspect > 0.0f) ? s_aspect : winAspect;
                 if (s_aspect < 0.0f && ps2xRdTakeoverOn()) // FEAT-RD16
                 {
-                    if (k >= 1.0f)
+                    if (s_aspectMax > 0.0f && winAspect > s_aspectMax) // FIX-R6
+                    {
+                        boxAspect = s_aspectMax; // FIX-R6
+                        g_rdAspectK = s_aspectMax / (4.0f / 3.0f); // FIX-R6
+                        static bool s_aspectCapLogged = false; // FIX-R6
+                        if (!s_aspectCapLogged) // FIX-R6
+                        {
+                            s_aspectCapLogged = true; // FIX-R6
+                            ps2xSafeLog("[aspect] fill capped at %.2f (window %.2f)\n", s_aspectMax, winAspect); // FIX-R6
+                        }
+                    }
+                    else if (k >= 1.0f)
                     {
                         boxAspect = winAspect;
                         g_rdAspectK = k;
@@ -7454,6 +7487,26 @@ void PS2Runtime::run()
                         if (!std::strcmp(a, "fill")) return -1.0f;
                         return 0.0f;
                     }();
+                    static const float s_aspectMax = []() { // FIX-R6
+                        const char *a = getenv("PS2X_ASPECT_MAX"); // FIX-R6
+                        if (!a || !*a) return 21.0f / 9.0f; // FIX-R6
+                        if (!std::strcmp(a, "21:9")) return 21.0f / 9.0f; // FIX-R6
+                        if (!std::strcmp(a, "32:9")) return 32.0f / 9.0f; // FIX-R6
+                        if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f; // FIX-R6
+                        if (!std::strcmp(a, "16:10")) return 1.6f; // FIX-R6
+                        if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f; // FIX-R6
+                        if (!std::strcmp(a, "none") || !std::strcmp(a, "NONE")) return 0.0f; // FIX-R6
+                        const char *colon = std::strchr(a, ':'); // FIX-R6
+                        if (colon) { // FIX-R6
+                            float num = std::strtof(a, nullptr); // FIX-R6
+                            float den = std::strtof(colon + 1, nullptr); // FIX-R6
+                            if (num > 0.0f && den > 0.0f) return num / den; // FIX-R6
+                        } // FIX-R6
+                        char *end = nullptr; // FIX-R6
+                        float v = std::strtof(a, &end); // FIX-R6
+                        if (end != a && v > 0.0f) return v; // FIX-R6
+                        return 21.0f / 9.0f; // FIX-R6
+                    }(); // FIX-R6
                     float dstWidth, dstHeight; // RDG3
                     extern float g_rdAspectK; // RDG3
                     if (s_aspect > 0.0f || s_aspect < 0.0f) // RDG3
@@ -7463,7 +7516,18 @@ void PS2Runtime::run()
                         float boxAspect = (s_aspect > 0.0f) ? s_aspect : winAspect;
                         if (s_aspect < 0.0f && ps2xRdTakeoverOn())
                         {
-                            if (k >= 1.0f)
+                            if (s_aspectMax > 0.0f && winAspect > s_aspectMax) // FIX-R6
+                            {
+                                boxAspect = s_aspectMax; // FIX-R6
+                                g_rdAspectK = s_aspectMax / (4.0f / 3.0f); // FIX-R6
+                                static bool s_aspectCapLogged = false; // FIX-R6
+                                if (!s_aspectCapLogged) // FIX-R6
+                                {
+                                    s_aspectCapLogged = true; // FIX-R6
+                                    ps2xSafeLog("[aspect] fill capped at %.2f (window %.2f)\n", s_aspectMax, winAspect); // FIX-R6
+                                }
+                            }
+                            else if (k >= 1.0f)
                             {
                                 boxAspect = winAspect;
                                 g_rdAspectK = k;
@@ -7611,6 +7675,7 @@ void PS2Runtime::run()
                         const int64_t tWorkEnd = paceQpcNow(); // PROBE-V3I
                         paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
                         const int64_t tWaitEnd = paceQpcNow(); // PROBE-V3I
+                        ps2xSdlSetPresentRegion(presentWidth, presentHeight); // FIX-R5
                         ps2xSdlPresent();
                         ps2xSdlForcePoll(); // FIX-RDG4Q
                         const int64_t tPresEnd = paceQpcNow(); // PROBE-V3I

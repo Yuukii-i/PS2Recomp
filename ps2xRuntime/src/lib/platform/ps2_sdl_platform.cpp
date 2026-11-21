@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <atomic> // FIX-RDG4Q
+#include <cctype> // FIX-R1
 #include <chrono> // FIX-RDG4Q
 #include <cmath>
 #include <cstdint>
@@ -38,6 +39,7 @@ bool ps2xSdlActive();
 bool ps2xSdlShouldClose();
 void ps2xSdlForcePoll(); // FIX-RDG4Q
 void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t strideBytes);
+void ps2xSdlSetPresentRegion(uint32_t w, uint32_t h); // FIX-R5
 void ps2xSdlPresent();
 const uint8_t *ps2xSdlLastFrameRgba(uint32_t &w, uint32_t &h, uint32_t &strideBytes); // FXC1
 void ps2xSdlSetTitle(const char *t);
@@ -110,6 +112,8 @@ namespace
 
         uint32_t frameW = 0;
         uint32_t frameH = 0;
+        uint32_t validW = 0; // FIX-R5
+        uint32_t validH = 0; // FIX-R5
         bool hasFrame = false;
         std::vector<uint8_t> cpuFrame;
 
@@ -488,6 +492,80 @@ namespace
             imageCount = caps.maxImageCount;
         }
 
+        // FIX-R1: present mode selection from PS2X_VK_PRESENT
+        const char *pmEnv = std::getenv("PS2X_VK_PRESENT");
+        std::string reqMode = (pmEnv && pmEnv[0]) ? pmEnv : "fifo";
+        std::string reqLower = reqMode;
+        for (char &c : reqLower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+        VkPresentModeKHR desiredMode = VK_PRESENT_MODE_FIFO_KHR;
+        const char *desiredName = "FIFO";
+        bool knownMode = true;
+        if (reqLower == "fifo")
+        {
+            desiredMode = VK_PRESENT_MODE_FIFO_KHR;
+            desiredName = "FIFO";
+        }
+        else if (reqLower == "mailbox")
+        {
+            desiredMode = VK_PRESENT_MODE_MAILBOX_KHR;
+            desiredName = "MAILBOX";
+        }
+        else if (reqLower == "immediate" || reqLower == "off")
+        {
+            desiredMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            desiredName = "IMMEDIATE";
+        }
+        else if (reqLower == "fifo_relaxed" || reqLower == "relaxed")
+        {
+            desiredMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+            desiredName = "FIFO_RELAXED";
+        }
+        else
+        {
+            knownMode = false;
+        }
+
+        uint32_t modeCount = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(g_sdl.physicalDevice, g_sdl.surface, &modeCount, nullptr);
+        std::vector<VkPresentModeKHR> modes(modeCount);
+        if (modeCount > 0)
+        {
+            vkGetPhysicalDeviceSurfacePresentModesKHR(g_sdl.physicalDevice, g_sdl.surface, &modeCount, modes.data());
+        }
+
+        bool supported = false;
+        if (knownMode)
+        {
+            for (VkPresentModeKHR m : modes)
+            {
+                if (m == desiredMode)
+                {
+                    supported = true;
+                    break;
+                }
+            }
+        }
+
+        VkPresentModeKHR chosenMode = VK_PRESENT_MODE_FIFO_KHR;
+        const char *chosenName = "FIFO";
+        static bool s_loggedPresentMode = false;
+        if (supported)
+        {
+            chosenMode = desiredMode;
+            chosenName = desiredName;
+        }
+        else
+        {
+            if (!s_loggedPresentMode && reqLower != "fifo")
+            {
+                std::printf("[sdl] present mode %s unavailable, using FIFO\n", reqMode.c_str());
+            }
+            chosenMode = VK_PRESENT_MODE_FIFO_KHR;
+            chosenName = "FIFO";
+        }
+
         VkSwapchainCreateInfoKHR sci{};
         sci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
         sci.surface = g_sdl.surface;
@@ -500,7 +578,7 @@ namespace
         sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         sci.preTransform = caps.currentTransform;
         sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        sci.presentMode = chosenMode; // FIX-R1
         sci.clipped = VK_TRUE;
         sci.oldSwapchain = VK_NULL_HANDLE;
 
@@ -517,6 +595,13 @@ namespace
         vkGetSwapchainImagesKHR(g_sdl.device, g_sdl.swapchain, &actualCount, nullptr);
         g_sdl.swapchainImages.resize(actualCount);
         vkGetSwapchainImagesKHR(g_sdl.device, g_sdl.swapchain, &actualCount, g_sdl.swapchainImages.data());
+
+        // FIX-R1: log chosen present mode once
+        if (!s_loggedPresentMode)
+        {
+            s_loggedPresentMode = true;
+            std::printf("[sdl] present mode=%s imageCount=%u\n", chosenName, actualCount);
+        }
 
         g_sdl.swapchainImageViews.resize(actualCount, VK_NULL_HANDLE);
         for (uint32_t i = 0; i < actualCount; ++i)
@@ -981,6 +1066,15 @@ bool ps2xSdlInit(const char *title, int w, int h)
         return false;
     }
 
+    // FIX-R1: start fullscreen when env PS2X_FULLSCREEN=1
+    if (const char *fsEnv = std::getenv("PS2X_FULLSCREEN"))
+    {
+        if (fsEnv[0] == '1')
+        {
+            SDL_SetWindowFullscreen(g_sdl.window, true);
+        }
+    }
+
     std::string vkErr;
     if (!InitVulkan(vkErr))
     {
@@ -1020,6 +1114,8 @@ namespace // FIX-RDG4Q
 {
     std::chrono::steady_clock::time_point g_sdlLastPoll{};
     bool g_sdlHasPolled = false;
+
+    void checkF11FullscreenToggle(); // FIX-R1
 
     void pollSdlEventsNow()
     {
@@ -1076,6 +1172,19 @@ namespace // FIX-RDG4Q
         }
         g_sdlLastPoll = std::chrono::steady_clock::now();
         g_sdlHasPolled = true;
+        checkF11FullscreenToggle(); // FIX-R1
+    }
+
+    // FIX-R1: toggle borderless fullscreen on F11 key edge
+    void checkF11FullscreenToggle()
+    {
+        if (g_sdl.window && ps2xSdlKeyPressedEdge(SDL_SCANCODE_F11) && !ps2xSdlImGuiWantsKeyboard())
+        {
+            bool isFs = (SDL_GetWindowFlags(g_sdl.window) & SDL_WINDOW_FULLSCREEN) != 0;
+            SDL_SetWindowFullscreen(g_sdl.window, !isFs);
+            g_sdl.framebufferResized = true;
+            g_sdl.prevKeys[SDL_SCANCODE_F11] = true;
+        }
     }
 } // namespace
 
@@ -1103,6 +1212,7 @@ bool ps2xSdlShouldClose()
         return g_sdl.shouldClose;
     }
     pollSdlEventsNow();
+    checkF11FullscreenToggle(); // FIX-R1
     return g_sdl.shouldClose;
 }
 
@@ -1164,6 +1274,12 @@ const uint8_t *ps2xSdlLastFrameRgba(uint32_t &w, uint32_t &h, uint32_t &strideBy
     h = g_sdl.frameH;
     strideBytes = g_sdl.frameW * 4u;
     return g_sdl.cpuFrame.data();
+}
+
+void ps2xSdlSetPresentRegion(uint32_t w, uint32_t h) // FIX-R5
+{
+    g_sdl.validW = w;
+    g_sdl.validH = h;
 }
 
 void ps2xSdlPresent()
@@ -1299,29 +1415,45 @@ void ps2xSdlPresent()
         VkImageSubresourceRange clearRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vkCmdClearColorImage(cmd, swapImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &clearRange);
 
-        const float srcAspect = static_cast<float>(g_sdl.frameW) / static_cast<float>(g_sdl.frameH);
-        const float dstAspect = static_cast<float>(g_sdl.swapchainExtent.width) / static_cast<float>(g_sdl.swapchainExtent.height);
-        int32_t dstX = 0;
-        int32_t dstY = 0;
-        int32_t dstW = static_cast<int32_t>(g_sdl.swapchainExtent.width);
-        int32_t dstH = static_cast<int32_t>(g_sdl.swapchainExtent.height);
-        if (dstAspect > srcAspect)
+        const uint32_t cropW = (g_sdl.validW > 0) ? std::min(g_sdl.validW, g_sdl.frameW) : g_sdl.frameW; // FIX-R5
+        const uint32_t cropH = (g_sdl.validH > 0) ? std::min(g_sdl.validH, g_sdl.frameH) : g_sdl.frameH; // FIX-R5
+        const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, cropW)); // FIX-R5
+        const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, cropH)); // FIX-R5
+        const float screenWidth = static_cast<float>(g_sdl.swapchainExtent.width); // FIX-R5
+        const float screenHeight = static_cast<float>(g_sdl.swapchainExtent.height); // FIX-R5
+
+        static const float s_aspect = []() { // FIX-R5
+            const char *a = std::getenv("PS2X_ASPECT");
+            if (!a || !*a) return 4.0f / 3.0f;
+            if (!std::strcmp(a, "native")) return 0.0f;
+            if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f;
+            if (!std::strcmp(a, "16:10")) return 1.6f;
+            if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f;
+            if (!std::strcmp(a, "fill")) return 4.0f / 3.0f;
+            return 0.0f;
+        }();
+
+        float dstWidth, dstHeight; // FIX-R5
+        if (s_aspect > 0.0f) // FIX-R5
         {
-            dstW = std::clamp(static_cast<int32_t>(static_cast<float>(g_sdl.swapchainExtent.height) * srcAspect + 0.5f),
-                              1, static_cast<int32_t>(g_sdl.swapchainExtent.width));
-            dstX = (static_cast<int32_t>(g_sdl.swapchainExtent.width) - dstW) / 2;
+            dstWidth = std::min(screenWidth, screenHeight * s_aspect);
+            dstHeight = dstWidth / s_aspect;
         }
-        else
+        else // FIX-R5
         {
-            dstH = std::clamp(static_cast<int32_t>(static_cast<float>(g_sdl.swapchainExtent.width) / srcAspect + 0.5f),
-                              1, static_cast<int32_t>(g_sdl.swapchainExtent.height));
-            dstY = (static_cast<int32_t>(g_sdl.swapchainExtent.height) - dstH) / 2;
+            const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+            dstWidth = srcWidth * scale;
+            dstHeight = srcHeight * scale;
         }
+        const int32_t dstW = static_cast<int32_t>(dstWidth); // FIX-R5
+        const int32_t dstH = static_cast<int32_t>(dstHeight); // FIX-R5
+        const int32_t dstX = (static_cast<int32_t>(screenWidth) - dstW) / 2; // FIX-R5
+        const int32_t dstY = (static_cast<int32_t>(screenHeight) - dstH) / 2; // FIX-R5
 
         VkImageBlit blit{};
         blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         blit.srcOffsets[0] = {0, 0, 0};
-        blit.srcOffsets[1] = {static_cast<int32_t>(g_sdl.frameW), static_cast<int32_t>(g_sdl.frameH), 1};
+        blit.srcOffsets[1] = {static_cast<int32_t>(cropW), static_cast<int32_t>(cropH), 1}; // FIX-R5
         blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         blit.dstOffsets[0] = {dstX, dstY, 0};
         blit.dstOffsets[1] = {dstX + dstW, dstY + dstH, 1};
