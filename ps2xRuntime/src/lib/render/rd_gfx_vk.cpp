@@ -416,6 +416,10 @@ struct RdVkState
 
     std::vector<std::vector<GarbageBuffer>> garbageBuffers;
     std::vector<std::vector<GarbageTexture>> garbageTextures;
+    // FIX-V3M: garbage destruction backlog
+    std::vector<GarbageBuffer> garbageBufBacklog;
+    std::vector<GarbageTexture> garbageTexBacklog;
+    size_t statBacklogMax = 0;
     std::vector<std::vector<VkCommandBuffer>> garbageCmds; // FIX-V3D
     std::vector<VkCommandBuffer> frameUploadCmd; // FIX-V3G
     std::vector<BufferCopy> stagingRings; // FIX-V3D
@@ -503,8 +507,34 @@ struct RdVkState
         poolTotalBytes = 0;
     }
 
+    void drainGarbageBacklog() // FIX-V3M
+    {
+        if (device == VK_NULL_HANDLE)
+            return;
+        for (const auto &gb : garbageBufBacklog)
+        {
+            if (gb.buffer != VK_NULL_HANDLE)
+                vkDestroyBuffer(device, gb.buffer, nullptr);
+            if (gb.memory != VK_NULL_HANDLE)
+                vkFreeMemory(device, gb.memory, nullptr);
+        }
+        garbageBufBacklog.clear();
+
+        for (const auto &gt : garbageTexBacklog)
+        {
+            if (gt.view != VK_NULL_HANDLE)
+                vkDestroyImageView(device, gt.view, nullptr);
+            if (gt.image != VK_NULL_HANDLE)
+                vkDestroyImage(device, gt.image, nullptr);
+            if (gt.memory != VK_NULL_HANDLE)
+                vkFreeMemory(device, gt.memory, nullptr);
+        }
+        garbageTexBacklog.clear();
+    }
+
     ~RdVkState() // FIX-V3E
     {
+        drainGarbageBacklog(); // FIX-V3M
         destroyImagePool();
     }
 };
@@ -884,6 +914,7 @@ bool ensureTargets(uint32_t w, uint32_t h)
     probe_v3b::msDevWait += dwMs; // PROBE-V3B
     probe_v3b::waits++; // PROBE-V3B
     probe_v3b::waitMs += dwMs; // PROBE-V3B
+    s_vk.drainGarbageBacklog(); // FIX-V3M
     destroyTargets();
 
     const bool useMsaa = (s_vk.msaaSamples > VK_SAMPLE_COUNT_1_BIT); // RDG2B
@@ -1403,14 +1434,14 @@ void flushGarbage(uint32_t frameIdx)
         s_vk.garbageCmds[frameIdx].clear();
     }
 
-    for (const auto &gb : s_vk.garbageBuffers[frameIdx])
+    // FIX-V3M: move this frame's buffer garbage into backlog
+    if (!s_vk.garbageBuffers[frameIdx].empty())
     {
-        if (gb.buffer != VK_NULL_HANDLE)
-            vkDestroyBuffer(s_vk.device, gb.buffer, nullptr);
-        if (gb.memory != VK_NULL_HANDLE)
-            vkFreeMemory(s_vk.device, gb.memory, nullptr);
+        s_vk.garbageBufBacklog.insert(s_vk.garbageBufBacklog.end(),
+                                     s_vk.garbageBuffers[frameIdx].begin(),
+                                     s_vk.garbageBuffers[frameIdx].end());
+        s_vk.garbageBuffers[frameIdx].clear();
     }
-    s_vk.garbageBuffers[frameIdx].clear();
 
     // FIX-V3E: pool recycled texture images instead of destroy/alloc
     const uint64_t MAX_POOL_BYTES = 256ULL * 1024 * 1024;
@@ -1427,12 +1458,8 @@ void flushGarbage(uint32_t frameIdx)
                     if (it->second.lastUsedSerial < oldest->second.lastUsedSerial)
                         oldest = it;
                 }
-                if (oldest->second.view != VK_NULL_HANDLE)
-                    vkDestroyImageView(s_vk.device, oldest->second.view, nullptr);
-                if (oldest->second.image != VK_NULL_HANDLE)
-                    vkDestroyImage(s_vk.device, oldest->second.image, nullptr);
-                if (oldest->second.memory != VK_NULL_HANDLE)
-                    vkFreeMemory(s_vk.device, oldest->second.memory, nullptr);
+                // FIX-V3M: push evicted image into backlog instead of destroying inline
+                s_vk.garbageTexBacklog.push_back({oldest->second.view, oldest->second.image, oldest->second.memory, 0, 0, 0, 0});
                 if (s_vk.poolTotalBytes >= oldest->second.bytes)
                     s_vk.poolTotalBytes -= oldest->second.bytes;
                 else
@@ -1457,14 +1484,69 @@ void flushGarbage(uint32_t frameIdx)
             }
         }
 
-        if (gt.view != VK_NULL_HANDLE)
-            vkDestroyImageView(s_vk.device, gt.view, nullptr);
-        if (gt.image != VK_NULL_HANDLE)
-            vkDestroyImage(s_vk.device, gt.image, nullptr);
-        if (gt.memory != VK_NULL_HANDLE)
-            vkFreeMemory(s_vk.device, gt.memory, nullptr);
+        // FIX-V3M: push unpooled texture garbage to backlog instead of destroying inline
+        s_vk.garbageTexBacklog.push_back(gt);
     }
     s_vk.garbageTextures[frameIdx].clear();
+
+    const size_t totalBacklog = s_vk.garbageBufBacklog.size() + s_vk.garbageTexBacklog.size(); // FIX-V3M
+    if (totalBacklog > s_vk.statBacklogMax) // FIX-V3M
+        s_vk.statBacklogMax = totalBacklog;
+
+    // FIX-V3M: process backlog FIFO with budget of 1.0 ms, checking clock every 4 items
+    const auto tBudgetStart = std::chrono::steady_clock::now();
+    const double budgetMs = 1.0;
+    size_t processedCount = 0;
+
+    size_t bufProcessed = 0;
+    while (bufProcessed < s_vk.garbageBufBacklog.size())
+    {
+        const auto &gb = s_vk.garbageBufBacklog[bufProcessed];
+        if (gb.buffer != VK_NULL_HANDLE)
+            vkDestroyBuffer(s_vk.device, gb.buffer, nullptr);
+        if (gb.memory != VK_NULL_HANDLE)
+            vkFreeMemory(s_vk.device, gb.memory, nullptr);
+        bufProcessed++;
+        processedCount++;
+
+        if (processedCount >= 4 && (processedCount % 4) == 0)
+        {
+            if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tBudgetStart).count() >= budgetMs)
+                break;
+        }
+    }
+    if (bufProcessed > 0)
+    {
+        s_vk.garbageBufBacklog.erase(s_vk.garbageBufBacklog.begin(), s_vk.garbageBufBacklog.begin() + bufProcessed);
+    }
+
+    if (s_vk.garbageBufBacklog.empty() &&
+        (processedCount < 4 || std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tBudgetStart).count() < budgetMs))
+    {
+        size_t texProcessed = 0;
+        while (texProcessed < s_vk.garbageTexBacklog.size())
+        {
+            const auto &gt = s_vk.garbageTexBacklog[texProcessed];
+            if (gt.view != VK_NULL_HANDLE)
+                vkDestroyImageView(s_vk.device, gt.view, nullptr);
+            if (gt.image != VK_NULL_HANDLE)
+                vkDestroyImage(s_vk.device, gt.image, nullptr);
+            if (gt.memory != VK_NULL_HANDLE)
+                vkFreeMemory(s_vk.device, gt.memory, nullptr);
+            texProcessed++;
+            processedCount++;
+
+            if (processedCount >= 4 && (processedCount % 4) == 0)
+            {
+                if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tBudgetStart).count() >= budgetMs)
+                    break;
+            }
+        }
+        if (texProcessed > 0)
+        {
+            s_vk.garbageTexBacklog.erase(s_vk.garbageTexBacklog.begin(), s_vk.garbageTexBacklog.begin() + texProcessed);
+        }
+    }
 }
 
 void applyPendingBufferWrites(uint32_t frameIdx)
@@ -2056,7 +2138,7 @@ void endFrame()
                         " dIdx=%llu dArr=%llu noFrame=%llu noPass=%llu noPipeline=%llu noVb=%llu noIb=%llu noDesc=%llu zeroCount=%llu"
                         " clears=%llu binds=%llu texCreated=%llu vbUpd=%llu uniformSets=%llu passBegun=%llu asyncUp=%u"
                         " t_wait=%.2f/%.2f t_rec=%.2f/%.2f t_draw=%.2f/%.2f t_tex=%.2f/%.2f t_end=%.2f/%.2f"
-                        " draws/f=%.1f/%llu descSets/f=%.1f+%.1f(max=%llu+%llu) pool=%llu/%llu\n", // FIX-V3E
+                        " draws/f=%.1f/%llu descSets/f=%.1f+%.1f(max=%llu+%llu) pool=%llu/%llu backlog=%llu\n", // FIX-V3M
                         static_cast<unsigned long long>(s_vk.statFrames),
                         static_cast<unsigned long long>(s_vk.statDraws),
                         s_vk.pipelines.size(),
@@ -2089,7 +2171,8 @@ void endFrame()
                         static_cast<unsigned long long>(s_vk.winDescHitsMax),
                         static_cast<unsigned long long>(s_vk.winDescMissesMax),
                         static_cast<unsigned long long>(s_vk.statTexPoolHit), // FIX-V3E
-                        static_cast<unsigned long long>(s_vk.statTexPoolMiss)); // FIX-V3E
+                        static_cast<unsigned long long>(s_vk.statTexPoolMiss), // FIX-V3E
+                        static_cast<unsigned long long>(s_vk.statBacklogMax)); // FIX-V3M
             s_vk.winFrames = 0;
             s_vk.winWaitSumMs = s_vk.winWaitMaxMs = 0.0;
             s_vk.winRecSumMs = s_vk.winRecMaxMs = 0.0;
@@ -2099,6 +2182,7 @@ void endFrame()
             s_vk.winDrawsSum = s_vk.winDrawsMax = 0;
             s_vk.winDescHitsSum = s_vk.winDescHitsMax = 0;
             s_vk.winDescMissesSum = s_vk.winDescMissesMax = 0;
+            s_vk.statBacklogMax = s_vk.garbageBufBacklog.size() + s_vk.garbageTexBacklog.size(); // FIX-V3M
             s_vk.lastLogTime = now;
         }
     }

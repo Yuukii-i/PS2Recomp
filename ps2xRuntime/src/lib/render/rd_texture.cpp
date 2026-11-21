@@ -48,6 +48,16 @@ std::atomic<uint32_t> g_rdRtAsyncSkips{0};       // FEAT-RD47
 std::atomic<uint32_t> g_rdRtForced{0};           // FEAT-RD47
 extern uint32_t ps2xRdFbPageRanges(uint32_t *first, uint32_t *last); // FEAT-RD28b
 std::atomic<uint64_t> g_rdRtBytes{0};            // FEAT-RD28
+static std::atomic<uint64_t> g_decNs{0}, g_decCount{0}; // PROBE-V3J
+
+double ps2xRdTexTakeDecodeMs(uint32_t *countOut) // PROBE-V3J
+{
+    const uint64_t ns = g_decNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t cnt = g_decCount.exchange(0, std::memory_order_relaxed);
+    if (countOut)
+        *countOut = static_cast<uint32_t>(cnt);
+    return static_cast<double>(ns) * 1e-6;
+}
 void ps2xRdMarkVramWrite(uint32_t firstByte, uint32_t byteCount) // FEAT-RD5b
 {
     if (byteCount == 0u || firstByte >= 0x400000u)
@@ -1200,6 +1210,7 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
         } // FEAT-RD3c
     }
 
+    const auto t_dec0 = std::chrono::steady_clock::now(); // PROBE-V3J
     static thread_local std::vector<uint32_t> t_getRaw; // FIX-RD73
     const size_t texelCount = static_cast<size_t>(w) * static_cast<size_t>(h); // FIX-RD73
     t_getRaw.resize(texelCount); // FIX-RD73
@@ -1225,6 +1236,9 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
     uint64_t hash = fnv1a64(params, sizeof(params) - sizeof(uint32_t));
     hash = fnv1a64(&texa, sizeof(texa), hash);
     hash = fnv1a64(s_rgba.data(), s_rgba.size(), hash);
+    const auto t_dec1 = std::chrono::steady_clock::now(); // PROBE-V3J
+    g_decNs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_dec1 - t_dec0).count()), std::memory_order_relaxed); // PROBE-V3J
+    g_decCount.fetch_add(1, std::memory_order_relaxed); // PROBE-V3J
 
     { // FEAT-RD3b texture dump
         static const bool s_dump = []() {

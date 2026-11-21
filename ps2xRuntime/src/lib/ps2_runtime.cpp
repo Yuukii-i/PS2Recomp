@@ -6565,7 +6565,7 @@ void PS2Runtime::run()
         fflush(stderr);
     }
     // FEAT-FT3: in-game frame-time recorder (PS2X_FT=<prefix>)
-    struct Ft3Entry { int64_t qpc; int64_t epochMs; uint8_t tag; }; // FEAT-HP2
+    struct Ft3Entry { int64_t qpc; int64_t epochMs; uint8_t tag; uint64_t seq; uint64_t kicks; uint8_t phase; float seenGap; float work; float wait; float pres; float draw; float texDecMs; uint32_t texDecN; float b1Ms; float b2Ms; float b3Ms; float b4Ms; float b5Ms; float beginMs; float totalMs; }; // PROBE-V3L
     constexpr size_t kFt3Cap = 1u << 20;
     static const char *s_ft3Env = std::getenv("PS2X_FT");
     static const bool s_ft3On = (s_ft3Env && s_ft3Env[0] != '\0');
@@ -6598,7 +6598,7 @@ void PS2Runtime::run()
             FILE *fp = std::fopen(outPath.c_str(), "w");
             if (fp)
             {
-                std::fprintf(fp, "Application,ProcessID,SwapChainAddress,TimeInSeconds,msBetweenPresents,Tag,EpochMs\n"); // FEAT-HP2
+                std::fprintf(fp, "Application,ProcessID,SwapChainAddress,TimeInSeconds,msBetweenPresents,Tag,EpochMs,Seq,Kicks,Phase,SeenGapMs,WorkMs,WaitMs,PresMs,DrawMs,TexDecMs,TexDecN,B1Ms,B2Ms,B3Ms,B4Ms,B5Ms,BeginMs,TotalMs\n"); // PROBE-V3L
                 std::fflush(fp);
             }
             uint64_t flushed = 0;
@@ -6627,7 +6627,7 @@ void PS2Runtime::run()
                     const double tSec = static_cast<double>(e.qpc - qpc0) * invFreqSec;
                     const double dtMs = (flushed == 0 && idx == 0) ? 0.0 : static_cast<double>(e.qpc - prevQpc) * invFreqMs;
                     prevQpc = e.qpc;
-                    std::fprintf(fp, "ApeEscape3.exe,%lu,0x1,%.6f,%.4f,%u,%lld\n", pid, tSec, dtMs, static_cast<unsigned>(e.tag), static_cast<long long>(e.epochMs)); // FEAT-HP2
+                    std::fprintf(fp, "ApeEscape3.exe,%lu,0x1,%.6f,%.4f,%u,%lld,%llu,%llu,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n", pid, tSec, dtMs, static_cast<unsigned>(e.tag), static_cast<long long>(e.epochMs), static_cast<unsigned long long>(e.seq), static_cast<unsigned long long>(e.kicks), static_cast<unsigned>(e.phase), e.seenGap, e.work, e.wait, e.pres, e.draw, e.texDecMs, static_cast<unsigned>(e.texDecN), e.b1Ms, e.b2Ms, e.b3Ms, e.b4Ms, e.b5Ms, e.beginMs, e.totalMs); // PROBE-V3L
                 }
                 std::fflush(fp);
                 flushed = cur;
@@ -6646,6 +6646,45 @@ void PS2Runtime::run()
                 std::fclose(fp);
         });
     }
+    // PROBE-V3H: helper to compute phase bitmask and append Ft3Entry
+    // PROBE-V3I: stage timing helper and ft3Record taking 4 stage timing floats (ms)
+    struct Ft3Stages { float seenGap; float work; float wait; float pres; }; // PROBE-V3I
+    static int64_t s_ft3PrevSeenQpc = 0; // PROBE-V3I
+    auto calcFt3Stages = [&](int64_t tSeen, int64_t tWorkEnd, int64_t tWaitEnd, int64_t tPresEnd) -> Ft3Stages { // PROBE-V3I
+        const double qpcFreqD = static_cast<double>(paceQpcFreq());
+        const float seenGap = (s_ft3PrevSeenQpc != 0 && qpcFreqD > 0.0) ? static_cast<float>((tSeen - s_ft3PrevSeenQpc) * 1000.0 / qpcFreqD) : 0.0f;
+        s_ft3PrevSeenQpc = tSeen;
+        const float work = (qpcFreqD > 0.0) ? static_cast<float>((tWorkEnd - tSeen) * 1000.0 / qpcFreqD) : 0.0f;
+        const float wait = (qpcFreqD > 0.0) ? static_cast<float>((tWaitEnd - tWorkEnd) * 1000.0 / qpcFreqD) : 0.0f;
+        const float pres = (qpcFreqD > 0.0) ? static_cast<float>((tPresEnd - tWaitEnd) * 1000.0 / qpcFreqD) : 0.0f;
+        return {seenGap, work, wait, pres};
+    };
+    auto ft3Record = [&](uint8_t tag, uint64_t seq, uint64_t kicks, float seenGap = 0.0f, float work = 0.0f, float wait = 0.0f, float pres = 0.0f, float draw = 0.0f, float texDecMs = 0.0f, uint32_t texDecN = 0, float b1Ms = 0.0f, float b2Ms = 0.0f, float b3Ms = 0.0f, float b4Ms = 0.0f, float b5Ms = 0.0f, float beginMs = 0.0f, float totalMs = 0.0f) { // PROBE-V3L
+        if (!s_ft3On)
+            return;
+        long long qpcNow = 0;
+#ifdef _WIN32
+        QueryPerformanceCounter(&qpcNow);
+#else
+        qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+        const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        uint8_t phase = 0;
+        if (g_ps2xPause.load(std::memory_order_relaxed) != 0)
+            phase |= (1u << 0);
+        if (g_rdFrameIsFx.load(std::memory_order_relaxed))
+            phase |= (1u << 1);
+        if (probe_ae::isMovieActive(m_memory.getRDRAM()))
+            phase |= (1u << 2);
+        const auto nowSteady = std::chrono::steady_clock::now();
+        const auto diffMs = std::chrono::duration_cast<std::chrono::milliseconds>(nowSteady - g_lastSceneTransitionTime).count();
+        if (diffMs >= 0 && diffMs < 4000)
+            phase |= (1u << 3);
+
+        const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
+        ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, tag, seq, kicks, phase, seenGap, work, wait, pres, draw, texDecMs, texDecN, b1Ms, b2Ms, b3Ms, b4Ms, b5Ms, beginMs, totalMs}; // PROBE-V3L
+        ft3WriteCount.store(idx + 1, std::memory_order_release);
+    };
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
         tick++;
@@ -6968,6 +7007,7 @@ void PS2Runtime::run()
         const bool vblankLatchOn = isVblankLatchEnabled();
         constexpr int64_t kIdleRepresentMs = 250; // PERF-IR2: re-present an unchanged frame only every 250 ms (was 33 ms: ~25 redundant sync+de-swizzle presents/s at the title, kd)
         const bool hasNewFrame = vblankLatchOn ? (currentPresentSeq != s_lastPresentedSeq) : (currentGsKicks != s_lastPresentedGsKicks); // FIX-PACE1
+        const int64_t tSeen = paceQpcNow(); // PROBE-V3I
         const bool shouldPresent = pauseToggled || hasNewFrame || (timeSinceLastPresent >= kIdleRepresentMs); // FEAT-PA1 // FIX-PACE1
 
         if (shouldPresent)
@@ -7387,27 +7427,17 @@ void PS2Runtime::run()
                         s_nextSwapQpc = 0;
                     }
                 }
-                if (s_ft3On) // FEAT-FT3
-                {
-                    long long qpcNow = 0;
-#ifdef _WIN32
-                    QueryPerformanceCounter(&qpcNow);
-#else
-                    qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-#endif
-                    const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); // FEAT-HP2
-                    const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
-                    ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag}; // FEAT-HP2
-                    ft3WriteCount.store(idx + 1, std::memory_order_release);
-                }
+                ft3Record(ft3Tag, currentPresentSeq, currentGsKicks); // PROBE-V3H
             }
             else // SDL-FE
             {
 #if defined(PS2X_HAS_SDL3) // RDG3
                 if (rdgfx_vk::active() && ps2xRdTakeoverOn() && !rdClassic) // RDG3
                 {
+                    const int64_t tDraw0 = paceQpcNow(); // PROBE-V3J
                     rdgfx_vk::beginFrame(); // RDG3
                     rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 1.0f); // RDG3
+                    const int64_t tBegin1 = paceQpcNow(); // PROBE-V3L
                     int rw = 0, rh = 0; // RDG3
                     rdgfx::getBackbufferSize(rw, rh); // RDG3
                     const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth)); // RDG3
@@ -7467,25 +7497,41 @@ void PS2Runtime::run()
                     const float dstX = (screenWidth - dstWidth) * 0.5f; // RDG3
                     const float dstY = (screenHeight - dstHeight) * 0.5f; // RDG3
                     (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight); // RDG3
+                    const int64_t tDraw1 = paceQpcNow(); // PROBE-V3J
+                    const double qpcFreqDraw = static_cast<double>(paceQpcFreq()); // PROBE-V3J
+                    const float drawMs = (qpcFreqDraw > 0.0) ? static_cast<float>((tDraw1 - tDraw0) * 1000.0 / qpcFreqDraw) : 0.0f; // PROBE-V3J
+                    const float beginMs = (qpcFreqDraw > 0.0) ? static_cast<float>((tBegin1 - tDraw0) * 1000.0 / qpcFreqDraw) : 0.0f; // PROBE-V3L
+                    float b1Ms = 0.0f, b2Ms = 0.0f, b3Ms = 0.0f, b4Ms = 0.0f, b5Ms = 0.0f; // PROBE-V3K
+                    float totalMs = 0.0f; // PROBE-V3L
+                    if (isPace2Enabled()) // PROBE-V3K
+                    {
+                        int64_t b[6] = {};
+                        ps2xRdPace2Take(b);
+                        if (qpcFreqDraw > 0.0)
+                        {
+                            const double toMs = 1000.0 / qpcFreqDraw;
+                            totalMs = static_cast<float>(b[0] * toMs); // PROBE-V3L
+                            b1Ms = static_cast<float>(b[1] * toMs);
+                            b2Ms = static_cast<float>(b[2] * toMs);
+                            b3Ms = static_cast<float>(b[3] * toMs);
+                            b4Ms = static_cast<float>(b[4] * toMs);
+                            b5Ms = static_cast<float>(b[5] * toMs);
+                        }
+                    }
                     if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
                         m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
+                    const int64_t tWorkEnd = paceQpcNow(); // PROBE-V3I
                     paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
+                    const int64_t tWaitEnd = paceQpcNow(); // PROBE-V3I
                     rdgfx_vk::endFrame(); // RDG3
                     ps2xSdlForcePoll(); // FIX-RDG4Q
+                    const int64_t tPresEnd = paceQpcNow(); // PROBE-V3I
                     paceAfterSwapSdl(); // FIX-V3F
-                    if (s_ft3On) // FIX-V3F
-                    {
-                        long long qpcNow = 0;
-#ifdef _WIN32
-                        QueryPerformanceCounter(&qpcNow);
-#else
-                        qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-#endif
-                        const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-                        const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
-                        ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag};
-                        ft3WriteCount.store(idx + 1, std::memory_order_release);
-                    }
+                    const auto st = calcFt3Stages(tSeen, tWorkEnd, tWaitEnd, tPresEnd); // PROBE-V3I
+                    extern double ps2xRdTexTakeDecodeMs(uint32_t *countOut); // PROBE-V3J
+                    uint32_t texDecN = 0; // PROBE-V3J
+                    const float texDecMs = static_cast<float>(ps2xRdTexTakeDecodeMs(&texDecN)); // PROBE-V3J
+                    ft3Record(ft3Tag, currentPresentSeq, currentGsKicks, st.seenGap, st.work, st.wait, st.pres, drawMs, texDecMs, texDecN, b1Ms, b2Ms, b3Ms, b4Ms, b5Ms, beginMs, totalMs); // PROBE-V3L
                 }
                 else // RDG3
                 {
@@ -7524,26 +7570,18 @@ void PS2Runtime::run()
                         if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
                             m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
 
+                        const int64_t tWorkEnd = paceQpcNow(); // PROBE-V3I
                         paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
+                        const int64_t tWaitEnd = paceQpcNow(); // PROBE-V3I
                         const auto t_f0 = std::chrono::steady_clock::now(); // PROBE-V3B
                         rdgfx_vk::endFrame(); // FXC1
                         ps2xSdlForcePoll(); // FXC1
+                        const int64_t tPresEnd = paceQpcNow(); // PROBE-V3I
                         const auto t_f1 = std::chrono::steady_clock::now(); // PROBE-V3B
                         const double cur_fMs = std::chrono::duration<double, std::milli>(t_f1 - t_f0).count(); // PROBE-V3B
                         paceAfterSwapSdl(); // FIX-V3F
-                        if (s_ft3On) // FIX-V3F
-                        {
-                            long long qpcNow = 0;
-#ifdef _WIN32
-                            QueryPerformanceCounter(&qpcNow);
-#else
-                            qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-#endif
-                            const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-                            const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
-                            ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag};
-                            ft3WriteCount.store(idx + 1, std::memory_order_release);
-                        }
+                        const auto st = calcFt3Stages(tSeen, tWorkEnd, tWaitEnd, tPresEnd); // PROBE-V3I
+                        ft3Record(ft3Tag, currentPresentSeq, currentGsKicks, st.seenGap, st.work, st.wait, st.pres); // PROBE-V3I
 
                         ++probe_v3b::n; // PROBE-V3B
                         probe_v3b::aSum += cur_aMs; // PROBE-V3B
@@ -7559,23 +7597,15 @@ void PS2Runtime::run()
                     {
                         if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
                             m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
+                        const int64_t tWorkEnd = paceQpcNow(); // PROBE-V3I
                         paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
+                        const int64_t tWaitEnd = paceQpcNow(); // PROBE-V3I
                         ps2xSdlPresent();
                         ps2xSdlForcePoll(); // FIX-RDG4Q
+                        const int64_t tPresEnd = paceQpcNow(); // PROBE-V3I
                         paceAfterSwapSdl(); // FIX-V3F
-                        if (s_ft3On) // FIX-V3F
-                        {
-                            long long qpcNow = 0;
-#ifdef _WIN32
-                            QueryPerformanceCounter(&qpcNow);
-#else
-                            qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-#endif
-                            const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-                            const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
-                            ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag};
-                            ft3WriteCount.store(idx + 1, std::memory_order_release);
-                        }
+                        const auto st = calcFt3Stages(tSeen, tWorkEnd, tWaitEnd, tPresEnd); // PROBE-V3I
+                        ft3Record(ft3Tag, currentPresentSeq, currentGsKicks, st.seenGap, st.work, st.wait, st.pres); // PROBE-V3I
                     }
                     const auto fxcNow = std::chrono::steady_clock::now(); // PROBE-FXC2
                     if (std::chrono::duration_cast<std::chrono::milliseconds>(fxcNow - s_fxcLastLog).count() >= 1000) // PROBE-FXC2
