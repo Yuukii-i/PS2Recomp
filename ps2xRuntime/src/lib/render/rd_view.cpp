@@ -1190,13 +1190,30 @@ static bool rdSerialInRanges(uint32_t s, const std::vector<RdSerialRange> &range
     return false;
 }
 
-static bool rdRingCoversRanges(uint32_t ringMin, uint32_t ringMax, const std::vector<RdSerialRange> &ranges) // FEAT-RD33
+// FIX-V3R: env-gated tail tolerance for 2D/3D cover chooser
+static const uint32_t s_coverTol = []{
+    extern void ps2xLoadConfig();
+    ps2xLoadConfig();
+    const char *e = std::getenv("PS2X_RD_COVER_TOL");
+    return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+}(); // FIX-V3R
+
+static bool rdRingCoversRanges(uint32_t ringMin, uint32_t ringMax, const std::vector<RdSerialRange> &ranges) // FEAT-RD33 // FIX-V3R
 {
     if (ranges.empty())
         return true;
     if (ringMin == 0u)
         return false;
-    return ringMin <= ranges.front().first && ranges.back().last <= ringMax;
+    if (s_coverTol == 0u)
+        return ringMin <= ranges.front().first && ranges.back().last <= ringMax;
+    for (const RdSerialRange &r : ranges) // FIX-V3R
+    {
+        if (r.first < ringMin)
+            return false;
+        if (static_cast<uint64_t>(r.last) > static_cast<uint64_t>(ringMax) + s_coverTol)
+            return false;
+    }
+    return true;
 }
 
 void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped, uint32_t gMin, uint32_t gMax, const uint32_t *mainRangePairs, size_t numMainRanges) // FEAT-RD8 // FEAT-RD13 // FEAT-RD33
@@ -1579,6 +1596,60 @@ static bool isRdCopyBufSkip(const Rd2DBatch &b) // FIX-RD87 // FIX-RD87B
     return findRdSnapTex(b, false) == 0u;
 }
 
+// PROBE-V3N: draw sequence tracking
+static uint64_t s_v3nLast3dSeq = 0; // PROBE-V3N
+static uint64_t s_v3nLast2dSeq = 0; // PROBE-V3N
+static uint32_t s_v3nLastFlags = 0; // PROBE-V3N
+
+void ps2xRdGetDrawSeqs(uint64_t *seq3d, uint64_t *seq2d, uint32_t *flags) // PROBE-V3N
+{
+    if (seq3d)
+        *seq3d = s_v3nLast3dSeq;
+    if (seq2d)
+        *seq2d = s_v3nLast2dSeq;
+    if (flags)
+        *flags = s_v3nLastFlags;
+}
+
+// PROBE-V3O: published sequences and chooser probe
+static int32_t s_v3oLastChosen2d = -1;  // PROBE-V3O
+static uint32_t s_v3oLastCoverFail = 0; // PROBE-V3O
+
+void ps2xRdGetPublishedSeqs(uint64_t *gen3d, uint64_t *gen2d) // PROBE-V3O
+{
+    std::lock_guard<std::mutex> lock(g_rdMutex);
+    if (gen3d)
+        *gen3d = g_rd3dSeq;
+    if (gen2d)
+        *gen2d = g_rd2dSeq;
+}
+
+void ps2xRdGetDrawSeqs2(int32_t *chosen2d, uint32_t *coverFail) // PROBE-V3O
+{
+    if (chosen2d)
+        *chosen2d = s_v3oLastChosen2d;
+    if (coverFail)
+        *coverFail = s_v3oLastCoverFail;
+}
+
+// PROBE-V3Q: cover probe for rdRingCoversRanges failures
+static const bool s_coverLog = []{
+    extern void ps2xLoadConfig();
+    ps2xLoadConfig();
+    const char *e = std::getenv("PS2X_RD_COVERLOG");
+    return e && e[0] == '1';
+}(); // PROBE-V3Q
+static uint32_t s_coverLogLines = 0;  // PROBE-V3Q
+static uint32_t s_coverFailCount = 0; // PROBE-V3Q
+
+// FIX-V3S: env-gated constant one-flip pairing lag in 2D/3D chooser
+static const bool s_pairLag = []{
+    extern void ps2xLoadConfig();
+    ps2xLoadConfig();
+    const char *e = std::getenv("PS2X_RD_PAIRLAG");
+    return e && e[0] == '1';
+}(); // FIX-V3S
+
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
     const bool pace2On = pace2Enabled(); // PROBE-PACE2
@@ -1593,8 +1664,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     bool hasNew2d = false; // FEAT-RD8
     bool needRealign = false; // FEAT-RD13
     int chosen2dIdx = -1;     // FEAT-RD33
+    uint32_t coverFail = 0;   // PROBE-V3O
     bool pendingUpload[kRdSlotCount] = {}; // FEAT-RD14 // FEAT-RD34
     uint32_t evictedMaxSnap = 0u; // FEAT-RD34
+    bool v3nNew3d = false; // PROBE-V3N
+    bool v3nNew2d = false; // PROBE-V3N
     {
         Pace2Scope pace2B1Scope(g_pace2Rd.b1, pace2On); // PROBE-PACE2
         std::lock_guard<std::mutex> lock(g_rdMutex);
@@ -1602,6 +1676,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         {
             ++g_rdGpu.drawsEmpty;
             ++g_rdGpu.drawsEmptySempty;
+            s_v3nLast3dSeq = g_rdGpu.last3dSeq; // PROBE-V3N
+            s_v3nLast2dSeq = g_rdGpu.last2dSeq; // PROBE-V3N
+            s_v3nLastFlags = (1u << 2);         // PROBE-V3N
+            s_v3oLastChosen2d = -1;             // PROBE-V3O
+            s_v3oLastCoverFail = 0;             // PROBE-V3O
             if (ps2xRdTakeoverOn()) // FEAT-RD12: clear to black instead of drawing stale GS texture
                 return true;
             return false;
@@ -1626,10 +1705,78 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (sMax > ringMax)
                     ringMax = sMax;
             }
-            if (g_rd2dFrames[0].valid && rdRingCoversRanges(ringMin, ringMax, g_rd2dFrames[0].mainRanges))
-                chosen2dIdx = 0;
-            else if (g_rd2dFrames[1].valid && rdRingCoversRanges(ringMin, ringMax, g_rd2dFrames[1].mainRanges))
-                chosen2dIdx = 1;
+            const int firstTry = s_pairLag ? 1 : 0;   // FIX-V3S
+            const int secondTry = s_pairLag ? 0 : 1;  // FIX-V3S
+            if (g_rd2dFrames[firstTry].valid && rdRingCoversRanges(ringMin, ringMax, g_rd2dFrames[firstTry].mainRanges)) // FIX-V3S
+                chosen2dIdx = firstTry; // FIX-V3S
+            else if (g_rd2dFrames[secondTry].valid && rdRingCoversRanges(ringMin, ringMax, g_rd2dFrames[secondTry].mainRanges)) // FIX-V3S
+                chosen2dIdx = secondTry; // FIX-V3S
+            else if (g_rd2dFrames[0].valid || g_rd2dFrames[1].valid) // PROBE-V3O
+            {
+                coverFail = 1; // PROBE-V3O
+                if (s_coverLog && s_coverLogLines < 400u) // PROBE-V3Q
+                {
+                    const uint32_t counter = s_coverFailCount++; // PROBE-V3Q
+                    if (counter < 40u || (counter % 5u) == 0u) // PROBE-V3Q
+                    {
+                        ++s_coverLogLines; // PROBE-V3Q
+                        std::string slotsStr = "["; // PROBE-V3Q
+                        bool firstSlot = true; // PROBE-V3Q
+                        for (size_t idx = 0; idx < kRdSlotCount; ++idx) // PROBE-V3Q
+                        {
+                            const Rd3DFrame &rf = g_rd3dRing[idx]; // PROBE-V3Q
+                            const RdGpuSlot &gs = g_rdGpu.slots[idx]; // PROBE-V3Q
+                            const uint64_t seq = (rf.seq != 0u) ? rf.seq : gs.seq; // PROBE-V3Q
+                            if (seq == 0u) // PROBE-V3Q
+                                continue; // PROBE-V3Q
+                            const uint32_t sMin = (rf.seq != 0u) ? rf.sMin : gs.sMin; // PROBE-V3Q
+                            const uint32_t sMax = (rf.seq != 0u) ? rf.sMax : gs.sMax; // PROBE-V3Q
+                            if (!firstSlot) // PROBE-V3Q
+                                slotsStr += ","; // PROBE-V3Q
+                            char sbuf[64]; // PROBE-V3Q
+                            std::snprintf(sbuf, sizeof(sbuf), "%llu:%u-%u", // PROBE-V3Q
+                                          static_cast<unsigned long long>(seq), sMin, sMax); // PROBE-V3Q
+                            slotsStr += sbuf; // PROBE-V3Q
+                            firstSlot = false; // PROBE-V3Q
+                        }
+                        slotsStr += "]"; // PROBE-V3Q
+                        const uint32_t f0First = g_rd2dFrames[0].mainRanges.empty() ? 0u : g_rd2dFrames[0].mainRanges.front().first; // PROBE-V3Q
+                        const uint32_t f0Last = g_rd2dFrames[0].mainRanges.empty() ? 0u : g_rd2dFrames[0].mainRanges.back().last; // PROBE-V3Q
+                        const uint32_t f1First = g_rd2dFrames[1].mainRanges.empty() ? 0u : g_rd2dFrames[1].mainRanges.front().first; // PROBE-V3Q
+                        const uint32_t f1Last = g_rd2dFrames[1].mainRanges.empty() ? 0u : g_rd2dFrames[1].mainRanges.back().last; // PROBE-V3Q
+                        uint32_t missing0 = 0u; // PROBE-V3Q
+                        for (const RdSerialRange &r : g_rd2dFrames[0].mainRanges) // PROBE-V3Q
+                        {
+                            if (r.last >= r.first) // PROBE-V3Q
+                            {
+                                const uint32_t total = r.last - r.first + 1u; // PROBE-V3Q
+                                if (ringMin != 0u && ringMin <= ringMax) // PROBE-V3Q
+                                {
+                                    const uint32_t ovFirst = std::max(r.first, ringMin); // PROBE-V3Q
+                                    const uint32_t ovLast = std::min(r.last, ringMax); // PROBE-V3Q
+                                    const uint32_t inside = (ovFirst <= ovLast) ? (ovLast - ovFirst + 1u) : 0u; // PROBE-V3Q
+                                    missing0 += (total - inside); // PROBE-V3Q
+                                }
+                                else // PROBE-V3Q
+                                {
+                                    missing0 += total; // PROBE-V3Q
+                                }
+                            }
+                        }
+                        ps2xSafeLog("[cover] g3=%llu g2=%llu ringMin=%u ringMax=%u slots=%s f0.valid=%d f0.ranges=%zu f0.first=%u f0.last=%u f0.n=%u f1.valid=%d f1.ranges=%zu f1.first=%u f1.last=%u f1.n=%u missing0=%u\n", // PROBE-V3Q
+                                    static_cast<unsigned long long>(g_rd3dSeq), // PROBE-V3Q
+                                    static_cast<unsigned long long>(g_rd2dSeq), // PROBE-V3Q
+                                    ringMin, ringMax, slotsStr.c_str(), // PROBE-V3Q
+                                    g_rd2dFrames[0].valid ? 1 : 0, // PROBE-V3Q
+                                    g_rd2dFrames[0].mainRanges.size(), // PROBE-V3Q
+                                    f0First, f0Last, g_rd2dFrames[0].mainSerialCount, // PROBE-V3Q
+                                    g_rd2dFrames[1].valid ? 1 : 0, // PROBE-V3Q
+                                    g_rd2dFrames[1].mainRanges.size(), // PROBE-V3Q
+                                    f1First, f1Last, g_rd2dFrames[1].mainSerialCount, // PROBE-V3Q
+                                    missing0); // PROBE-V3Q
+                    }
+                }
+            }
 
             if (chosen2dIdx >= 0)
             {
@@ -1675,12 +1822,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         }
                     }
                     g_rdGpu.last3dSeq = g_rd3dSeq;
+                    v3nNew3d = true; // PROBE-V3N
                 }
                 if (g_rd2dSeq != g_rdGpu.last2dSeq) // FEAT-RD13
                 {
                     g_rdGpu.frames2d[0] = g_rd2dFrames[0];
                     g_rdGpu.frames2d[1] = g_rd2dFrames[1];
                     g_rdGpu.last2dSeq = g_rd2dSeq;
+                    v3nNew2d = true; // PROBE-V3N
                 }
                 needRealign = true;
             }
@@ -1688,6 +1837,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             {
                 ++g_rdGpu.drawsEmpty;
                 ++g_rdGpu.drawsEmptyMissing;
+                s_v3nLast3dSeq = g_rdGpu.last3dSeq; // PROBE-V3N
+                s_v3nLast2dSeq = g_rdGpu.last2dSeq; // PROBE-V3N
+                s_v3nLastFlags = (1u << 2);         // PROBE-V3N
+                s_v3oLastChosen2d = chosen2dIdx;    // PROBE-V3O
+                s_v3oLastCoverFail = coverFail;     // PROBE-V3O
                 return ps2xRdTakeoverOn();
             }
         }
@@ -2085,6 +2239,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         else if (g_rdGpu.lastEmptyReason == 3) ++g_rdGpu.drawsEmptyOverwritten;
         else if (g_rdGpu.lastEmptyReason == 4) ++g_rdGpu.drawsEmptySkipped;
         else ++g_rdGpu.drawsEmptySempty;
+        s_v3nLast3dSeq = g_rdGpu.last3dSeq; // PROBE-V3N
+        s_v3nLast2dSeq = g_rdGpu.last2dSeq; // PROBE-V3N
+        s_v3nLastFlags = (1u << 2);         // PROBE-V3N
+        s_v3oLastChosen2d = chosen2dIdx;    // PROBE-V3O
+        s_v3oLastCoverFail = coverFail;     // PROBE-V3O
         return ps2xRdTakeoverOn();
     }
 
@@ -3738,6 +3897,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             ps2xSafeLog("[rdfb] used=%u copies=%u frozen=%u last=%u blend=%u lastf=%.3f snaps=%u snapUsed=%u snapSkippedNoGeom=%u copyskip=%u pal=%u palFail=%u palFb=%u a1=%u psm27why=%u/%u/%u/%u/%u/%u/ok=%u lastValid=%d lastId=%u prevId=%u nftrim=%u nfskip=%u\n", s_fbTexUsed, s_fbTexCopies, s_fbTexFrozen, s_fbTexLastCopies, s_fbTexBlendCount, s_fbTexLastF, s_snapCount, s_snapUsedCount, s_snapSkippedNoGeom, s_fbCopySkip, s_fbTexPal, s_fbTexPalFail, s_fbTexPalFb, s_fbTexAlphaFix, s_psm27WhyOff, s_psm27WhyNoPrev, s_psm27WhyNotFb, s_psm27WhyDispFbp, s_psm27WhyBadPsm, s_psm27WhyNoRange, s_psm27Ok, s_lastSceneFilled ? 1 : 0, s_lastSceneTexId, s_prevTexId, s_nextFrameTrim, s_nextFrameSkip); // FIX-RD79 // FIX-RD80 // FIX-RD81 // FIX-RD81b // FIX-RD82B // PROBE-RD82C // FIX-RD82J // FIX-RD84 // FIX-RD85 // FIX-RD85B // FIX-RD86 // FIX-RD87 // FIX-RD88 // FIX-RD88B
         }
     }
+    s_v3nLast3dSeq = g_rdGpu.last3dSeq; // PROBE-V3N
+    s_v3nLast2dSeq = g_rdGpu.last2dSeq; // PROBE-V3N
+    uint32_t v3nFlags = 0; // PROBE-V3N
+    if (v3nNew3d) v3nFlags |= (1u << 0); // PROBE-V3N
+    if (v3nNew2d) v3nFlags |= (1u << 1); // PROBE-V3N
+    if (!v3nNew3d && !v3nNew2d) v3nFlags |= (1u << 2); // PROBE-V3N
+    s_v3nLastFlags = v3nFlags;       // PROBE-V3N
+    s_v3oLastChosen2d = chosen2dIdx; // PROBE-V3O
+    s_v3oLastCoverFail = coverFail;  // PROBE-V3O
     return true;
 }
 

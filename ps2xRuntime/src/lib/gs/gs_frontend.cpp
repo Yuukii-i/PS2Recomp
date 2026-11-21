@@ -2320,6 +2320,55 @@ void GS::latchHostPresentationFrame()
                     if (s_rdCutCopy) ++s_rdFlipsSinceCopy; // FIX-CUT2
                     const bool noCut = s_rdBoundaries.empty() ||
                                        (s_rdBoundaries.back().first == 0u && s_rdBoundaries.size() == 1u);
+                    // PROBE-V3P: cutlog probe in frame-cut publisher
+                    static const bool s_rdCutLogOn = []() {
+                        const char *v = std::getenv("PS2X_RD_CUTLOG");
+                        return v && v[0] == '1';
+                    }();
+                    if (s_rdCutLogOn)
+                    {
+                        static uint32_t s_cutLogFlip = 0u;
+                        static uint32_t s_cutLogLines = 0u;
+                        static uint64_t s_cutLogLastKicks = 0u;
+                        extern std::atomic<uint64_t> g_gsFrameKicks;
+                        const uint64_t curKicks = g_gsFrameKicks.load(std::memory_order_relaxed);
+                        const uint32_t kicksSinceLast = static_cast<uint32_t>(curKicks - s_cutLogLastKicks);
+                        s_cutLogLastKicks = curKicks;
+                        const uint32_t flip = ++s_cutLogFlip;
+                        const uint32_t streak = noCut ? (s_rdCutHoldStreak + 1u) : 0u;
+                        if (s_cutLogLines < 4000u)
+                        {
+                            ++s_cutLogLines;
+                            char drawFbpsBuf[64] = "";
+                            uint32_t distinctFbps[6];
+                            size_t numDistinct = 0u;
+                            for (const Rd2DBatch &b : s_rd2dBatches)
+                            {
+                                const uint32_t bfbp = static_cast<uint32_t>(b.frame & 0x1FFu);
+                                bool found = false;
+                                for (size_t di = 0u; di < numDistinct; ++di)
+                                {
+                                    if (distinctFbps[di] == bfbp) { found = true; break; }
+                                }
+                                if (!found && numDistinct < 6u)
+                                    distinctFbps[numDistinct++] = bfbp;
+                            }
+                            int pos = 0;
+                            for (size_t di = 0u; di < numDistinct; ++di)
+                            {
+                                const int rem = static_cast<int>(sizeof(drawFbpsBuf)) - pos;
+                                if (rem <= 1) break;
+                                const int n = std::snprintf(drawFbpsBuf + pos, static_cast<size_t>(rem), "%s%x", (di > 0u ? "," : ""), distinctFbps[di]);
+                                if (n > 0) pos += std::min(n, rem - 1);
+                            }
+                            const uint32_t drawFbpFirst = s_rd2dBatches.empty() ? 0xFFFFFFFFu : static_cast<uint32_t>(s_rd2dBatches.front().frame & 0x1FFu);
+                            const uint32_t drawFbpLast = s_rd2dBatches.empty() ? 0xFFFFFFFFu : static_cast<uint32_t>(s_rd2dBatches.back().frame & 0x1FFu);
+                            ps2xSafeLog("[cutlog] flip=%u noCut=%d streak=%u batches=%zu verts=%zu nB=%zu disp=%x drawFbps=%s drawFbpFirst=%x drawFbpLast=%x kicksSinceLast=%u\n",
+                                        flip, noCut ? 1 : 0, streak,
+                                        s_rd2dBatches.size(), s_rd2dVerts.size(), s_rdBoundaries.size(),
+                                        displayFbp, drawFbpsBuf, drawFbpFirst, drawFbpLast, kicksSinceLast);
+                        }
+                    }
                     if (noCut)
                     {
                         ++s_rdCutHoldStreak;

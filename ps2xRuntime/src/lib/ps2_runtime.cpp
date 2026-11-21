@@ -6565,7 +6565,7 @@ void PS2Runtime::run()
         fflush(stderr);
     }
     // FEAT-FT3: in-game frame-time recorder (PS2X_FT=<prefix>)
-    struct Ft3Entry { int64_t qpc; int64_t epochMs; uint8_t tag; uint64_t seq; uint64_t kicks; uint8_t phase; float seenGap; float work; float wait; float pres; float draw; float texDecMs; uint32_t texDecN; float b1Ms; float b2Ms; float b3Ms; float b4Ms; float b5Ms; float beginMs; float totalMs; }; // PROBE-V3L
+    struct Ft3Entry { int64_t qpc; int64_t epochMs; uint8_t tag; uint64_t seq; uint64_t kicks; uint8_t phase; float seenGap; float work; float wait; float pres; float draw; float texDecMs; uint32_t texDecN; float b1Ms; float b2Ms; float b3Ms; float b4Ms; float b5Ms; float beginMs; float totalMs; uint64_t pub3d; uint64_t pub2d; uint32_t drawFlags; uint64_t gen3d; uint64_t gen2d; int32_t chosen2d; uint32_t coverFail; }; // PROBE-V3L // PROBE-V3N // PROBE-V3O
     constexpr size_t kFt3Cap = 1u << 20;
     static const char *s_ft3Env = std::getenv("PS2X_FT");
     static const bool s_ft3On = (s_ft3Env && s_ft3Env[0] != '\0');
@@ -6598,7 +6598,7 @@ void PS2Runtime::run()
             FILE *fp = std::fopen(outPath.c_str(), "w");
             if (fp)
             {
-                std::fprintf(fp, "Application,ProcessID,SwapChainAddress,TimeInSeconds,msBetweenPresents,Tag,EpochMs,Seq,Kicks,Phase,SeenGapMs,WorkMs,WaitMs,PresMs,DrawMs,TexDecMs,TexDecN,B1Ms,B2Ms,B3Ms,B4Ms,B5Ms,BeginMs,TotalMs\n"); // PROBE-V3L
+                std::fprintf(fp, "Application,ProcessID,SwapChainAddress,TimeInSeconds,msBetweenPresents,Tag,EpochMs,Seq,Kicks,Phase,SeenGapMs,WorkMs,WaitMs,PresMs,DrawMs,TexDecMs,TexDecN,B1Ms,B2Ms,B3Ms,B4Ms,B5Ms,BeginMs,TotalMs,Pub3D,Pub2D,DrawFlags,Gen3D,Gen2D,Chosen,CoverFail\n"); // PROBE-V3L // PROBE-V3N // PROBE-V3O
                 std::fflush(fp);
             }
             uint64_t flushed = 0;
@@ -6627,7 +6627,7 @@ void PS2Runtime::run()
                     const double tSec = static_cast<double>(e.qpc - qpc0) * invFreqSec;
                     const double dtMs = (flushed == 0 && idx == 0) ? 0.0 : static_cast<double>(e.qpc - prevQpc) * invFreqMs;
                     prevQpc = e.qpc;
-                    std::fprintf(fp, "ApeEscape3.exe,%lu,0x1,%.6f,%.4f,%u,%lld,%llu,%llu,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n", pid, tSec, dtMs, static_cast<unsigned>(e.tag), static_cast<long long>(e.epochMs), static_cast<unsigned long long>(e.seq), static_cast<unsigned long long>(e.kicks), static_cast<unsigned>(e.phase), e.seenGap, e.work, e.wait, e.pres, e.draw, e.texDecMs, static_cast<unsigned>(e.texDecN), e.b1Ms, e.b2Ms, e.b3Ms, e.b4Ms, e.b5Ms, e.beginMs, e.totalMs); // PROBE-V3L
+                    std::fprintf(fp, "ApeEscape3.exe,%lu,0x1,%.6f,%.4f,%u,%lld,%llu,%llu,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%llu,%llu,%u,%llu,%llu,%d,%u\n", pid, tSec, dtMs, static_cast<unsigned>(e.tag), static_cast<long long>(e.epochMs), static_cast<unsigned long long>(e.seq), static_cast<unsigned long long>(e.kicks), static_cast<unsigned>(e.phase), e.seenGap, e.work, e.wait, e.pres, e.draw, e.texDecMs, static_cast<unsigned>(e.texDecN), e.b1Ms, e.b2Ms, e.b3Ms, e.b4Ms, e.b5Ms, e.beginMs, e.totalMs, static_cast<unsigned long long>(e.pub3d), static_cast<unsigned long long>(e.pub2d), static_cast<unsigned>(e.drawFlags), static_cast<unsigned long long>(e.gen3d), static_cast<unsigned long long>(e.gen2d), static_cast<int>(e.chosen2d), static_cast<unsigned>(e.coverFail)); // PROBE-V3L // PROBE-V3N // PROBE-V3O
                 }
                 std::fflush(fp);
                 flushed = cur;
@@ -6659,7 +6659,7 @@ void PS2Runtime::run()
         const float pres = (qpcFreqD > 0.0) ? static_cast<float>((tPresEnd - tWaitEnd) * 1000.0 / qpcFreqD) : 0.0f;
         return {seenGap, work, wait, pres};
     };
-    auto ft3Record = [&](uint8_t tag, uint64_t seq, uint64_t kicks, float seenGap = 0.0f, float work = 0.0f, float wait = 0.0f, float pres = 0.0f, float draw = 0.0f, float texDecMs = 0.0f, uint32_t texDecN = 0, float b1Ms = 0.0f, float b2Ms = 0.0f, float b3Ms = 0.0f, float b4Ms = 0.0f, float b5Ms = 0.0f, float beginMs = 0.0f, float totalMs = 0.0f) { // PROBE-V3L
+    auto ft3Record = [&](uint8_t tag, uint64_t seq, uint64_t kicks, float seenGap = 0.0f, float work = 0.0f, float wait = 0.0f, float pres = 0.0f, float draw = 0.0f, float texDecMs = 0.0f, uint32_t texDecN = 0, float b1Ms = 0.0f, float b2Ms = 0.0f, float b3Ms = 0.0f, float b4Ms = 0.0f, float b5Ms = 0.0f, float beginMs = 0.0f, float totalMs = 0.0f, uint64_t pub3d = 0, uint64_t pub2d = 0, uint32_t drawFlags = 0, uint64_t gen3d = 0, uint64_t gen2d = 0, int32_t chosen2d = 0, uint32_t coverFail = 0) { // PROBE-V3L // PROBE-V3N // PROBE-V3O
         if (!s_ft3On)
             return;
         long long qpcNow = 0;
@@ -6682,7 +6682,7 @@ void PS2Runtime::run()
             phase |= (1u << 3);
 
         const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
-        ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, tag, seq, kicks, phase, seenGap, work, wait, pres, draw, texDecMs, texDecN, b1Ms, b2Ms, b3Ms, b4Ms, b5Ms, beginMs, totalMs}; // PROBE-V3L
+        ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, tag, seq, kicks, phase, seenGap, work, wait, pres, draw, texDecMs, texDecN, b1Ms, b2Ms, b3Ms, b4Ms, b5Ms, beginMs, totalMs, pub3d, pub2d, drawFlags, gen3d, gen2d, chosen2d, coverFail}; // PROBE-V3L // PROBE-V3N // PROBE-V3O
         ft3WriteCount.store(idx + 1, std::memory_order_release);
     };
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
@@ -7497,6 +7497,17 @@ void PS2Runtime::run()
                     const float dstX = (screenWidth - dstWidth) * 0.5f; // RDG3
                     const float dstY = (screenHeight - dstHeight) * 0.5f; // RDG3
                     (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight); // RDG3
+                    extern void ps2xRdGetDrawSeqs(uint64_t *seq3d, uint64_t *seq2d, uint32_t *flags); // PROBE-V3N
+                    uint64_t pub3d = 0, pub2d = 0; // PROBE-V3N
+                    uint32_t drawFlags = 0; // PROBE-V3N
+                    ps2xRdGetDrawSeqs(&pub3d, &pub2d, &drawFlags); // PROBE-V3N
+                    extern void ps2xRdGetPublishedSeqs(uint64_t *gen3d, uint64_t *gen2d); // PROBE-V3O
+                    uint64_t gen3d = 0, gen2d = 0; // PROBE-V3O
+                    ps2xRdGetPublishedSeqs(&gen3d, &gen2d); // PROBE-V3O
+                    extern void ps2xRdGetDrawSeqs2(int32_t *chosen2d, uint32_t *coverFail); // PROBE-V3O
+                    int32_t chosen2d = -1; // PROBE-V3O
+                    uint32_t coverFail = 0; // PROBE-V3O
+                    ps2xRdGetDrawSeqs2(&chosen2d, &coverFail); // PROBE-V3O
                     const int64_t tDraw1 = paceQpcNow(); // PROBE-V3J
                     const double qpcFreqDraw = static_cast<double>(paceQpcFreq()); // PROBE-V3J
                     const float drawMs = (qpcFreqDraw > 0.0) ? static_cast<float>((tDraw1 - tDraw0) * 1000.0 / qpcFreqDraw) : 0.0f; // PROBE-V3J
@@ -7531,7 +7542,7 @@ void PS2Runtime::run()
                     extern double ps2xRdTexTakeDecodeMs(uint32_t *countOut); // PROBE-V3J
                     uint32_t texDecN = 0; // PROBE-V3J
                     const float texDecMs = static_cast<float>(ps2xRdTexTakeDecodeMs(&texDecN)); // PROBE-V3J
-                    ft3Record(ft3Tag, currentPresentSeq, currentGsKicks, st.seenGap, st.work, st.wait, st.pres, drawMs, texDecMs, texDecN, b1Ms, b2Ms, b3Ms, b4Ms, b5Ms, beginMs, totalMs); // PROBE-V3L
+                    ft3Record(ft3Tag, currentPresentSeq, currentGsKicks, st.seenGap, st.work, st.wait, st.pres, drawMs, texDecMs, texDecN, b1Ms, b2Ms, b3Ms, b4Ms, b5Ms, beginMs, totalMs, pub3d, pub2d, drawFlags, gen3d, gen2d, chosen2d, coverFail); // PROBE-V3L // PROBE-V3N // PROBE-V3O
                 }
                 else // RDG3
                 {
