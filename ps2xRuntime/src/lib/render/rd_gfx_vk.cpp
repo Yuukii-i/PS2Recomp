@@ -4,6 +4,16 @@
 
 #if defined(PS2X_HAS_SDL3)
 
+#ifdef _WIN32 // PROBE-RDG4P
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <SDL3/SDL.h>
 #include <vulkan/vulkan.h>
 
@@ -26,6 +36,7 @@ VkFormat ps2xSdlVkSwapFormat();
 uint32_t ps2xSdlVkFramesInFlight();
 bool ps2xSdlVkBeginRdFrame(VkCommandBuffer *cb, VkImage *swapImage, uint32_t *w, uint32_t *h, uint32_t *frameIdx);
 void ps2xSdlVkEndRdFrame();
+double ps2xSdlVkLastBeginWaitMs(); // PROBE-RDG4P
 
 namespace rdgfx_vk
 {
@@ -68,6 +79,7 @@ struct PipelineKey
     bool depthMask = true;
     rdgfx::DepthFunc depthFunc = rdgfx::DepthFunc::Lequal;
     bool cull = false;
+    uint8_t samples = 1; // RDG2B
 
     uint64_t pack() const
     {
@@ -84,6 +96,7 @@ struct PipelineKey
         k |= (depthMask ? 1ull : 0ull) << 22;
         k |= (static_cast<uint64_t>(depthFunc) & 1ull) << 23;
         k |= (cull ? 1ull : 0ull) << 24;
+        k |= (static_cast<uint64_t>(samples) & 0x7Full) << 25; // RDG2B
         return k;
     }
 };
@@ -186,6 +199,62 @@ struct GpuVao
     VkDeviceSize vbOffset = 0;
 };
 
+// PERF-RDG4R: flat vector handle table with free-list (0 is always invalid).
+template <typename T>
+struct HandleTable
+{
+    struct Slot
+    {
+        bool alive = false;
+        T value{};
+    };
+    std::vector<Slot> slots;
+    std::vector<uint32_t> freeList;
+
+    uint32_t allocate(T &&val)
+    {
+        uint32_t id = 0;
+        if (!freeList.empty())
+        {
+            id = freeList.back();
+            freeList.pop_back();
+            slots[id].alive = true;
+            slots[id].value = std::move(val);
+        }
+        else
+        {
+            if (slots.empty())
+                slots.emplace_back(); // slot 0 reserved as invalid
+            id = static_cast<uint32_t>(slots.size());
+            slots.push_back(Slot{true, std::move(val)});
+        }
+        return id;
+    }
+
+    T *find(uint32_t id)
+    {
+        if (id == 0 || id >= slots.size() || !slots[id].alive)
+            return nullptr;
+        return &slots[id].value;
+    }
+
+    const T *find(uint32_t id) const
+    {
+        if (id == 0 || id >= slots.size() || !slots[id].alive)
+            return nullptr;
+        return &slots[id].value;
+    }
+
+    void erase(uint32_t id)
+    {
+        if (id == 0 || id >= slots.size() || !slots[id].alive)
+            return;
+        slots[id].alive = false;
+        slots[id].value = T{};
+        freeList.push_back(id);
+    }
+};
+
 struct RdVkState
 {
     bool initialized = false;
@@ -225,6 +294,20 @@ struct RdVkState
     VkImageView depthView = VK_NULL_HANDLE;
     VkImageLayout depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
+    // RDG2B: MSAA resolve target
+    VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkImage resolveImage = VK_NULL_HANDLE;
+    VkDeviceMemory resolveMem = VK_NULL_HANDLE;
+    VkImageView resolveView = VK_NULL_HANDLE;
+    VkImageLayout resolveLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // RDG2B: palette textures & overlay VBO
+    std::vector<uint32_t> palTexIds;
+    std::vector<std::vector<uint32_t>> palLastRgba;
+    std::vector<bool> palHasData;
+    uint32_t overlayVbo = 0;
+    uint32_t overlayVertexCursor = 0;
+
     // Frame state
     bool frameActive = false;
     bool inRenderPass = false;
@@ -244,18 +327,42 @@ struct RdVkState
     uint32_t boundEbo = 0;
     uint32_t boundTex[2] = {0, 0};
 
-    // FIX-RDG3C
+    // PERF-RDG4R: dirty flags, cached resolved resources, and last-bound command-buffer state
+    bool dirtyPipeline = true;
+    bool dirtyViewport = true;
+    bool dirtyScissor = true;
+    bool dirtyTextures = true;
+    bool dirtyPushConstants = true;
+    bool dirtyVertexBuffer = true;
+    bool dirtyIndexBuffer = true;
+
+    VkPipeline cachedPipeline = VK_NULL_HANDLE;
+    const GpuTexture *cachedTex[2] = {nullptr, nullptr};
+    VkSampler cachedSampler[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    uint32_t cachedEffTexId[2] = {0, 0};
+    VkDescriptorSet cachedDescSet = VK_NULL_HANDLE;
+
+    VkDescriptorSet lastBoundDescSet = VK_NULL_HANDLE;
+    bool lastPcValid = false;
+    PushConstants lastPc{};
+    bool lastVpValid = false;
+    VkViewport lastVp{};
+    bool lastScValid = false;
+    VkRect2D lastSc{};
+    VkBuffer lastBoundVb = VK_NULL_HANDLE;
+    VkDeviceSize lastBoundVbOffset = 0;
+    VkBuffer lastBoundIb = VK_NULL_HANDLE;
+    VkIndexType lastBoundIbType = VK_INDEX_TYPE_MAX_ENUM;
+
+    // FIX-RDG3C / PERF-RDG4R
     uint32_t boundVao = 0;
-    uint32_t nextVaoId = 1;
-    std::unordered_map<uint32_t, GpuVao> vaos;
+    HandleTable<GpuVao> vaos;
 
     // Resource tables
-    uint32_t nextBufId = 1;
-    std::unordered_map<uint32_t, GpuBuffer> vbos;
-    std::unordered_map<uint32_t, GpuBuffer> ebos;
+    HandleTable<GpuBuffer> vbos;
+    HandleTable<GpuBuffer> ebos;
 
-    uint32_t nextTexId = 1;
-    std::unordered_map<uint32_t, GpuTexture> textures;
+    HandleTable<GpuTexture> textures;
     uint32_t defaultWhiteTex = 0;
 
     std::vector<std::vector<GarbageBuffer>> garbageBuffers;
@@ -285,9 +392,106 @@ struct RdVkState
     uint64_t statUniformSets = 0;
     uint64_t statPassBegun = 0;
     bool firstDrawLogged = false;
+
+    // PROBE-RDG4P
+    int probeDrawDepth = 0;
+    int probeTexDepth = 0;
+    int64_t recStartQpc = 0;
+    double curFrameWaitMs = 0.0;
+    double curFrameRecMs = 0.0;
+    int64_t curFrameDrawTicks = 0;
+    int64_t curFrameTexTicks = 0;
+    double curFrameEndMs = 0.0;
+    uint64_t curFrameDraws = 0;
+    uint64_t curFrameDescHits = 0;
+    uint64_t curFrameDescMisses = 0;
+
+    uint64_t winFrames = 0;
+    double winWaitSumMs = 0.0, winWaitMaxMs = 0.0;
+    double winRecSumMs = 0.0, winRecMaxMs = 0.0;
+    double winDrawSumMs = 0.0, winDrawMaxMs = 0.0;
+    double winTexSumMs = 0.0, winTexMaxMs = 0.0;
+    double winEndSumMs = 0.0, winEndMaxMs = 0.0;
+    uint64_t winDrawsSum = 0, winDrawsMax = 0;
+    uint64_t winDescHitsSum = 0, winDescHitsMax = 0;
+    uint64_t winDescMissesSum = 0, winDescMissesMax = 0;
 };
 
 RdVkState s_vk;
+
+// PROBE-RDG4P
+inline int64_t probeQpcNow()
+{
+#ifdef _WIN32
+    LARGE_INTEGER li{};
+    QueryPerformanceCounter(&li);
+    return static_cast<int64_t>(li.QuadPart);
+#else
+    return 0;
+#endif
+}
+
+inline double probeQpcToMs(int64_t ticks)
+{
+#ifdef _WIN32
+    static const double invFreqMs = []()
+    {
+        LARGE_INTEGER freq{};
+        QueryPerformanceFrequency(&freq);
+        return freq.QuadPart > 0 ? (1000.0 / static_cast<double>(freq.QuadPart)) : 0.0;
+    }();
+    return static_cast<double>(ticks) * invFreqMs;
+#else
+    (void)ticks;
+    return 0.0;
+#endif
+}
+
+struct ProbeDrawScope
+{
+    bool top = false;
+    int64_t t0 = 0;
+    ProbeDrawScope()
+    {
+        if (s_vk.logEnabled && s_vk.probeDrawDepth++ == 0)
+        {
+            top = true;
+            t0 = probeQpcNow();
+        }
+    }
+    ~ProbeDrawScope()
+    {
+        if (s_vk.logEnabled)
+        {
+            if (top)
+                s_vk.curFrameDrawTicks += (probeQpcNow() - t0);
+            --s_vk.probeDrawDepth;
+        }
+    }
+};
+
+struct ProbeTexScope
+{
+    bool top = false;
+    int64_t t0 = 0;
+    ProbeTexScope()
+    {
+        if (s_vk.logEnabled && s_vk.probeTexDepth++ == 0)
+        {
+            top = true;
+            t0 = probeQpcNow();
+        }
+    }
+    ~ProbeTexScope()
+    {
+        if (s_vk.logEnabled)
+        {
+            if (top)
+                s_vk.curFrameTexTicks += (probeQpcNow() - t0);
+            --s_vk.probeTexDepth;
+        }
+    }
+};
 
 uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags props)
 {
@@ -316,6 +520,7 @@ void imageBarrier(VkCommandBuffer cmd,
                   VkImageLayout oldLayout,
                   VkImageLayout newLayout)
 {
+    ProbeTexScope texProbe; // PROBE-RDG4P
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barrier.srcStageMask = srcStage;
@@ -445,13 +650,29 @@ void destroyTargets()
         vkFreeMemory(s_vk.device, s_vk.depthMem, nullptr);
         s_vk.depthMem = VK_NULL_HANDLE;
     }
+    if (s_vk.resolveView != VK_NULL_HANDLE) // RDG2B
+    {
+        vkDestroyImageView(s_vk.device, s_vk.resolveView, nullptr);
+        s_vk.resolveView = VK_NULL_HANDLE;
+    }
+    if (s_vk.resolveImage != VK_NULL_HANDLE) // RDG2B
+    {
+        vkDestroyImage(s_vk.device, s_vk.resolveImage, nullptr);
+        s_vk.resolveImage = VK_NULL_HANDLE;
+    }
+    if (s_vk.resolveMem != VK_NULL_HANDLE) // RDG2B
+    {
+        vkFreeMemory(s_vk.device, s_vk.resolveMem, nullptr);
+        s_vk.resolveMem = VK_NULL_HANDLE;
+    }
     s_vk.colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     s_vk.depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    s_vk.resolveLayout = VK_IMAGE_LAYOUT_UNDEFINED; // RDG2B
     s_vk.targetW = 0;
     s_vk.targetH = 0;
 }
 
-bool createImageAndView(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage,
+bool createImageAndView(uint32_t w, uint32_t h, VkFormat fmt, VkSampleCountFlagBits samples, VkImageUsageFlags usage,
                         VkImageAspectFlags aspect, VkImage &outImg, VkDeviceMemory &outMem, VkImageView &outView)
 {
     VkImageCreateInfo ici{};
@@ -461,7 +682,7 @@ bool createImageAndView(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags 
     ici.extent = {w, h, 1};
     ici.mipLevels = 1;
     ici.arrayLayers = 1;
-    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.samples = samples; // RDG2B
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = usage;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -503,15 +724,19 @@ bool ensureTargets(uint32_t w, uint32_t h)
     vkDeviceWaitIdle(s_vk.device);
     destroyTargets();
 
-    if (!createImageAndView(w, h, VK_FORMAT_R8G8B8A8_UNORM,
-                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+    const bool useMsaa = (s_vk.msaaSamples > VK_SAMPLE_COUNT_1_BIT); // RDG2B
+    const VkImageUsageFlags colorUsage = useMsaa
+                                             ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                                             : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+
+    if (!createImageAndView(w, h, VK_FORMAT_R8G8B8A8_UNORM, s_vk.msaaSamples, colorUsage,
                             VK_IMAGE_ASPECT_COLOR_BIT, s_vk.colorImage, s_vk.colorMem, s_vk.colorView))
     {
         destroyTargets();
         return false;
     }
 
-    if (!createImageAndView(w, h, VK_FORMAT_D32_SFLOAT,
+    if (!createImageAndView(w, h, VK_FORMAT_D32_SFLOAT, s_vk.msaaSamples,
                             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                             VK_IMAGE_ASPECT_DEPTH_BIT, s_vk.depthImage, s_vk.depthMem, s_vk.depthView))
     {
@@ -519,10 +744,22 @@ bool ensureTargets(uint32_t w, uint32_t h)
         return false;
     }
 
+    if (useMsaa) // RDG2B
+    {
+        if (!createImageAndView(w, h, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT, s_vk.resolveImage, s_vk.resolveMem, s_vk.resolveView))
+        {
+            destroyTargets();
+            return false;
+        }
+    }
+
     s_vk.targetW = w;
     s_vk.targetH = h;
     s_vk.colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     s_vk.depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    s_vk.resolveLayout = VK_IMAGE_LAYOUT_UNDEFINED; // RDG2B
     s_vk.vpX = 0;
     s_vk.vpY = 0;
     s_vk.vpW = static_cast<int>(w);
@@ -550,22 +787,64 @@ VkRect2D computeVkScissor()
     return {{x, y}, {static_cast<uint32_t>(w), static_cast<uint32_t>(h)}};
 }
 
-void applyViewportAndScissor()
+// PERF-RDG4R: invalidate all command-buffer tracked state and mark all dirty flags.
+void invalidateCommandBufferState()
+{
+    s_vk.boundPipeline = VK_NULL_HANDLE;
+    s_vk.lastBoundDescSet = VK_NULL_HANDLE;
+    s_vk.lastPcValid = false;
+    s_vk.lastVpValid = false;
+    s_vk.lastScValid = false;
+    s_vk.lastBoundVb = VK_NULL_HANDLE;
+    s_vk.lastBoundVbOffset = 0;
+    s_vk.lastBoundIb = VK_NULL_HANDLE;
+    s_vk.lastBoundIbType = VK_INDEX_TYPE_MAX_ENUM;
+
+    s_vk.dirtyPipeline = true;
+    s_vk.dirtyViewport = true;
+    s_vk.dirtyScissor = true;
+    s_vk.dirtyTextures = true;
+    s_vk.dirtyPushConstants = true;
+    s_vk.dirtyVertexBuffer = true;
+    s_vk.dirtyIndexBuffer = true;
+}
+
+void applyViewportAndScissorIfDirty()
 {
     if (!s_vk.frameActive)
         return;
-    const int th = static_cast<int>(s_vk.targetH);
-    VkViewport vp{};
-    vp.x = static_cast<float>(s_vk.vpX);
-    vp.y = static_cast<float>(th - (s_vk.vpY + s_vk.vpH));
-    vp.width = static_cast<float>(s_vk.vpW);
-    vp.height = static_cast<float>(s_vk.vpH);
-    vp.minDepth = 0.0f;
-    vp.maxDepth = 1.0f;
-    vkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
+    if (s_vk.dirtyViewport || !s_vk.lastVpValid)
+    {
+        const int th = static_cast<int>(s_vk.targetH);
+        VkViewport vp{};
+        vp.x = static_cast<float>(s_vk.vpX);
+        vp.y = static_cast<float>(th - (s_vk.vpY + s_vk.vpH));
+        vp.width = static_cast<float>(s_vk.vpW);
+        vp.height = static_cast<float>(s_vk.vpH);
+        vp.minDepth = 0.0f;
+        vp.maxDepth = 1.0f;
+        if (!s_vk.lastVpValid || std::memcmp(&vp, &s_vk.lastVp, sizeof(VkViewport)) != 0)
+        {
+            vkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
+            s_vk.lastVp = vp;
+            s_vk.lastVpValid = true;
+        }
+        s_vk.dirtyViewport = false;
+    }
 
-    VkRect2D sc = computeVkScissor();
-    vkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
+    if (s_vk.dirtyScissor || !s_vk.lastScValid)
+    {
+        VkRect2D sc = computeVkScissor();
+        if (!s_vk.lastScValid ||
+            sc.offset.x != s_vk.lastSc.offset.x || sc.offset.y != s_vk.lastSc.offset.y ||
+            sc.extent.width != s_vk.lastSc.extent.width || sc.extent.height != s_vk.lastSc.extent.height)
+        {
+            vkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
+            s_vk.lastSc = sc;
+            s_vk.lastScValid = true;
+        }
+        s_vk.dirtyScissor = false;
+    }
 }
 
 void ensureRenderPass(bool forceClear, float r, float g, float b, float a)
@@ -593,6 +872,17 @@ void ensureRenderPass(bool forceClear, float r, float g, float b, float a)
         s_vk.depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
 
+    const bool useMsaa = (s_vk.msaaSamples > VK_SAMPLE_COUNT_1_BIT && s_vk.resolveView != VK_NULL_HANDLE); // RDG2B
+    if (useMsaa && s_vk.resolveLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+    {
+        imageBarrier(s_vk.cmd, s_vk.resolveImage, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     s_vk.resolveLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        s_vk.resolveLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+
     const bool doClear = s_vk.firstPassInFrame || forceClear;
 
     VkRenderingAttachmentInfo colorAtt{};
@@ -605,6 +895,12 @@ void ensureRenderPass(bool forceClear, float r, float g, float b, float a)
     colorAtt.clearValue.color.float32[1] = g;
     colorAtt.clearValue.color.float32[2] = b;
     colorAtt.clearValue.color.float32[3] = a;
+    if (useMsaa) // RDG2B
+    {
+        colorAtt.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+        colorAtt.resolveImageView = s_vk.resolveView;
+        colorAtt.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
 
     VkRenderingAttachmentInfo depthAtt{};
     depthAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -626,8 +922,7 @@ void ensureRenderPass(bool forceClear, float r, float g, float b, float a)
     ++s_vk.statPassBegun; // PROBE-RDG3B
     s_vk.inRenderPass = true;
     s_vk.firstPassInFrame = false;
-    s_vk.boundPipeline = VK_NULL_HANDLE;
-    applyViewportAndScissor();
+    invalidateCommandBufferState(); // PERF-RDG4R
 }
 
 VkBlendFactor toVkBlendFactor(rdgfx::BlendFactor f)
@@ -707,7 +1002,7 @@ VkPipeline getOrCreatePipeline(const PipelineKey &key)
 
     VkPipelineMultisampleStateCreateInfo ms{};
     ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    ms.rasterizationSamples = static_cast<VkSampleCountFlagBits>(key.samples ? key.samples : 1); // RDG2B
 
     VkPipelineDepthStencilStateCreateInfo ds{};
     ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -860,22 +1155,19 @@ uint32_t createDynBuffer(const void *data, int sizeBytes, bool isIndex)
     }
 
     s_vk.totalBufBytes += static_cast<uint64_t>(sizeBytes) * s_vk.framesInFlight;
-    const uint32_t id = s_vk.nextBufId++;
     if (isIndex)
-        s_vk.ebos.emplace(id, std::move(buf));
-    else
-        s_vk.vbos.emplace(id, std::move(buf));
-    return id;
+        return s_vk.ebos.allocate(std::move(buf)); // PERF-RDG4R
+    return s_vk.vbos.allocate(std::move(buf));     // PERF-RDG4R
 }
 
-void updateDynBuffer(std::unordered_map<uint32_t, GpuBuffer> &map, uint32_t id, const void *data, int sizeBytes, int offsetBytes)
+void updateDynBuffer(HandleTable<GpuBuffer> &table, uint32_t id, const void *data, int sizeBytes, int offsetBytes)
 {
     if (!data || sizeBytes <= 0 || offsetBytes < 0)
         return;
-    auto it = map.find(id);
-    if (it == map.end())
+    GpuBuffer *bufPtr = table.find(id);
+    if (!bufPtr)
         return;
-    GpuBuffer &buf = it->second;
+    GpuBuffer &buf = *bufPtr;
     if (offsetBytes + sizeBytes > buf.sizeBytes)
         return;
 
@@ -895,12 +1187,12 @@ void updateDynBuffer(std::unordered_map<uint32_t, GpuBuffer> &map, uint32_t id, 
     }
 }
 
-void freeDynBuffer(std::unordered_map<uint32_t, GpuBuffer> &map, uint32_t id)
+void freeDynBuffer(HandleTable<GpuBuffer> &table, uint32_t id)
 {
-    auto it = map.find(id);
-    if (it == map.end())
+    GpuBuffer *bufPtr = table.find(id);
+    if (!bufPtr)
         return;
-    GpuBuffer &buf = it->second;
+    GpuBuffer &buf = *bufPtr;
     if (s_vk.totalBufBytes >= static_cast<uint64_t>(buf.sizeBytes) * s_vk.framesInFlight)
         s_vk.totalBufBytes -= static_cast<uint64_t>(buf.sizeBytes) * s_vk.framesInFlight;
 
@@ -918,7 +1210,7 @@ void freeDynBuffer(std::unordered_map<uint32_t, GpuBuffer> &map, uint32_t id)
                 vkFreeMemory(s_vk.device, c.memory, nullptr);
         }
     }
-    map.erase(it);
+    table.erase(id);
 }
 
 void flushGarbage(uint32_t frameIdx)
@@ -948,11 +1240,13 @@ void flushGarbage(uint32_t frameIdx)
 
 void applyPendingBufferWrites(uint32_t frameIdx)
 {
-    auto applyMap = [frameIdx](std::unordered_map<uint32_t, GpuBuffer> &map)
+    auto applyTable = [frameIdx](HandleTable<GpuBuffer> &table) // PERF-RDG4R
     {
-        for (auto &[id, buf] : map)
+        for (auto &slot : table.slots)
         {
-            (void)id;
+            if (!slot.alive)
+                continue;
+            GpuBuffer &buf = slot.value;
             if (frameIdx >= buf.pending.size() || buf.pending[frameIdx].empty())
                 continue;
             uint8_t *dst = static_cast<uint8_t *>(buf.copies[frameIdx].mapped);
@@ -963,8 +1257,8 @@ void applyPendingBufferWrites(uint32_t frameIdx)
             buf.pending[frameIdx].clear();
         }
     };
-    applyMap(s_vk.vbos);
-    applyMap(s_vk.ebos);
+    applyTable(s_vk.vbos);
+    applyTable(s_vk.ebos);
 }
 
 // FIX-RDG3C
@@ -1026,11 +1320,11 @@ uint32_t resolveBoundVbo(VkDeviceSize *outOffset = nullptr)
         *outOffset = 0;
     if (s_vk.boundVao != 0)
     {
-        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end() && it->second.vbo != 0)
+        if (const GpuVao *vao = s_vk.vaos.find(s_vk.boundVao); vao && vao->vbo != 0) // PERF-RDG4R
         {
             if (outOffset)
-                *outOffset = it->second.vbOffset;
-            return it->second.vbo;
+                *outOffset = vao->vbOffset;
+            return vao->vbo;
         }
     }
     return s_vk.boundVbo;
@@ -1040,14 +1334,15 @@ uint32_t resolveBoundEbo()
 {
     if (s_vk.boundVao != 0)
     {
-        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end() && it->second.ebo != 0)
-            return it->second.ebo;
+        if (const GpuVao *vao = s_vk.vaos.find(s_vk.boundVao); vao && vao->ebo != 0) // PERF-RDG4R
+            return vao->ebo;
     }
     return s_vk.boundEbo;
 }
 
 bool prepareDraw()
 {
+    ProbeDrawScope drawProbe; // PROBE-RDG4P
     if (!s_vk.frameActive || !s_vk.shaderReady || s_vk.cmd == VK_NULL_HANDLE)
     {
         ++s_vk.statNoFrame; // PROBE-RDG3B
@@ -1061,113 +1356,169 @@ bool prepareDraw()
         return false;
     }
 
-    VkPipeline pipe = getOrCreatePipeline(s_vk.pipeKey);
-    if (pipe == VK_NULL_HANDLE)
+    // PERF-RDG4R: only re-resolve pipeline when pipeKey / msaaSamples changed.
+    const uint8_t curSamples = static_cast<uint8_t>(s_vk.msaaSamples); // RDG2B
+    if (s_vk.pipeKey.samples != curSamples)
+    {
+        s_vk.pipeKey.samples = curSamples;
+        s_vk.dirtyPipeline = true;
+    }
+    if (s_vk.dirtyPipeline || s_vk.cachedPipeline == VK_NULL_HANDLE)
+    {
+        s_vk.cachedPipeline = getOrCreatePipeline(s_vk.pipeKey);
+        s_vk.dirtyPipeline = false;
+    }
+    if (s_vk.cachedPipeline == VK_NULL_HANDLE)
     {
         ++s_vk.statNoPipeline; // PROBE-RDG3B
         return false;
     }
-    if (pipe != s_vk.boundPipeline)
+    if (s_vk.cachedPipeline != s_vk.boundPipeline)
     {
-        vkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-        s_vk.boundPipeline = pipe;
+        vkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vk.cachedPipeline);
+        s_vk.boundPipeline = s_vk.cachedPipeline;
     }
 
-    applyViewportAndScissor();
+    // PERF-RDG4R: only emit vkCmdSetViewport / vkCmdSetScissor when effective state changed.
+    applyViewportAndScissorIfDirty();
 
-    // FIX-RDG3C: resolve unit 0/1 textures (fallback to 1x1 white) and reuse cached per-frame descriptor sets.
-    auto resolveTex = [](uint32_t id, uint32_t &outId) -> const GpuTexture *
+    // FIX-RDG3C / PERF-RDG4R: only resolve textures, samplers, and hash DescCacheKey when dirty.
+    if (s_vk.dirtyTextures || s_vk.cachedDescSet == VK_NULL_HANDLE ||
+        !s_vk.cachedTex[0] || !s_vk.cachedTex[1])
     {
-        auto it = s_vk.textures.find(id);
-        if (it != s_vk.textures.end())
+        auto resolveTex = [](uint32_t id, uint32_t &outId) -> const GpuTexture *
         {
-            outId = id;
-            return &it->second;
-        }
-        auto defIt = s_vk.textures.find(s_vk.defaultWhiteTex);
-        if (defIt != s_vk.textures.end())
+            if (const GpuTexture *t = s_vk.textures.find(id))
+            {
+                outId = id;
+                return t;
+            }
+            if (const GpuTexture *def = s_vk.textures.find(s_vk.defaultWhiteTex))
+            {
+                outId = s_vk.defaultWhiteTex;
+                return def;
+            }
+            outId = 0;
+            return nullptr;
+        };
+
+        uint32_t effId0 = 0, effId1 = 0;
+        const GpuTexture *tex0 = resolveTex(s_vk.boundTex[0], effId0);
+        const GpuTexture *tex1 = resolveTex(s_vk.boundTex[1], effId1);
+        if (!tex0 || !tex1 || tex0->view == VK_NULL_HANDLE || tex1->view == VK_NULL_HANDLE)
         {
-            outId = s_vk.defaultWhiteTex;
-            return &defIt->second;
-        }
-        outId = 0;
-        return nullptr;
-    };
-
-    uint32_t effId0 = 0, effId1 = 0;
-    const GpuTexture *tex0 = resolveTex(s_vk.boundTex[0], effId0);
-    const GpuTexture *tex1 = resolveTex(s_vk.boundTex[1], effId1);
-    if (!tex0 || !tex1 || tex0->view == VK_NULL_HANDLE || tex1->view == VK_NULL_HANDLE)
-    {
-        ++s_vk.statNoDesc; // PROBE-RDG3B
-        return false;
-    }
-
-    VkSampler samp0 = getOrCreateSampler(tex0->sampler);
-    VkSampler samp1 = getOrCreateSampler(tex1->sampler);
-    if (samp0 == VK_NULL_HANDLE || samp1 == VK_NULL_HANDLE)
-    {
-        ++s_vk.statNoDesc; // PROBE-RDG3B
-        return false;
-    }
-
-    const DescCacheKey cacheKey{effId0, effId1, tex0->sampler.pack(), tex1->sampler.pack()};
-    auto &cache = s_vk.descCaches[s_vk.curFrame];
-    VkDescriptorSet ds = VK_NULL_HANDLE;
-    if (auto cit = cache.find(cacheKey); cit != cache.end())
-    {
-        ds = cit->second;
-    }
-    else
-    {
-        if (!allocDescriptorSet(s_vk.curFrame, ds))
-        {
+            s_vk.cachedDescSet = VK_NULL_HANDLE;
             ++s_vk.statNoDesc; // PROBE-RDG3B
             return false;
         }
 
-        VkDescriptorImageInfo imgInfos[2]{};
-        imgInfos[0] = {samp0, tex0->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        imgInfos[1] = {samp1, tex1->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkSampler samp0 = getOrCreateSampler(tex0->sampler);
+        VkSampler samp1 = getOrCreateSampler(tex1->sampler);
+        if (samp0 == VK_NULL_HANDLE || samp1 == VK_NULL_HANDLE)
+        {
+            s_vk.cachedDescSet = VK_NULL_HANDLE;
+            ++s_vk.statNoDesc; // PROBE-RDG3B
+            return false;
+        }
 
-        VkWriteDescriptorSet writes[2]{};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = ds;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[0].pImageInfo = &imgInfos[0];
+        s_vk.cachedTex[0] = tex0;
+        s_vk.cachedTex[1] = tex1;
+        s_vk.cachedEffTexId[0] = effId0;
+        s_vk.cachedEffTexId[1] = effId1;
+        s_vk.cachedSampler[0] = samp0;
+        s_vk.cachedSampler[1] = samp1;
 
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = ds;
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[1].pImageInfo = &imgInfos[1];
+        const DescCacheKey cacheKey{effId0, effId1, tex0->sampler.pack(), tex1->sampler.pack()};
+        auto &cache = s_vk.descCaches[s_vk.curFrame];
+        VkDescriptorSet ds = VK_NULL_HANDLE;
+        if (auto cit = cache.find(cacheKey); cit != cache.end())
+        {
+            ds = cit->second;
+            if (s_vk.logEnabled) // PROBE-RDG4P
+                ++s_vk.curFrameDescHits;
+        }
+        else
+        {
+            if (!allocDescriptorSet(s_vk.curFrame, ds))
+            {
+                s_vk.cachedDescSet = VK_NULL_HANDLE;
+                ++s_vk.statNoDesc; // PROBE-RDG3B
+                return false;
+            }
+            if (s_vk.logEnabled) // PROBE-RDG4P
+                ++s_vk.curFrameDescMisses;
 
-        vkUpdateDescriptorSets(s_vk.device, 2, writes, 0, nullptr);
-        cache.emplace(cacheKey, ds);
+            VkDescriptorImageInfo imgInfos[2]{};
+            imgInfos[0] = {samp0, tex0->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            imgInfos[1] = {samp1, tex1->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+            VkWriteDescriptorSet writes[2]{};
+            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet = ds;
+            writes[0].dstBinding = 0;
+            writes[0].descriptorCount = 1;
+            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[0].pImageInfo = &imgInfos[0];
+
+            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[1].dstSet = ds;
+            writes[1].dstBinding = 1;
+            writes[1].descriptorCount = 1;
+            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[1].pImageInfo = &imgInfos[1];
+
+            vkUpdateDescriptorSets(s_vk.device, 2, writes, 0, nullptr);
+            cache.emplace(cacheKey, ds);
+        }
+
+        s_vk.cachedDescSet = ds;
+        s_vk.dirtyTextures = false;
     }
 
-    vkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vk.pipelineLayout, 0, 1, &ds, 0, nullptr);
-
-    vkCmdPushConstants(s_vk.cmd, s_vk.pipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(PushConstants), &s_vk.pc);
-
-    // FIX-RDG3C: resolve VBO from bound VAO (or fallback to boundVbo).
-    VkDeviceSize offset = 0;
-    const uint32_t activeVbo = resolveBoundVbo(&offset);
-    auto vboIt = s_vk.vbos.find(activeVbo);
-    if (vboIt == s_vk.vbos.end())
+    if (s_vk.cachedDescSet != s_vk.lastBoundDescSet)
     {
-        ++s_vk.statNoVb; // PROBE-RDG3B
-        return false;
+        vkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vk.pipelineLayout, 0, 1, &s_vk.cachedDescSet, 0, nullptr);
+        s_vk.lastBoundDescSet = s_vk.cachedDescSet;
     }
-    VkBuffer vb = vboIt->second.copies[s_vk.curFrame].buffer;
-    vkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &vb, &offset);
+
+    // PERF-RDG4R: only push constants when dirty and changed.
+    if (s_vk.dirtyPushConstants || !s_vk.lastPcValid)
+    {
+        if (!s_vk.lastPcValid || std::memcmp(&s_vk.pc, &s_vk.lastPc, sizeof(PushConstants)) != 0)
+        {
+            vkCmdPushConstants(s_vk.cmd, s_vk.pipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(PushConstants), &s_vk.pc);
+            s_vk.lastPc = s_vk.pc;
+            s_vk.lastPcValid = true;
+        }
+        s_vk.dirtyPushConstants = false;
+    }
+
+    // FIX-RDG3C / PERF-RDG4R: resolve VBO only when vertex binding is dirty.
+    if (s_vk.dirtyVertexBuffer || s_vk.lastBoundVb == VK_NULL_HANDLE)
+    {
+        VkDeviceSize offset = 0;
+        const uint32_t activeVbo = resolveBoundVbo(&offset);
+        const GpuBuffer *vbo = s_vk.vbos.find(activeVbo);
+        if (!vbo)
+        {
+            ++s_vk.statNoVb; // PROBE-RDG3B
+            return false;
+        }
+        VkBuffer vb = vbo->copies[s_vk.curFrame].buffer;
+        if (vb != s_vk.lastBoundVb || offset != s_vk.lastBoundVbOffset)
+        {
+            vkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &vb, &offset);
+            s_vk.lastBoundVb = vb;
+            s_vk.lastBoundVbOffset = offset;
+        }
+        s_vk.dirtyVertexBuffer = false;
+    }
 
     ++s_vk.statDraws;
+    if (s_vk.logEnabled) // PROBE-RDG4P
+        ++s_vk.curFrameDraws;
     return true;
 }
 
@@ -1249,7 +1600,30 @@ bool init()
     s_vk.garbageBuffers.resize(s_vk.framesInFlight);
     s_vk.garbageTextures.resize(s_vk.framesInFlight);
 
+    // RDG2B: MSAA setup (PS2X_MSAA >= 2 -> 4x)
+    s_vk.msaaSamples = VK_SAMPLE_COUNT_1_BIT;
+    if (const char *msaaEnv = std::getenv("PS2X_MSAA"))
+    {
+        if (std::atoi(msaaEnv) >= 2)
+        {
+            VkPhysicalDeviceProperties props{};
+            vkGetPhysicalDeviceProperties(s_vk.physicalDevice, &props);
+            const VkSampleCountFlags supported =
+                props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
+            if (supported & VK_SAMPLE_COUNT_4_BIT)
+                s_vk.msaaSamples = VK_SAMPLE_COUNT_4_BIT;
+            else
+                std::printf("[rdvk] PS2X_MSAA=4x not supported by device, falling back to 1x\n");
+        }
+    }
+
+    // RDG2B: per-frame palette state
+    s_vk.palTexIds.assign(s_vk.framesInFlight, 0u);
+    s_vk.palLastRgba.assign(s_vk.framesInFlight, std::vector<uint32_t>(256u, 0u));
+    s_vk.palHasData.assign(s_vk.framesInFlight, false);
+
     s_vk.pc = PushConstants{};
+    s_vk.pipeKey.samples = static_cast<uint8_t>(s_vk.msaaSamples); // RDG2B
     s_vk.pc.uFlip[0] = 1.0f;
     s_vk.pc.uFlip[1] = 1.0f;
     s_vk.pc.uFlip[2] = 1.0f;
@@ -1283,12 +1657,25 @@ void beginFrame()
         return;
     }
 
+    if (s_vk.logEnabled) // PROBE-RDG4P
+    {
+        s_vk.curFrameWaitMs = ps2xSdlVkLastBeginWaitMs();
+        s_vk.curFrameRecMs = 0.0;
+        s_vk.curFrameDrawTicks = 0;
+        s_vk.curFrameTexTicks = 0;
+        s_vk.curFrameEndMs = 0.0;
+        s_vk.curFrameDraws = 0;
+        s_vk.curFrameDescHits = 0;
+        s_vk.curFrameDescMisses = 0;
+    }
+
     s_vk.cmd = cmd;
     s_vk.swapImage = swapImg;
     s_vk.curFrame = frameIdx;
     s_vk.inRenderPass = false;
     s_vk.firstPassInFrame = true;
-    s_vk.boundPipeline = VK_NULL_HANDLE;
+    invalidateCommandBufferState(); // PERF-RDG4R
+    s_vk.cachedDescSet = VK_NULL_HANDLE;
 
     if (!ensureTargets(w, h))
     {
@@ -1303,8 +1690,11 @@ void beginFrame()
     s_vk.descCaches[frameIdx].clear();
     flushGarbage(frameIdx);
     applyPendingBufferWrites(frameIdx);
+    s_vk.overlayVertexCursor = 0; // RDG2B
 
     s_vk.frameActive = true;
+    if (s_vk.logEnabled) // PROBE-RDG4P
+        s_vk.recStartQpc = probeQpcNow();
 }
 
 void endFrame()
@@ -1312,23 +1702,36 @@ void endFrame()
     if (!s_vk.initialized || !s_vk.frameActive)
         return;
 
+    int64_t endStartQpc = 0; // PROBE-RDG4P
+    if (s_vk.logEnabled)
+    {
+        endStartQpc = probeQpcNow();
+        s_vk.curFrameRecMs = (s_vk.recStartQpc != 0) ? probeQpcToMs(endStartQpc - s_vk.recStartQpc) : 0.0;
+    }
+
     if (s_vk.inRenderPass)
     {
         vkCmdEndRendering(s_vk.cmd);
         s_vk.inRenderPass = false;
+        invalidateCommandBufferState(); // PERF-RDG4R
     }
     else if (s_vk.firstPassInFrame)
     {
         ensureRenderPass(true, 0.0f, 0.0f, 0.0f, 1.0f);
         vkCmdEndRendering(s_vk.cmd);
         s_vk.inRenderPass = false;
+        invalidateCommandBufferState(); // PERF-RDG4R
     }
 
-    imageBarrier(s_vk.cmd, s_vk.colorImage, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+    const bool useMsaa = (s_vk.msaaSamples > VK_SAMPLE_COUNT_1_BIT && s_vk.resolveImage != VK_NULL_HANDLE); // RDG2B
+    VkImage srcImage = useMsaa ? s_vk.resolveImage : s_vk.colorImage;
+    VkImageLayout &srcLayout = useMsaa ? s_vk.resolveLayout : s_vk.colorLayout;
+
+    imageBarrier(s_vk.cmd, srcImage, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-                 s_vk.colorLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    s_vk.colorLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                 srcLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    srcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
     imageBarrier(s_vk.cmd, s_vk.swapImage, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
                  VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
@@ -1343,7 +1746,7 @@ void endFrame()
     blit.dstOffsets[0] = {0, 0, 0};
     blit.dstOffsets[1] = {static_cast<int32_t>(s_vk.targetW), static_cast<int32_t>(s_vk.targetH), 1};
     vkCmdBlitImage(s_vk.cmd,
-                   s_vk.colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    s_vk.swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1, &blit, VK_FILTER_NEAREST);
 
@@ -1358,13 +1761,39 @@ void endFrame()
     ++s_vk.statFrames;
     if (s_vk.logEnabled)
     {
+        // PROBE-RDG4P
+        s_vk.curFrameEndMs = probeQpcToMs(probeQpcNow() - endStartQpc);
+        const double curDrawMs = probeQpcToMs(s_vk.curFrameDrawTicks);
+        const double curTexMs = probeQpcToMs(s_vk.curFrameTexTicks);
+
+        ++s_vk.winFrames;
+        s_vk.winWaitSumMs += s_vk.curFrameWaitMs;
+        s_vk.winWaitMaxMs = std::max(s_vk.winWaitMaxMs, s_vk.curFrameWaitMs);
+        s_vk.winRecSumMs += s_vk.curFrameRecMs;
+        s_vk.winRecMaxMs = std::max(s_vk.winRecMaxMs, s_vk.curFrameRecMs);
+        s_vk.winDrawSumMs += curDrawMs;
+        s_vk.winDrawMaxMs = std::max(s_vk.winDrawMaxMs, curDrawMs);
+        s_vk.winTexSumMs += curTexMs;
+        s_vk.winTexMaxMs = std::max(s_vk.winTexMaxMs, curTexMs);
+        s_vk.winEndSumMs += s_vk.curFrameEndMs;
+        s_vk.winEndMaxMs = std::max(s_vk.winEndMaxMs, s_vk.curFrameEndMs);
+        s_vk.winDrawsSum += s_vk.curFrameDraws;
+        s_vk.winDrawsMax = std::max(s_vk.winDrawsMax, s_vk.curFrameDraws);
+        s_vk.winDescHitsSum += s_vk.curFrameDescHits;
+        s_vk.winDescHitsMax = std::max(s_vk.winDescHitsMax, s_vk.curFrameDescHits);
+        s_vk.winDescMissesSum += s_vk.curFrameDescMisses;
+        s_vk.winDescMissesMax = std::max(s_vk.winDescMissesMax, s_vk.curFrameDescMisses);
+
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - s_vk.lastLogTime).count() >= 1)
         {
             double bufMB = static_cast<double>(s_vk.totalBufBytes) / (1024.0 * 1024.0);
+            const double invFrames = s_vk.winFrames > 0 ? (1.0 / static_cast<double>(s_vk.winFrames)) : 0.0; // PROBE-RDG4P
             std::printf("[rdvk] frames=%llu draws=%llu pipelines=%zu bufMB=%.2f"
                         " dIdx=%llu dArr=%llu noFrame=%llu noPass=%llu noPipeline=%llu noVb=%llu noIb=%llu noDesc=%llu zeroCount=%llu"
-                        " clears=%llu binds=%llu texCreated=%llu vbUpd=%llu uniformSets=%llu passBegun=%llu\n",
+                        " clears=%llu binds=%llu texCreated=%llu vbUpd=%llu uniformSets=%llu passBegun=%llu"
+                        " t_wait=%.2f/%.2f t_rec=%.2f/%.2f t_draw=%.2f/%.2f t_tex=%.2f/%.2f t_end=%.2f/%.2f"
+                        " draws/f=%.1f/%llu descSets/f=%.1f+%.1f(max=%llu+%llu)\n",
                         static_cast<unsigned long long>(s_vk.statFrames),
                         static_cast<unsigned long long>(s_vk.statDraws),
                         s_vk.pipelines.size(),
@@ -1383,7 +1812,27 @@ void endFrame()
                         static_cast<unsigned long long>(s_vk.statTexCreated),
                         static_cast<unsigned long long>(s_vk.statVbUpd),
                         static_cast<unsigned long long>(s_vk.statUniformSets),
-                        static_cast<unsigned long long>(s_vk.statPassBegun));
+                        static_cast<unsigned long long>(s_vk.statPassBegun),
+                        s_vk.winWaitSumMs * invFrames, s_vk.winWaitMaxMs,
+                        s_vk.winRecSumMs * invFrames, s_vk.winRecMaxMs,
+                        s_vk.winDrawSumMs * invFrames, s_vk.winDrawMaxMs,
+                        s_vk.winTexSumMs * invFrames, s_vk.winTexMaxMs,
+                        s_vk.winEndSumMs * invFrames, s_vk.winEndMaxMs,
+                        static_cast<double>(s_vk.winDrawsSum) * invFrames,
+                        static_cast<unsigned long long>(s_vk.winDrawsMax),
+                        static_cast<double>(s_vk.winDescHitsSum) * invFrames,
+                        static_cast<double>(s_vk.winDescMissesSum) * invFrames,
+                        static_cast<unsigned long long>(s_vk.winDescHitsMax),
+                        static_cast<unsigned long long>(s_vk.winDescMissesMax));
+            s_vk.winFrames = 0;
+            s_vk.winWaitSumMs = s_vk.winWaitMaxMs = 0.0;
+            s_vk.winRecSumMs = s_vk.winRecMaxMs = 0.0;
+            s_vk.winDrawSumMs = s_vk.winDrawMaxMs = 0.0;
+            s_vk.winTexSumMs = s_vk.winTexMaxMs = 0.0;
+            s_vk.winEndSumMs = s_vk.winEndMaxMs = 0.0;
+            s_vk.winDrawsSum = s_vk.winDrawsMax = 0;
+            s_vk.winDescHitsSum = s_vk.winDescHitsMax = 0;
+            s_vk.winDescMissesSum = s_vk.winDescMissesMax = 0;
             s_vk.lastLogTime = now;
         }
     }
@@ -1399,6 +1848,7 @@ bool hasUniform(rdgfx::Uniform) { return true; }
 void setUniformInt(rdgfx::Uniform u, int v)
 {
     ++s_vk.statUniformSets; // PROBE-RDG3B
+    s_vk.dirtyPushConstants = true; // PERF-RDG4R
     switch (u)
     {
     case rdgfx::Uniform::Mode2d: s_vk.pc.uMode2d = v; break;
@@ -1417,6 +1867,7 @@ void setUniformInt(rdgfx::Uniform u, int v)
 void setUniformFloat(rdgfx::Uniform u, float v)
 {
     ++s_vk.statUniformSets; // PROBE-RDG3B
+    s_vk.dirtyPushConstants = true; // PERF-RDG4R
     switch (u)
     {
     case rdgfx::Uniform::ZBias: s_vk.pc.uZBias = v; break;
@@ -1429,6 +1880,7 @@ void setUniformVec2(rdgfx::Uniform u, const float *v)
 {
     if (!v) return;
     ++s_vk.statUniformSets; // PROBE-RDG3B
+    s_vk.dirtyPushConstants = true; // PERF-RDG4R
     if (u == rdgfx::Uniform::FbSize)
     {
         s_vk.pc.uFbSize[0] = v[0];
@@ -1445,6 +1897,7 @@ void setUniformVec3Immediate(rdgfx::Uniform u, const float *v)
 {
     if (!v) return;
     ++s_vk.statUniformSets; // PROBE-RDG3B
+    s_vk.dirtyPushConstants = true; // PERF-RDG4R
     if (u == rdgfx::Uniform::Flip)
     {
         s_vk.pc.uFlip[0] = v[0];
@@ -1458,6 +1911,7 @@ void setUniformVec4(rdgfx::Uniform u, const float *v)
 {
     if (!v) return;
     ++s_vk.statUniformSets; // PROBE-RDG3B
+    s_vk.dirtyPushConstants = true; // PERF-RDG4R
     if (u == rdgfx::Uniform::VpA)
         std::memcpy(s_vk.pc.uVpA, v, 4 * sizeof(float));
     else if (u == rdgfx::Uniform::VpB)
@@ -1480,29 +1934,35 @@ void getWindowSize(int &w, int &h) // FIX-RDG3D
 
 void setViewport(int x, int y, int w, int h)
 {
-    s_vk.vpX = x;
-    s_vk.vpY = y;
-    s_vk.vpW = w;
-    s_vk.vpH = h;
-    if (s_vk.inRenderPass)
-        applyViewportAndScissor();
+    if (s_vk.vpX != x || s_vk.vpY != y || s_vk.vpW != w || s_vk.vpH != h) // PERF-RDG4R
+    {
+        s_vk.vpX = x;
+        s_vk.vpY = y;
+        s_vk.vpW = w;
+        s_vk.vpH = h;
+        s_vk.dirtyViewport = true;
+    }
 }
 
 void setScissorTest(bool on)
 {
-    s_vk.scissorTest = on;
-    if (s_vk.inRenderPass)
-        applyViewportAndScissor();
+    if (s_vk.scissorTest != on) // PERF-RDG4R
+    {
+        s_vk.scissorTest = on;
+        s_vk.dirtyScissor = true;
+    }
 }
 
 void setScissorRect(int x, int y, int w, int h)
 {
-    s_vk.scX = x;
-    s_vk.scY = y;
-    s_vk.scW = w;
-    s_vk.scH = h;
-    if (s_vk.inRenderPass)
-        applyViewportAndScissor();
+    if (s_vk.scX != x || s_vk.scY != y || s_vk.scW != w || s_vk.scH != h) // PERF-RDG4R
+    {
+        s_vk.scX = x;
+        s_vk.scY = y;
+        s_vk.scW = w;
+        s_vk.scH = h;
+        s_vk.dirtyScissor = true;
+    }
 }
 
 void setColorMask(bool r, bool g, bool b, bool a)
@@ -1512,12 +1972,37 @@ void setColorMask(bool r, bool g, bool b, bool a)
     if (g) m |= VK_COLOR_COMPONENT_G_BIT;
     if (b) m |= VK_COLOR_COMPONENT_B_BIT;
     if (a) m |= VK_COLOR_COMPONENT_A_BIT;
-    s_vk.pipeKey.colorMask = m;
+    if (s_vk.pipeKey.colorMask != m) // PERF-RDG4R
+    {
+        s_vk.pipeKey.colorMask = m;
+        s_vk.dirtyPipeline = true;
+    }
 }
 
-void setDepthTest(bool on) { s_vk.pipeKey.depthTest = on; }
-void setDepthMask(bool on) { s_vk.pipeKey.depthMask = on; }
-void setDepthFunc(rdgfx::DepthFunc func) { s_vk.pipeKey.depthFunc = func; }
+void setDepthTest(bool on)
+{
+    if (s_vk.pipeKey.depthTest != on) // PERF-RDG4R
+    {
+        s_vk.pipeKey.depthTest = on;
+        s_vk.dirtyPipeline = true;
+    }
+}
+void setDepthMask(bool on)
+{
+    if (s_vk.pipeKey.depthMask != on) // PERF-RDG4R
+    {
+        s_vk.pipeKey.depthMask = on;
+        s_vk.dirtyPipeline = true;
+    }
+}
+void setDepthFunc(rdgfx::DepthFunc func)
+{
+    if (s_vk.pipeKey.depthFunc != func) // PERF-RDG4R
+    {
+        s_vk.pipeKey.depthFunc = func;
+        s_vk.dirtyPipeline = true;
+    }
+}
 
 void setBlendAlpha()
 {
@@ -1535,16 +2020,33 @@ void setBlend(bool enable,
               rdgfx::BlendEq eqRgb,
               rdgfx::BlendEq eqAlpha)
 {
-    s_vk.pipeKey.blendEnable = enable;
-    s_vk.pipeKey.srcRgb = srcRgb;
-    s_vk.pipeKey.dstRgb = dstRgb;
-    s_vk.pipeKey.srcAlpha = srcAlpha;
-    s_vk.pipeKey.dstAlpha = dstAlpha;
-    s_vk.pipeKey.eqRgb = eqRgb;
-    s_vk.pipeKey.eqAlpha = eqAlpha;
+    if (s_vk.pipeKey.blendEnable != enable ||
+        s_vk.pipeKey.srcRgb != srcRgb ||
+        s_vk.pipeKey.dstRgb != dstRgb ||
+        s_vk.pipeKey.srcAlpha != srcAlpha ||
+        s_vk.pipeKey.dstAlpha != dstAlpha ||
+        s_vk.pipeKey.eqRgb != eqRgb ||
+        s_vk.pipeKey.eqAlpha != eqAlpha) // PERF-RDG4R
+    {
+        s_vk.pipeKey.blendEnable = enable;
+        s_vk.pipeKey.srcRgb = srcRgb;
+        s_vk.pipeKey.dstRgb = dstRgb;
+        s_vk.pipeKey.srcAlpha = srcAlpha;
+        s_vk.pipeKey.dstAlpha = dstAlpha;
+        s_vk.pipeKey.eqRgb = eqRgb;
+        s_vk.pipeKey.eqAlpha = eqAlpha;
+        s_vk.dirtyPipeline = true;
+    }
 }
 
-void setBackfaceCulling(bool on) { s_vk.pipeKey.cull = on; }
+void setBackfaceCulling(bool on)
+{
+    if (s_vk.pipeKey.cull != on) // PERF-RDG4R
+    {
+        s_vk.pipeKey.cull = on;
+        s_vk.dirtyPipeline = true;
+    }
+}
 
 void clearScreenBuffers(float r, float g, float b, float a)
 {
@@ -1579,14 +2081,17 @@ void clearScreenBuffers(float r, float g, float b, float a)
 // FIX-RDG3C: emulate GL VAO state (stores VBO on set/enableVertexAttribute and EBO on bindIndexBuffer).
 uint32_t createVertexArray()
 {
-    const uint32_t id = s_vk.nextVaoId++;
-    s_vk.vaos.emplace(id, GpuVao{});
-    return id;
+    return s_vk.vaos.allocate(GpuVao{}); // PERF-RDG4R
 }
 
 void bindVertexArray(uint32_t vao)
 {
-    s_vk.boundVao = vao;
+    if (s_vk.boundVao != vao) // PERF-RDG4R
+    {
+        s_vk.boundVao = vao;
+        s_vk.dirtyVertexBuffer = true;
+        s_vk.dirtyIndexBuffer = true;
+    }
 }
 
 uint32_t createVertexBuffer(const void *data, int sizeBytes, bool)
@@ -1598,11 +2103,13 @@ void updateVertexBuffer(uint32_t vbo, const void *data, int sizeBytes, int offse
 {
     ++s_vk.statVbUpd; // PROBE-RDG3B
     updateDynBuffer(s_vk.vbos, vbo, data, sizeBytes, offsetBytes);
+    s_vk.dirtyVertexBuffer = true; // PERF-RDG4R
 }
 
 void freeVertexBuffer(uint32_t vbo)
 {
     freeDynBuffer(s_vk.vbos, vbo);
+    s_vk.dirtyVertexBuffer = true; // PERF-RDG4R
 }
 
 uint32_t createIndexBuffer(const void *data, int sizeBytes, bool)
@@ -1613,23 +2120,42 @@ uint32_t createIndexBuffer(const void *data, int sizeBytes, bool)
 void updateIndexBuffer(uint32_t ebo, const void *data, int sizeBytes, int offsetBytes)
 {
     updateDynBuffer(s_vk.ebos, ebo, data, sizeBytes, offsetBytes);
+    s_vk.dirtyIndexBuffer = true; // PERF-RDG4R
 }
 
 void freeIndexBuffer(uint32_t ebo)
 {
     freeDynBuffer(s_vk.ebos, ebo);
+    s_vk.dirtyIndexBuffer = true; // PERF-RDG4R
 }
 
-void bindVertexBuffer(uint32_t vbo) { s_vk.boundVbo = vbo; }
+void bindVertexBuffer(uint32_t vbo)
+{
+    if (s_vk.boundVbo != vbo) // PERF-RDG4R
+    {
+        s_vk.boundVbo = vbo;
+        s_vk.dirtyVertexBuffer = true;
+    }
+}
 
 // FIX-RDG3C
 void bindIndexBuffer(uint32_t ebo)
 {
-    s_vk.boundEbo = ebo;
+    if (s_vk.boundEbo != ebo) // PERF-RDG4R
+    {
+        s_vk.boundEbo = ebo;
+        s_vk.dirtyIndexBuffer = true;
+    }
     if (s_vk.boundVao != 0)
     {
-        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end())
-            it->second.ebo = ebo;
+        if (GpuVao *vao = s_vk.vaos.find(s_vk.boundVao)) // PERF-RDG4R
+        {
+            if (vao->ebo != ebo)
+            {
+                vao->ebo = ebo;
+                s_vk.dirtyIndexBuffer = true;
+            }
+        }
     }
 }
 
@@ -1637,11 +2163,12 @@ void setVertexAttribute(uint32_t index, int, rdgfx::VertexAttrFormat, bool, int,
 {
     if (s_vk.boundVao != 0 && s_vk.boundVbo != 0)
     {
-        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end())
+        if (GpuVao *vao = s_vk.vaos.find(s_vk.boundVao)) // PERF-RDG4R
         {
-            it->second.vbo = s_vk.boundVbo;
+            vao->vbo = s_vk.boundVbo;
             if (index == 0)
-                it->second.vbOffset = static_cast<VkDeviceSize>(std::max(0, offsetBytes));
+                vao->vbOffset = static_cast<VkDeviceSize>(std::max(0, offsetBytes));
+            s_vk.dirtyVertexBuffer = true;
         }
     }
 }
@@ -1650,8 +2177,14 @@ void enableVertexAttribute(uint32_t)
 {
     if (s_vk.boundVao != 0 && s_vk.boundVbo != 0)
     {
-        if (auto it = s_vk.vaos.find(s_vk.boundVao); it != s_vk.vaos.end())
-            it->second.vbo = s_vk.boundVbo;
+        if (GpuVao *vao = s_vk.vaos.find(s_vk.boundVao)) // PERF-RDG4R
+        {
+            if (vao->vbo != s_vk.boundVbo)
+            {
+                vao->vbo = s_vk.boundVbo;
+                s_vk.dirtyVertexBuffer = true;
+            }
+        }
     }
 }
 
@@ -1666,17 +2199,17 @@ void enableVertexAttribute(uint32_t)
         const uint32_t activeEbo = resolveBoundEbo(); // FIX-RDG3C
         uint64_t vbHandle = 0;
         int vbSize = 0;
-        if (auto it = s_vk.vbos.find(activeVbo); it != s_vk.vbos.end() && s_vk.curFrame < it->second.copies.size())
+        if (const GpuBuffer *vbo = s_vk.vbos.find(activeVbo); vbo && s_vk.curFrame < vbo->copies.size())
         {
-            vbHandle = reinterpret_cast<uint64_t>(it->second.copies[s_vk.curFrame].buffer);
-            vbSize = it->second.sizeBytes;
+            vbHandle = reinterpret_cast<uint64_t>(vbo->copies[s_vk.curFrame].buffer);
+            vbSize = vbo->sizeBytes;
         }
         uint64_t ibHandle = 0;
         int ibSize = 0;
-        if (auto it = s_vk.ebos.find(activeEbo); it != s_vk.ebos.end() && s_vk.curFrame < it->second.copies.size())
+        if (const GpuBuffer *ebo = s_vk.ebos.find(activeEbo); ebo && s_vk.curFrame < ebo->copies.size())
         {
-            ibHandle = reinterpret_cast<uint64_t>(it->second.copies[s_vk.curFrame].buffer);
-            ibSize = it->second.sizeBytes;
+            ibHandle = reinterpret_cast<uint64_t>(ebo->copies[s_vk.curFrame].buffer);
+            ibSize = ebo->sizeBytes;
         }
         std::printf("[rdvk] firstDraw=%s target=%ux%u vp=(%d,%d,%d,%d) scOn=%d sc=(%d,%d,%d,%d) vkSc=(%d,%d,%u,%u)"
                     " vbId=%u vb=0x%llx vbSize=%d ibId=%u ib=0x%llx ibSize=%d first=%u count=%u\n",
@@ -1693,6 +2226,7 @@ void enableVertexAttribute(uint32_t)
 
 void drawArrays(rdgfx::PrimitiveTopology, int first, int count)
 {
+    ProbeDrawScope drawProbe; // PROBE-RDG4P
     ++s_vk.statDrawArr; // PROBE-RDG3B
     logFirstDraw("drawArrays", static_cast<uint32_t>(first), static_cast<uint32_t>(std::max(0, count)));
     if (count <= 0)
@@ -1707,6 +2241,7 @@ void drawArrays(rdgfx::PrimitiveTopology, int first, int count)
 
 void drawIndexed(rdgfx::PrimitiveTopology, uint32_t first, uint32_t count, bool idx32)
 {
+    ProbeDrawScope drawProbe; // PROBE-RDG4P
     ++s_vk.statDrawIdx; // PROBE-RDG3B
     logFirstDraw("drawIndexed", first, count);
     if (count == 0)
@@ -1716,30 +2251,40 @@ void drawIndexed(rdgfx::PrimitiveTopology, uint32_t first, uint32_t count, bool 
     }
     if (!prepareDraw())
         return;
-    const uint32_t activeEbo = resolveBoundEbo(); // FIX-RDG3C
-    auto eboIt = s_vk.ebos.find(activeEbo);
-    if (eboIt == s_vk.ebos.end())
+    // PERF-RDG4R: only resolve and bind index buffer when dirty or index type changed.
+    const VkIndexType idxType = idx32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+    if (s_vk.dirtyIndexBuffer || s_vk.lastBoundIb == VK_NULL_HANDLE || idxType != s_vk.lastBoundIbType)
     {
-        ++s_vk.statNoIb; // PROBE-RDG3B
-        return;
+        const uint32_t activeEbo = resolveBoundEbo(); // FIX-RDG3C
+        const GpuBuffer *ebo = s_vk.ebos.find(activeEbo);
+        if (!ebo)
+        {
+            ++s_vk.statNoIb; // PROBE-RDG3B
+            return;
+        }
+        VkBuffer eb = ebo->copies[s_vk.curFrame].buffer;
+        if (eb != s_vk.lastBoundIb || idxType != s_vk.lastBoundIbType)
+        {
+            vkCmdBindIndexBuffer(s_vk.cmd, eb, 0, idxType);
+            s_vk.lastBoundIb = eb;
+            s_vk.lastBoundIbType = idxType;
+        }
+        s_vk.dirtyIndexBuffer = false;
     }
-    VkBuffer eb = eboIt->second.copies[s_vk.curFrame].buffer;
-    vkCmdBindIndexBuffer(s_vk.cmd, eb, 0, idx32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     vkCmdDrawIndexed(s_vk.cmd, count, 1, first, 0, 0);
 }
 
-uint32_t createTextureRGBA8(const void *data, int w, int h)
+uint32_t createTexture2DInternal(const void *data, int w, int h, uint32_t mipLevels, const SamplerKey &sampler, bool clearBlackOpaque) // RDG2B
 {
-    if (!s_vk.initialized || w <= 0 || h <= 0)
+    ProbeTexScope texProbe; // PROBE-RDG4P
+    if (!s_vk.initialized || w <= 0 || h <= 0 || mipLevels == 0)
         return 0;
-
-    const uint32_t maxDim = static_cast<uint32_t>(std::max(w, h));
-    const uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(static_cast<double>(maxDim)))) + 1u;
 
     GpuTexture tex;
     tex.width = w;
     tex.height = h;
     tex.mipLevels = mipLevels;
+    tex.sampler = sampler;
 
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1822,6 +2367,22 @@ uint32_t createTextureRGBA8(const void *data, int w, int h)
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
+    else if (clearBlackOpaque)
+    {
+        imageBarrier(cmd, tex.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+        VkClearColorValue cv{{0.0f, 0.0f, 0.0f, 1.0f}};
+        VkImageSubresourceRange rng{VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
+        vkCmdClearColorImage(cmd, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cv, 1, &rng);
+
+        imageBarrier(cmd, tex.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
     else
     {
         imageBarrier(cmd, tex.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels,
@@ -1838,35 +2399,56 @@ uint32_t createTextureRGBA8(const void *data, int w, int h)
         vkFreeMemory(s_vk.device, staging.memory, nullptr);
     }
 
-    const uint32_t id = s_vk.nextTexId++;
-    s_vk.textures.emplace(id, tex);
+    const uint32_t id = s_vk.textures.allocate(std::move(tex)); // PERF-RDG4R
+    // Vector reallocation can move GpuTexture slots, so invalidate cached texture pointers.
+    s_vk.cachedTex[0] = nullptr;
+    s_vk.cachedTex[1] = nullptr;
+    s_vk.dirtyTextures = true;
     ++s_vk.statTexCreated; // PROBE-RDG3B
     return id;
 }
 
+uint32_t createTextureRGBA8(const void *data, int w, int h)
+{
+    ProbeTexScope texProbe; // PROBE-RDG4P
+    if (!s_vk.initialized || w <= 0 || h <= 0)
+        return 0;
+
+    const uint32_t maxDim = static_cast<uint32_t>(std::max(w, h));
+    const uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(static_cast<double>(maxDim)))) + 1u;
+    return createTexture2DInternal(data, w, h, mipLevels, SamplerKey{}, false);
+}
+
 void freeTexture(uint32_t texId)
 {
-    auto it = s_vk.textures.find(texId);
-    if (it == s_vk.textures.end())
+    const GpuTexture *tex = s_vk.textures.find(texId); // PERF-RDG4R
+    if (!tex)
         return;
-    const GpuTexture &tex = it->second;
     if (s_vk.frameActive)
-        s_vk.garbageTextures[s_vk.curFrame].push_back({tex.view, tex.image, tex.memory});
+        s_vk.garbageTextures[s_vk.curFrame].push_back({tex->view, tex->image, tex->memory});
     else
     {
-        if (tex.view != VK_NULL_HANDLE) vkDestroyImageView(s_vk.device, tex.view, nullptr);
-        if (tex.image != VK_NULL_HANDLE) vkDestroyImage(s_vk.device, tex.image, nullptr);
-        if (tex.memory != VK_NULL_HANDLE) vkFreeMemory(s_vk.device, tex.memory, nullptr);
+        if (tex->view != VK_NULL_HANDLE) vkDestroyImageView(s_vk.device, tex->view, nullptr);
+        if (tex->image != VK_NULL_HANDLE) vkDestroyImage(s_vk.device, tex->image, nullptr);
+        if (tex->memory != VK_NULL_HANDLE) vkFreeMemory(s_vk.device, tex->memory, nullptr);
     }
-    s_vk.textures.erase(it);
+    s_vk.textures.erase(texId);
+    if (texId == s_vk.boundTex[0] || texId == s_vk.boundTex[1] ||
+        texId == s_vk.cachedEffTexId[0] || texId == s_vk.cachedEffTexId[1])
+    {
+        s_vk.cachedTex[0] = nullptr;
+        s_vk.cachedTex[1] = nullptr;
+        s_vk.dirtyTextures = true;
+    }
 }
 
 void generateMipmaps(uint32_t texId, int w, int h)
 {
-    auto it = s_vk.textures.find(texId);
-    if (it == s_vk.textures.end())
+    ProbeTexScope texProbe; // PROBE-RDG4P
+    GpuTexture *texPtr = s_vk.textures.find(texId); // PERF-RDG4R
+    if (!texPtr)
         return;
-    GpuTexture &tex = it->second;
+    GpuTexture &tex = *texPtr;
     if (tex.mipLevels <= 1)
         return;
 
@@ -1916,47 +2498,424 @@ void generateMipmaps(uint32_t texId, int w, int h)
 
 void setTextureWrap(uint32_t texId, bool isT, rdgfx::TextureWrap wrap)
 {
-    auto it = s_vk.textures.find(texId);
-    if (it == s_vk.textures.end())
+    GpuTexture *tex = s_vk.textures.find(texId); // PERF-RDG4R
+    if (!tex)
         return;
+    bool changed = false;
     if (isT)
-        it->second.sampler.wrapT = wrap;
+    {
+        if (tex->sampler.wrapT != wrap)
+        {
+            tex->sampler.wrapT = wrap;
+            changed = true;
+        }
+    }
     else
-        it->second.sampler.wrapS = wrap;
+    {
+        if (tex->sampler.wrapS != wrap)
+        {
+            tex->sampler.wrapS = wrap;
+            changed = true;
+        }
+    }
+    if (changed && (texId == s_vk.boundTex[0] || texId == s_vk.boundTex[1] ||
+                    texId == s_vk.cachedEffTexId[0] || texId == s_vk.cachedEffTexId[1]))
+    {
+        s_vk.dirtyTextures = true;
+    }
 }
 
 void setTextureFilter(uint32_t texId, bool isMin, rdgfx::TextureFilter filter)
 {
-    auto it = s_vk.textures.find(texId);
-    if (it == s_vk.textures.end())
+    GpuTexture *tex = s_vk.textures.find(texId); // PERF-RDG4R
+    if (!tex)
         return;
+    bool changed = false;
     if (isMin)
-        it->second.sampler.minFilter = filter;
+    {
+        if (tex->sampler.minFilter != filter)
+        {
+            tex->sampler.minFilter = filter;
+            changed = true;
+        }
+    }
     else
-        it->second.sampler.magFilter = filter;
+    {
+        if (tex->sampler.magFilter != filter)
+        {
+            tex->sampler.magFilter = filter;
+            changed = true;
+        }
+    }
+    if (changed && (texId == s_vk.boundTex[0] || texId == s_vk.boundTex[1] ||
+                    texId == s_vk.cachedEffTexId[0] || texId == s_vk.cachedEffTexId[1]))
+    {
+        s_vk.dirtyTextures = true;
+    }
 }
 
 void bindTexture(uint32_t unit, uint32_t texId)
 {
     ++s_vk.statBinds; // PROBE-RDG3B
-    if (unit < 2)
+    if (unit < 2 && s_vk.boundTex[unit] != texId) // PERF-RDG4R
+    {
         s_vk.boundTex[unit] = texId;
+        s_vk.dirtyTextures = true;
+    }
 }
 
-// Not in RDG2A (palette textures / overlay / backbuffer copy deferred to later tasks).
-bool isPaletteTextureSupported() { return false; }
-bool uploadPaletteTexture(const uint32_t *) { return false; }
-void unbindPaletteTexture() {}
+// RDG2B: palette textures, overlay quad, backbuffer copy
+bool isPaletteTextureSupported() { return s_vk.initialized; }
 
-void drawTextureOverlay(uint32_t, int, int, float, float, float, float, float, float, float, float, uint8_t) {}
-
-bool canCopyBackbuffer() { return false; }
-bool beginBackbufferCopy(rdgfx::BackbufferCopyState &) { return false; }
-bool copyBackbufferToTexture(rdgfx::BackbufferCopyState &, uint32_t &, uint32_t &, int &, int &,
-                             int, int, int, int, int, int, int, int, bool)
+bool uploadPaletteTexture(const uint32_t *rgba256)
 {
-    return false;
+    ProbeTexScope texProbe; // PROBE-RDG4P
+    if (!s_vk.initialized || !rgba256)
+        return false;
+
+    const uint32_t fi = (s_vk.curFrame < s_vk.framesInFlight) ? s_vk.curFrame : 0u;
+    uint32_t &palId = s_vk.palTexIds[fi];
+    constexpr size_t kPalBytes = 256u * sizeof(uint32_t);
+
+    if (palId == 0u)
+    {
+        SamplerKey palSamp{rdgfx::TextureFilter::Nearest, rdgfx::TextureFilter::Nearest,
+                           rdgfx::TextureWrap::Clamp, rdgfx::TextureWrap::Clamp};
+        palId = createTexture2DInternal(rgba256, 256, 1, 1, palSamp, false);
+        if (palId == 0u)
+            return false;
+        std::memcpy(s_vk.palLastRgba[fi].data(), rgba256, kPalBytes);
+        s_vk.palHasData[fi] = true;
+    }
+    else if (!s_vk.palHasData[fi] || std::memcmp(s_vk.palLastRgba[fi].data(), rgba256, kPalBytes) != 0)
+    {
+        const GpuTexture *tex = s_vk.textures.find(palId); // PERF-RDG4R
+        if (!tex)
+            return false;
+
+        BufferCopy staging{};
+        if (!createHostBuffer(static_cast<VkDeviceSize>(kPalBytes), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging))
+            return false;
+        std::memcpy(staging.mapped, rgba256, kPalBytes);
+
+        if (s_vk.frameActive && s_vk.cmd != VK_NULL_HANDLE)
+        {
+            if (s_vk.inRenderPass)
+            {
+                vkCmdEndRendering(s_vk.cmd);
+                s_vk.inRenderPass = false;
+                invalidateCommandBufferState(); // PERF-RDG4R
+            }
+            imageBarrier(s_vk.cmd, tex->image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                         VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageExtent = {256u, 1u, 1u};
+            vkCmdCopyBufferToImage(s_vk.cmd, staging.buffer, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            imageBarrier(s_vk.cmd, tex->image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                         VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+            vkUnmapMemory(s_vk.device, staging.memory);
+            s_vk.garbageBuffers[s_vk.curFrame].push_back({staging.buffer, staging.memory});
+        }
+        else
+        {
+            VkCommandBuffer cmd = beginOneTimeCmd();
+            imageBarrier(cmd, tex->image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                         VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageExtent = {256u, 1u, 1u};
+            vkCmdCopyBufferToImage(cmd, staging.buffer, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            imageBarrier(cmd, tex->image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                         VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            endOneTimeCmd(cmd);
+
+            vkUnmapMemory(s_vk.device, staging.memory);
+            vkDestroyBuffer(s_vk.device, staging.buffer, nullptr);
+            vkFreeMemory(s_vk.device, staging.memory, nullptr);
+        }
+
+        std::memcpy(s_vk.palLastRgba[fi].data(), rgba256, kPalBytes);
+        s_vk.palHasData[fi] = true;
+    }
+
+    if (s_vk.boundTex[1] != palId) // PERF-RDG4R
+    {
+        s_vk.boundTex[1] = palId;
+        s_vk.dirtyTextures = true;
+    }
+    return true;
 }
+
+void unbindPaletteTexture()
+{
+    if (s_vk.boundTex[1] != 0u) // PERF-RDG4R
+    {
+        s_vk.boundTex[1] = 0u;
+        s_vk.dirtyTextures = true;
+    }
+}
+
+void drawTextureOverlay(uint32_t texId, int texW, int texH,
+                        float srcX, float srcY, float srcW, float srcH,
+                        float dstX, float dstY, float dstW, float dstH,
+                        uint8_t alpha)
+{
+    if (!s_vk.initialized || !s_vk.frameActive || s_vk.cmd == VK_NULL_HANDLE ||
+        texId == 0u || texW <= 0 || texH <= 0 || dstW == 0.0f || dstH == 0.0f)
+        return;
+    if (!s_vk.textures.find(texId)) // PERF-RDG4R
+        return;
+
+    struct OverlayVertex
+    {
+        float pos[4];
+        uint8_t col[4];
+        float uv[2];
+    };
+    static_assert(sizeof(OverlayVertex) == 28, "OverlayVertex must match 28-byte stride");
+    constexpr uint32_t kMaxOverlayQuads = 64u;
+    constexpr uint32_t kMaxOverlayVerts = kMaxOverlayQuads * 6u;
+
+    if (s_vk.overlayVbo == 0u)
+    {
+        s_vk.overlayVbo = createDynBuffer(nullptr, static_cast<int>(kMaxOverlayVerts * sizeof(OverlayVertex)), false);
+        if (s_vk.overlayVbo == 0u)
+            return;
+    }
+    if (s_vk.overlayVertexCursor + 6u > kMaxOverlayVerts)
+        return;
+
+    const GpuBuffer *ovVbo = s_vk.vbos.find(s_vk.overlayVbo); // PERF-RDG4R
+    if (!ovVbo || s_vk.curFrame >= ovVbo->copies.size() || !ovVbo->copies[s_vk.curFrame].mapped)
+        return;
+
+    const float u0 = srcX / static_cast<float>(texW);
+    const float v0 = srcY / static_cast<float>(texH);
+    const float u1 = (srcX + srcW) / static_cast<float>(texW);
+    const float v1 = (srcY + srcH) / static_cast<float>(texH);
+    const float x0 = dstX;
+    const float y0 = dstY;
+    const float x1 = dstX + dstW;
+    const float y1 = dstY + dstH;
+
+    const OverlayVertex quad[6] = {
+        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}},
+        {{x1, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v0}},
+        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}},
+        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}},
+        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}},
+        {{x0, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v1}},
+    };
+
+    const uint32_t firstVertex = s_vk.overlayVertexCursor;
+    uint8_t *dstPtr = static_cast<uint8_t *>(ovVbo->copies[s_vk.curFrame].mapped) + firstVertex * sizeof(OverlayVertex);
+    std::memcpy(dstPtr, quad, sizeof(quad));
+
+    // Save state
+    const PushConstants savedPc = s_vk.pc;
+    const PipelineKey savedPipeKey = s_vk.pipeKey;
+    const int savedVpX = s_vk.vpX, savedVpY = s_vk.vpY, savedVpW = s_vk.vpW, savedVpH = s_vk.vpH;
+    const bool savedScissor = s_vk.scissorTest;
+    const uint32_t savedVao = s_vk.boundVao;
+    const uint32_t savedVbo = s_vk.boundVbo;
+    const uint32_t savedTex0 = s_vk.boundTex[0];
+    const uint32_t savedTex1 = s_vk.boundTex[1];
+
+    // Set 2D overlay state
+    s_vk.pc = PushConstants{};
+    s_vk.pc.uFlip[0] = 1.0f;
+    s_vk.pc.uFlip[1] = 1.0f;
+    s_vk.pc.uFlip[2] = 1.0f;
+    s_vk.pc.uMode2d = 1;
+    s_vk.pc.uFbSize[0] = static_cast<float>(s_vk.targetW);
+    s_vk.pc.uFbSize[1] = static_cast<float>(s_vk.targetH);
+    s_vk.pc.uTex = 1;
+    s_vk.pc.uTfx = 1;
+    s_vk.pc.uTcc = 0;
+    s_vk.pc.uAtst = 1;
+    s_vk.pc.uFixAlpha = static_cast<float>(alpha) / 255.0f;
+
+    s_vk.pipeKey.blendEnable = true;
+    s_vk.pipeKey.srcRgb = rdgfx::BlendFactor::SrcAlpha;
+    s_vk.pipeKey.dstRgb = rdgfx::BlendFactor::OneMinusSrcAlpha;
+    s_vk.pipeKey.srcAlpha = rdgfx::BlendFactor::SrcAlpha;
+    s_vk.pipeKey.dstAlpha = rdgfx::BlendFactor::OneMinusSrcAlpha;
+    s_vk.pipeKey.eqRgb = rdgfx::BlendEq::Add;
+    s_vk.pipeKey.eqAlpha = rdgfx::BlendEq::Add;
+    s_vk.pipeKey.colorMask = 0x0Fu;
+    s_vk.pipeKey.depthTest = false;
+    s_vk.pipeKey.depthMask = false;
+    s_vk.pipeKey.cull = false;
+
+    s_vk.vpX = 0;
+    s_vk.vpY = 0;
+    s_vk.vpW = static_cast<int>(s_vk.targetW);
+    s_vk.vpH = static_cast<int>(s_vk.targetH);
+    s_vk.scissorTest = false;
+    s_vk.boundVao = 0u;
+    s_vk.boundVbo = s_vk.overlayVbo;
+    s_vk.boundTex[0] = texId;
+    s_vk.boundTex[1] = 0u;
+    // PERF-RDG4R: mark dirty before overlay draw
+    s_vk.dirtyPushConstants = true;
+    s_vk.dirtyPipeline = true;
+    s_vk.dirtyViewport = true;
+    s_vk.dirtyScissor = true;
+    s_vk.dirtyVertexBuffer = true;
+    s_vk.dirtyTextures = true;
+
+    if (prepareDraw())
+    {
+        vkCmdDraw(s_vk.cmd, 6u, 1u, firstVertex, 0u);
+        s_vk.overlayVertexCursor += 6u;
+    }
+
+    // Restore state
+    s_vk.pc = savedPc;
+    s_vk.pipeKey = savedPipeKey;
+    s_vk.vpX = savedVpX;
+    s_vk.vpY = savedVpY;
+    s_vk.vpW = savedVpW;
+    s_vk.vpH = savedVpH;
+    s_vk.scissorTest = savedScissor;
+    s_vk.boundVao = savedVao;
+    s_vk.boundVbo = savedVbo;
+    s_vk.boundTex[0] = savedTex0;
+    s_vk.boundTex[1] = savedTex1;
+    // PERF-RDG4R: mark dirty after restoring state
+    s_vk.dirtyPushConstants = true;
+    s_vk.dirtyPipeline = true;
+    s_vk.dirtyViewport = true;
+    s_vk.dirtyScissor = true;
+    s_vk.dirtyVertexBuffer = true;
+    s_vk.dirtyTextures = true;
+}
+
+bool canCopyBackbuffer() { return s_vk.initialized; }
+
+bool beginBackbufferCopy(rdgfx::BackbufferCopyState &state)
+{
+    state = rdgfx::BackbufferCopyState{};
+    if (!s_vk.initialized || !s_vk.frameActive || s_vk.cmd == VK_NULL_HANDLE)
+        return false;
+    state.valid = true;
+    return true;
+}
+
+bool copyBackbufferToTexture(rdgfx::BackbufferCopyState &state,
+                             uint32_t &texId, uint32_t &auxId,
+                             int &texW, int &texH,
+                             int wantW, int wantH,
+                             int vx, int vy, int vw, int vh,
+                             int dstW, int dstH,
+                             bool linearFilter)
+{
+    ProbeTexScope texProbe; // PROBE-RDG4P
+    (void)auxId;
+    if (!state.valid || !s_vk.initialized || !s_vk.frameActive || s_vk.cmd == VK_NULL_HANDLE)
+        return false;
+    if (wantW <= 0 || wantH <= 0 || vw <= 0 || vh <= 0 || dstW <= 0 || dstH <= 0)
+        return false;
+
+    if (texId == 0u || texW != wantW || texH != wantH)
+    {
+        if (texId != 0u)
+        {
+            freeTexture(texId);
+            texId = 0u;
+        }
+        SamplerKey copySamp{rdgfx::TextureFilter::Linear, rdgfx::TextureFilter::Linear,
+                            rdgfx::TextureWrap::Clamp, rdgfx::TextureWrap::Clamp};
+        texId = createTexture2DInternal(nullptr, wantW, wantH, 1u, copySamp, true);
+        if (texId == 0u)
+            return false;
+        texW = wantW;
+        texH = wantH;
+    }
+
+    const GpuTexture *tex = s_vk.textures.find(texId); // PERF-RDG4R
+    if (!tex)
+        return false;
+
+    const int tw = static_cast<int>(s_vk.targetW);
+    const int th = static_cast<int>(s_vk.targetH);
+    const int sx0 = std::max(0, std::min(tw, vx));
+    const int sx1 = std::max(0, std::min(tw, vx + vw));
+    const int sy0 = std::max(0, std::min(th, th - (vy + vh)));
+    const int sy1 = std::max(0, std::min(th, th - vy));
+    if (sx1 <= sx0 || sy1 <= sy0)
+        return false;
+
+    if (s_vk.inRenderPass)
+    {
+        vkCmdEndRendering(s_vk.cmd);
+        s_vk.inRenderPass = false;
+        invalidateCommandBufferState(); // PERF-RDG4R
+    }
+    else if (s_vk.firstPassInFrame)
+    {
+        ensureRenderPass(true, 0.0f, 0.0f, 0.0f, 1.0f);
+        vkCmdEndRendering(s_vk.cmd);
+        s_vk.inRenderPass = false;
+        invalidateCommandBufferState(); // PERF-RDG4R
+    }
+
+    const bool useMsaa = (s_vk.msaaSamples > VK_SAMPLE_COUNT_1_BIT && s_vk.resolveImage != VK_NULL_HANDLE);
+    VkImage srcImage = useMsaa ? s_vk.resolveImage : s_vk.colorImage;
+    VkImageLayout &srcLayout = useMsaa ? s_vk.resolveLayout : s_vk.colorLayout;
+
+    imageBarrier(s_vk.cmd, srcImage, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                 srcLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    srcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+    imageBarrier(s_vk.cmd, tex->image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.srcOffsets[0] = {sx0, sy0, 0};
+    blit.srcOffsets[1] = {sx1, sy1, 1};
+    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.dstOffsets[0] = {0, 0, 0};
+    blit.dstOffsets[1] = {std::min(dstW, texW), std::min(dstH, texH), 1};
+    vkCmdBlitImage(s_vk.cmd,
+                   srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &blit, linearFilter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+
+    imageBarrier(s_vk.cmd, srcImage, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    srcLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    imageBarrier(s_vk.cmd, tex->image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    return true;
+}
+
 void endBackbufferCopy(const rdgfx::BackbufferCopyState &) {}
 
 uint32_t getLastError() { return 0u; }

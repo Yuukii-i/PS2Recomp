@@ -260,7 +260,8 @@ int main(int argc, char *argv[])
             setEnvIfUnset("PS2X_RD_2DFEEDBACK", "1"); // RDG3
             setEnvIfUnset("PS2X_RD_2DLATE", "1"); // RDG3
             setEnvIfUnset("PS2X_RD_FORCECLASSIC", "0"); // RDG3
-            setEnvIfUnset("PS2X_RD_FBTEX", "0"); // RDG3
+            setEnvIfUnset("PS2X_RD_FBTEX", "1"); // FIX-RDG4Q
+            setEnvIfUnset("PS2X_RD_SNAP", "0"); // FIX-RDG4Q
         }
         else // RDG3
         {

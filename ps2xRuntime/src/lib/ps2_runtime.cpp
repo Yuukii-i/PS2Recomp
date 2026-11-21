@@ -30,6 +30,7 @@ extern bool ps2xSdlWanted();
 extern bool ps2xSdlInit(const char *title, int w, int h);
 extern bool ps2xSdlActive();
 extern bool ps2xSdlShouldClose();
+extern void ps2xSdlForcePoll(); // FIX-RDG4Q
 extern void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t strideBytes);
 extern void ps2xSdlPresent();
 extern void ps2xSdlSetTitle(const char *t);
@@ -39,6 +40,7 @@ inline bool ps2xSdlWanted() { return false; }
 inline bool ps2xSdlInit(const char *, int, int) { return false; }
 inline bool ps2xSdlActive() { return false; }
 inline bool ps2xSdlShouldClose() { return false; }
+inline void ps2xSdlForcePoll() {} // FIX-RDG4Q
 inline void ps2xSdlUploadFrame(const uint8_t *, uint32_t, uint32_t, uint32_t) {}
 inline void ps2xSdlPresent() {}
 inline void ps2xSdlSetTitle(const char *) {}
@@ -7254,11 +7256,13 @@ void PS2Runtime::run()
                     const float dstY = (screenHeight - dstHeight) * 0.5f; // RDG3
                     (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight); // RDG3
                     rdgfx_vk::endFrame(); // RDG3
+                    ps2xSdlForcePoll(); // FIX-RDG4Q
                 }
                 else // RDG3
 #endif // RDG3
                 {
                     ps2xSdlPresent();
+                    ps2xSdlForcePoll(); // FIX-RDG4Q
                 }
                 gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             }

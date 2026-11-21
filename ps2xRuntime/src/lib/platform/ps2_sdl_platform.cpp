@@ -1,10 +1,22 @@
 #if defined(PS2X_HAS_SDL3)
 
+#ifdef _WIN32 // PROBE-RDG4P
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <atomic> // FIX-RDG4Q
+#include <chrono> // FIX-RDG4Q
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -18,6 +30,7 @@ bool ps2xSdlWanted();
 bool ps2xSdlInit(const char *title, int w, int h);
 bool ps2xSdlActive();
 bool ps2xSdlShouldClose();
+void ps2xSdlForcePoll(); // FIX-RDG4Q
 void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t strideBytes);
 void ps2xSdlPresent();
 void ps2xSdlSetTitle(const char *t);
@@ -41,7 +54,7 @@ namespace
         SDL_Window *window = nullptr;
         SDL_Gamepad *gamepad = nullptr;
         SDL_JoystickID gamepadId = 0;
-        bool keys[SDL_SCANCODE_COUNT]{};
+        std::atomic<bool> keys[SDL_SCANCODE_COUNT]{}; // FIX-RDG4Q: read from game thread without tearing
 
         SDL_AudioStream *audioStream = nullptr;
         AudioFillFn audioFill = nullptr;
@@ -91,9 +104,117 @@ namespace
         uint32_t rdImageIndex = 0; // RDG2
         bool rdSuboptimal = false; // RDG2
         bool rdFrameOpen = false; // RDG2
+        double rdLastBeginWaitMs = 0.0; // PROBE-RDG4P
+
+        void reset()
+        {
+            active = false;
+            shouldClose = false;
+            framebufferResized = false;
+
+            window = nullptr;
+            gamepad = nullptr;
+            gamepadId = 0;
+            for (auto &k : keys)
+            {
+                k.store(false, std::memory_order_relaxed);
+            }
+
+            audioStream = nullptr;
+            audioFill = nullptr;
+
+            instance = VK_NULL_HANDLE;
+            debugMessenger = VK_NULL_HANDLE;
+            vkValMsgCount = 0;
+            surface = VK_NULL_HANDLE;
+            physicalDevice = VK_NULL_HANDLE;
+            queueFamily = UINT32_MAX;
+            device = VK_NULL_HANDLE;
+            queue = VK_NULL_HANDLE;
+
+            swapchain = VK_NULL_HANDLE;
+            swapchainFormat = VK_FORMAT_B8G8R8A8_UNORM;
+            swapchainExtent = {0, 0};
+            swapchainImages.clear();
+            swapchainImageViews.clear();
+            renderFinishedSemaphores.clear();
+
+            commandPool = VK_NULL_HANDLE;
+            commandBuffers.clear();
+            imageAvailableSemaphores.clear();
+            inFlightFences.clear();
+            frameInFlight = 0;
+
+            stagingBuffer = VK_NULL_HANDLE;
+            stagingMemory = VK_NULL_HANDLE;
+            stagingSize = 0;
+            stagingMapped = nullptr;
+
+            srcImage = VK_NULL_HANDLE;
+            srcImageMemory = VK_NULL_HANDLE;
+            srcW = 0;
+            srcH = 0;
+
+            frameW = 0;
+            frameH = 0;
+            hasFrame = false;
+            cpuFrame.clear();
+
+            shotDir.clear();
+            shotEvery = 60;
+            presentCount = 0;
+            shotIndex = 0;
+
+            rdImageIndex = 0;
+            rdSuboptimal = false;
+            rdFrameOpen = false;
+            rdLastBeginWaitMs = 0.0;
+        }
     };
 
     SdlPlatformState g_sdl;
+
+    // PROBE-RDG4P
+    bool rdvkLogEnabled()
+    {
+        static const bool enabled = []()
+        {
+            const char *env = std::getenv("PS2X_RDVK_LOG");
+            return env && env[0] == '1';
+        }();
+        return enabled;
+    }
+
+    struct ScopedBeginWaitQpc
+    {
+        bool active = false;
+#ifdef _WIN32
+        LARGE_INTEGER start{};
+#endif
+        ScopedBeginWaitQpc() : active(rdvkLogEnabled())
+        {
+#ifdef _WIN32
+            if (active)
+                QueryPerformanceCounter(&start);
+#endif
+        }
+        ~ScopedBeginWaitQpc()
+        {
+#ifdef _WIN32
+            if (!active)
+                return;
+            LARGE_INTEGER end{};
+            QueryPerformanceCounter(&end);
+            static const double invFreqMs = []()
+            {
+                LARGE_INTEGER freq{};
+                QueryPerformanceFrequency(&freq);
+                return freq.QuadPart > 0 ? (1000.0 / static_cast<double>(freq.QuadPart)) : 0.0;
+            }();
+            g_sdl.rdLastBeginWaitMs = static_cast<double>(end.QuadPart - start.QuadPart) * invFreqMs;
+#endif
+        }
+    };
 
     uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
     {
@@ -815,7 +936,7 @@ bool ps2xSdlInit(const char *title, int w, int h)
         return true;
     }
 
-    g_sdl = SdlPlatformState{};
+    g_sdl.reset();
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD))
     {
@@ -866,54 +987,89 @@ bool ps2xSdlActive()
     return g_sdl.active && g_sdl.window != nullptr && g_sdl.device != VK_NULL_HANDLE;
 }
 
+namespace // FIX-RDG4Q
+{
+    std::chrono::steady_clock::time_point g_sdlLastPoll{};
+    bool g_sdlHasPolled = false;
+
+    void pollSdlEventsNow()
+    {
+        SDL_Event ev{};
+        while (SDL_PollEvent(&ev))
+        {
+            switch (ev.type)
+            {
+            case SDL_EVENT_QUIT:
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+                g_sdl.shouldClose = true;
+                break;
+            case SDL_EVENT_WINDOW_RESIZED:
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+                g_sdl.framebufferResized = true;
+                break;
+            case SDL_EVENT_KEY_DOWN:
+            case SDL_EVENT_KEY_UP:
+                if (ev.key.scancode >= 0 && ev.key.scancode < SDL_SCANCODE_COUNT)
+                {
+                    g_sdl.keys[ev.key.scancode].store(ev.type == SDL_EVENT_KEY_DOWN, std::memory_order_relaxed);
+                }
+                break;
+            case SDL_EVENT_GAMEPAD_ADDED:
+                if (!g_sdl.gamepad)
+                {
+                    g_sdl.gamepad = SDL_OpenGamepad(ev.gdevice.which);
+                    if (g_sdl.gamepad)
+                    {
+                        g_sdl.gamepadId = ev.gdevice.which;
+                        const char *name = SDL_GetGamepadName(g_sdl.gamepad);
+                        std::printf("[sdl] pad %s\n", name ? name : "unknown");
+                    }
+                }
+                break;
+            case SDL_EVENT_GAMEPAD_REMOVED:
+                if (g_sdl.gamepad && ev.gdevice.which == g_sdl.gamepadId)
+                {
+                    SDL_CloseGamepad(g_sdl.gamepad);
+                    g_sdl.gamepad = nullptr;
+                    g_sdl.gamepadId = 0;
+                    OpenFirstGamepad();
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        g_sdlLastPoll = std::chrono::steady_clock::now();
+        g_sdlHasPolled = true;
+    }
+} // namespace
+
 bool ps2xSdlShouldClose()
 {
-    SDL_Event ev{};
-    while (SDL_PollEvent(&ev))
+    // FIX-RDG4Q: throttle SDL_PollEvent on the ~1 kHz main loop (matching PS2X_IDLE_POLL_MS).
+    if (g_sdl.shouldClose)
+        return true;
+
+    static const int64_t s_pollUs = []() {
+        const char *e = std::getenv("PS2X_SDL_POLL_MS");
+        const long v = e ? std::atol(e) : 4;
+        return static_cast<int64_t>(v < 0 ? 0 : v) * 1000;
+    }();
+    const auto now = std::chrono::steady_clock::now();
+    if (g_sdlHasPolled &&
+        std::chrono::duration_cast<std::chrono::microseconds>(now - g_sdlLastPoll).count() < s_pollUs)
     {
-        switch (ev.type)
-        {
-        case SDL_EVENT_QUIT:
-        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-            g_sdl.shouldClose = true;
-            break;
-        case SDL_EVENT_WINDOW_RESIZED:
-        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-            g_sdl.framebufferResized = true;
-            break;
-        case SDL_EVENT_KEY_DOWN:
-        case SDL_EVENT_KEY_UP:
-            if (ev.key.scancode >= 0 && ev.key.scancode < SDL_SCANCODE_COUNT)
-            {
-                g_sdl.keys[ev.key.scancode] = (ev.type == SDL_EVENT_KEY_DOWN);
-            }
-            break;
-        case SDL_EVENT_GAMEPAD_ADDED:
-            if (!g_sdl.gamepad)
-            {
-                g_sdl.gamepad = SDL_OpenGamepad(ev.gdevice.which);
-                if (g_sdl.gamepad)
-                {
-                    g_sdl.gamepadId = ev.gdevice.which;
-                    const char *name = SDL_GetGamepadName(g_sdl.gamepad);
-                    std::printf("[sdl] pad %s\n", name ? name : "unknown");
-                }
-            }
-            break;
-        case SDL_EVENT_GAMEPAD_REMOVED:
-            if (g_sdl.gamepad && ev.gdevice.which == g_sdl.gamepadId)
-            {
-                SDL_CloseGamepad(g_sdl.gamepad);
-                g_sdl.gamepad = nullptr;
-                g_sdl.gamepadId = 0;
-                OpenFirstGamepad();
-            }
-            break;
-        default:
-            break;
-        }
+        return g_sdl.shouldClose;
     }
+    pollSdlEventsNow();
     return g_sdl.shouldClose;
+}
+
+void ps2xSdlForcePoll() // FIX-RDG4Q
+{
+    if (!ps2xSdlActive())
+        return;
+    pollSdlEventsNow();
 }
 
 void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t strideBytes)
@@ -1261,6 +1417,7 @@ void ps2xSdlShutdown()
     SDL_Quit();
     g_sdl.active = false;
     g_sdl.shouldClose = false;
+    g_sdlHasPolled = false; // FIX-RDG4Q
     g_sdl.hasFrame = false;
     g_sdl.cpuFrame.clear();
 }
@@ -1442,9 +1599,11 @@ VkQueue ps2xSdlVkQueue() { return g_sdl.queue; }
 uint32_t ps2xSdlVkQueueFamily() { return g_sdl.queueFamily; }
 VkFormat ps2xSdlVkSwapFormat() { return g_sdl.swapchainFormat; }
 uint32_t ps2xSdlVkFramesInFlight() { return kMaxFramesInFlight; }
+double ps2xSdlVkLastBeginWaitMs() { return g_sdl.rdLastBeginWaitMs; } // PROBE-RDG4P
 
 bool ps2xSdlVkBeginRdFrame(VkCommandBuffer *cb, VkImage *swapImage, uint32_t *w, uint32_t *h, uint32_t *frameIdx)
 {
+    ScopedBeginWaitQpc waitProbe; // PROBE-RDG4P
     if (!ps2xSdlActive())
     {
         return false;
