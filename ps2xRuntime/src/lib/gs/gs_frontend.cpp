@@ -822,13 +822,64 @@ static uint32_t s_rdCutHoldStreak = 0u; // FEAT-RD54
 static uint32_t s_rdCutPub = 0u; // FEAT-RD54
 static uint32_t s_rdCutHold = 0u; // FEAT-RD54
 static uint32_t s_rdCutFlush = 0u; // FEAT-RD54
+static uint32_t s_rdCutRej = 0u; // PROBE-CUT1
+static uint32_t s_rdRejSinceLastPub = 0u; // PROBE-CUT1
+static uint32_t s_rdHoldRej = 0u; // PROBE-CUT1
+static uint32_t s_rdHoldNoClear = 0u; // PROBE-CUT1
+static uint32_t s_rdRejGapMin = UINT32_MAX; // PROBE-CUT1
+static uint32_t s_rdRejGapMax = 0u; // PROBE-CUT1
+static uint64_t s_rdRejGapSum = 0ull; // PROBE-CUT1
+static uint32_t s_rdRejGapCnt = 0u; // PROBE-CUT1
+static uint32_t s_rdRejRing[3] = {0u, 0u, 0u}; // FIX-CUT1
+static uint32_t s_rdRejRingHead = 0u; // FIX-CUT1
+static uint32_t s_rdRejRingCnt = 0u; // FIX-CUT1
+static const bool s_rdCutAdapt = []() { const char *e = std::getenv("PS2X_RD_CUT_ADAPT"); return e && e[0] == '1'; }(); // FIX-CUT1
+static const bool s_rdCutCopy = []() { const char *e = std::getenv("PS2X_RD_CUT_COPY"); return e && e[0] == '1'; }(); // FIX-CUT2
+static uint32_t s_rdCopyB = 0u; // FIX-CUT2 // FIX-CUT3: copies seen
+static uint32_t s_rdCopyRej = 0u; // FIX-CUT2D
+static uint32_t s_rdLastCopyBIdx = 0xFFFFFFFFu; // FIX-CUT2E
+static uint32_t s_rdFlipsSinceCopy = 0u; // FIX-CUT2
+static bool s_rdCopyArmed = false; // FIX-CUT3
+static uint32_t s_rdArmedAcc = 0u; // FIX-CUT3
+static uint32_t s_rdClearIgnored = 0u; // FIX-CUT3
+static uint32_t s_rdCg0 = 0u, s_rdCg1 = 0u, s_rdCg2 = 0u, s_rdCg3 = 0u, s_rdCg4 = 0u, s_rdCg5 = 0u; // PROBE-CUT2B
+static uint32_t s_rdCgLastFbp = 0u, s_rdCgLastPsm = 0u; // PROBE-CUT2B
+static uint32_t s_rdCgLastScX0 = 0u, s_rdCgLastScX1 = 0u, s_rdCgLastScY0 = 0u, s_rdCgLastScY1 = 0u; // PROBE-CUT2B
+static uint32_t s_rdCgLastScW = 0u, s_rdCgLastScH = 0u; // PROBE-CUT2B
+static float s_rdCgLastBbW = 0.0f, s_rdCgLastBbH = 0.0f; // PROBE-CUT2B
+static const bool s_rdFxOn = []() { const char *e = std::getenv("PS2X_RD_FXCLASSIC"); return !e || !*e || e[0] != '0'; }(); // FIX-FX1 // FIX-FX4
+static const bool s_rdFxPause = []() { const char *e = std::getenv("PS2X_RD_FXPAUSE"); return !e || !*e || e[0] != '0'; }(); // FIX-FX2
+static std::atomic<bool> s_rdFxPending{false}; // FIX-FX1
+static uint32_t s_rdFxMarkers = 0u; // FIX-FX1
+static uint32_t s_rdFxClassic = 0u; // FIX-FX1
+static uint32_t s_rdFxTintFrames = 0u; // FIX-FX2
+static uint32_t s_rdFxBlurFrames = 0u; // FIX-FX2
+static bool s_rdFxSawTint = false; // FIX-FX2
+static bool s_rdFxSawBlur = false; // FIX-FX2
+static uint32_t s_rdFxDispCopyFbp = 0xFFFFFFFFu; // FIX-FX2
+static uint32_t s_rdFxHold = 0u; // FIX-FX3
+static uint32_t s_rdFxHeld = 0u; // FIX-FX3
+static const uint32_t s_rdFxHoldMax = []() -> uint32_t { // FIX-FX3
+    const char *e = std::getenv("PS2X_RD_FXHOLD");
+    if (!e || !*e) return 12u;
+    const unsigned long v = std::strtoul(e, nullptr, 10);
+    return v > 120ul ? 120u : static_cast<uint32_t>(v);
+}();
+static uint32_t s_rdFxWrittenFbps[8] = {}; // FIX-FX1
+static uint32_t s_rdFxWrittenFbpCnt = 0u; // FIX-FX1
 static void rdResetBoundariesLocked() // FEAT-RD54
 {
     s_rdBoundaries.clear();
     s_rdLastBoundarySerial = 0u;
     s_rdHasLastBoundary = false;
+    s_rdLastCopyBIdx = 0xFFFFFFFFu; // FIX-CUT2E
+    s_rdCopyArmed = false; // FIX-CUT3
     s_rdBoundaryEma = 1500.0;
     s_rdCutHoldStreak = 0u;
+    s_rdRejSinceLastPub = 0u; // PROBE-CUT1
+    s_rdRejRingHead = 0u; // FIX-CUT1
+    s_rdRejRingCnt = 0u; // FIX-CUT1
+    s_rdFlipsSinceCopy = 0u; // FIX-CUT2
 }
 static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, const GSTexaReg &texa, const uint8_t *localMem); // FEAT-RD42
 
@@ -2026,11 +2077,25 @@ void GS::latchHostPresentationFrame()
             ps2xSafeLog("[rd] forceClassic OFF (stage transition, prims/latch=%u)\n", latchPrims);
         }
     }
+    bool fxNow = false; // FIX-FX1
+    if (takeover && s_rdFxOn) // FIX-FX1 // FIX-FX4
+    {
+        std::lock_guard<std::mutex> capLock(s_rd2dCapMutex); // FIX-FX3
+        const bool fxPending = s_rdFxPending.exchange(false); // FIX-FX3
+        const bool fxHeld = !fxPending && s_rdFxHold > 0u; // FIX-FX3
+        fxNow = fxPending || s_rdFxHold > 0u; // FIX-FX3 // FIX-FX4
+        if (fxHeld) { --s_rdFxHold; ++s_rdFxHeld; } // FIX-FX3
+        if (fxNow) ++s_rdFxClassic;
+        s_rdFxWrittenFbpCnt = 0u;
+        s_rdFxSawTint = false; // FIX-FX2
+        s_rdFxSawBlur = false; // FIX-FX2
+        s_rdFxDispCopyFbp = 0xFFFFFFFFu; // FIX-FX2
+    }
     const bool forcedNow = ps2xRdForceClassic(); // FEAT-RD48
     const bool useClassicForced = forcedNow && (s_rdForceWarmup == 0u); // FEAT-RD48
     if (s_rdForceWarmup > 0u) --s_rdForceWarmup; // FEAT-RD48
-    const bool useRepeat = takeover && !useClassicForced && !frameHasGeom && s_rdEmptyLatches < 8u; // FEAT-RD33c // FEAT-RD48
-    const bool useClassic = takeover && (useClassicForced || (!frameHasGeom && !useRepeat)); // FEAT-RD18 // FEAT-RD33c // FEAT-RD48
+    const bool useRepeat = takeover && !fxNow && !useClassicForced && !frameHasGeom && s_rdEmptyLatches < 8u; // FEAT-RD33c // FEAT-RD48 // FIX-FX1
+    const bool useClassic = takeover && (fxNow || useClassicForced || (!frameHasGeom && !useRepeat)); // FEAT-RD18 // FEAT-RD33c // FEAT-RD48 // FIX-FX1
     if (takeover && rdForceClassicMode() == 2 && !forcedNow) // FEAT-RD48
     {
         // FIX-RD71: measured with the vblank latch gone, the new renderer beats classic in every stage even at an rtSync EMA of 9.5 ms (ciscocity_c on 4 cores: new 52.5 fps vs classic 43.6), so the guard is only a safety valve for pathological sync cost.
@@ -2250,6 +2315,7 @@ void GS::latchHostPresentationFrame()
                 logEmaSpacing = s_rdBoundaryEma; // FEAT-RD54
                 if (rdFrameCutOn()) // FEAT-RD54: frame-boundary aware publishing
                 {
+                    if (s_rdCutCopy) ++s_rdFlipsSinceCopy; // FIX-CUT2
                     const bool noCut = s_rdBoundaries.empty() ||
                                        (s_rdBoundaries.back().first == 0u && s_rdBoundaries.size() == 1u);
                     if (noCut)
@@ -2258,13 +2324,17 @@ void GS::latchHostPresentationFrame()
                         if (s_rdCutHoldStreak < 4u)
                         {
                             ++s_rdCutHold;
+                            if (s_rdRejSinceLastPub > 0u) ++s_rdHoldRej; else ++s_rdHoldNoClear; // PROBE-CUT1
                             skipPublishHold = true;
                         }
                         else
                         {
                             ++s_rdCutFlush;
                             s_rdCutHoldStreak = 0u;
+                            s_rdRejSinceLastPub = 0u; // PROBE-CUT1
                             s_rdBoundaries.clear();
+                            s_rdLastCopyBIdx = 0xFFFFFFFFu; // FIX-CUT2E
+                            s_rdCopyArmed = false; // FIX-CUT3
                             s_pubVerts.swap(s_rd2dVerts);
                             s_pubBatches.swap(s_rd2dBatches);
                             s_pubFba.swap(s_rd2dFba); // PROBE-RD78D
@@ -2286,6 +2356,7 @@ void GS::latchHostPresentationFrame()
                         const uint32_t sb = s_rdBoundaries.back().second;
                         s_rdCutHoldStreak = 0u;
                         ++s_rdCutPub;
+                        s_rdRejSinceLastPub = 0u; // PROBE-CUT1
                         const size_t splitVert = (kb < s_rd2dBatches.size()) ? static_cast<size_t>(s_rd2dBatches[kb].first) : s_rd2dVerts.size();
                         // FEAT-RD55: swap buffers and copy only the kept tail back (avoids double-copying the published prefix)
                         s_pubVerts.swap(s_rd2dVerts);
@@ -2336,6 +2407,8 @@ void GS::latchHostPresentationFrame()
                             s_rdLastKickRecSerial = 0u;
 
                         s_rdBoundaries.clear();
+                        s_rdLastCopyBIdx = 0xFFFFFFFFu; // FIX-CUT2E
+                        s_rdCopyArmed = false; // FIX-CUT3
                         s_rdBoundaries.push_back({0u, sb});
 
                         rtSk = s_rd2dRtSkipped;
@@ -2357,6 +2430,8 @@ void GS::latchHostPresentationFrame()
                 else
                 {
                     s_rdBoundaries.clear();
+                    s_rdLastCopyBIdx = 0xFFFFFFFFu; // FIX-CUT2E
+                    s_rdCopyArmed = false; // FIX-CUT3
                     s_pubVerts.swap(s_rd2dVerts);
                     s_pubBatches.swap(s_rd2dBatches);
                     s_pubFba.swap(s_rd2dFba); // PROBE-RD78D
@@ -3082,6 +3157,50 @@ void GS::latchHostPresentationFrame()
                             s_rdCutFlush,
                             logBoundariesTotal,
                             logEmaSpacing); // FEAT-RD48 // FEAT-RD54
+                { // PROBE-CUT1
+                    uint32_t cutRej = 0u, holdRej = 0u, holdNoClear = 0u;
+                    uint32_t gMin = 0u, gAvg = 0u, gMax = 0u;
+                    uint32_t copyB = 0u, copyRej = 0u; // FIX-CUT2 // FIX-CUT2D
+                    uint32_t armedAcc = 0u, clrIgn = 0u; // FIX-CUT3
+                    uint32_t cg0 = 0u, cg1 = 0u, cg2 = 0u, cg3 = 0u, cg4 = 0u, cg5 = 0u; // PROBE-CUT2B
+                    uint32_t cgFbp = 0u, cgPsm = 0u, cgScX0 = 0u, cgScX1 = 0u, cgScY0 = 0u, cgScY1 = 0u, cgScW = 0u, cgScH = 0u; // PROBE-CUT2B
+                    float cgBbW = 0.0f, cgBbH = 0.0f; // PROBE-CUT2B
+                    uint32_t fxMark = 0u; // FIX-FX1
+                    uint32_t fxTint = 0u, fxBlur = 0u; // FIX-FX2
+                    size_t batchesSz = 0u;
+                    {
+                        std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+                        cutRej = s_rdCutRej;
+                        holdRej = s_rdHoldRej;
+                        holdNoClear = s_rdHoldNoClear;
+                        copyB = s_rdCopyB; // FIX-CUT2
+                        copyRej = s_rdCopyRej; // FIX-CUT2D
+                        armedAcc = s_rdArmedAcc; // FIX-CUT3
+                        clrIgn = s_rdClearIgnored; // FIX-CUT3
+                        fxMark = s_rdFxMarkers; // FIX-FX1
+                        fxTint = s_rdFxTintFrames; // FIX-FX2
+                        fxBlur = s_rdFxBlurFrames; // FIX-FX2
+                        cg0 = s_rdCg0; cg1 = s_rdCg1; cg2 = s_rdCg2; cg3 = s_rdCg3; cg4 = s_rdCg4; cg5 = s_rdCg5; // PROBE-CUT2B
+                        cgFbp = s_rdCgLastFbp; cgPsm = s_rdCgLastPsm; // PROBE-CUT2B
+                        cgScX0 = s_rdCgLastScX0; cgScX1 = s_rdCgLastScX1; cgScY0 = s_rdCgLastScY0; cgScY1 = s_rdCgLastScY1; // PROBE-CUT2B
+                        cgScW = s_rdCgLastScW; cgScH = s_rdCgLastScH; cgBbW = s_rdCgLastBbW; cgBbH = s_rdCgLastBbH; // PROBE-CUT2B
+                        if (s_rdRejGapCnt > 0u)
+                        {
+                            gMin = s_rdRejGapMin;
+                            gAvg = static_cast<uint32_t>(s_rdRejGapSum / s_rdRejGapCnt);
+                            gMax = s_rdRejGapMax;
+                        }
+                        s_rdRejGapMin = UINT32_MAX;
+                        s_rdRejGapMax = 0u;
+                        s_rdRejGapSum = 0ull;
+                        s_rdRejGapCnt = 0u;
+                        batchesSz = s_rd2dBatches.size();
+                    }
+                    ps2xSafeLog("[cut] rej=%u holdRej=%u holdNoClear=%u rejGap min/avg/max=%u/%u/%u ema=%.0f batches=%zu copyB=%u copyRej=%u armedAcc=%u clrIgn=%u cg=%u/%u/%u/%u/%u/%u last{fbp=%u psm=%u sc=%u,%u,%u,%u scWH=%ux%u bb=%.0fx%.0f} fxMark=%u fxClassic=%u fxTint=%u fxBlur=%u fxHeld=%u\n", // FIX-CUT2 // PROBE-CUT2B // FIX-CUT2D // FIX-CUT3 // FIX-FX1 // FIX-FX2 // FIX-FX3
+                                cutRej, holdRej, holdNoClear, gMin, gAvg, gMax, logEmaSpacing, batchesSz, copyB, copyRej, armedAcc, clrIgn,
+                                cg0, cg1, cg2, cg3, cg4, cg5, cgFbp, cgPsm, cgScX0, cgScX1, cgScY0, cgScY1, cgScW, cgScH, cgBbW, cgBbH,
+                                fxMark, s_rdFxClassic, fxTint, fxBlur, s_rdFxHeld);
+                }
             }
         }
         ps2_gt_count(4, 1); // PROBE-GT: latched
@@ -5297,13 +5416,30 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             b2d.scissor = rdPackScissor(ctx); // FEAT-RD22
 
             bool isFullScreenClear = false;
-            if (rdFrameCutOn() && !prim.tme && addCount > 0u && // FEAT-RD55: O(1) early-out when FRAMECUT=0, TME=1, or count==0
-                (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
-                ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull)
+            bool isCopyBoundary = false; // FIX-CUT2
+            bool isFxCandidate = false; // FIX-FX1
+            const bool wantClearCheck = rdFrameCutOn() && !prim.tme && addCount > 0u && // FEAT-RD55: O(1) early-out when FRAMECUT=0, TME=1, or count==0
+                                        (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
+                                        ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull;
+            const bool wantCopyCheck = rdFrameCutOn() && s_rdCutCopy && prim.tme && addCount == 6u && // FIX-CUT2 // FIX-CUT2C
+                                       ctx.frame.fbp != 0u && ctx.frame.psm == 0u; // FIX-CUT2C
+            const bool fxActive = s_rdFxOn && ps2xRdTakeoverOn(); // FIX-FX4
+            const bool wantFxCheck = fxActive && prim.tme && addCount == 6u; // FIX-FX1 // FIX-FX4
+            const bool cg0 = rdFrameCutOn() && prim.tme && addCount > 0u; // PROBE-CUT2B
+            const bool cg1 = cg0 && (addCount == 6u); // PROBE-CUT2B
+            const bool cg2 = cg1 && (ctx.frame.fbp != 0u); // PROBE-CUT2B
+            const bool cg3 = cg2 && (ctx.frame.psm == 0u); // PROBE-CUT2B // FIX-CUT2C
+            bool cg4 = false; // PROBE-CUT2B
+            bool cg5 = false; // PROBE-CUT2B
+            uint32_t cgScW = 0u, cgScH = 0u; // PROBE-CUT2B
+            float cgBbW = 0.0f, cgBbH = 0.0f; // PROBE-CUT2B
+            if (wantClearCheck || wantCopyCheck || cg1 || wantFxCheck) // PROBE-CUT2B // FIX-FX1
             {
                 const uint32_t scW = (ctx.scissor.x1 >= ctx.scissor.x0) ? (static_cast<uint32_t>(ctx.scissor.x1) + 1u - ctx.scissor.x0) : 0u; // FEAT-RD54
                 const uint32_t scH = (ctx.scissor.y1 >= ctx.scissor.y0) ? (static_cast<uint32_t>(ctx.scissor.y1) + 1u - ctx.scissor.y0) : 0u;
-                if (rdScissorQualifies(scW, scH)) // FEAT-RD55: scissor test before bbox
+                const bool scissorOk = rdScissorQualifies(scW, scH); // FEAT-RD55: scissor test before bbox // PROBE-CUT2B
+                if (cg1) { cgScW = scW; cgScH = scH; cg4 = cg3 && scissorOk; } // PROBE-CUT2B
+                if (scissorOk || cg1 || wantFxCheck) // PROBE-CUT2B // FIX-FX1
                 {
                     float minX = triVerts[0].pos[0], maxX = triVerts[0].pos[0];
                     float minY = triVerts[0].pos[1], maxY = triVerts[0].pos[1];
@@ -5320,19 +5456,118 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                     const float cMaxY = std::min(maxY, static_cast<float>(ctx.scissor.y1 + 1u));
                     const float bboxArea = (cMaxX > cMinX && cMaxY > cMinY) ? ((cMaxX - cMinX) * (cMaxY - cMinY)) : 0.0f;
                     const float scArea = static_cast<float>(scW) * static_cast<float>(scH);
-                    isFullScreenClear = (bboxArea >= 0.9f * scArea);
+                    const bool fullScreen = (bboxArea >= 0.9f * scArea);
+                    if (cg1) { cgBbW = cMaxX - cMinX; cgBbH = cMaxY - cMinY; cg5 = cg4 && fullScreen; } // PROBE-CUT2B
+                    if (scissorOk) // PROBE-CUT2B
+                    {
+                        if (wantClearCheck) isFullScreenClear = fullScreen;
+                        if (wantCopyCheck && scW >= 480u && scH >= 400u) isCopyBoundary = fullScreen; // FIX-CUT2 // FIX-CUT2C
+                    }
+                    if (wantFxCheck && scW >= 480u && scH >= 400u) isFxCandidate = fullScreen; // FIX-FX1
                 }
             }
 
             std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+            if (fxActive) // FIX-FX1 // FIX-FX4
+            {
+                const uint32_t dstFbp = static_cast<uint32_t>(ctx.frame.fbp);
+                if (s_rdFxPause && isFxCandidate && !ps2xRdIsDisplayFbp(dstFbp) && dstFbp != 0u && ctx.frame.psm == 0u) // FIX-FX2
+                    s_rdFxDispCopyFbp = dstFbp;
+                if (isFxCandidate && ps2xRdIsDisplayFbp(dstFbp))
+                {
+                    const uint32_t tbp0 = static_cast<uint32_t>(ctx.tex0.tbp0) & 0x3FFFu;
+                    if ((tbp0 & 31u) == 0u)
+                    {
+                        const uint32_t srcFbp = tbp0 >> 5;
+                        if (srcFbp != dstFbp)
+                        {
+                            bool inWritten = false;
+                            for (uint32_t i = 0u; i < s_rdFxWrittenFbpCnt; ++i)
+                            {
+                                if (s_rdFxWrittenFbps[i] == srcFbp) { inWritten = true; break; }
+                            }
+                            if (inWritten)
+                            {
+                                if (!s_rdFxPause) // FIX-FX2
+                                {
+                                    s_rdFxPending.store(true, std::memory_order_relaxed);
+                                    ++s_rdFxMarkers;
+                                }
+                                else // FIX-FX2
+                                {
+                                    const uint8_t tpsm = ctx.tex0.psm;
+                                    bool matched = false;
+                                    if (tpsm == 0x1Bu || tpsm == 0x14u)
+                                    {
+                                        if (!s_rdFxSawTint) { s_rdFxSawTint = true; ++s_rdFxTintFrames; }
+                                        matched = true;
+                                    }
+                                    else if (tpsm == 0u && srcFbp != s_rdFxDispCopyFbp && !ps2xRdIsDisplayFbp(srcFbp))
+                                    {
+                                        if (!s_rdFxSawBlur) { s_rdFxSawBlur = true; ++s_rdFxBlurFrames; }
+                                        matched = true;
+                                    }
+                                    if (matched && s_rdFxSawTint && s_rdFxSawBlur)
+                                    {
+                                        s_rdFxPending.store(true, std::memory_order_relaxed);
+                                        s_rdFxHold = s_rdFxHoldMax; // FIX-FX3
+                                        ++s_rdFxMarkers;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                bool seenFbp = false;
+                for (uint32_t i = 0u; i < s_rdFxWrittenFbpCnt; ++i)
+                {
+                    if (s_rdFxWrittenFbps[i] == dstFbp) { seenFbp = true; break; }
+                }
+                if (!seenFbp && s_rdFxWrittenFbpCnt < 8u)
+                    s_rdFxWrittenFbps[s_rdFxWrittenFbpCnt++] = dstFbp;
+            }
+            if (cg0) ++s_rdCg0; // PROBE-CUT2B
+            if (cg1) // PROBE-CUT2B
+            {
+                ++s_rdCg1;
+                if (cg2) ++s_rdCg2;
+                if (cg3) ++s_rdCg3;
+                if (cg4) ++s_rdCg4;
+                if (cg5) ++s_rdCg5;
+                s_rdCgLastFbp = static_cast<uint32_t>(ctx.frame.fbp);
+                s_rdCgLastPsm = static_cast<uint32_t>(ctx.frame.psm);
+                s_rdCgLastScX0 = static_cast<uint32_t>(ctx.scissor.x0);
+                s_rdCgLastScX1 = static_cast<uint32_t>(ctx.scissor.x1);
+                s_rdCgLastScY0 = static_cast<uint32_t>(ctx.scissor.y0);
+                s_rdCgLastScY1 = static_cast<uint32_t>(ctx.scissor.y1);
+                s_rdCgLastScW = cgScW;
+                s_rdCgLastScH = cgScH;
+                s_rdCgLastBbW = cgBbW;
+                s_rdCgLastBbH = cgBbH;
+            }
             b2d.first = static_cast<uint32_t>(s_rd2dVerts.size());
             b2d.count = addCount;
+            if (isCopyBoundary) // FIX-CUT2 // FIX-CUT3: arm cut at next full-screen clear instead of pushing copy as boundary
+            {
+                const uint32_t bIdx = static_cast<uint32_t>(s_rd2dBatches.size());
+                if (bIdx != s_rdLastCopyBIdx) // FIX-CUT2E
+                {
+                    s_rdLastCopyBIdx = bIdx; // FIX-CUT2E
+                    ++s_rdCopyB;
+                    s_rdCopyArmed = true; // FIX-CUT3
+                    s_rdFlipsSinceCopy = 0u;
+                }
+                else // FIX-CUT2E
+                {
+                    ++s_rdCopyRej; // FIX-CUT2E
+                }
+            }
             if (isFullScreenClear) // FEAT-RD54 // FEAT-RD55: record frame boundary with stricter hysteresis
             {
                 const uint32_t bSerial = b2d.afterSerial & 0x3FFFFFFFu;
                 const uint32_t bIdx = static_cast<uint32_t>(s_rd2dBatches.size());
-                const bool isOpaque = !prim.abe; // FEAT-RD55: ABE=0 strictly opaque
                 bool acceptBoundary = false;
+                const bool isOpaque = !prim.abe; // FEAT-RD55: ABE=0 strictly opaque // FIX-CUT4
                 if (!s_rdHasLastBoundary)
                 {
                     if (isOpaque)
@@ -5345,12 +5580,37 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                 else if (bSerial >= s_rdLastBoundarySerial)
                 {
                     const uint32_t gap = bSerial - s_rdLastBoundarySerial;
-                    const double minGap = std::max(300.0, (isOpaque ? 0.75 : 0.9) * s_rdBoundaryEma); // FEAT-RD55
+                    const double minFloor = s_rdCutAdapt ? 40.0 : 300.0; // FIX-CUT1
+                    const double minGap = std::max(minFloor, (isOpaque ? 0.75 : 0.9) * s_rdBoundaryEma); // FEAT-RD55 // FIX-CUT1
                     if (static_cast<double>(gap) >= minGap)
                     {
                         acceptBoundary = true;
                         s_rdBoundaryEma = 0.8 * s_rdBoundaryEma + 0.2 * static_cast<double>(gap);
                         s_rdLastBoundarySerial = bSerial;
+                    }
+                    else
+                    {
+                        ++s_rdCutRej; // PROBE-CUT1
+                        ++s_rdRejSinceLastPub; // PROBE-CUT1
+                        if (gap < s_rdRejGapMin) s_rdRejGapMin = gap; // PROBE-CUT1
+                        if (gap > s_rdRejGapMax) s_rdRejGapMax = gap; // PROBE-CUT1
+                        s_rdRejGapSum += gap; // PROBE-CUT1
+                        ++s_rdRejGapCnt; // PROBE-CUT1
+                        s_rdRejRing[s_rdRejRingHead] = gap; // FIX-CUT1
+                        s_rdRejRingHead = (s_rdRejRingHead + 1u) % 3u; // FIX-CUT1
+                        if (s_rdRejRingCnt < 3u) ++s_rdRejRingCnt; // FIX-CUT1
+                        if (s_rdCutAdapt && s_rdRejRingCnt == 3u) // FIX-CUT1
+                        {
+                            const uint32_t rMin = std::min(s_rdRejRing[0], std::min(s_rdRejRing[1], s_rdRejRing[2]));
+                            const uint32_t rMax = std::max(s_rdRejRing[0], std::max(s_rdRejRing[1], s_rdRejRing[2]));
+                            if (rMin >= 40u && static_cast<double>(rMax) <= 1.35 * static_cast<double>(rMin))
+                            {
+                                const double avg3 = static_cast<double>(s_rdRejRing[0] + s_rdRejRing[1] + s_rdRejRing[2]) / 3.0;
+                                acceptBoundary = true;
+                                s_rdBoundaryEma = 0.5 * s_rdBoundaryEma + 0.5 * avg3;
+                                s_rdLastBoundarySerial = bSerial;
+                            }
+                        }
                     }
                 }
                 else
@@ -5361,10 +5621,20 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                         s_rdLastBoundarySerial = bSerial;
                     }
                 }
+                if (!acceptBoundary && s_rdCutCopy && s_rdCopyArmed) // FIX-CUT4
+                {
+                    acceptBoundary = true;
+                    s_rdLastBoundarySerial = bSerial;
+                    s_rdHasLastBoundary = true;
+                    ++s_rdArmedAcc;
+                }
                 if (acceptBoundary)
                 {
                     s_rdBoundaries.push_back({bIdx, bSerial});
                     ++s_rdBoundariesTotal;
+                    s_rdRejRingHead = 0u; // FIX-CUT1
+                    s_rdRejRingCnt = 0u; // FIX-CUT1
+                    s_rdCopyArmed = false; // FIX-CUT4
                 }
             }
             s_rd2dVerts.insert(s_rd2dVerts.end(), triVerts, triVerts + addCount);
