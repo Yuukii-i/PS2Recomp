@@ -33,6 +33,12 @@ extern "C" int __llvm_profile_write_file(void);
 #pragma comment(linker, "/alternatename:__llvm_profile_write_file=ps2x_profile_noop")
 #endif
 
+#if defined(PS2X_HAS_SDL3) // SDL-FE
+extern bool ps2xSdlWanted();
+#else
+inline bool ps2xSdlWanted() { return false; }
+#endif
+
 namespace
 {
 #if defined(__ANDROID__)
@@ -228,6 +234,18 @@ namespace
 
 int main(int argc, char *argv[])
 {
+    if (ps2xSdlWanted()) // SDL-FE
+    {
+#if defined(_WIN32)
+        _putenv_s("PS2X_NO_CONFIG", "1");
+        _putenv_s("PS2X_RD_VIEW", "0");
+        _putenv_s("PS2X_RD_TAKEOVER", "0");
+#else
+        setenv("PS2X_NO_CONFIG", "1", 1);
+        setenv("PS2X_RD_VIEW", "0", 1);
+        setenv("PS2X_RD_TAKEOVER", "0", 1);
+#endif
+    }
     fprintf(stderr, "[boot] runner started\n");
     extern const uint32_t g_ps2RecompiledFunctionTableBase;
     extern const uint32_t g_ps2RecompiledFunctionTableEnd;

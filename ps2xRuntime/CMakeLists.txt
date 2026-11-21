@@ -83,6 +83,21 @@ else()
     )
     FetchContent_MakeAvailable(raylib)
 
+    option(PS2X_ENABLE_SDL3 "SDL3 platform layer (Vulkan frontend)" ON) # SDL-PLAT
+    if(PS2X_ENABLE_SDL3 AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # SDL-PLAT
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE) # SDL-PLAT
+        set(SDL_STATIC ON CACHE BOOL "" FORCE) # SDL-PLAT
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE) # SDL-PLAT
+        set(SDL_INSTALL OFF CACHE BOOL "" FORCE) # SDL-PLAT
+        FetchContent_Declare( # SDL-PLAT
+            SDL3 # SDL-PLAT
+            GIT_REPOSITORY "https://github.com/libsdl-org/SDL.git" # SDL-PLAT
+            GIT_TAG "release-3.2.28" # SDL-PLAT
+            GIT_SHALLOW TRUE # SDL-PLAT
+        ) # SDL-PLAT
+        FetchContent_MakeAvailable(SDL3) # SDL-PLAT
+    endif() # SDL-PLAT
+
     if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
         FetchContent_Declare(
             imgui
@@ -416,6 +431,12 @@ add_library(ps2_runtime STATIC
     src/lib/config/ps2x_config.cpp # FEAT-CFG
     src/lib/render/rd_texture.cpp # FEAT-RD3
 )
+
+if(PS2X_ENABLE_SDL3 AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # SDL-PLAT
+    target_sources(ps2_runtime PRIVATE src/lib/platform/ps2_sdl_platform.cpp) # SDL-PLAT
+    target_link_libraries(ps2_runtime PRIVATE SDL3::SDL3-static) # SDL-PLAT
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_HAS_SDL3=1) # SDL-PLAT
+endif() # SDL-PLAT
 
 if(PS2X_ENABLE_RUNTIME_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC

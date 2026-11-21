@@ -24,6 +24,25 @@ extern "C" bool ps2_gt_enabled(); // PROBE-GT
 extern "C" void ps2_gt_count(int what, uint64_t n); // PROBE-GT
 extern "C" void ps2_gt_take_counts(uint64_t *out); // PROBE-GT
 extern "C" void ps2_gt_vk_take(double *outFrameAvg, double *outFrameMax, double *outPresAvg, double *outPresMax, double *outFenceMs, bool *outTsOk, double *outTsPeriodNs); // PROBE-GT
+#if defined(PS2X_HAS_SDL3) // SDL-FE
+extern bool ps2xSdlWanted();
+extern bool ps2xSdlInit(const char *title, int w, int h);
+extern bool ps2xSdlActive();
+extern bool ps2xSdlShouldClose();
+extern void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t strideBytes);
+extern void ps2xSdlPresent();
+extern void ps2xSdlSetTitle(const char *t);
+extern void ps2xSdlShutdown();
+#else
+inline bool ps2xSdlWanted() { return false; }
+inline bool ps2xSdlInit(const char *, int, int) { return false; }
+inline bool ps2xSdlActive() { return false; }
+inline bool ps2xSdlShouldClose() { return false; }
+inline void ps2xSdlUploadFrame(const uint8_t *, uint32_t, uint32_t, uint32_t) {}
+inline void ps2xSdlPresent() {}
+inline void ps2xSdlSetTitle(const char *) {}
+inline void ps2xSdlShutdown() {}
+#endif
 #include "probe_ae.h"
 #include "probe_ae.cpp"
 #include "diag/DiagSampler.h"
@@ -1128,9 +1147,24 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                                                    &sourceFbp,
                                                    &usedPreferredDisplaySource))
     {
-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
-        UpdateTexture(tex, blank.data);
-        UnloadImage(blank);
+        if (ps2xSdlActive()) // SDL-FE
+        {
+            std::vector<uint8_t> magenta(static_cast<size_t>(FB_WIDTH) * FB_HEIGHT * 4u);
+            for (size_t i = 0; i < magenta.size(); i += 4u)
+            {
+                magenta[i + 0] = 255u;
+                magenta[i + 1] = 0u;
+                magenta[i + 2] = 255u;
+                magenta[i + 3] = 255u;
+            }
+            ps2xSdlUploadFrame(magenta.data(), FB_WIDTH, FB_HEIGHT, FB_WIDTH * 4u);
+        }
+        else
+        {
+            Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
+            UpdateTexture(tex, blank.data);
+            UnloadImage(blank);
+        }
         outWidth = FB_WIDTH;
         outHeight = DEFAULT_DISPLAY_HEIGHT;
         s_lastWidth = outWidth;
@@ -1348,7 +1382,10 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         }
     }
 
-    UpdateTexture(tex, s_uploadBuffer.data());
+    if (ps2xSdlActive()) // SDL-FE
+        ps2xSdlUploadFrame(s_uploadBuffer.data(), FB_WIDTH, FB_HEIGHT, FB_WIDTH * 4u);
+    else
+        UpdateTexture(tex, s_uploadBuffer.data());
     probe_ae::onBwFramePresented(width, height, s_uploadBuffer.data(), rt ? rt->memory().getRDRAM() : nullptr, rt);
     outWidth = width;
     outHeight = height;
@@ -1602,7 +1639,11 @@ PS2Runtime::~PS2Runtime()
         m_audioBackend.setAudioReady(false);
 #else
         ps2x::audio::stopSpu2Output(); // PERF-AU2
-        if (IsAudioDeviceReady())
+        if (ps2xSdlActive()) // SDL-FE
+        {
+            m_audioBackend.setAudioReady(false);
+        }
+        else if (IsAudioDeviceReady())
         {
             CloseAudioDevice();
             m_audioBackend.setAudioReady(false);
@@ -1614,7 +1655,11 @@ PS2Runtime::~PS2Runtime()
             m_debugUiInitialized = false;
         }
 
-        if (IsWindowReady())
+        if (ps2xSdlActive()) // SDL-FE
+        {
+            ps2xSdlShutdown();
+        }
+        else if (IsWindowReady())
         {
             CloseWindow();
         }
@@ -1861,29 +1906,10 @@ bool PS2Runtime::initialize(const char *title)
 
         probe_ae::bhInitStartup();
         ps2xMcInit(); // FEAT-DE
+        const bool sdlMode = ps2xSdlWanted(); // SDL-FE
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
-        const char *bgWinEnv = std::getenv("PS2X_WINDOW_BACKGROUND"); // FEAT-BGWIN
-        const bool bgWin = bgWinEnv && bgWinEnv[0] == '1';            // FEAT-BGWIN
-        if (bgWin)                                                    // FEAT-BGWIN
-        {
-            std::cerr << "[win] background window mode" << std::endl; // FEAT-BGWIN
-            SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_UNFOCUSED); // FEAT-BGWIN
-        }
-        else
-        {
-            SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-        }
-        { // FEAT-CFG
-            int msaaReq = 0;
-            if (const char *m = std::getenv("PS2X_MSAA"))
-                msaaReq = std::atoi(m);
-            const int msaaEff = (msaaReq >= 2) ? 4 : 0;
-            if (msaaEff)
-                SetConfigFlags(FLAG_MSAA_4X_HINT);
-            std::cerr << "[cfg] msaa requested=" << msaaReq << " effective=" << msaaEff << std::endl;
-        }
         int winW = HOST_WINDOW_WIDTH, winH = HOST_WINDOW_HEIGHT; // FEAT-CFG
         if (const char *ws = std::getenv("PS2X_WINDOW_SIZE"))    // FEAT-CFG
         {
@@ -1894,25 +1920,58 @@ bool PS2Runtime::initialize(const char *title)
                 winH = h;
             }
         }
-        InitWindow(winW, winH, title); // FEAT-CFG
-#ifdef _WIN32
-        if (bgWin) // FEAT-BGWIN
+        if (sdlMode) // SDL-FE
         {
-            void *const kBgHwndBottom = (void *)(intptr_t)1;
-            constexpr unsigned int kBgSwpNoSize = 0x0001u, kBgSwpNoMove = 0x0002u, kBgSwpNoActivate = 0x0010u;
-            ps2x_bgSetWindowPos(GetWindowHandle(), kBgHwndBottom, 0, 0, 0, 0,
-                                kBgSwpNoMove | kBgSwpNoSize | kBgSwpNoActivate); // FEAT-BGWIN
+            if (!ps2xSdlInit(title, winW, winH))
+                return false;
+            m_audioBackend.setAudioReady(true);
+            ps2x::audio::startSpu2Output();
+        }
+        else
+        {
+            const char *bgWinEnv = std::getenv("PS2X_WINDOW_BACKGROUND"); // FEAT-BGWIN
+            const bool bgWin = bgWinEnv && bgWinEnv[0] == '1';            // FEAT-BGWIN
+            if (bgWin)                                                    // FEAT-BGWIN
+            {
+                std::cerr << "[win] background window mode" << std::endl; // FEAT-BGWIN
+                SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_UNFOCUSED); // FEAT-BGWIN
+            }
+            else
+            {
+                SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+            }
+            { // FEAT-CFG
+                int msaaReq = 0;
+                if (const char *m = std::getenv("PS2X_MSAA"))
+                    msaaReq = std::atoi(m);
+                const int msaaEff = (msaaReq >= 2) ? 4 : 0;
+                if (msaaEff)
+                    SetConfigFlags(FLAG_MSAA_4X_HINT);
+                std::cerr << "[cfg] msaa requested=" << msaaReq << " effective=" << msaaEff << std::endl;
+            }
+            InitWindow(winW, winH, title); // FEAT-CFG
+#ifdef _WIN32
+            if (bgWin) // FEAT-BGWIN
+            {
+                void *const kBgHwndBottom = (void *)(intptr_t)1;
+                constexpr unsigned int kBgSwpNoSize = 0x0001u, kBgSwpNoMove = 0x0002u, kBgSwpNoActivate = 0x0010u;
+                ps2x_bgSetWindowPos(GetWindowHandle(), kBgHwndBottom, 0, 0, 0, 0,
+                                    kBgSwpNoMove | kBgSwpNoSize | kBgSwpNoActivate); // FEAT-BGWIN
+            }
+#endif
+            InitAudioDevice();
+            m_audioBackend.setAudioReady(IsAudioDeviceReady());
+            ps2x::audio::startSpu2Output(); // PERF-AU2
         }
 #endif
-        InitAudioDevice();
-        m_audioBackend.setAudioReady(IsAudioDeviceReady());
-        ps2x::audio::startSpu2Output(); // PERF-AU2
-#endif
-        SetTargetFPS(isPaceEnabled() ? getPaceRlFps() : 60); // FIX-PACE1 // PROBE-PACE5
-        if (m_debugUiInitCallback)
+        if (!sdlMode) // SDL-FE
         {
-            m_debugUiInitCallback(*this, m_debugUiUserData);
-            m_debugUiInitialized = true;
+            SetTargetFPS(isPaceEnabled() ? getPaceRlFps() : 60); // FIX-PACE1 // PROBE-PACE5
+            if (m_debugUiInitCallback)
+            {
+                m_debugUiInitCallback(*this, m_debugUiUserData);
+                m_debugUiInitialized = true;
+            }
         }
 
         return true;
@@ -6213,9 +6272,14 @@ void PS2Runtime::run()
 #endif
 
     // A blank image to use as a framebuffer
-    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
-    Texture2D frameTex = LoadTextureFromImage(blank);
-    UnloadImage(blank);
+    const bool sdlMode = ps2xSdlActive(); // SDL-FE
+    Texture2D frameTex{};                 // SDL-FE
+    if (!sdlMode)                         // SDL-FE
+    {
+        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+        frameTex = LoadTextureFromImage(blank);
+        UnloadImage(blank);
+    }
 
     ThreadNaming::SetCurrentThreadName("MainLoop"); // PERF-MB
 #ifdef _WIN32
@@ -6764,7 +6828,10 @@ void PS2Runtime::run()
                     ps2xRdSetPresentSize(presentWidth, presentHeight);
             }
 
-            BeginDrawing();
+            std::chrono::steady_clock::time_point gtEd0{}; // SDL-FE
+            if (!ps2xSdlActive())                         // SDL-FE
+            {
+                BeginDrawing();
             ClearBackground(BLACK);
             const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
@@ -7079,34 +7146,40 @@ void PS2Runtime::run()
                     s_paceLogLastQpc = swapStampQpc;
                 }
             }
-            const auto gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT
-            EndDrawing();
-            if (paceOn) // FIX-PACE1
-            {
-                if (!skipPace && hasNewFrame) // FIX-PACE4
+                gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT // SDL-FE
+                EndDrawing();
+                if (paceOn) // FIX-PACE1
                 {
-                    const int64_t afterSwapQpc = paceQpcNow();
-                    const int64_t cand1 = prevNextSwapQpc + periodTicks;
-                    const int64_t cand2 = afterSwapQpc + minAdvanceTicks;
-                    s_nextSwapQpc = (cand1 > cand2) ? cand1 : cand2;
+                    if (!skipPace && hasNewFrame) // FIX-PACE4
+                    {
+                        const int64_t afterSwapQpc = paceQpcNow();
+                        const int64_t cand1 = prevNextSwapQpc + periodTicks;
+                        const int64_t cand2 = afterSwapQpc + minAdvanceTicks;
+                        s_nextSwapQpc = (cand1 > cand2) ? cand1 : cand2;
+                    }
+                    else
+                    {
+                        s_nextSwapQpc = 0;
+                    }
                 }
-                else
+                if (s_ft3On) // FEAT-FT3
                 {
-                    s_nextSwapQpc = 0;
+                    long long qpcNow = 0;
+#ifdef _WIN32
+                    QueryPerformanceCounter(&qpcNow);
+#else
+                    qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+                    const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); // FEAT-HP2
+                    const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
+                    ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag}; // FEAT-HP2
+                    ft3WriteCount.store(idx + 1, std::memory_order_release);
                 }
             }
-            if (s_ft3On) // FEAT-FT3
+            else // SDL-FE
             {
-                long long qpcNow = 0;
-#ifdef _WIN32
-                QueryPerformanceCounter(&qpcNow);
-#else
-                qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-#endif
-                const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); // FEAT-HP2
-                const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
-                ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag}; // FEAT-HP2
-                ft3WriteCount.store(idx + 1, std::memory_order_release);
+                ps2xSdlPresent();
+                gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             }
             const auto presT1 = std::chrono::steady_clock::now();
             if (ps2_gt_enabled()) // PROBE-GT
@@ -7119,7 +7192,7 @@ void PS2Runtime::run()
             // tools/cpu_per_frame.ps1), PCSX2 has no such cost. Poll at most every PS2X_IDLE_POLL_MS (default 4; 1 = old behaviour). EndDrawing polls once per presented frame anyway.
             static const int64_t s_idlePollUs = []() { const char *e = std::getenv("PS2X_IDLE_POLL_MS"); const long v = e ? std::atol(e) : 4; return static_cast<int64_t>(v < 1 ? 1 : v) * 1000; }();
             static auto s_lastPoll = std::chrono::steady_clock::now() - std::chrono::seconds(1);
-            if (std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - s_lastPoll).count() >= s_idlePollUs - 100)
+            if (!ps2xSdlActive() && std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - s_lastPoll).count() >= s_idlePollUs - 100) // SDL-FE
             {
                 PollInputEvents();
                 s_lastPoll = std::chrono::steady_clock::now();
@@ -7303,12 +7376,15 @@ void PS2Runtime::run()
             }
             char titleBuf[128];
             std::snprintf(titleBuf, sizeof(titleBuf), "Ape Escape 3 Recomp - FPS: %u (GS %llu)", currentFps, (unsigned long long)currentGsKicks);
-            SetWindowTitle(titleBuf);
+            if (ps2xSdlActive()) // SDL-FE
+                ps2xSdlSetTitle(titleBuf);
+            else
+                SetWindowTitle(titleBuf);
             s_fpsCounter = 0;
             s_lastFpsLogTime = now;
         }
 
-        if (WindowShouldClose())
+        if (ps2xSdlActive() ? ps2xSdlShouldClose() : WindowShouldClose()) // SDL-FE
         {
             RUNTIME_LOG("[run] window close requested, breaking out of loop");
             requestStop();
@@ -7338,8 +7414,15 @@ void PS2Runtime::run()
         m_debugUiShutdownCallback(*this, m_debugUiUserData);
         m_debugUiInitialized = false;
     }
-    UnloadTexture(frameTex);
-    CloseWindow();
+    if (sdlMode) // SDL-FE
+    {
+        ps2xSdlShutdown();
+    }
+    else
+    {
+        UnloadTexture(frameTex);
+        CloseWindow();
+    }
 
     RUNTIME_LOG("[run] exiting loop");
 }
