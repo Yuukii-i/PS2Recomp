@@ -85,6 +85,10 @@ namespace
         uint32_t shotEvery = 60;
         uint32_t presentCount = 0;
         uint32_t shotIndex = 0;
+
+        uint32_t rdImageIndex = 0; // RDG2
+        bool rdSuboptimal = false; // RDG2
+        bool rdFrameOpen = false; // RDG2
     };
 
     SdlPlatformState g_sdl;
@@ -1322,6 +1326,146 @@ void ps2xSdlAudioStop()
         g_sdl.audioStream = nullptr;
     }
     g_sdl.audioFill = nullptr;
+}
+
+// RDG2: Vulkan accessors and frame protocol for rd_gfx_vk.
+VkInstance ps2xSdlVkInstance() { return g_sdl.instance; }
+VkPhysicalDevice ps2xSdlVkPhysicalDevice() { return g_sdl.physicalDevice; }
+VkDevice ps2xSdlVkDevice() { return g_sdl.device; }
+VkQueue ps2xSdlVkQueue() { return g_sdl.queue; }
+uint32_t ps2xSdlVkQueueFamily() { return g_sdl.queueFamily; }
+VkFormat ps2xSdlVkSwapFormat() { return g_sdl.swapchainFormat; }
+uint32_t ps2xSdlVkFramesInFlight() { return kMaxFramesInFlight; }
+
+bool ps2xSdlVkBeginRdFrame(VkCommandBuffer *cb, VkImage *swapImage, uint32_t *w, uint32_t *h, uint32_t *frameIdx)
+{
+    if (!ps2xSdlActive())
+    {
+        return false;
+    }
+
+    if (g_sdl.framebufferResized || g_sdl.swapchainExtent.width == 0 || g_sdl.swapchainExtent.height == 0)
+    {
+        g_sdl.framebufferResized = false;
+        std::string err;
+        if (!RecreateSwapchain(err))
+        {
+            return false;
+        }
+        if (g_sdl.swapchainExtent.width == 0 || g_sdl.swapchainExtent.height == 0)
+        {
+            return false;
+        }
+    }
+
+    const uint32_t curFrame = g_sdl.frameInFlight;
+    vkWaitForFences(g_sdl.device, 1, &g_sdl.inFlightFences[curFrame], VK_TRUE, UINT64_MAX);
+
+    uint32_t imageIndex = 0;
+    VkResult acqRes = vkAcquireNextImageKHR(
+        g_sdl.device,
+        g_sdl.swapchain,
+        UINT64_MAX,
+        g_sdl.imageAvailableSemaphores[curFrame],
+        VK_NULL_HANDLE,
+        &imageIndex);
+    if (acqRes == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+        g_sdl.framebufferResized = true;
+        return false;
+    }
+    if (acqRes != VK_SUCCESS && acqRes != VK_SUBOPTIMAL_KHR)
+    {
+        return false;
+    }
+
+    vkResetFences(g_sdl.device, 1, &g_sdl.inFlightFences[curFrame]);
+    VkCommandBuffer cmd = g_sdl.commandBuffers[curFrame];
+    vkResetCommandBuffer(cmd, 0);
+
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    g_sdl.rdImageIndex = imageIndex;
+    g_sdl.rdSuboptimal = (acqRes == VK_SUBOPTIMAL_KHR);
+    g_sdl.rdFrameOpen = true;
+
+    if (cb)
+        *cb = cmd;
+    if (swapImage)
+        *swapImage = g_sdl.swapchainImages[imageIndex];
+    if (w)
+        *w = g_sdl.swapchainExtent.width;
+    if (h)
+        *h = g_sdl.swapchainExtent.height;
+    if (frameIdx)
+        *frameIdx = curFrame;
+
+    return true;
+}
+
+void ps2xSdlVkEndRdFrame()
+{
+    if (!ps2xSdlActive() || !g_sdl.rdFrameOpen)
+    {
+        return;
+    }
+    g_sdl.rdFrameOpen = false;
+
+    const uint32_t curFrame = g_sdl.frameInFlight;
+    const uint32_t imageIndex = g_sdl.rdImageIndex;
+    VkCommandBuffer cmd = g_sdl.commandBuffers[curFrame];
+
+    vkEndCommandBuffer(cmd);
+
+    VkSemaphoreSubmitInfo waitSem{};
+    waitSem.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    waitSem.semaphore = g_sdl.imageAvailableSemaphores[curFrame];
+    waitSem.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+    VkCommandBufferSubmitInfo cmdInfo{};
+    cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cmdInfo.commandBuffer = cmd;
+
+    VkSemaphoreSubmitInfo sigSem{};
+    sigSem.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    sigSem.semaphore = g_sdl.renderFinishedSemaphores[imageIndex];
+    sigSem.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submitInfo.waitSemaphoreInfoCount = 1;
+    submitInfo.pWaitSemaphoreInfos = &waitSem;
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &cmdInfo;
+    submitInfo.signalSemaphoreInfoCount = 1;
+    submitInfo.pSignalSemaphoreInfos = &sigSem;
+
+    if (vkQueueSubmit2(g_sdl.queue, 1, &submitInfo, g_sdl.inFlightFences[curFrame]) != VK_SUCCESS)
+    {
+        return;
+    }
+
+    VkPresentInfoKHR presentInfo{};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &g_sdl.renderFinishedSemaphores[imageIndex];
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &g_sdl.swapchain;
+    presentInfo.pImageIndices = &imageIndex;
+
+    VkResult presRes = vkQueuePresentKHR(g_sdl.queue, &presentInfo);
+    if (presRes == VK_ERROR_OUT_OF_DATE_KHR || presRes == VK_SUBOPTIMAL_KHR || g_sdl.rdSuboptimal)
+    {
+        g_sdl.framebufferResized = true;
+    }
+
+    g_sdl.frameInFlight = (g_sdl.frameInFlight + 1) % kMaxFramesInFlight;
+    ++g_sdl.presentCount;
 }
 
 #endif // PS2X_HAS_SDL3
