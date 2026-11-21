@@ -74,6 +74,7 @@ extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern void ps2xRdResetState(); // FEAT-RD49
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD12
 extern void ps2xRdSetDisplayBlend(float f); // FIX-RD80
+extern void ps2xRdNoteSnapshot(uint32_t destFbp, int w, int h); // FIX-RD81
 static bool rd80FbTexOn() // FIX-RD80
 {
     static const bool s_on = []() {
@@ -81,6 +82,16 @@ static bool rd80FbTexOn() // FIX-RD80
         ps2xLoadConfig();
         const char *e = std::getenv("PS2X_RD_FBTEX");
         return e && e[0] == '1';
+    }();
+    return s_on;
+}
+static bool rd81SnapOn() // FIX-RD81
+{
+    static const bool s_on = []() {
+        if (!rd80FbTexOn())
+            return false;
+        const char *e = std::getenv("PS2X_RD_SNAP");
+        return !(e && e[0] == '0');
     }();
     return s_on;
 }
@@ -2684,6 +2695,38 @@ void GS::latchHostPresentationFrame()
                 float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
                 if (needBbox)
                     computeBatchBbox(b, x0, y0, x1, y1);
+                if (rd81SnapOn() && frameHasGeom && tex == 1 && b.count >= 3u &&
+                    bFbp != displayFbp && bFbp != frameGeomFbp && bFbp != 0xFFFFFFFFu) // FIX-RD81 // FIX-RD81b
+                {
+                    const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull);
+                    const uint32_t tbw = static_cast<uint32_t>((b.tex0 >> 14) & 0x3Full);
+                    const uint8_t psm = static_cast<uint8_t>((b.tex0 >> 20) & 0x3Full);
+                    const uint32_t tw = static_cast<uint32_t>((b.tex0 >> 26) & 0xFull);
+                    const uint32_t th = static_cast<uint32_t>((b.tex0 >> 30) & 0xFull);
+                    bool fbOverlap = false;
+                    if (rd78FbCnt > 0u)
+                    {
+                        uint32_t tf = 0u, tl = 0u;
+                        rtt0PageRange(tbp0, tbw, psm, 1u << std::min<uint32_t>(tw, 10u), 1u << std::min<uint32_t>(th, 10u), tf, tl);
+                        for (uint32_t fi = 0u; fi < rd78FbCnt; ++fi)
+                        {
+                            if (tf <= rd78FbLast[fi] && tl >= rd78FbFirst[fi]) { fbOverlap = true; break; }
+                        }
+                    }
+                    if (fbOverlap || ps2xRdIsFbFeedback(b.texSerial))
+                    {
+                        if (!needBbox)
+                            computeBatchBbox(b, x0, y0, x1, y1);
+                        const float bw = (x1 > x0) ? (x1 - x0) : 0.0f;
+                        const float bh = (y1 > y0) ? (y1 - y0) : 0.0f;
+                        if (bw * bh >= 2000.0f)
+                        {
+                            const int snapW = std::max(1, static_cast<int>(std::lround(bw)));
+                            const int snapH = std::max(1, static_cast<int>(std::lround(bh)));
+                            ps2xRdNoteSnapshot(bFbp, snapW, snapH);
+                        }
+                    }
+                }
                 if (!keepBatch && s_rd2dKeepSmall && tex == 1 && b.count > 0u) // FIX-RD58
                 {
                     const float area = (x1 - x0) * (y1 - y0);

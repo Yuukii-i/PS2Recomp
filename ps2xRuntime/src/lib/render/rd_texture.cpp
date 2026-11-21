@@ -1859,3 +1859,55 @@ bool ps2xRdLookupState(uint32_t serial, uint64_t &prim, uint64_t &alpha, uint64_
     fba = slot.fba.load(std::memory_order_relaxed);
     return slot.serial.load(std::memory_order_acquire) == serial;
 }
+
+bool ps2xRdGetClutRgba256(uint64_t tex0, uint64_t texa, uint32_t out[256]) // FIX-RD82B
+{
+    if (!out)
+        return false;
+    const uint32_t tbp0 = static_cast<uint32_t>(tex0 & 0x3FFFull);
+    const uint32_t tbw = static_cast<uint32_t>((tex0 >> 14) & 0x3Full);
+    const uint8_t psm = static_cast<uint8_t>((tex0 >> 20) & 0x3Full);
+    const uint32_t tw = static_cast<uint32_t>((tex0 >> 26) & 0xFull);
+    const uint32_t th = static_cast<uint32_t>((tex0 >> 30) & 0xFull);
+    const uint32_t cbp = static_cast<uint32_t>((tex0 >> 37) & 0x3FFFull);
+    const uint8_t cpsm = static_cast<uint8_t>((tex0 >> 51) & 0xFull);
+    const uint8_t csm = static_cast<uint8_t>((tex0 >> 55) & 0x1ull);
+
+    if (!isSupportedTex(psm, cpsm, csm) || !isIndexedPsm(psm) || isFourBitPsm(psm))
+        return false;
+
+    RdClutNote note{};
+    bool haveNote = false;
+    {
+        std::lock_guard<std::mutex> lk(g_clutMutex);
+        auto nit = g_clutNotes.find(RdClutKey{tbp0, tbw, psm, tw, th});
+        if (nit != g_clutNotes.end())
+        {
+            note = nit->second;
+            haveNote = true;
+        }
+    }
+    if (haveNote)
+    {
+        buildClutFrom512(texa, note.cpsm, note.csa, false, note.clut, out);
+        return true;
+    }
+
+    const uint8_t *vram = g_rdVram.load(std::memory_order_acquire);
+    if (!vram)
+        return false;
+    GSMem::TexturePageCache pageCache;
+    const bool sixteenBit = (cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S);
+    for (uint32_t i = 0u; i < 256u; ++i)
+    {
+        const uint32_t srcIdx = swizzleClutIndexCSM1(i);
+        const uint32_t raw = GSMem::ReadTexture(pageCache, vram, cpsm, cbp, 1u, srcIdx & 0x0Fu, srcIdx >> 4u);
+        if (sixteenBit)
+            out[i] = applyTexa(texa, cpsm, rgba5551ToRgba8888(static_cast<uint16_t>(raw)));
+        else if (cpsm == GS_PSM_CT24)
+            out[i] = applyTexa(texa, cpsm, raw & 0xFFFFFFu);
+        else
+            out[i] = raw;
+    }
+    return true;
+}

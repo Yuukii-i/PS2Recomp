@@ -9,6 +9,11 @@ extern "C" __declspec(dllimport) void * __stdcall wglGetProcAddress(const char *
 extern "C" __declspec(dllimport) void __stdcall glGetIntegerv(unsigned int pname, int *data); // FIX-RD79
 extern "C" __declspec(dllimport) void __stdcall glClearColor(float r, float g, float b, float a); // FIX-RD79
 extern "C" __declspec(dllimport) void __stdcall glClear(unsigned int mask); // FIX-RD79
+extern "C" __declspec(dllimport) void __stdcall glGenTextures(int n, unsigned int *textures); // FIX-RD82G
+extern "C" __declspec(dllimport) void __stdcall glBindTexture(unsigned int target, unsigned int texture); // FIX-RD82G
+extern "C" __declspec(dllimport) void __stdcall glTexImage2D(unsigned int target, int level, int internalformat, int width, int height, int border, unsigned int format, unsigned int type, const void *pixels); // FIX-RD82G
+extern "C" __declspec(dllimport) void __stdcall glTexSubImage2D(unsigned int target, int level, int xoffset, int yoffset, int width, int height, unsigned int format, unsigned int type, const void *pixels); // FIX-RD82G
+extern "C" __declspec(dllimport) void __stdcall glTexParameteri(unsigned int target, unsigned int pname, int param); // FIX-RD82G
 #endif
 static bool g_rdAlwaysFunc = false; // FEAT-RD20
 
@@ -38,12 +43,31 @@ extern bool ps2xRdIsMainPass(uint32_t fbp, uint64_t xyoffset); // FEAT-RD23
 extern uint64_t ps2xRdMainXyoff(); // FEAT-RD23
 extern bool ps2xRdIsFbFeedback(uint32_t serial); // FEAT-RD28b
 extern uint32_t ps2xRdFbPageRanges(uint32_t *first, uint32_t *last); // FIX-RD79
+extern bool ps2xRdGetClutRgba256(uint64_t tex0, uint64_t texa, uint32_t out[256]); // FIX-RD82B
 static uint32_t s_fbFeedbackSkipped = 0u; // FEAT-RD28b
 static uint32_t s_fbTexUsed = 0u; // FIX-RD79
 static uint32_t s_fbTexCopies = 0u; // FIX-RD79
+static uint32_t s_fbTexFrozen = 0u; // FIX-RD86
+static uint32_t s_fbCopySkip = 0u; // FIX-RD87
 static unsigned int s_prevTexId = 0u; // FIX-RD79
+static unsigned int s_lastSceneTexId = 0u; // FIX-RD85
+static bool s_lastSceneFilled = false; // FIX-RD85
+static uint32_t s_fbTexLastCopies = 0u; // FIX-RD85
 static uint32_t s_fbTexBlendCount = 0u; // FIX-RD80
 static float s_fbTexLastF = 1.0f; // FIX-RD80
+static uint32_t s_fbTexPal = 0u; // FIX-RD82B
+static uint32_t s_fbTexPalFail = 0u; // FIX-RD82B
+static uint32_t s_fbTexPalFb = 0u; // FIX-RD84
+static uint32_t s_fbTexAlphaFix = 0u; // FIX-RD82J
+static uint32_t s_psm27WhyOff = 0u; // PROBE-RD82C
+static uint32_t s_psm27WhyNoPrev = 0u; // PROBE-RD82C
+static uint32_t s_psm27WhyNotFb = 0u; // PROBE-RD82C
+static uint32_t s_psm27WhyDispFbp = 0u; // PROBE-RD82C
+static uint32_t s_psm27WhyBadPsm = 0u; // PROBE-RD82C
+static uint32_t s_psm27WhyNoRange = 0u; // PROBE-RD82C
+static uint32_t s_psm27Ok = 0u; // PROBE-RD82C
+static uint32_t s_nextFrameTrim = 0u; // FIX-RD88
+static uint32_t s_nextFrameSkip = 0u; // FIX-RD88B
 static std::atomic<uint32_t> s_rdDisplayBlendBits{0x3F800000u}; // FIX-RD80
 
 void ps2xRdSetDisplayBlend(float f) // FIX-RD80
@@ -81,6 +105,175 @@ static bool rdFbTexSubstOn() // FIX-RD80
         return !(e && e[0] == '0');
     }();
     return s_on;
+}
+static bool rdFbTexAnyPsmOn() // FIX-RD82
+{
+    static const bool s_on = []() {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_FBTEX_ANYPSM");
+        return !(e && e[0] == '0');
+    }();
+    return s_on;
+}
+static bool rdFbTexPalOn() // FIX-RD82B
+{
+    static const bool s_on = []() {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_FBTEX_PAL");
+        return !(e && e[0] == '0');
+    }();
+    return s_on;
+}
+static bool rdFbTexPalFbOn() // FIX-RD84B
+{
+    static const bool s_on = []() {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_FBTEX_PALFB");
+        return !(e && e[0] == '0');
+    }();
+    return s_on;
+}
+static bool rdFbTexCtOn() // FIX-RD82H
+{
+    static const bool s_on = []() {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_FBTEX_CT");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+static bool rdFbTexLastOn() // FIX-RD85 // FIX-RD86
+{
+    static const bool s_on = []() {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_FBTEX_LAST");
+        return e && e[0] == '1'; // FIX-RD86: default 0 (LASTSCENE off)
+    }();
+    return s_on;
+}
+static uint32_t rdFbTexLast3dMin() // FIX-RD85B
+{
+    static const uint32_t s_min = []() -> uint32_t {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_LAST3D");
+        if (e && e[0] != '\0')
+        {
+            const long v = std::strtol(e, nullptr, 10);
+            if (v >= 0)
+                return static_cast<uint32_t>(v);
+        }
+        return 12u;
+    }();
+    return s_min;
+}
+static unsigned int rdFbTexSelectId(uint64_t tex0) // FIX-RD85
+{
+    const uint32_t psm = static_cast<uint32_t>((tex0 >> 20) & 0x3Full);
+    const bool isPalPsm = (psm == 0x1Bu || psm == 0x24u || psm == 0x2Cu);
+    if (rdFbTexLastOn() && isPalPsm && s_lastSceneFilled && s_lastSceneTexId != 0u)
+        return s_lastSceneTexId;
+    return s_prevTexId;
+}
+static bool rdSnapOn() // FIX-RD81
+{
+    static const bool s_on = []() {
+        if (!rdFbTexOn())
+            return false;
+        const char *e = std::getenv("PS2X_RD_SNAP");
+        return !(e && e[0] == '0');
+    }();
+    return s_on;
+}
+static bool rdCopySkipOn() // FIX-RD87
+{
+    static const bool s_on = []() {
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_COPYSKIP");
+        return !(e && e[0] == '0');
+    }();
+    return s_on;
+}
+struct RdCopyBufEntry // FIX-RD87
+{
+    uint32_t destFbp = 0xFFFFFFFFu;
+    uint64_t lastSeenFrame = 0ull;
+};
+struct RdSnapReq // FIX-RD81
+{
+    uint32_t destFbp = 0xFFFFFFFFu;
+    int w = 0;
+    int h = 0;
+};
+struct RdSnapSlot // FIX-RD81
+{
+    uint32_t destFbp = 0xFFFFFFFFu;
+    unsigned int texId = 0u;
+    unsigned int fbo = 0u;
+    int w = 0;
+    int h = 0;
+    bool valid = false;
+    uint64_t lastUsedFrame = 0ull;
+};
+static constexpr size_t kRdSnapSlots = 4u; // FIX-RD81
+static std::mutex s_snapMutex; // FIX-RD81
+static std::vector<RdSnapReq> s_snapPending; // FIX-RD81
+static std::atomic<bool> s_snapNeedReset{false}; // FIX-RD81
+static RdSnapSlot s_snapSlots[kRdSnapSlots]; // FIX-RD81
+static std::vector<RdCopyBufEntry> copyBufFbps; // FIX-RD87
+static std::atomic<uint64_t> s_snapFrameSeq{0ull}; // FIX-RD81 // FIX-RD87
+static uint32_t s_snapCount = 0u; // FIX-RD81
+static uint32_t s_snapUsedCount = 0u; // FIX-RD81
+static uint32_t s_snapSkippedNoGeom = 0u; // FIX-RD81b
+
+void ps2xRdNoteSnapshot(uint32_t destFbp, int w, int h) // FIX-RD81
+{
+    if (!rdSnapOn() || destFbp == 0xFFFFFFFFu || w <= 0 || h <= 0)
+        return;
+    const uint64_t curFrame = s_snapFrameSeq.load(std::memory_order_relaxed); // FIX-RD87
+    std::lock_guard<std::mutex> lock(s_snapMutex);
+    bool foundCopy = false; // FIX-RD87
+    for (RdCopyBufEntry &cb : copyBufFbps) // FIX-RD87
+    {
+        if (cb.destFbp == destFbp)
+        {
+            cb.lastSeenFrame = curFrame;
+            foundCopy = true;
+            break;
+        }
+    }
+    if (!foundCopy) // FIX-RD87
+    {
+        if (copyBufFbps.size() >= 16u)
+        {
+            size_t oldest = 0u;
+            for (size_t i = 1u; i < copyBufFbps.size(); ++i)
+                if (copyBufFbps[i].lastSeenFrame < copyBufFbps[oldest].lastSeenFrame)
+                    oldest = i;
+            copyBufFbps[oldest] = {destFbp, curFrame};
+        }
+        else
+        {
+            copyBufFbps.push_back({destFbp, curFrame});
+        }
+    }
+    for (RdSnapReq &req : s_snapPending)
+    {
+        if (req.destFbp == destFbp)
+        {
+            req.w = w;
+            req.h = h;
+            return;
+        }
+    }
+    if (s_snapPending.size() < kRdSnapSlots)
+        s_snapPending.push_back({destFbp, w, h});
 }
 extern std::atomic<uint32_t> g_rdStateChangesInKick; // FEAT-RD17
 extern std::atomic<uint32_t> g_rdMergedSpan;        // FEAT-RD17
@@ -241,6 +434,9 @@ struct RdGpuState
     int texLoc = -1;     // FEAT-RD3
     int tfxLoc = -1;     // FEAT-RD3
     int tccLoc = -1;     // FEAT-RD3
+    int palTexLoc = -1;  // FIX-RD82B
+    int palModeLoc = -1; // FIX-RD82B
+    int palFbLoc = -1;   // FIX-RD84
     float flip[3] = {1.0f, -1.0f, 1.0f}; // FEAT-RD2
     std::vector<RdDrawBatch> drawBatches; // FEAT-RD14
     std::vector<RdVert> local2dScratch; // FEAT-RD8
@@ -390,6 +586,22 @@ struct RdGlCache
         {
             std::fill(texParamsVec.begin(), texParamsVec.end(), 0u); // PERF-EX5
             texParams.clear();
+        }
+    }
+    void invalidateTex(unsigned int texId) // FIX-RD85B
+    {
+        if (texId == 0u)
+            return;
+        if (bound == texId)
+            bound = 0u;
+        if (texId < kFastTexCap)
+        {
+            if (texId < texParamsVec.size())
+                texParamsVec[texId] = 0u;
+        }
+        else
+        {
+            texParams.erase(texId);
         }
     }
 } g_rdc; // FEAT-RD15
@@ -741,6 +953,12 @@ void ps2xRdResetState() // FEAT-RD49
     g_rd2dFrames[1] = Rd2DFrame{};
     g_rdNeedGpuReset.store(true, std::memory_order_release);
     ps2xRdSetDisplayBlend(1.0f); // FIX-RD80
+    { // FIX-RD81
+        std::lock_guard<std::mutex> snapLock(s_snapMutex);
+        s_snapPending.clear();
+        copyBufFbps.clear(); // FIX-RD87
+        s_snapNeedReset.store(true, std::memory_order_release);
+    }
 }
 
 float g_rdAspectK = 1.0f; // FEAT-RD16: published each frame by present loop when PS2X_ASPECT=fill & takeover
@@ -1002,6 +1220,9 @@ static std::vector<uint16_t> g_rd24Idx[kRdSlotCount]; // PROBE-RD24 // FEAT-RD34
 static const bool g_rdBlendOn = []{ const char *e = std::getenv("PS2X_RD_BLENDLOG"); return e && e[0] == '1'; }(); // PROBE-RD29
 static const bool g_rdReasonOn = []{ const char *e = std::getenv("PS2X_RD_DRAWREASON"); return e && e[0] == '1'; }(); // PROBE-RD59
 static const bool g_rd2dReasonOn = []{ const char *e = std::getenv("PS2X_RD_2DREASON"); return e && e[0] == '1'; }(); // PROBE-RD62
+static const bool g_rd2dReasonBig = []{ const char *e = std::getenv("PS2X_RD_2DREASON_BIG"); return e && e[0] == '1'; }(); // PROBE-RD62B
+static const int g_rd2dMax = []{ const char *e = std::getenv("PS2X_RD_2DMAX"); return (e && *e) ? std::atoi(e) : 0; }(); // PROBE-RD83
+static const int g_rd2dOnly = []{ const char *e = std::getenv("PS2X_RD_2DONLY"); return (e && *e) ? std::atoi(e) : -1; }(); // PROBE-RD83
 static inline bool g_rd2dLateOn() // FIX-CFG2
 {
     static const bool s_on = [] { extern void ps2xLoadConfig(); ps2xLoadConfig(); const char *e = std::getenv("PS2X_RD_2DLATE"); return e && e[0] == '1'; }(); // FIX-RD63 // FIX-CFG2
@@ -1112,24 +1333,133 @@ Rd35Stats g_rd35; // PROBE-RD35
 
 static bool isRdFbTexDisplayBatch(const Rd2DBatch &b) // FIX-RD79
 {
-    if (!rdFbTexOn() || !rdFbTexSubstOn() || s_prevTexId == 0u) // FIX-RD80
+    const uint32_t psm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full); // PROBE-RD82C
+    const bool isPsm27 = (psm == 0x1Bu); // PROBE-RD82C
+    if (!rdFbTexOn() || !rdFbTexSubstOn()) // FIX-RD80 // PROBE-RD82C
+    {
+        if (isPsm27) ++s_psm27WhyOff; // PROBE-RD82C
         return false;
+    }
+    if (s_prevTexId == 0u) // FIX-RD80 // PROBE-RD82C
+    {
+        if (isPsm27) ++s_psm27WhyNoPrev; // PROBE-RD82C
+        return false;
+    }
     if (((b.prim >> 4) & 1ull) == 0ull || !ps2xRdIsFbFeedback(b.texSerial))
+    {
+        if (isPsm27) ++s_psm27WhyNotFb; // PROBE-RD82C
         return false;
-    if (ps2xRdIsDisplayFbp(static_cast<uint32_t>(b.frame & 0x1FFull)))
+    }
+    const bool okPsm = (rdFbTexCtOn() && (psm == 0u || psm == 1u || psm == 2u || psm == 10u)) || // FIX-RD82H: CT32, CT24, CT16, CT16S
+                       (rdFbTexAnyPsmOn() && (psm == 0x1Bu || psm == 0x24u || psm == 0x2Cu)); // FIX-RD82: PSMT8H, PSMT4HL, PSMT4HH
+    if (!okPsm)
+    {
+        if (isPsm27) ++s_psm27WhyBadPsm; // PROBE-RD82C
         return false;
-    const uint32_t psm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full);
-    if (psm != 0u && psm != 1u && psm != 2u && psm != 10u) // CT32, CT24, CT16, CT16S
-        return false;
+    }
     const uint32_t page = static_cast<uint32_t>(b.tex0 & 0x3FFFull) / 32u;
+    const uint32_t dstFbp = static_cast<uint32_t>(b.frame & 0x1FFull); // FIX-RD82D
     uint32_t fbF[8], fbL[8];
     const uint32_t nfb = ps2xRdFbPageRanges(fbF, fbL);
     for (uint32_t k = 0u; k < nfb; ++k)
     {
         if (ps2xRdIsDisplayFbp(fbF[k]) && page >= fbF[k] && page <= fbL[k])
+        {
+            if (dstFbp == page) // FIX-RD82E
+            {
+                if (isPsm27) ++s_psm27WhyDispFbp; // PROBE-RD82C
+                return false;
+            }
+            if (isPsm27) ++s_psm27Ok; // PROBE-RD82C
             return true;
+        }
+    }
+    if (isPsm27) // PROBE-RD82C
+    {
+        ++s_psm27WhyNoRange;
+        static uint32_t s_rangeMissLogs = 0u;
+        if (s_rangeMissLogs < 5u)
+        {
+            ++s_rangeMissLogs;
+            if (nfb == 0u)
+                ps2xSafeLog("[rdfb] range-miss page=%x nfb=0 first=0..0 isDisp=0\n", page);
+            for (uint32_t k = 0u; k < nfb; ++k)
+                ps2xSafeLog("[rdfb] range-miss page=%x nfb=%u first=%x..%x isDisp=%d\n",
+                            page, nfb, fbF[k], fbL[k], ps2xRdIsDisplayFbp(fbF[k]) ? 1 : 0);
+        }
     }
     return false;
+}
+
+static unsigned int findRdSnapTex(const Rd2DBatch &b, bool touch) // FIX-RD81
+{
+    if (!rdSnapOn() || ((b.prim >> 4) & 1ull) == 0ull)
+        return 0u;
+    const uint32_t psm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full);
+    if (psm != 0u && psm != 1u && psm != 2u && psm != 10u)
+        return 0u;
+    const uint32_t startPage = static_cast<uint32_t>(b.tex0 & 0x3FFFull) / 32u;
+    for (size_t i = 0u; i < kRdSnapSlots; ++i)
+    {
+        RdSnapSlot &slot = s_snapSlots[i];
+        if (!slot.valid || slot.texId == 0u || slot.destFbp == 0xFFFFFFFFu)
+            continue;
+        if (startPage >= slot.destFbp && startPage <= slot.destFbp + 0x1Bu)
+        {
+            if (touch)
+            {
+                slot.lastUsedFrame = s_snapFrameSeq;
+                ++s_snapUsedCount;
+            }
+            return slot.texId;
+        }
+    }
+    return 0u;
+}
+
+static bool isRdCopyBufSkip(const Rd2DBatch &b) // FIX-RD87 // FIX-RD87B
+{
+    if (!rdFbTexOn() || !rdCopySkipOn() || ((b.prim >> 4) & 1ull) == 0ull)
+        return false;
+    const uint32_t tw = static_cast<uint32_t>((b.tex0 >> 26) & 0xFull); // FIX-RD87B
+    const uint32_t th = static_cast<uint32_t>((b.tex0 >> 30) & 0xFull); // FIX-RD87B
+    if (tw != 9u || th != 9u) // FIX-RD87B
+        return false;
+    const float rawW = static_cast<float>(g_rdPresentW.load(std::memory_order_relaxed)); // FIX-RD87B
+    const float rawH = static_cast<float>(g_rdPresentH.load(std::memory_order_relaxed)); // FIX-RD87B
+    const float vpW = (rawW > 0.0f) ? rawW : 512.0f; // FIX-RD87B
+    const float vpH = (rawH > 0.0f) ? rawH : 448.0f; // FIX-RD87B
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f; // FIX-RD87B
+    const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size()); // FIX-RD87B
+    for (size_t vi = b.first; vi < e2; ++vi) // FIX-RD87B
+    {
+        const RdVert &v = g_rdGpu.local2dScratch[vi];
+        x0 = std::min(x0, v.pos[0]); x1 = std::max(x1, v.pos[0]);
+        y0 = std::min(y0, v.pos[1]); y1 = std::max(y1, v.pos[1]);
+    }
+    if (x1 < x0 || y1 < y0) // FIX-RD87B
+        return false;
+    x0 = std::max(0.0f, std::min(x0, vpW)); x1 = std::max(0.0f, std::min(x1, vpW)); // FIX-RD87B
+    y0 = std::max(0.0f, std::min(y0, vpH)); y1 = std::max(0.0f, std::min(y1, vpH)); // FIX-RD87B
+    if ((x1 - x0) * (y1 - y0) < 0.80f * vpW * vpH) // FIX-RD87B
+        return false;
+    const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull); // FIX-RD87B
+    const uint64_t curFrame = s_snapFrameSeq.load(std::memory_order_relaxed);
+    bool registered = false;
+    {
+        std::lock_guard<std::mutex> lock(s_snapMutex);
+        for (const RdCopyBufEntry &cb : copyBufFbps)
+        {
+            if ((curFrame - cb.lastSeenFrame) < 900ull && tbp0 == cb.destFbp * 32u) // FIX-RD87B
+            {
+                registered = true;
+                break;
+            }
+        }
+    }
+    if (!registered)
+        return false;
+    return findRdSnapTex(b, false) == 0u;
 }
 
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
@@ -1280,6 +1610,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             "in vec4 vCol;\n"
             "in vec2 vUv;\n" // FEAT-RD3
             "uniform sampler2D uSampler;\n" // FEAT-RD3
+            "uniform sampler2D uPalTex;\n" // FIX-RD82B
+            "uniform int uPalMode;\n" // FIX-RD82B
+            "uniform int uPalFallback;\n" // FIX-RD84
             "uniform int uTex;\n" // FEAT-RD3
             "uniform int uTfx;\n" // FEAT-RD3
             "uniform int uTcc;\n" // FEAT-RD3
@@ -1293,6 +1626,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             "    float a_ps2 = vCol.a * 255.0;\n"
             "    if (uTex != 0) {\n" // FEAT-RD3
             "        vec4 t = texture(uSampler, vUv);\n"
+            "        if (uPalMode == 1) {\n" // FIX-RD82B
+            "            float l = dot(t.rgb, vec3(0.299, 0.587, 0.114));\n" // FIX-RD82B
+            "            if (uPalFallback != 0)\n" // FIX-RD84
+            "                t.rgb = vec3(0.40, 0.46, 0.80) * l + vec3(0.0, 0.01, 0.05);\n" // FIX-RD84
+            "            else\n" // FIX-RD84
+            "                t = texture(uPalTex, vec2((floor(l * 255.0) + 0.5) / 256.0, 0.5));\n" // FIX-RD82B
+            "        }\n" // FIX-RD82B
+            "        if (uPalMode != 0)\n" // FIX-RD82J
+            "            t.a = 128.0 / 255.0;\n" // FIX-RD82J
             "        float t_a_ps2 = t.a * 255.0;\n"
             "        vec3 vc_rgb = vCol.rgb * 255.0;\n"
             "        float vc_a = vCol.a * 255.0;\n"
@@ -1341,6 +1683,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         g_rdGpu.texLoc = GetShaderLocation(g_rdGpu.shader, "uTex");         // FEAT-RD3
         g_rdGpu.tfxLoc = GetShaderLocation(g_rdGpu.shader, "uTfx");         // FEAT-RD3
         g_rdGpu.tccLoc = GetShaderLocation(g_rdGpu.shader, "uTcc");         // FEAT-RD3
+        g_rdGpu.palTexLoc = GetShaderLocation(g_rdGpu.shader, "uPalTex");   // FIX-RD82B
+        g_rdGpu.palModeLoc = GetShaderLocation(g_rdGpu.shader, "uPalMode"); // FIX-RD82B
+        g_rdGpu.palFbLoc = GetShaderLocation(g_rdGpu.shader, "uPalFallback"); // FIX-RD84
         g_rdZBiasLoc = GetShaderLocation(g_rdGpu.shader, "uZBias");         // PROBE-RD59
         if (g_rdZBiasLoc >= 0) // PROBE-RD59
         {
@@ -1352,6 +1697,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             int samplerUnit = 0;
             SetShaderValue(g_rdGpu.shader, g_rdGpu.samplerLoc, &samplerUnit, SHADER_UNIFORM_INT);
         }
+        // FIX-RD82I: uPalTex=1 set lazily before first palette draw; do not touch uTex/uSampler/uPalMode here
         const char *fe = std::getenv("PS2X_RD_FLIP");
         const int flipBits = (fe && *fe) ? std::atoi(fe) : 0;
         g_rdGpu.flip[0] = 1.0f;
@@ -1782,6 +2128,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     static const bool s_2dDepth = []{ const char *e = std::getenv("PS2X_RD_2DZ"); return !(e && e[0] == '0'); }(); // FEAT-RD11
     uint64_t draws2dThisFrame = 0; // FEAT-RD8
     uint32_t drawn3dThisFrame = 0u; // FEAT-RD34
+    bool palDrawnThisFrame = false; // FIX-RD86
     uint64_t ztested2dThisFrame = 0; // FEAT-RD11
     uint64_t zclears2dThisFrame = 0; // FEAT-RD20
     struct RdPassEnt { uint32_t fbp, xo, yo, sx0, sy0, sx1, sy1; float vox, voy; uint32_t n; }; // FEAT-RD22
@@ -1808,8 +2155,80 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             rdSetUniform(g_rdGpu.vpZLoc, vpZ, RL_SHADER_UNIFORM_VEC2, 1);
         unsigned int curVao = 0u; // FEAT-RD14
         int prevBlend = -1; // FEAT-RD2b
-        size_t i2d = 0; // FEAT-RD8
         size_t n2d = (s_draw2d && g_rdGpu.gpu2dVertCount > 0 && g_rdGpu.vao2d != 0) ? g_rdGpu.local2dBatches.size() : 0; // FEAT-RD36
+        size_t startIdx = 0; // FIX-RD88B
+        static const bool s_nfTrimOn = []() { // FIX-RD88
+            extern void ps2xLoadConfig();
+            ps2xLoadConfig();
+            const char *e = std::getenv("PS2X_RD_NFTRIM");
+            return !e || e[0] != '0';
+        }();
+        static const bool s_nfStartOn = []() { // FIX-RD88B // FIX-RD88C
+            extern void ps2xLoadConfig();
+            ps2xLoadConfig();
+            const char *e = std::getenv("PS2X_RD_NFSTART");
+            return e && e[0] == '1'; // FIX-RD88C: opt-in (default 0)
+        }();
+        if (s_nfTrimOn && n2d > 0) // FIX-RD88
+        {
+            const float vpW = (fbSize[0] > 0.0f) ? fbSize[0] : 512.0f;
+            const float vpH = (fbSize[1] > 0.0f) ? fbSize[1] : 448.0f;
+            auto isFrameStartCopy = [&](const Rd2DBatch &b) -> bool {
+                if (b.count == 0u)
+                    return false;
+                if (((b.prim >> 4) & 1ull) == 0ull || !ps2xRdIsFbFeedback(b.texSerial))
+                    return false;
+                const uint32_t dstFbp = static_cast<uint32_t>(b.frame & 0x1FFull);
+                const uint32_t srcFbp = static_cast<uint32_t>(b.tex0 & 0x3FFFull) / 32u;
+                if (dstFbp == srcFbp)
+                    return false;
+                float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+                const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size());
+                for (size_t vi = b.first; vi < e2; ++vi)
+                {
+                    const RdVert &v = g_rdGpu.local2dScratch[vi];
+                    x0 = std::min(x0, v.pos[0]); x1 = std::max(x1, v.pos[0]);
+                    y0 = std::min(y0, v.pos[1]); y1 = std::max(y1, v.pos[1]);
+                }
+                if (x1 < x0 || y1 < y0)
+                    return false;
+                x0 = std::max(0.0f, std::min(x0, vpW)); x1 = std::max(0.0f, std::min(x1, vpW));
+                y0 = std::max(0.0f, std::min(y0, vpH)); y1 = std::max(0.0f, std::min(y1, vpH));
+                return (x1 - x0) * (y1 - y0) >= 0.90f * vpW * vpH;
+            };
+            size_t lastCopy = n2d;
+            for (size_t k = n2d; k > 0; --k)
+            {
+                if (isFrameStartCopy(g_rdGpu.local2dBatches[k - 1]))
+                {
+                    lastCopy = k - 1;
+                    break;
+                }
+            }
+            if (lastCopy < n2d && (n2d - 1 - lastCopy) < 80u)
+            {
+                size_t prevCopy = n2d; // FIX-RD88B
+                for (size_t k = lastCopy; k > 0; --k)
+                {
+                    if (isFrameStartCopy(g_rdGpu.local2dBatches[k - 1]))
+                    {
+                        prevCopy = k - 1;
+                        break;
+                    }
+                }
+                if (prevCopy < lastCopy)
+                {
+                    n2d = lastCopy;
+                    ++s_nextFrameTrim;
+                    if (s_nfStartOn && prevCopy > 0) // FIX-RD88B
+                    {
+                        startIdx = prevCopy;
+                        s_nextFrameSkip += static_cast<uint32_t>(startIdx);
+                    }
+                }
+            }
+        }
+        size_t i2d = startIdx; // FEAT-RD8 // FIX-RD88B
         bool rd2dReasonDump = false; // PROBE-RD62
         int rd2dReasonPrinted = 0;
         uint32_t min3dSerial = 0xFFFFFFFFu, max3dSerial = 0u;
@@ -1844,11 +2263,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 }
             }
         }
-        auto log2dReason = [&](size_t idx, const Rd2DBatch &b, const char *fate) // PROBE-RD62
+        auto log2dReason = [&](size_t idx, const Rd2DBatch &b, const char *fate) // PROBE-RD62 // PROBE-RD62B
         {
-            if (!rd2dReasonDump || rd2dReasonPrinted >= 60)
+            const int cap = g_rd2dReasonBig ? 400 : 60; // PROBE-RD62B
+            if (!rd2dReasonDump || rd2dReasonPrinted >= cap)
                 return;
-            ++rd2dReasonPrinted;
             float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
             const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size());
             for (size_t k = b.first; k < e2; ++k)
@@ -1857,15 +2276,35 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 x0 = std::min(x0, pp[0]); x1 = std::max(x1, pp[0]);
                 y0 = std::min(y0, pp[1]); y1 = std::max(y1, pp[1]);
             }
+            if (g_rd2dReasonBig) // PROBE-RD62B
+            {
+                const float screenArea = (fbSize[0] > 0.0f && fbSize[1] > 0.0f) ? (fbSize[0] * fbSize[1]) : 0.0f;
+                const float cx0 = std::max(0.0f, std::min(x0, fbSize[0]));
+                const float cx1 = std::max(0.0f, std::min(x1, fbSize[0]));
+                const float cy0 = std::max(0.0f, std::min(y0, fbSize[1]));
+                const float cy1 = std::max(0.0f, std::min(y1, fbSize[1]));
+                const float bboxArea = (x1 >= x0 && y1 >= y0) ? (cx1 - cx0) * (cy1 - cy0) : 0.0f;
+                const bool bigBox = (screenArea > 0.0f) && (bboxArea >= 0.15f * screenArea);
+                const bool boringFate = (std::strcmp(fate, "deferred-late") == 0 || std::strcmp(fate, "merged") == 0);
+                if (!bigBox && boringFate)
+                    return;
+            }
+            ++rd2dReasonPrinted;
             const int bx0 = (x1 >= x0) ? static_cast<int>(x0) : 0;
             const int by0 = (y1 >= y0) ? static_cast<int>(y0) : 0;
             const int bx1 = (x1 >= x0) ? static_cast<int>(x1) : 0;
             const int by1 = (y1 >= y0) ? static_cast<int>(y1) : 0;
-            ps2xSafeLog("[rd2dr] i=%zu fbp=%x count=%u tex=%d abe=%d afterSerial=%u bbox=%d,%d-%d,%d tex0=%llx test=%x 3d=%x..%x fate=%s\n",
+            const unsigned int zte = static_cast<unsigned int>((b.test >> 16) & 1ull); // PROBE-RD62B
+            const unsigned int ztst = static_cast<unsigned int>((b.test >> 17) & 3ull);
+            const unsigned int zmsk = static_cast<unsigned int>((b.zbuf >> 32) & 1ull);
+            ps2xSafeLog("[rd2dr] i=%zu fbp=%x count=%u tex=%d abe=%d afterSerial=%u bbox=%d,%d-%d,%d tex0=%llx alpha=%llx frame=%llx test=%llx zbuf=%llx prim=%llx zte=%u ztst=%u zmsk=%u 3d=%x..%x fate=%s\n",
                         idx, static_cast<unsigned int>(b.frame & 0x1FFull), static_cast<unsigned int>(b.count),
                         static_cast<int>((b.prim >> 4) & 1ull), static_cast<int>((b.prim >> 6) & 1ull),
                         static_cast<unsigned int>(b.afterSerial), bx0, by0, bx1, by1,
-                        static_cast<unsigned long long>(b.tex0), static_cast<unsigned int>(b.test),
+                        static_cast<unsigned long long>(b.tex0), static_cast<unsigned long long>(b.alpha),
+                        static_cast<unsigned long long>(b.frame), static_cast<unsigned long long>(b.test),
+                        static_cast<unsigned long long>(b.zbuf), static_cast<unsigned long long>(b.prim),
+                        zte, ztst, zmsk,
                         drawn3dThisFrame ? min3dSerial : 0u, drawn3dThisFrame ? max3dSerial : 0u, fate);
         };
 
@@ -1989,8 +2428,19 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 return true;
             return false;
         };
+        auto allow2dIdx = [&](size_t idx) -> bool { // PROBE-RD83 // FIX-RD88B
+            if (idx < startIdx) // FIX-RD88B
+                return false;
+            if (g_rd2dMax > 0 && idx >= static_cast<size_t>(g_rd2dMax))
+                return false;
+            if (g_rd2dOnly >= 0 && idx != static_cast<size_t>(g_rd2dOnly))
+                return false;
+            return true;
+        };
         auto emit2dBatch = [&](size_t idx, const Rd2DBatch &b0, uint32_t totalCount, size_t jEnd, bool forceNoZ, bool logReason) // FIX-RD63
         {
+            if (!allow2dIdx(idx)) // PROBE-RD83
+                return;
             const uint32_t ate = static_cast<uint32_t>(b0.test & 1ull);
             const uint32_t atst = ate ? static_cast<uint32_t>((b0.test >> 1) & 7ull) : 1u;
             const int afail = (ate && atst != 1u) ? static_cast<int>((b0.test >> 12) & 3ull) : 0; // FEAT-RD30
@@ -2055,13 +2505,118 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
 
             int texVal = 0, tfxVal = 0, tccVal = 0;
+            int palMode = 0; // FIX-RD82B
+            int palFallback = 0; // FIX-RD84
+#ifdef _WIN32
+            using PFN_glActiveTexture = void(__stdcall *)(unsigned int); // FIX-RD82G
+            static auto pActiveTex = reinterpret_cast<PFN_glActiveTexture>(wglGetProcAddress("glActiveTexture")); // FIX-RD82G
+#endif
             unsigned int texId = 0u;
             if ((b0.prim >> 4) & 1ull)
             {
                 if (isRdFbTexDisplayBatch(b0)) // FIX-RD79
                 {
-                    texId = s_prevTexId;
+                    texId = rdFbTexSelectId(b0.tex0); // FIX-RD85
                     ++s_fbTexUsed;
+                    palMode = 2; // FIX-RD82J
+                    ++s_fbTexAlphaFix; // FIX-RD82J
+                    const uint32_t psm = static_cast<uint32_t>((b0.tex0 >> 20) & 0x3Full); // FIX-RD82B
+                    if (texId != 0u && texId == s_prevTexId && (psm == 0x1Bu || psm == 0x24u || psm == 0x2Cu)) // FIX-RD86
+                        palDrawnThisFrame = true; // FIX-RD86
+#ifdef _WIN32
+                    if (rdFbTexOn() && rdFbTexPalOn() && psm == 27u) // FIX-RD82B // FIX-RD82G
+                    {
+                        if (rdFbTexPalFbOn()) // FIX-RD84B
+                        {
+                            palMode = 1;
+                            palFallback = 1;
+                            ++s_fbTexPalFb;
+                        }
+                        else
+                        {
+                        uint32_t palRgba[256];
+                        if (pActiveTex && g_rdGpu.palModeLoc >= 0 && g_rdGpu.palTexLoc >= 0 && ps2xRdGetClutRgba256(b0.tex0, b0.texa, palRgba))
+                        {
+                            uint32_t maxRgb = 0u; // FIX-RD84
+                            const uint32_t firstRgb = palRgba[0] & 0x00FFFFFFu; // FIX-RD84
+                            bool rgbVaries = false; // FIX-RD84
+                            for (int pi = 0; pi < 256; ++pi) // FIX-RD84
+                            {
+                                const uint32_t c = palRgba[pi];
+                                const uint32_t r = c & 0xFFu;
+                                const uint32_t g = (c >> 8) & 0xFFu;
+                                const uint32_t b = (c >> 16) & 0xFFu;
+                                if (r > maxRgb) maxRgb = r;
+                                if (g > maxRgb) maxRgb = g;
+                                if (b > maxRgb) maxRgb = b;
+                                if ((c & 0x00FFFFFFu) != firstRgb)
+                                    rgbVaries = true;
+                            }
+                            if (maxRgb < 40u || !rgbVaries) // FIX-RD84
+                            {
+                                palMode = 1;
+                                palFallback = 1;
+                                ++s_fbTexPalFb;
+                            }
+                            else
+                            {
+                            static unsigned int s_palTexId = 0u;
+                            static uint32_t s_palLastRgba[256] = {};
+                            static bool s_palHasData = false;
+                            pActiveTex(0x84C0u); // GL_TEXTURE0
+                            int prevTex0 = 0;
+                            glGetIntegerv(0x8069u, &prevTex0); // GL_TEXTURE_BINDING_2D
+                            pActiveTex(0x84C1u); // GL_TEXTURE1
+                            if (s_palTexId == 0u)
+                            {
+                                glGenTextures(1, &s_palTexId);
+                                if (s_palTexId != 0u)
+                                {
+                                    glBindTexture(0x0DE1u, s_palTexId); // GL_TEXTURE_2D
+                                    glTexParameteri(0x0DE1u, 0x2802u, 0x812Fu); // GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE
+                                    glTexParameteri(0x0DE1u, 0x2803u, 0x812Fu); // GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE
+                                    glTexParameteri(0x0DE1u, 0x2800u, 0x2600u); // GL_TEXTURE_MAG_FILTER, GL_NEAREST
+                                    glTexParameteri(0x0DE1u, 0x2801u, 0x2600u); // GL_TEXTURE_MIN_FILTER, GL_NEAREST
+                                    glTexImage2D(0x0DE1u, 0, 0x8058, 256, 1, 0, 0x1908u, 0x1401u, palRgba); // GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE
+                                    std::memcpy(s_palLastRgba, palRgba, sizeof(palRgba));
+                                    s_palHasData = true;
+                                }
+                            }
+                            else
+                            {
+                                glBindTexture(0x0DE1u, s_palTexId); // GL_TEXTURE_2D
+                                if (!s_palHasData || std::memcmp(palRgba, s_palLastRgba, sizeof(palRgba)) != 0)
+                                {
+                                    glTexSubImage2D(0x0DE1u, 0, 0, 0, 256, 1, 0x1908u, 0x1401u, palRgba); // GL_RGBA, GL_UNSIGNED_BYTE
+                                    std::memcpy(s_palLastRgba, palRgba, sizeof(palRgba));
+                                    s_palHasData = true;
+                                }
+                            }
+                            pActiveTex(0x84C0u); // GL_TEXTURE0
+                            glBindTexture(0x0DE1u, static_cast<unsigned int>(prevTex0));
+                            g_rdc.bound = 0u;
+                            if (s_palTexId != 0u)
+                            {
+                                palMode = 1;
+                                ++s_fbTexPal;
+                            }
+                            else
+                            {
+                                ++s_fbTexPalFail;
+                            }
+                            }
+                        }
+                        else
+                        {
+                            ++s_fbTexPalFail;
+                        }
+                        }
+                    }
+#endif
+                }
+                else if (const unsigned int snapTexId = findRdSnapTex(b0, true)) // FIX-RD81
+                {
+                    texId = snapTexId;
                 }
                 else
                 {
@@ -2084,6 +2639,19 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniform(g_rdGpu.tfxLoc, &tfxVal, RL_SHADER_UNIFORM_INT, 1);
             if (g_rdGpu.tccLoc >= 0)
                 rdSetUniform(g_rdGpu.tccLoc, &tccVal, RL_SHADER_UNIFORM_INT, 1);
+            if (palMode != 0 && g_rdGpu.palModeLoc >= 0) // FIX-RD82I
+            {
+                static bool s_palTexSet = false;
+                if (!s_palTexSet && g_rdGpu.palTexLoc >= 0)
+                {
+                    const int palUnit = 1;
+                    rdSetUniform(g_rdGpu.palTexLoc, &palUnit, RL_SHADER_UNIFORM_INT, 1);
+                    s_palTexSet = true;
+                }
+                rdSetUniform(g_rdGpu.palModeLoc, &palMode, RL_SHADER_UNIFORM_INT, 1);
+                if (palMode == 1 && g_rdGpu.palFbLoc >= 0) // FIX-RD84
+                    rdSetUniform(g_rdGpu.palFbLoc, &palFallback, RL_SHADER_UNIFORM_INT, 1);
+            }
 
             if (rdbDump) rdb2d(b0, 0, totalCount); // PROBE-RD29
             if (camDump) // PROBE-RD26
@@ -2129,6 +2697,28 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             }
             else
                 rlDrawVertexArray(static_cast<int>(b0.first), static_cast<int>(totalCount));
+            if (palMode != 0) // FIX-RD82B // FIX-RD82G // FIX-RD82I
+            {
+                if (g_rdGpu.palModeLoc >= 0)
+                {
+                    const int palZero = 0;
+                    rdSetUniform(g_rdGpu.palModeLoc, &palZero, RL_SHADER_UNIFORM_INT, 1);
+                }
+                if (palMode == 1 && palFallback != 0 && g_rdGpu.palFbLoc >= 0) // FIX-RD84
+                {
+                    const int palFbZero = 0;
+                    rdSetUniform(g_rdGpu.palFbLoc, &palFbZero, RL_SHADER_UNIFORM_INT, 1);
+                }
+#ifdef _WIN32
+                if (pActiveTex)
+                {
+                    pActiveTex(0x84C1u); // GL_TEXTURE1
+                    glBindTexture(0x0DE1u, 0u); // GL_TEXTURE_2D
+                    pActiveTex(0x84C0u); // GL_TEXTURE0
+                }
+#endif
+                g_rdc.bound = 0u;
+            }
             ++draws2dThisFrame;
             if (logReason && rd2dReasonDump) // PROBE-RD62
             {
@@ -2171,6 +2761,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             while (i2d < n2d && (drawAll || (g_rdGpu.local2dBatches[i2d].afterSerial & 0x3FFFFFFFu) < maxS))
             {
                 const Rd2DBatch &b0 = g_rdGpu.local2dBatches[i2d];
+                if (!allow2dIdx(i2d)) // PROBE-RD83
+                {
+                    ++i2d;
+                    continue;
+                }
                 if (b0.count == 0u)
                 {
                     log2dReason(i2d, b0, "skip-count0"); // PROBE-RD62
@@ -2182,6 +2777,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     if (rdbDump) rdb2d(b0, 1, b0.count); // PROBE-RD29
                     log2dReason(i2d, b0, "skip-fbFeedback"); // PROBE-RD62
                     ++s_fbFeedbackSkipped;
+                    ++i2d;
+                    continue;
+                }
+                if (isRdCopyBufSkip(b0)) // FIX-RD87
+                {
+                    log2dReason(i2d, b0, "skip-copybuf"); // PROBE-RD62
+                    ++s_fbCopySkip;
                     ++i2d;
                     continue;
                 }
@@ -2224,7 +2826,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     if (((b.prim >> 4) & 1ull) == 0ull)
                         return 0u;
                     if (isRdFbTexDisplayBatch(b))
-                        return s_prevTexId;
+                        return rdFbTexSelectId(b.tex0); // FIX-RD85
+                    if (const unsigned int snapTexId = findRdSnapTex(b, false)) // FIX-RD81
+                        return snapTexId;
                     ps2xRdBt2SetKind(1); // PROBE-BT2
                     return ps2xRdGetTextureForBatch(b.texSerial, b.tex0, b.texa);
                 };
@@ -2233,6 +2837,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 size_t j = i2d + 1;
                 while (j < n2d && (drawAll || (g_rdGpu.local2dBatches[j].afterSerial & 0x3FFFFFFFu) < maxS)) // FEAT-RD10
                 {
+                    if (!allow2dIdx(j)) // PROBE-RD83
+                        break;
                     const Rd2DBatch &bn = g_rdGpu.local2dBatches[j];
                     if (shouldDefer2d(bn, nullptr)) // FIX-RD63
                         break;
@@ -2807,6 +3413,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             rlEnableVertexArray(g_rdGpu.vao2d);
             for (size_t idx : deferred2d)
             {
+                if (!allow2dIdx(idx)) // PROBE-RD83
+                    continue;
                 const Rd2DBatch &b0 = g_rdGpu.local2dBatches[idx];
                 if (!applyScissor(b0.scissor, true))
                     continue;
@@ -2863,12 +3471,169 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     rlViewport(0, 0, rw, rh);
 
 #ifdef _WIN32
-    if (rdFbTexOn() && vw > 0 && vh > 0) // FIX-RD79 // FIX-RD80
+    if (rdFbTexOn() && vw > 0 && vh > 0) // FIX-RD79 // FIX-RD80 // FIX-RD81
     {
-        static int s_prevW = 0, s_prevH = 0, s_resW = 0, s_resH = 0;
+        static int s_prevW = 0, s_prevH = 0, s_resW = 0, s_resH = 0, s_lastW = 0, s_lastH = 0; // FIX-RD85
         static bool s_prevFilled = false; // FIX-RD80
         const int wantW = vw;
         const int wantH = static_cast<int>((static_cast<int64_t>(vh) * 512 + 224) / 448);
+        using PFN_glGenFramebuffers = void(__stdcall *)(int, unsigned int *);
+        using PFN_glBindFramebuffer = void(__stdcall *)(unsigned int, unsigned int);
+        using PFN_glFramebufferTexture2D = void(__stdcall *)(unsigned int, unsigned int, unsigned int, unsigned int, int);
+        using PFN_glBlitFramebuffer = void(__stdcall *)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
+        static auto pGenFbo = reinterpret_cast<PFN_glGenFramebuffers>(wglGetProcAddress("glGenFramebuffers"));
+        static auto pBindFbo = reinterpret_cast<PFN_glBindFramebuffer>(wglGetProcAddress("glBindFramebuffer"));
+        static auto pFbTex2D = reinterpret_cast<PFN_glFramebufferTexture2D>(wglGetProcAddress("glFramebufferTexture2D"));
+        static auto pBlitFbo = reinterpret_cast<PFN_glBlitFramebuffer>(wglGetProcAddress("glBlitFramebuffer"));
+        static unsigned int s_prevFbo = 0u, s_resFbo = 0u, s_resTex = 0u, s_lastSceneFbo = 0u; // FIX-RD85
+        int prevReadFbo = 0, prevDrawFbo = 0, sampleBufs = 0;
+        if (pGenFbo && pBindFbo && pFbTex2D && pBlitFbo)
+        {
+            glGetIntegerv(0x8CAAu, &prevReadFbo); // GL_READ_FRAMEBUFFER_BINDING
+            glGetIntegerv(0x8CA6u, &prevDrawFbo); // GL_DRAW_FRAMEBUFFER_BINDING
+            glGetIntegerv(0x80A8u, &sampleBufs);  // GL_SAMPLE_BUFFERS
+        }
+        if (rdSnapOn()) // FIX-RD81: capture finished frame before RD80 blend
+        {
+            const uint64_t curSnapFrame = ++s_snapFrameSeq; // FIX-RD87
+            if (s_snapNeedReset.exchange(false, std::memory_order_acquire))
+            {
+                for (size_t si = 0u; si < kRdSnapSlots; ++si)
+                {
+                    s_snapSlots[si].valid = false;
+                    s_snapSlots[si].destFbp = 0xFFFFFFFFu;
+                }
+            }
+            for (size_t si = 0u; si < kRdSnapSlots; ++si)
+            {
+                if (s_snapSlots[si].valid && (curSnapFrame - s_snapSlots[si].lastUsedFrame) >= 600ull)
+                {
+                    s_snapSlots[si].valid = false;
+                    s_snapSlots[si].destFbp = 0xFFFFFFFFu;
+                }
+            }
+            std::vector<RdSnapReq> snapReqs;
+            {
+                std::lock_guard<std::mutex> snapLock(s_snapMutex);
+                snapReqs.swap(s_snapPending);
+                copyBufFbps.erase( // FIX-RD87
+                    std::remove_if(copyBufFbps.begin(), copyBufFbps.end(),
+                                   [curSnapFrame](const RdCopyBufEntry &cb) { return (curSnapFrame - cb.lastSeenFrame) >= 900ull; }),
+                    copyBufFbps.end());
+            }
+            if (!snapReqs.empty())
+            {
+                if (drawn3dThisFrame == 0u || palDrawnThisFrame) // FIX-RD81b // FIX-RD86
+                {
+                    if (drawn3dThisFrame == 0u)
+                        s_snapSkippedNoGeom += static_cast<uint32_t>(snapReqs.size());
+                }
+                else if (pGenFbo && pBindFbo && pFbTex2D && pBlitFbo)
+                {
+                bool resolved = false;
+                for (const RdSnapReq &req : snapReqs)
+                {
+                    size_t chosen = kRdSnapSlots;
+                    for (size_t si = 0u; si < kRdSnapSlots; ++si)
+                    {
+                        if (s_snapSlots[si].valid && s_snapSlots[si].destFbp == req.destFbp)
+                        {
+                            chosen = si;
+                            break;
+                        }
+                    }
+                    if (chosen == kRdSnapSlots)
+                    {
+                        for (size_t si = 0u; si < kRdSnapSlots; ++si)
+                        {
+                            if (!s_snapSlots[si].valid)
+                            {
+                                chosen = si;
+                                break;
+                            }
+                        }
+                    }
+                    if (chosen == kRdSnapSlots)
+                    {
+                        chosen = 0u;
+                        for (size_t si = 1u; si < kRdSnapSlots; ++si)
+                        {
+                            if (s_snapSlots[si].lastUsedFrame < s_snapSlots[chosen].lastUsedFrame)
+                                chosen = si;
+                        }
+                    }
+                    RdSnapSlot &slot = s_snapSlots[chosen];
+                    if (slot.texId == 0u || slot.w != wantW || slot.h != wantH)
+                    {
+                        if (slot.texId != 0u)
+                            rlUnloadTexture(slot.texId);
+                        slot.texId = rlLoadTexture(nullptr, wantW, wantH, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                        slot.w = wantW;
+                        slot.h = wantH;
+                        if (slot.texId != 0u)
+                        {
+                            rlTextureParameters(slot.texId, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+                            rlTextureParameters(slot.texId, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+                            rlTextureParameters(slot.texId, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                            rlTextureParameters(slot.texId, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                            if (slot.fbo == 0u)
+                                pGenFbo(1, &slot.fbo);
+                            pBindFbo(0x8CA9u, slot.fbo);
+                            pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, slot.texId, 0);
+                            glClearColor(0.0f, 0.0f, 0.0f, 1.0f); // FIX-RD82J
+                            glClear(0x00004000u);
+                        }
+                    }
+                    if (slot.texId != 0u && slot.fbo != 0u)
+                    {
+                        const int dstW = std::max(1, std::min(wantW, static_cast<int>((static_cast<int64_t>(wantW) * req.w + 256) / 512)));
+                        const int dstH = std::max(1, std::min(wantH, static_cast<int>((static_cast<int64_t>(vh) * req.h + 224) / 448)));
+                        if (sampleBufs > 0)
+                        {
+                            if (!resolved)
+                            {
+                                if (s_resTex == 0u || s_resW != vw || s_resH != vh)
+                                {
+                                    if (s_resTex != 0u)
+                                        rlUnloadTexture(s_resTex);
+                                    s_resTex = rlLoadTexture(nullptr, vw, vh, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                                    s_resW = vw;
+                                    s_resH = vh;
+                                    if (s_resFbo == 0u)
+                                        pGenFbo(1, &s_resFbo);
+                                    pBindFbo(0x8CA9u, s_resFbo);
+                                    pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, s_resTex, 0);
+                                }
+                                pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
+                                pBindFbo(0x8CA9u, s_resFbo);
+                                pBlitFbo(vx, vy, vx + vw, vy + vh, 0, 0, vw, vh, 0x00004000u, 0x2600u);
+                                resolved = true;
+                            }
+                            pBindFbo(0x8CA8u, s_resFbo);
+                            pBindFbo(0x8CA9u, slot.fbo);
+                            pBlitFbo(0, vh, vw, 0, 0, 0, dstW, dstH, 0x00004000u, 0x2601u);
+                        }
+                        else
+                        {
+                            pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
+                            pBindFbo(0x8CA9u, slot.fbo);
+                            pBlitFbo(vx, vy + vh, vx + vw, vy, 0, 0, dstW, dstH, 0x00004000u, 0x2601u);
+                        }
+                        rlColorMask(false, false, false, true); // FIX-RD82J
+                        glClearColor(0.0f, 0.0f, 0.0f, 1.0f); // FIX-RD82J
+                        glClear(0x00004000u); // FIX-RD82J
+                        rlColorMask(true, true, true, true); // FIX-RD82J
+                        slot.destFbp = req.destFbp;
+                        slot.valid = true;
+                        slot.lastUsedFrame = s_snapFrameSeq;
+                        ++s_snapCount;
+                    }
+                }
+                    pBindFbo(0x8CA8u, static_cast<unsigned int>(prevReadFbo));
+                    pBindFbo(0x8CA9u, static_cast<unsigned int>(prevDrawFbo));
+                }
+            }
+        }
         const float dispF = rdGetDisplayBlend(); // FIX-RD80
         s_fbTexLastF = dispF; // FIX-RD80
         if (dispF < 0.999f && s_prevFilled && s_prevTexId != 0u && s_prevW == wantW && s_prevH == wantH) // FIX-RD80
@@ -2891,76 +3656,85 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             rlEnableBackfaceCulling();
             ++s_fbTexBlendCount;
         }
-        using PFN_glGenFramebuffers = void(__stdcall *)(int, unsigned int *);
-        using PFN_glBindFramebuffer = void(__stdcall *)(unsigned int, unsigned int);
-        using PFN_glFramebufferTexture2D = void(__stdcall *)(unsigned int, unsigned int, unsigned int, unsigned int, int);
-        using PFN_glBlitFramebuffer = void(__stdcall *)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
-        static auto pGenFbo = reinterpret_cast<PFN_glGenFramebuffers>(wglGetProcAddress("glGenFramebuffers"));
-        static auto pBindFbo = reinterpret_cast<PFN_glBindFramebuffer>(wglGetProcAddress("glBindFramebuffer"));
-        static auto pFbTex2D = reinterpret_cast<PFN_glFramebufferTexture2D>(wglGetProcAddress("glFramebufferTexture2D"));
-        static auto pBlitFbo = reinterpret_cast<PFN_glBlitFramebuffer>(wglGetProcAddress("glBlitFramebuffer"));
         if (pGenFbo && pBindFbo && pFbTex2D && pBlitFbo)
         {
-            static unsigned int s_prevFbo = 0u, s_resFbo = 0u, s_resTex = 0u;
-            int prevReadFbo = 0, prevDrawFbo = 0, sampleBufs = 0;
-            glGetIntegerv(0x8CAAu, &prevReadFbo); // GL_READ_FRAMEBUFFER_BINDING
-            glGetIntegerv(0x8CA6u, &prevDrawFbo); // GL_DRAW_FRAMEBUFFER_BINDING
-            glGetIntegerv(0x80A8u, &sampleBufs);  // GL_SAMPLE_BUFFERS
-            if (s_prevTexId == 0u || s_prevW != wantW || s_prevH != wantH)
-            {
-                if (s_prevTexId != 0u)
-                    rlUnloadTexture(s_prevTexId);
-                s_prevTexId = rlLoadTexture(nullptr, wantW, wantH, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
-                s_prevW = wantW;
-                s_prevH = wantH;
-                if (s_prevTexId != 0u)
+            bool resResolved = false; // FIX-RD85B
+            auto copyToFbTarget = [&](unsigned int &texId, unsigned int &fbo, int &texW, int &texH, bool &filled, uint32_t &copies) { // FIX-RD85B
+                if (texId == 0u || texW != wantW || texH != wantH)
                 {
-                    rlTextureParameters(s_prevTexId, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
-                    rlTextureParameters(s_prevTexId, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
-                    rlTextureParameters(s_prevTexId, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
-                    rlTextureParameters(s_prevTexId, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_LINEAR);
-                    if (s_prevFbo == 0u)
-                        pGenFbo(1, &s_prevFbo);
-                    pBindFbo(0x8CA9u, s_prevFbo); // GL_DRAW_FRAMEBUFFER
-                    pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, s_prevTexId, 0);
-                    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-                    glClear(0x00004000u);
-                }
-            }
-            if (s_prevTexId != 0u && s_prevFbo != 0u)
-            {
-                if (sampleBufs > 0)
-                {
-                    if (s_resTex == 0u || s_resW != vw || s_resH != vh)
+                    if (texId != 0u)
                     {
-                        if (s_resTex != 0u)
-                            rlUnloadTexture(s_resTex);
-                        s_resTex = rlLoadTexture(nullptr, vw, vh, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
-                        s_resW = vw;
-                        s_resH = vh;
-                        if (s_resFbo == 0u)
-                            pGenFbo(1, &s_resFbo);
-                        pBindFbo(0x8CA9u, s_resFbo);
-                        pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, s_resTex, 0);
+                        g_rdc.invalidateTex(texId);
+                        rlUnloadTexture(texId);
                     }
-                    pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
-                    pBindFbo(0x8CA9u, s_resFbo);
-                    pBlitFbo(vx, vy, vx + vw, vy + vh, 0, 0, vw, vh, 0x00004000u, 0x2600u);
-                    pBindFbo(0x8CA8u, s_resFbo);
-                    pBindFbo(0x8CA9u, s_prevFbo);
-                    pBlitFbo(0, vh, vw, 0, 0, 0, vw, vh, 0x00004000u, 0x2600u);
+                    texId = rlLoadTexture(nullptr, wantW, wantH, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                    texW = wantW;
+                    texH = wantH;
+                    filled = false;
+                    if (texId != 0u)
+                    {
+                        g_rdc.invalidateTex(texId);
+                        rlTextureParameters(texId, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+                        rlTextureParameters(texId, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+                        rlTextureParameters(texId, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                        rlTextureParameters(texId, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                        if (fbo == 0u)
+                            pGenFbo(1, &fbo);
+                        pBindFbo(0x8CA9u, fbo); // GL_DRAW_FRAMEBUFFER
+                        pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, texId, 0);
+                        glClearColor(0.0f, 0.0f, 0.0f, 1.0f); // FIX-RD82J
+                        glClear(0x00004000u);
+                    }
                 }
-                else
+                if (texId != 0u && fbo != 0u)
                 {
-                    pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
-                    pBindFbo(0x8CA9u, s_prevFbo);
-                    pBlitFbo(vx, vy + vh, vx + vw, vy, 0, 0, vw, vh, 0x00004000u, 0x2600u);
+                    if (sampleBufs > 0)
+                    {
+                        if (!resResolved)
+                        {
+                            if (s_resTex == 0u || s_resW != vw || s_resH != vh)
+                            {
+                                if (s_resTex != 0u)
+                                    rlUnloadTexture(s_resTex);
+                                s_resTex = rlLoadTexture(nullptr, vw, vh, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                                s_resW = vw;
+                                s_resH = vh;
+                                if (s_resFbo == 0u)
+                                    pGenFbo(1, &s_resFbo);
+                                pBindFbo(0x8CA9u, s_resFbo);
+                                pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, s_resTex, 0);
+                            }
+                            pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
+                            pBindFbo(0x8CA9u, s_resFbo);
+                            pBlitFbo(vx, vy, vx + vw, vy + vh, 0, 0, vw, vh, 0x00004000u, 0x2600u);
+                            resResolved = true;
+                        }
+                        pBindFbo(0x8CA8u, s_resFbo);
+                        pBindFbo(0x8CA9u, fbo);
+                        pBlitFbo(0, vh, vw, 0, 0, 0, vw, vh, 0x00004000u, 0x2600u);
+                    }
+                    else
+                    {
+                        pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
+                        pBindFbo(0x8CA9u, fbo);
+                        pBlitFbo(vx, vy + vh, vx + vw, vy, 0, 0, vw, vh, 0x00004000u, 0x2600u);
+                    }
+                    rlColorMask(false, false, false, true); // FIX-RD82J
+                    glClearColor(0.0f, 0.0f, 0.0f, 1.0f); // FIX-RD82J
+                    glClear(0x00004000u); // FIX-RD82J
+                    rlColorMask(true, true, true, true); // FIX-RD82J
+                    ++copies;
+                    filled = true;
                 }
-                ++s_fbTexCopies;
-                s_prevFilled = true; // FIX-RD80
-            }
-            pBindFbo(0x8CA8u, static_cast<unsigned int>(prevReadFbo));
-            pBindFbo(0x8CA9u, static_cast<unsigned int>(prevDrawFbo));
+                pBindFbo(0x8CA8u, static_cast<unsigned int>(prevReadFbo));
+                pBindFbo(0x8CA9u, static_cast<unsigned int>(prevDrawFbo));
+            };
+            if (!palDrawnThisFrame) // FIX-RD86
+                copyToFbTarget(s_prevTexId, s_prevFbo, s_prevW, s_prevH, s_prevFilled, s_fbTexCopies); // FIX-RD85B
+            else // FIX-RD86
+                ++s_fbTexFrozen; // FIX-RD86
+            if (rdFbTexLastOn() && drawn3dThisFrame >= rdFbTexLast3dMin()) // FIX-RD85 // FIX-RD85B
+                copyToFbTarget(s_lastSceneTexId, s_lastSceneFbo, s_lastW, s_lastH, s_lastSceneFilled, s_fbTexLastCopies); // FIX-RD85B
         }
     }
 #endif
@@ -3106,7 +3880,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_fbTexLastLog).count() >= 2000)
         {
             s_fbTexLastLog = now;
-            ps2xSafeLog("[rdfb] used=%u copies=%u blend=%u lastf=%.3f\n", s_fbTexUsed, s_fbTexCopies, s_fbTexBlendCount, s_fbTexLastF); // FIX-RD79 // FIX-RD80
+            ps2xSafeLog("[rdfb] used=%u copies=%u frozen=%u last=%u blend=%u lastf=%.3f snaps=%u snapUsed=%u snapSkippedNoGeom=%u copyskip=%u pal=%u palFail=%u palFb=%u a1=%u psm27why=%u/%u/%u/%u/%u/%u/ok=%u lastValid=%d lastId=%u prevId=%u nftrim=%u nfskip=%u\n", s_fbTexUsed, s_fbTexCopies, s_fbTexFrozen, s_fbTexLastCopies, s_fbTexBlendCount, s_fbTexLastF, s_snapCount, s_snapUsedCount, s_snapSkippedNoGeom, s_fbCopySkip, s_fbTexPal, s_fbTexPalFail, s_fbTexPalFb, s_fbTexAlphaFix, s_psm27WhyOff, s_psm27WhyNoPrev, s_psm27WhyNotFb, s_psm27WhyDispFbp, s_psm27WhyBadPsm, s_psm27WhyNoRange, s_psm27Ok, s_lastSceneFilled ? 1 : 0, s_lastSceneTexId, s_prevTexId, s_nextFrameTrim, s_nextFrameSkip); // FIX-RD79 // FIX-RD80 // FIX-RD81 // FIX-RD81b // FIX-RD82B // PROBE-RD82C // FIX-RD82J // FIX-RD84 // FIX-RD85 // FIX-RD85B // FIX-RD86 // FIX-RD87 // FIX-RD88 // FIX-RD88B
         }
     }
     return true;
