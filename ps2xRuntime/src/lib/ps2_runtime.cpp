@@ -149,6 +149,7 @@ extern "C" __declspec(dllimport) void *__stdcall CreateWaitableTimerExW(void *lp
 extern "C" __declspec(dllimport) int __stdcall SetWaitableTimer(void *hTimer, const long long *lpDueTime, long lPeriod, void *pfnCompletionRoutine, void *lpArgToCompletionRoutine, int fResume); // FIX-PACE1
 extern "C" __declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void *hHandle, unsigned long dwMilliseconds); // FIX-PACE1
 extern "C" __declspec(dllimport) void __stdcall Sleep(unsigned long dwMilliseconds); // FIX-PACE1
+extern "C" __declspec(dllimport) unsigned int __stdcall timeBeginPeriod(unsigned int uPeriod); // FIX-V3F
 #endif
 
 // FIX-PACE1 / FIX-PACE4: swap-time frame pacing & telemetry helpers
@@ -258,6 +259,194 @@ struct Pace2Scope
     Pace2Scope(const Pace2Scope &) = delete;
     Pace2Scope &operator=(const Pace2Scope &) = delete;
 };
+
+// FIX-V3F: SDL branch frame pacer
+extern void ps2xSafeLog(const char *fmt, ...);
+extern std::atomic<int> g_ps2xPause;
+#if defined(_WIN32) || defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <immintrin.h>
+#endif
+
+static int64_t s_sdlNextSwapQpc = 0;
+static int64_t s_sdlPrevSwapStampQpc = 0;
+static int64_t s_sdlPaceLogLastQpc = 0;
+static std::vector<double> s_sdlPaceSwapMs;
+static std::vector<double> s_sdlPaceDrawMs;
+static double s_sdlPaceWaitSumMs = 0.0;
+static uint32_t s_sdlPaceWaitCount = 0;
+static uint32_t s_sdlPaceResyncs = 0;
+static uint32_t s_sdlPaceLate2ms = 0;
+static int64_t s_sdlPrevNextSwapQpc = 0;
+static int64_t s_sdlPeriodTicks = 0;
+static int64_t s_sdlMinAdvanceTicks = 0;
+static bool s_sdlSkipPace = false;
+static bool s_sdlHasNewFrame = false;
+
+static inline void paceBeforeSwapSdl(bool hasNewFrame, int64_t presT0Qpc)
+{
+    const bool paceOn = isPaceEnabled();
+    const bool paceLogOn = isPaceLogEnabled();
+    const bool isPaused = (g_ps2xPause.load(std::memory_order_relaxed) != 0);
+    const bool skipPace = isPaused;
+    s_sdlSkipPace = skipPace;
+    s_sdlHasNewFrame = hasNewFrame;
+
+    const int64_t qpcFreq = (paceOn || paceLogOn) ? paceQpcFreq() : 0;
+    const int64_t periodTicks = paceOn ? static_cast<int64_t>(std::llround(static_cast<double>(qpcFreq) / getPaceHz())) : 0;
+    const int64_t minAdvanceTicks = paceOn ? static_cast<int64_t>(std::llround(0.7 * static_cast<double>(qpcFreq) / getPaceHz())) : 0;
+    s_sdlPeriodTicks = periodTicks;
+    s_sdlMinAdvanceTicks = minAdvanceTicks;
+
+    int64_t prevNextSwapQpc = 0;
+    bool resyncedThisFrame = false;
+    double waitMsThisFrame = 0.0;
+
+    if (paceOn && !skipPace && hasNewFrame)
+    {
+        const bool paceNowait = isPaceNowaitEnabled();
+        const bool paceYield = isPaceYieldEnabled();
+        bool didWait = false;
+        int64_t nowQpc = paceQpcNow();
+        if (s_sdlNextSwapQpc == 0)
+        {
+            s_sdlNextSwapQpc = nowQpc;
+        }
+        else if (nowQpc > s_sdlNextSwapQpc + periodTicks)
+        {
+            s_sdlNextSwapQpc = nowQpc;
+            ++s_sdlPaceResyncs;
+            resyncedThisFrame = true;
+        }
+        else if (nowQpc < s_sdlNextSwapQpc)
+        {
+            if ((s_sdlNextSwapQpc - nowQpc) > periodTicks)
+                s_sdlNextSwapQpc = nowQpc + periodTicks;
+            if (!paceNowait)
+            {
+                didWait = true;
+                const int64_t waitStartQpc = nowQpc;
+                const int64_t coarseMarginTicks = qpcFreq / 1000;
+                const int64_t coarseTargetQpc = s_sdlNextSwapQpc - coarseMarginTicks;
+                if (nowQpc < coarseTargetQpc)
+                {
+#ifdef _WIN32
+                    static void *s_hiResTimer = []() -> void * {
+                        void *h = CreateWaitableTimerExW(nullptr, nullptr, 0x2u, 0x1F0003u);
+                        if (!h)
+                            timeBeginPeriod(1);
+                        return h;
+                    }();
+                    if (s_hiResTimer)
+                    {
+                        const double remSec = static_cast<double>(coarseTargetQpc - nowQpc) / static_cast<double>(qpcFreq);
+                        long long due100ns = -static_cast<long long>(remSec * 10000000.0);
+                        const unsigned long maxWaitMs = static_cast<unsigned long>((periodTicks * 1000LL) / qpcFreq) + 2ul;
+                        if (due100ns < 0 && SetWaitableTimer(s_hiResTimer, &due100ns, 0, nullptr, nullptr, 0))
+                            WaitForSingleObject(s_hiResTimer, maxWaitMs);
+                    }
+                    else
+                    {
+                        const unsigned long ms = static_cast<unsigned long>((coarseTargetQpc - nowQpc) * 1000LL / qpcFreq);
+                        if (ms > 0)
+                            Sleep(ms);
+                    }
+#else
+                    const auto targetTp = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(coarseTargetQpc));
+                    std::this_thread::sleep_until(targetTp);
+#endif
+                }
+                while (paceQpcNow() < s_sdlNextSwapQpc && (paceQpcNow() - waitStartQpc) < periodTicks)
+                {
+#if defined(_WIN32) || defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+                    _mm_pause();
+#else
+                    std::this_thread::yield();
+#endif
+                }
+                waitMsThisFrame = static_cast<double>(paceQpcNow() - waitStartQpc) * 1000.0 / static_cast<double>(qpcFreq);
+            }
+        }
+        if (paceYield && !didWait)
+        {
+#ifdef _WIN32
+            Sleep(1);
+#else
+            std::this_thread::yield();
+#endif
+        }
+        prevNextSwapQpc = s_sdlNextSwapQpc;
+    }
+    s_sdlPrevNextSwapQpc = prevNextSwapQpc;
+
+    if (paceLogOn)
+    {
+        const int64_t swapStampQpc = paceQpcNow();
+        if (s_sdlPaceLogLastQpc == 0)
+            s_sdlPaceLogLastQpc = swapStampQpc;
+        if (s_sdlPrevSwapStampQpc != 0)
+        {
+            const int64_t diffTicks = swapStampQpc - s_sdlPrevSwapStampQpc;
+            if (diffTicks > 0 && diffTicks <= qpcFreq)
+                s_sdlPaceSwapMs.push_back(static_cast<double>(diffTicks) * 1000.0 / static_cast<double>(qpcFreq));
+        }
+        s_sdlPrevSwapStampQpc = swapStampQpc;
+        const double drawMs = static_cast<double>(swapStampQpc - presT0Qpc) * 1000.0 / static_cast<double>(qpcFreq) - waitMsThisFrame;
+        s_sdlPaceDrawMs.push_back(drawMs > 0.0 ? drawMs : 0.0);
+        s_sdlPaceWaitSumMs += waitMsThisFrame;
+        ++s_sdlPaceWaitCount;
+        if (paceOn && !skipPace && hasNewFrame && !resyncedThisFrame && prevNextSwapQpc != 0)
+        {
+            const int64_t lateTicks = swapStampQpc - prevNextSwapQpc;
+            if (lateTicks > (2 * qpcFreq / 1000))
+                ++s_sdlPaceLate2ms;
+        }
+        if ((swapStampQpc - s_sdlPaceLogLastQpc) >= (5 * qpcFreq) && !s_sdlPaceSwapMs.empty())
+        {
+            std::vector<double> sv(s_sdlPaceSwapMs);
+            std::sort(sv.begin(), sv.end());
+            const auto sat = [&](double q) { return sv[std::min<size_t>(sv.size() - 1, static_cast<size_t>(q * static_cast<double>(sv.size())))]; };
+            double sum = 0.0;
+            for (double x : sv) sum += x;
+            const double mean = sum / static_cast<double>(sv.size());
+            double var = 0.0;
+            for (double x : sv) { const double d = x - mean; var += d * d; }
+            const double stdev = std::sqrt(var / static_cast<double>(sv.size()));
+            std::vector<double> dv(s_sdlPaceDrawMs);
+            std::sort(dv.begin(), dv.end());
+            const auto dat = [&](double q) { return dv[std::min<size_t>(dv.size() - 1, static_cast<size_t>(q * static_cast<double>(dv.size())))]; };
+            const double waitAvg = s_sdlPaceWaitCount ? (s_sdlPaceWaitSumMs / static_cast<double>(s_sdlPaceWaitCount)) : 0.0;
+            ps2xSafeLog("[pace] n=%u swap p50=%.2f p95=%.2f p99=%.2f max=%.2f ms stdev=%.2f | draw p50=%.2f p95=%.2f max=%.2f | waitAvg=%.2f resyncs=%u late>2ms=%u pace=%d\n",
+                        static_cast<unsigned>(sv.size()), sat(0.50), sat(0.95), sat(0.99), sv.back(), stdev,
+                        dat(0.50), dat(0.95), dv.back(), waitAvg, s_sdlPaceResyncs, s_sdlPaceLate2ms, paceOn ? 1 : 0);
+            s_sdlPaceSwapMs.clear();
+            s_sdlPaceDrawMs.clear();
+            s_sdlPaceWaitSumMs = 0.0;
+            s_sdlPaceWaitCount = 0;
+            s_sdlPaceResyncs = 0;
+            s_sdlPaceLate2ms = 0;
+            s_sdlPaceLogLastQpc = swapStampQpc;
+        }
+    }
+}
+
+static inline void paceAfterSwapSdl()
+{
+    const bool paceOn = isPaceEnabled();
+    if (paceOn)
+    {
+        if (!s_sdlSkipPace && s_sdlHasNewFrame)
+        {
+            const int64_t afterSwapQpc = paceQpcNow();
+            const int64_t cand1 = s_sdlPrevNextSwapQpc + s_sdlPeriodTicks;
+            const int64_t cand2 = afterSwapQpc + s_sdlMinAdvanceTicks;
+            s_sdlNextSwapQpc = (cand1 > cand2) ? cand1 : cand2;
+        }
+        else
+        {
+            s_sdlNextSwapQpc = 0;
+        }
+    }
+}
 
 
 static std::mutex s_logMutex;
@@ -7280,8 +7469,23 @@ void PS2Runtime::run()
                     (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight); // RDG3
                     if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
                         m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
+                    paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
                     rdgfx_vk::endFrame(); // RDG3
                     ps2xSdlForcePoll(); // FIX-RDG4Q
+                    paceAfterSwapSdl(); // FIX-V3F
+                    if (s_ft3On) // FIX-V3F
+                    {
+                        long long qpcNow = 0;
+#ifdef _WIN32
+                        QueryPerformanceCounter(&qpcNow);
+#else
+                        qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+                        const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                        const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
+                        ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag};
+                        ft3WriteCount.store(idx + 1, std::memory_order_release);
+                    }
                 }
                 else // RDG3
                 {
@@ -7320,11 +7524,26 @@ void PS2Runtime::run()
                         if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
                             m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
 
+                        paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
                         const auto t_f0 = std::chrono::steady_clock::now(); // PROBE-V3B
                         rdgfx_vk::endFrame(); // FXC1
                         ps2xSdlForcePoll(); // FXC1
                         const auto t_f1 = std::chrono::steady_clock::now(); // PROBE-V3B
                         const double cur_fMs = std::chrono::duration<double, std::milli>(t_f1 - t_f0).count(); // PROBE-V3B
+                        paceAfterSwapSdl(); // FIX-V3F
+                        if (s_ft3On) // FIX-V3F
+                        {
+                            long long qpcNow = 0;
+#ifdef _WIN32
+                            QueryPerformanceCounter(&qpcNow);
+#else
+                            qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+                            const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                            const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
+                            ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag};
+                            ft3WriteCount.store(idx + 1, std::memory_order_release);
+                        }
 
                         ++probe_v3b::n; // PROBE-V3B
                         probe_v3b::aSum += cur_aMs; // PROBE-V3B
@@ -7340,8 +7559,23 @@ void PS2Runtime::run()
                     {
                         if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
                             m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
+                        paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
                         ps2xSdlPresent();
                         ps2xSdlForcePoll(); // FIX-RDG4Q
+                        paceAfterSwapSdl(); // FIX-V3F
+                        if (s_ft3On) // FIX-V3F
+                        {
+                            long long qpcNow = 0;
+#ifdef _WIN32
+                            QueryPerformanceCounter(&qpcNow);
+#else
+                            qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+                            const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                            const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
+                            ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, ft3Tag};
+                            ft3WriteCount.store(idx + 1, std::memory_order_release);
+                        }
                     }
                     const auto fxcNow = std::chrono::steady_clock::now(); // PROBE-FXC2
                     if (std::chrono::duration_cast<std::chrono::milliseconds>(fxcNow - s_fxcLastLog).count() >= 1000) // PROBE-FXC2

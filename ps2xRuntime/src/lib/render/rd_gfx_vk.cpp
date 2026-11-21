@@ -172,6 +172,7 @@ struct GpuTexture
     int height = 0;
     uint32_t mipLevels = 1;
     SamplerKey sampler;
+    uint64_t memBytes = 0; // FIX-V3E
 };
 
 struct GarbageBuffer
@@ -180,11 +181,33 @@ struct GarbageBuffer
     VkDeviceMemory memory = VK_NULL_HANDLE;
 };
 
+// FIX-V3E: pool recycled texture images instead of create/alloc/destroy
+struct PooledImage
+{
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    uint32_t w = 0;
+    uint32_t h = 0;
+    uint32_t mips = 0;
+    uint64_t bytes = 0;
+    uint64_t lastUsedSerial = 0;
+};
+
+static inline uint64_t imagePoolKey(uint32_t w, uint32_t h, uint32_t mips)
+{
+    return (static_cast<uint64_t>(w) << 32) | (static_cast<uint64_t>(h) << 16) | (static_cast<uint64_t>(mips) & 0xFFFF);
+}
+
 struct GarbageTexture
 {
     VkImageView view = VK_NULL_HANDLE;
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    uint32_t w = 0; // FIX-V3E
+    uint32_t h = 0; // FIX-V3E
+    uint32_t mips = 0; // FIX-V3E
+    uint64_t bytes = 0; // FIX-V3E
 };
 
 // FIX-RDG3C
@@ -394,6 +417,7 @@ struct RdVkState
     std::vector<std::vector<GarbageBuffer>> garbageBuffers;
     std::vector<std::vector<GarbageTexture>> garbageTextures;
     std::vector<std::vector<VkCommandBuffer>> garbageCmds; // FIX-V3D
+    std::vector<VkCommandBuffer> frameUploadCmd; // FIX-V3G
     std::vector<BufferCopy> stagingRings; // FIX-V3D
     std::vector<VkDeviceSize> stagingCursors; // FIX-V3D
 
@@ -444,6 +468,45 @@ struct RdVkState
     uint64_t winDrawsSum = 0, winDrawsMax = 0;
     uint64_t winDescHitsSum = 0, winDescHitsMax = 0;
     uint64_t winDescMissesSum = 0, winDescMissesMax = 0;
+
+    // FIX-V3E: texture image recycling pool
+    std::unordered_multimap<uint64_t, PooledImage> imagePool;
+    uint64_t poolTotalBytes = 0;
+    uint64_t poolSerial = 0;
+    uint64_t statTexPoolHit = 0;
+    uint64_t statTexPoolMiss = 0;
+
+    void destroyImagePool() // FIX-V3E
+    {
+        if (device == VK_NULL_HANDLE)
+            return;
+        for (auto &pair : imagePool)
+        {
+            PooledImage &pi = pair.second;
+            if (pi.view != VK_NULL_HANDLE)
+            {
+                vkDestroyImageView(device, pi.view, nullptr);
+                pi.view = VK_NULL_HANDLE;
+            }
+            if (pi.image != VK_NULL_HANDLE)
+            {
+                vkDestroyImage(device, pi.image, nullptr);
+                pi.image = VK_NULL_HANDLE;
+            }
+            if (pi.memory != VK_NULL_HANDLE)
+            {
+                vkFreeMemory(device, pi.memory, nullptr);
+                pi.memory = VK_NULL_HANDLE;
+            }
+        }
+        imagePool.clear();
+        poolTotalBytes = 0;
+    }
+
+    ~RdVkState() // FIX-V3E
+    {
+        destroyImagePool();
+    }
 };
 
 RdVkState s_vk;
@@ -620,6 +683,48 @@ void endOneTimeCmdAsync(VkCommandBuffer cmd) // FIX-V3D
     vkQueueSubmit(s_vk.queue, 1, &si, VK_NULL_HANDLE);
     probe_v3b::cntAsyncUpload++; // FIX-V3D
     s_vk.garbageCmds[s_vk.curFrame].push_back(cmd);
+}
+
+VkCommandBuffer beginUploadCmdBatched() // FIX-V3G
+{
+    if (!s_vk.frameActive)
+        return beginOneTimeCmd();
+
+    const uint32_t f = s_vk.curFrame;
+    if (f < s_vk.frameUploadCmd.size() && s_vk.frameUploadCmd[f] != VK_NULL_HANDLE)
+        return s_vk.frameUploadCmd[f];
+
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = s_vk.uploadPool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(s_vk.device, &ai, &cmd) != VK_SUCCESS)
+        return beginOneTimeCmd();
+
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS)
+    {
+        vkFreeCommandBuffers(s_vk.device, s_vk.uploadPool, 1, &cmd);
+        return beginOneTimeCmd();
+    }
+
+    if (f < s_vk.frameUploadCmd.size())
+        s_vk.frameUploadCmd[f] = cmd;
+    return cmd;
+}
+
+void endUploadCmdBatched(VkCommandBuffer cmd) // FIX-V3G
+{
+    if (cmd == VK_NULL_HANDLE)
+        return;
+    if (s_vk.frameActive && s_vk.curFrame < s_vk.frameUploadCmd.size() && cmd == s_vk.frameUploadCmd[s_vk.curFrame])
+        return; // Keep open for batching across the frame
+    endOneTimeCmd(cmd);
 }
 
 std::vector<uint8_t> readBinaryFile(const std::filesystem::path &path)
@@ -1307,8 +1412,51 @@ void flushGarbage(uint32_t frameIdx)
     }
     s_vk.garbageBuffers[frameIdx].clear();
 
+    // FIX-V3E: pool recycled texture images instead of destroy/alloc
+    const uint64_t MAX_POOL_BYTES = 256ULL * 1024 * 1024;
     for (const auto &gt : s_vk.garbageTextures[frameIdx])
     {
+        if (gt.w > 0 && gt.h > 0 && gt.mips > 0 && gt.image != VK_NULL_HANDLE && gt.memory != VK_NULL_HANDLE && gt.view != VK_NULL_HANDLE)
+        {
+            const uint64_t bytes = gt.bytes > 0 ? gt.bytes : (static_cast<uint64_t>(gt.w) * gt.h * 4);
+            while (!s_vk.imagePool.empty() && (s_vk.poolTotalBytes + bytes > MAX_POOL_BYTES))
+            {
+                auto oldest = s_vk.imagePool.begin();
+                for (auto it = s_vk.imagePool.begin(); it != s_vk.imagePool.end(); ++it)
+                {
+                    if (it->second.lastUsedSerial < oldest->second.lastUsedSerial)
+                        oldest = it;
+                }
+                if (oldest->second.view != VK_NULL_HANDLE)
+                    vkDestroyImageView(s_vk.device, oldest->second.view, nullptr);
+                if (oldest->second.image != VK_NULL_HANDLE)
+                    vkDestroyImage(s_vk.device, oldest->second.image, nullptr);
+                if (oldest->second.memory != VK_NULL_HANDLE)
+                    vkFreeMemory(s_vk.device, oldest->second.memory, nullptr);
+                if (s_vk.poolTotalBytes >= oldest->second.bytes)
+                    s_vk.poolTotalBytes -= oldest->second.bytes;
+                else
+                    s_vk.poolTotalBytes = 0;
+                s_vk.imagePool.erase(oldest);
+            }
+
+            if (s_vk.poolTotalBytes + bytes <= MAX_POOL_BYTES)
+            {
+                PooledImage pi;
+                pi.image = gt.image;
+                pi.memory = gt.memory;
+                pi.view = gt.view;
+                pi.w = gt.w;
+                pi.h = gt.h;
+                pi.mips = gt.mips;
+                pi.bytes = bytes;
+                pi.lastUsedSerial = ++s_vk.poolSerial;
+                s_vk.poolTotalBytes += bytes;
+                s_vk.imagePool.emplace(imagePoolKey(gt.w, gt.h, gt.mips), pi);
+                continue;
+            }
+        }
+
         if (gt.view != VK_NULL_HANDLE)
             vkDestroyImageView(s_vk.device, gt.view, nullptr);
         if (gt.image != VK_NULL_HANDLE)
@@ -1681,6 +1829,7 @@ bool init()
     s_vk.garbageBuffers.resize(s_vk.framesInFlight);
     s_vk.garbageTextures.resize(s_vk.framesInFlight);
     s_vk.garbageCmds.resize(s_vk.framesInFlight); // FIX-V3D
+    s_vk.frameUploadCmd.assign(s_vk.framesInFlight, VK_NULL_HANDLE); // FIX-V3G
     s_vk.stagingRings.resize(s_vk.framesInFlight); // FIX-V3D
     s_vk.stagingCursors.assign(s_vk.framesInFlight, 0); // FIX-V3D
 
@@ -1772,6 +1921,16 @@ void beginFrame()
         vkResetDescriptorPool(s_vk.device, pool, 0);
     s_vk.descPoolIdx[frameIdx] = 0;
     s_vk.descCaches[frameIdx].clear();
+    // FIX-V3G: safe discard unsubmitted batch cmds if frame was aborted
+    for (uint32_t i = 0; i < s_vk.frameUploadCmd.size(); ++i)
+    {
+        if (s_vk.frameUploadCmd[i] != VK_NULL_HANDLE)
+        {
+            vkEndCommandBuffer(s_vk.frameUploadCmd[i]);
+            s_vk.garbageCmds[i].push_back(s_vk.frameUploadCmd[i]);
+            s_vk.frameUploadCmd[i] = VK_NULL_HANDLE;
+        }
+    }
     flushGarbage(frameIdx);
     s_vk.stagingCursors[frameIdx] = 0; // FIX-V3D
     applyPendingBufferWrites(frameIdx);
@@ -1786,6 +1945,21 @@ void endFrame()
 {
     if (!s_vk.initialized || !s_vk.frameActive)
         return;
+
+    // FIX-V3G: submit batched upload commands before main frame command buffer
+    if (s_vk.curFrame < s_vk.frameUploadCmd.size() && s_vk.frameUploadCmd[s_vk.curFrame] != VK_NULL_HANDLE)
+    {
+        VkCommandBuffer ucmd = s_vk.frameUploadCmd[s_vk.curFrame];
+        vkEndCommandBuffer(ucmd);
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &ucmd;
+        vkQueueSubmit(s_vk.queue, 1, &si, VK_NULL_HANDLE);
+        probe_v3b::cntAsyncUpload++;
+        s_vk.garbageCmds[s_vk.curFrame].push_back(ucmd);
+        s_vk.frameUploadCmd[s_vk.curFrame] = VK_NULL_HANDLE;
+    }
 
     int64_t endStartQpc = 0; // PROBE-RDG4P
     if (s_vk.logEnabled)
@@ -1882,7 +2056,7 @@ void endFrame()
                         " dIdx=%llu dArr=%llu noFrame=%llu noPass=%llu noPipeline=%llu noVb=%llu noIb=%llu noDesc=%llu zeroCount=%llu"
                         " clears=%llu binds=%llu texCreated=%llu vbUpd=%llu uniformSets=%llu passBegun=%llu asyncUp=%u"
                         " t_wait=%.2f/%.2f t_rec=%.2f/%.2f t_draw=%.2f/%.2f t_tex=%.2f/%.2f t_end=%.2f/%.2f"
-                        " draws/f=%.1f/%llu descSets/f=%.1f+%.1f(max=%llu+%llu)\n",
+                        " draws/f=%.1f/%llu descSets/f=%.1f+%.1f(max=%llu+%llu) pool=%llu/%llu\n", // FIX-V3E
                         static_cast<unsigned long long>(s_vk.statFrames),
                         static_cast<unsigned long long>(s_vk.statDraws),
                         s_vk.pipelines.size(),
@@ -1913,7 +2087,9 @@ void endFrame()
                         static_cast<double>(s_vk.winDescHitsSum) * invFrames,
                         static_cast<double>(s_vk.winDescMissesSum) * invFrames,
                         static_cast<unsigned long long>(s_vk.winDescHitsMax),
-                        static_cast<unsigned long long>(s_vk.winDescMissesMax));
+                        static_cast<unsigned long long>(s_vk.winDescMissesMax),
+                        static_cast<unsigned long long>(s_vk.statTexPoolHit), // FIX-V3E
+                        static_cast<unsigned long long>(s_vk.statTexPoolMiss)); // FIX-V3E
             s_vk.winFrames = 0;
             s_vk.winWaitSumMs = s_vk.winWaitMaxMs = 0.0;
             s_vk.winRecSumMs = s_vk.winRecMaxMs = 0.0;
@@ -2376,53 +2552,74 @@ uint32_t createTexture2DInternal(const void *data, int w, int h, uint32_t mipLev
     tex.mipLevels = mipLevels;
     tex.sampler = sampler;
 
-    VkImageCreateInfo ici{};
-    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
-    ici.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
-    ici.mipLevels = mipLevels;
-    ici.arrayLayers = 1;
-    ici.samples = VK_SAMPLE_COUNT_1_BIT;
-    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(s_vk.device, &ici, nullptr, &tex.image) != VK_SUCCESS)
-        return 0;
-
-    VkMemoryRequirements req{};
-    vkGetImageMemoryRequirements(s_vk.device, tex.image, &req);
-    uint32_t memType = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (memType == UINT32_MAX)
+    // FIX-V3E: check pool before creating image
+    const uint64_t poolKey = imagePoolKey(static_cast<uint32_t>(w), static_cast<uint32_t>(h), mipLevels);
+    auto poolIt = s_vk.imagePool.find(poolKey);
+    if (poolIt != s_vk.imagePool.end())
     {
-        vkDestroyImage(s_vk.device, tex.image, nullptr);
-        return 0;
+        tex.image = poolIt->second.image;
+        tex.memory = poolIt->second.memory;
+        tex.view = poolIt->second.view;
+        tex.memBytes = poolIt->second.bytes;
+        if (s_vk.poolTotalBytes >= poolIt->second.bytes)
+            s_vk.poolTotalBytes -= poolIt->second.bytes;
+        else
+            s_vk.poolTotalBytes = 0;
+        s_vk.imagePool.erase(poolIt);
+        ++s_vk.statTexPoolHit;
     }
-
-    VkMemoryAllocateInfo mai{};
-    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    mai.allocationSize = req.size;
-    mai.memoryTypeIndex = memType;
-    if (vkAllocateMemory(s_vk.device, &mai, nullptr, &tex.memory) != VK_SUCCESS ||
-        vkBindImageMemory(s_vk.device, tex.image, tex.memory, 0) != VK_SUCCESS)
+    else
     {
-        if (tex.memory != VK_NULL_HANDLE) vkFreeMemory(s_vk.device, tex.memory, nullptr);
-        vkDestroyImage(s_vk.device, tex.image, nullptr);
-        return 0;
-    }
+        ++s_vk.statTexPoolMiss;
+        VkImageCreateInfo ici{};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ici.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+        ici.mipLevels = mipLevels;
+        ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(s_vk.device, &ici, nullptr, &tex.image) != VK_SUCCESS)
+            return 0;
 
-    VkImageViewCreateInfo ivci{};
-    ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    ivci.image = tex.image;
-    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
-    ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
-    if (vkCreateImageView(s_vk.device, &ivci, nullptr, &tex.view) != VK_SUCCESS)
-    {
-        vkFreeMemory(s_vk.device, tex.memory, nullptr);
-        vkDestroyImage(s_vk.device, tex.image, nullptr);
-        return 0;
+        VkMemoryRequirements req{};
+        vkGetImageMemoryRequirements(s_vk.device, tex.image, &req);
+        uint32_t memType = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (memType == UINT32_MAX)
+        {
+            vkDestroyImage(s_vk.device, tex.image, nullptr);
+            return 0;
+        }
+
+        VkMemoryAllocateInfo mai{};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = memType;
+        if (vkAllocateMemory(s_vk.device, &mai, nullptr, &tex.memory) != VK_SUCCESS ||
+            vkBindImageMemory(s_vk.device, tex.image, tex.memory, 0) != VK_SUCCESS)
+        {
+            if (tex.memory != VK_NULL_HANDLE) vkFreeMemory(s_vk.device, tex.memory, nullptr);
+            vkDestroyImage(s_vk.device, tex.image, nullptr);
+            return 0;
+        }
+
+        VkImageViewCreateInfo ivci{};
+        ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        ivci.image = tex.image;
+        ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
+        if (vkCreateImageView(s_vk.device, &ivci, nullptr, &tex.view) != VK_SUCCESS)
+        {
+            vkFreeMemory(s_vk.device, tex.memory, nullptr);
+            vkDestroyImage(s_vk.device, tex.image, nullptr);
+            return 0;
+        }
+        tex.memBytes = req.size;
     }
 
     // FIX-V3D: Staging ring with fallback
@@ -2468,7 +2665,7 @@ uint32_t createTexture2DInternal(const void *data, int w, int h, uint32_t mipLev
         }
     }
 
-    VkCommandBuffer cmd = beginOneTimeCmd();
+    VkCommandBuffer cmd = beginUploadCmdBatched(); // FIX-V3G
     if (data)
     {
         imageBarrier(cmd, tex.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels,
@@ -2511,10 +2708,7 @@ uint32_t createTexture2DInternal(const void *data, int w, int h, uint32_t mipLev
                      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
-    if (s_vk.frameActive)
-        endOneTimeCmdAsync(cmd); // FIX-V3D
-    else
-        endOneTimeCmd(cmd);
+    endUploadCmdBatched(cmd); // FIX-V3G
 
     if (data && !usedRing)
     {
@@ -2556,7 +2750,15 @@ void freeTexture(uint32_t texId)
     if (!tex)
         return;
     if (s_vk.frameActive)
-        s_vk.garbageTextures[s_vk.curFrame].push_back({tex->view, tex->image, tex->memory});
+    {
+        // FIX-V3E: preserve w, h, mips, bytes for recycling in imagePool
+        const uint64_t bytes = tex->memBytes > 0 ? tex->memBytes : (static_cast<uint64_t>(std::max(0, tex->width)) * std::max(0, tex->height) * 4);
+        s_vk.garbageTextures[s_vk.curFrame].push_back({tex->view, tex->image, tex->memory,
+                                                       static_cast<uint32_t>(std::max(0, tex->width)),
+                                                       static_cast<uint32_t>(std::max(0, tex->height)),
+                                                       tex->mipLevels,
+                                                       bytes});
+    }
     else
     {
         if (tex->view != VK_NULL_HANDLE) vkDestroyImageView(s_vk.device, tex->view, nullptr);
@@ -2583,7 +2785,7 @@ void generateMipmaps(uint32_t texId, int w, int h)
     if (tex.mipLevels <= 1)
         return;
 
-    VkCommandBuffer cmd = beginOneTimeCmd();
+    VkCommandBuffer cmd = beginUploadCmdBatched(); // FIX-V3G
     imageBarrier(cmd, tex.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, tex.mipLevels,
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -2624,10 +2826,7 @@ void generateMipmaps(uint32_t texId, int w, int h)
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    if (s_vk.frameActive)
-        endOneTimeCmdAsync(cmd); // FIX-V3D
-    else
-        endOneTimeCmd(cmd);
+    endUploadCmdBatched(cmd); // FIX-V3G
 }
 
 void setTextureWrap(uint32_t texId, bool isT, rdgfx::TextureWrap wrap)
