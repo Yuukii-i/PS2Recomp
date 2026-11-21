@@ -75,6 +75,8 @@ void drawTextureOverlay(uint32_t texId, int texW, int texH,
                         float srcX, float srcY, float srcW, float srcH,
                         float dstX, float dstY, float dstW, float dstH,
                         uint8_t alpha);
+void drawFxBackground(uint32_t texId, int texW, int texH); // FXC1
+void drawClassicAdditive(const uint8_t *rgba, int w, int h, int strideBytes); // FXC1
 
 bool canCopyBackbuffer();
 bool beginBackbufferCopy(rdgfx::BackbufferCopyState &state);

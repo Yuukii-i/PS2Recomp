@@ -33,6 +33,7 @@ bool ps2xSdlShouldClose();
 void ps2xSdlForcePoll(); // FIX-RDG4Q
 void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t strideBytes);
 void ps2xSdlPresent();
+const uint8_t *ps2xSdlLastFrameRgba(uint32_t &w, uint32_t &h, uint32_t &strideBytes); // FXC1
 void ps2xSdlSetTitle(const char *t);
 void ps2xSdlShutdown();
 bool ps2xSdlReadPad(uint16_t *btnsActiveLow, uint8_t *sticks);
@@ -1108,6 +1109,21 @@ void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t st
     g_sdl.frameW = w;
     g_sdl.frameH = h;
     g_sdl.hasFrame = true;
+}
+
+const uint8_t *ps2xSdlLastFrameRgba(uint32_t &w, uint32_t &h, uint32_t &strideBytes) // FXC1
+{
+    if (!ps2xSdlActive() || !g_sdl.hasFrame || g_sdl.cpuFrame.empty() || g_sdl.frameW == 0 || g_sdl.frameH == 0)
+    {
+        w = 0;
+        h = 0;
+        strideBytes = 0;
+        return nullptr;
+    }
+    w = g_sdl.frameW;
+    h = g_sdl.frameH;
+    strideBytes = g_sdl.frameW * 4u;
+    return g_sdl.cpuFrame.data();
 }
 
 void ps2xSdlPresent()

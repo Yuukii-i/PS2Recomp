@@ -17,6 +17,8 @@ extern "C" __declspec(dllimport) void __stdcall glReadPixels(int, int, int, int,
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
 extern void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h); // FEAT-RD12
 extern std::atomic<bool> g_rdFrameIsClassic; // FEAT-RD18
+extern std::atomic<bool> g_rdFrameIsFx; // FXC1
+extern bool ps2xRdGetPrevFrame(uint32_t &texId, int &w, int &h); // FXC1
 extern void ps2xPadMarker(); // PROBE-MK
 extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
 extern void ps2xMcInit(); // FEAT-DE
@@ -33,6 +35,7 @@ extern bool ps2xSdlShouldClose();
 extern void ps2xSdlForcePoll(); // FIX-RDG4Q
 extern void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t strideBytes);
 extern void ps2xSdlPresent();
+extern const uint8_t *ps2xSdlLastFrameRgba(uint32_t &w, uint32_t &h, uint32_t &strideBytes); // FXC1
 extern void ps2xSdlSetTitle(const char *t);
 extern void ps2xSdlShutdown();
 #else
@@ -43,6 +46,7 @@ inline bool ps2xSdlShouldClose() { return false; }
 inline void ps2xSdlForcePoll() {} // FIX-RDG4Q
 inline void ps2xSdlUploadFrame(const uint8_t *, uint32_t, uint32_t, uint32_t) {}
 inline void ps2xSdlPresent() {}
+inline const uint8_t *ps2xSdlLastFrameRgba(uint32_t &, uint32_t &, uint32_t &) { return nullptr; } // FXC1
 inline void ps2xSdlSetTitle(const char *) {}
 inline void ps2xSdlShutdown() {}
 #endif
@@ -6810,6 +6814,7 @@ void PS2Runtime::run()
             uint32_t presentWidth = FB_WIDTH;
             uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
             bool rdClassic = false; // FEAT-RD18
+            bool rdFx = false; // PROBE-FXC2
             if (ps2xRdTakeoverOn()) // FEAT-RD12: skip UploadFrame / GS readback
             {
                 if (!vblankLatchOn)
@@ -6823,6 +6828,7 @@ void PS2Runtime::run()
                     }
                 }
                 rdClassic = g_rdFrameIsClassic.load(std::memory_order_acquire); // FEAT-RD18
+                rdFx = rdClassic && g_rdFrameIsFx.load(std::memory_order_acquire); // PROBE-FXC2
                 if (rdClassic) // FEAT-RD18: classic fallback for non-geometry frames
                 {
                     UploadFrame(frameTex, this, presentWidth, presentHeight, tick, true);
@@ -7259,11 +7265,44 @@ void PS2Runtime::run()
                     ps2xSdlForcePoll(); // FIX-RDG4Q
                 }
                 else // RDG3
-#endif // RDG3
                 {
-                    ps2xSdlPresent();
-                    ps2xSdlForcePoll(); // FIX-RDG4Q
+                    uint32_t prevTex = 0u; // FXC1
+                    int prevW = 0, prevH = 0; // FXC1
+                    uint32_t fxW = 0u, fxH = 0u, fxStride = 0u; // FXC1
+                    const uint8_t *fxRgba = nullptr; // FXC1
+                    const bool hasPrev = ps2xRdGetPrevFrame(prevTex, prevW, prevH); // PROBE-FXC2
+                    fxRgba = ps2xSdlLastFrameRgba(fxW, fxH, fxStride); // PROBE-FXC2
+                    const bool hasRgba = (fxRgba != nullptr); // PROBE-FXC2
+                    static uint32_t s_fxcClassicFrames = 0u, s_fxcFxFlag = 0u, s_fxcPrevOk = 0u, s_fxcRgbaOk = 0u, s_fxcComposited = 0u; // PROBE-FXC2
+                    static auto s_fxcLastLog = std::chrono::steady_clock::now(); // PROBE-FXC2
+                    ++s_fxcClassicFrames; // PROBE-FXC2
+                    if (rdFx) ++s_fxcFxFlag; // PROBE-FXC2
+                    if (hasPrev) ++s_fxcPrevOk; // PROBE-FXC2
+                    if (hasRgba) ++s_fxcRgbaOk; // PROBE-FXC2
+                    if (rdgfx_vk::active() && rdFx && hasPrev && hasRgba) // FXC1 // PROBE-FXC2
+                    {
+                        ++s_fxcComposited; // PROBE-FXC2
+                        rdgfx_vk::beginFrame(); // FXC1
+                        rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 1.0f); // FXC1
+                        rdgfx_vk::drawFxBackground(prevTex, prevW, prevH); // FXC1
+                        rdgfx_vk::drawClassicAdditive(fxRgba, static_cast<int>(fxW), static_cast<int>(fxH), static_cast<int>(fxStride)); // FXC1
+                        rdgfx_vk::endFrame(); // FXC1
+                        ps2xSdlForcePoll(); // FXC1
+                    }
+                    else
+                    {
+                        ps2xSdlPresent();
+                        ps2xSdlForcePoll(); // FIX-RDG4Q
+                    }
+                    const auto fxcNow = std::chrono::steady_clock::now(); // PROBE-FXC2
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(fxcNow - s_fxcLastLog).count() >= 1000) // PROBE-FXC2
+                    {
+                        s_fxcLastLog = fxcNow; // PROBE-FXC2
+                        ps2xSafeLog("[fxc] classicFrames=%u fxFlag=%u prevOk=%u rgbaOk=%u composited=%u\n",
+                                    s_fxcClassicFrames, s_fxcFxFlag, s_fxcPrevOk, s_fxcRgbaOk, s_fxcComposited); // PROBE-FXC2
+                    }
                 }
+#endif // RDG3
                 gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             }
             const auto presT1 = std::chrono::steady_clock::now();

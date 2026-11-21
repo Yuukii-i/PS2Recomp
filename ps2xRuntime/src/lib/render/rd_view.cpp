@@ -94,6 +94,8 @@ static uint32_t s_fbTexCopies = 0u; // FIX-RD79
 static uint32_t s_fbTexFrozen = 0u; // FIX-RD86
 static uint32_t s_fbCopySkip = 0u; // FIX-RD87
 static unsigned int s_prevTexId = 0u; // FIX-RD79
+static int s_prevW = 0, s_prevH = 0; // FXC1
+static bool s_prevFilled = false; // FXC1
 static unsigned int s_lastSceneTexId = 0u; // FIX-RD85
 static bool s_lastSceneFilled = false; // FIX-RD85
 static uint32_t s_fbTexLastCopies = 0u; // FIX-RD85
@@ -223,6 +225,15 @@ static unsigned int rdFbTexSelectId(uint64_t tex0) // FIX-RD85
     if (rdFbTexLastOn() && isPalPsm && s_lastSceneFilled && s_lastSceneTexId != 0u)
         return s_lastSceneTexId;
     return s_prevTexId;
+}
+bool ps2xRdGetPrevFrame(uint32_t &texId, int &w, int &h) // FXC1
+{
+    if (!s_prevFilled || s_prevTexId == 0u || s_prevW <= 0 || s_prevH <= 0)
+        return false;
+    texId = s_prevTexId;
+    w = s_prevW;
+    h = s_prevH;
+    return true;
 }
 static bool rdSnapOn() // FIX-RD81
 {
@@ -3415,8 +3426,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     if (rdFbTexOn() && vw > 0 && vh > 0) // FIX-RD79 // FIX-RD80 // FIX-RD81
     {
         Pace2Scope pace2B5Scope(g_pace2Rd.b5, pace2On); // PROBE-PACE2
-        static int s_prevW = 0, s_prevH = 0, s_lastW = 0, s_lastH = 0; // FIX-RD85
-        static bool s_prevFilled = false; // FIX-RD80
+        static int s_lastW = 0, s_lastH = 0; // FIX-RD85 // FXC1
         const int wantW = vw;
         const int wantH = static_cast<int>((static_cast<int64_t>(vh) * 512 + 224) / 448);
         static unsigned int s_prevFbo = 0u, s_lastSceneFbo = 0u; // FIX-RD85

@@ -307,6 +307,9 @@ struct RdVkState
     std::vector<bool> palHasData;
     uint32_t overlayVbo = 0;
     uint32_t overlayVertexCursor = 0;
+    uint32_t classicTexId = 0; // FXC1
+    int classicTexW = 0; // FXC1
+    int classicTexH = 0; // FXC1
 
     // Frame state
     bool frameActive = false;
@@ -2805,6 +2808,318 @@ void drawTextureOverlay(uint32_t texId, int texW, int texH,
     s_vk.dirtyTextures = true;
 }
 
+static void drawQuad2d(uint32_t texId,
+                       float u0, float v0, float u1, float v1,
+                       float dstX, float dstY, float dstW, float dstH,
+                       const PushConstants &pc,
+                       bool blendEnable,
+                       rdgfx::BlendFactor srcRgb, rdgfx::BlendFactor dstRgb,
+                       rdgfx::BlendFactor srcAlpha, rdgfx::BlendFactor dstAlpha) // FXC1
+{
+    if (!s_vk.initialized || !s_vk.frameActive || s_vk.cmd == VK_NULL_HANDLE ||
+        texId == 0u || dstW == 0.0f || dstH == 0.0f || !s_vk.textures.find(texId))
+        return;
+
+    struct OverlayVertex
+    {
+        float pos[4];
+        uint8_t col[4];
+        float uv[2];
+    };
+    constexpr uint32_t kMaxOverlayVerts = 64u * 6u;
+    if (s_vk.overlayVbo == 0u)
+    {
+        s_vk.overlayVbo = createDynBuffer(nullptr, static_cast<int>(kMaxOverlayVerts * sizeof(OverlayVertex)), false);
+        if (s_vk.overlayVbo == 0u)
+            return;
+    }
+    if (s_vk.overlayVertexCursor + 6u > kMaxOverlayVerts)
+        return;
+
+    const GpuBuffer *ovVbo = s_vk.vbos.find(s_vk.overlayVbo);
+    if (!ovVbo || s_vk.curFrame >= ovVbo->copies.size() || !ovVbo->copies[s_vk.curFrame].mapped)
+        return;
+
+    const float x0 = dstX;
+    const float y0 = dstY;
+    const float x1 = dstX + dstW;
+    const float y1 = dstY + dstH;
+    const OverlayVertex quad[6] = {
+        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}},
+        {{x1, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v0}},
+        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}},
+        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}},
+        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}},
+        {{x0, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v1}},
+    };
+
+    const uint32_t firstVertex = s_vk.overlayVertexCursor;
+    uint8_t *dstPtr = static_cast<uint8_t *>(ovVbo->copies[s_vk.curFrame].mapped) + firstVertex * sizeof(OverlayVertex);
+    std::memcpy(dstPtr, quad, sizeof(quad));
+
+    const PushConstants savedPc = s_vk.pc;
+    const PipelineKey savedPipeKey = s_vk.pipeKey;
+    const int savedVpX = s_vk.vpX, savedVpY = s_vk.vpY, savedVpW = s_vk.vpW, savedVpH = s_vk.vpH;
+    const bool savedScissor = s_vk.scissorTest;
+    const uint32_t savedVao = s_vk.boundVao;
+    const uint32_t savedVbo = s_vk.boundVbo;
+    const uint32_t savedTex0 = s_vk.boundTex[0];
+    const uint32_t savedTex1 = s_vk.boundTex[1];
+
+    s_vk.pc = pc;
+    s_vk.pipeKey.blendEnable = blendEnable;
+    s_vk.pipeKey.srcRgb = srcRgb;
+    s_vk.pipeKey.dstRgb = dstRgb;
+    s_vk.pipeKey.srcAlpha = srcAlpha;
+    s_vk.pipeKey.dstAlpha = dstAlpha;
+    s_vk.pipeKey.eqRgb = rdgfx::BlendEq::Add;
+    s_vk.pipeKey.eqAlpha = rdgfx::BlendEq::Add;
+    s_vk.pipeKey.colorMask = 0x0Fu;
+    s_vk.pipeKey.depthTest = false;
+    s_vk.pipeKey.depthMask = false;
+    s_vk.pipeKey.cull = false;
+
+    s_vk.vpX = 0;
+    s_vk.vpY = 0;
+    s_vk.vpW = static_cast<int>(s_vk.targetW);
+    s_vk.vpH = static_cast<int>(s_vk.targetH);
+    s_vk.scissorTest = false;
+    s_vk.boundVao = 0u;
+    s_vk.boundVbo = s_vk.overlayVbo;
+    s_vk.boundTex[0] = texId;
+    s_vk.boundTex[1] = 0u;
+    s_vk.dirtyPushConstants = true;
+    s_vk.dirtyPipeline = true;
+    s_vk.dirtyViewport = true;
+    s_vk.dirtyScissor = true;
+    s_vk.dirtyVertexBuffer = true;
+    s_vk.dirtyTextures = true;
+
+    if (prepareDraw())
+    {
+        vkCmdDraw(s_vk.cmd, 6u, 1u, firstVertex, 0u);
+        s_vk.overlayVertexCursor += 6u;
+    }
+
+    s_vk.pc = savedPc;
+    s_vk.pipeKey = savedPipeKey;
+    s_vk.vpX = savedVpX;
+    s_vk.vpY = savedVpY;
+    s_vk.vpW = savedVpW;
+    s_vk.vpH = savedVpH;
+    s_vk.scissorTest = savedScissor;
+    s_vk.boundVao = savedVao;
+    s_vk.boundVbo = savedVbo;
+    s_vk.boundTex[0] = savedTex0;
+    s_vk.boundTex[1] = savedTex1;
+    s_vk.dirtyPushConstants = true;
+    s_vk.dirtyPipeline = true;
+    s_vk.dirtyViewport = true;
+    s_vk.dirtyScissor = true;
+    s_vk.dirtyVertexBuffer = true;
+    s_vk.dirtyTextures = true;
+}
+
+static PushConstants makeCompositePc(float fbW, float fbH, int32_t palMode, int32_t palFallback) // FIX-FXC4
+{
+    static const struct FlipCfg {
+        float x, y, z;
+    } s_flip = []() {
+        const char *fe = std::getenv("PS2X_RD_FLIP");
+        const int flipBits = (fe && *fe) ? std::atoi(fe) : 0;
+        return FlipCfg{
+            1.0f,
+            (flipBits & 1) ? 1.0f : -1.0f,
+            (flipBits & 2) ? -1.0f : 1.0f,
+        };
+    }();
+    PushConstants pc{};
+    pc.uFlip[0] = s_flip.x;
+    pc.uFlip[1] = s_flip.y;
+    pc.uFlip[2] = s_flip.z;
+    pc.uFlip[3] = 0.0f;
+    pc.uMode2d = 1;
+    pc.uFbSize[0] = fbW;
+    pc.uFbSize[1] = fbH;
+    pc.uZBias = 0.0f;
+    pc.uVpB[3] = 0.0f;
+    pc.uAtst = 1;
+    pc.uAtInvert = 0;
+    pc.uFixAlpha = -1.0f;
+    pc.uTex = 1;
+    pc.uTfx = 1;
+    pc.uTcc = 0;
+    pc.uPalMode = palMode;
+    pc.uPalFallback = palFallback;
+    return pc;
+}
+
+static void prepareCompositeState(int tw, int th,
+                                  bool blendEnable,
+                                  rdgfx::BlendFactor srcRgb, rdgfx::BlendFactor dstRgb,
+                                  rdgfx::BlendFactor srcAlpha, rdgfx::BlendFactor dstAlpha) // FIX-FXC4
+{
+    rdgfx_vk::setViewport(0, 0, tw, th);
+    rdgfx_vk::setScissorTest(false);
+    rdgfx_vk::setScissorRect(0, 0, tw, th);
+    rdgfx_vk::setColorMask(true, true, true, true);
+    rdgfx_vk::setDepthTest(false);
+    rdgfx_vk::setDepthMask(false);
+    rdgfx_vk::setBackfaceCulling(false);
+    rdgfx_vk::setBlend(blendEnable, srcRgb, dstRgb, srcAlpha, dstAlpha, rdgfx::BlendEq::Add, rdgfx::BlendEq::Add);
+    rdgfx_vk::bindVertexArray(0u);
+    s_vk.dirtyPipeline = true;
+    s_vk.dirtyViewport = true;
+    s_vk.dirtyScissor = true;
+    s_vk.dirtyTextures = true;
+    s_vk.dirtyPushConstants = true;
+    s_vk.dirtyVertexBuffer = true;
+    s_vk.dirtyIndexBuffer = true;
+}
+
+void drawFxBackground(uint32_t texId, int texW, int texH) // FXC1
+{
+    if (!s_vk.initialized || !s_vk.frameActive || s_vk.cmd == VK_NULL_HANDLE ||
+        texId == 0u || texW <= 0 || texH <= 0 || s_vk.targetW == 0u || s_vk.targetH == 0u)
+        return;
+
+    const int tw = static_cast<int>(s_vk.targetW);
+    const int th = static_cast<int>(s_vk.targetH);
+    prepareCompositeState(tw, th, false,
+                          rdgfx::BlendFactor::One, rdgfx::BlendFactor::Zero,
+                          rdgfx::BlendFactor::One, rdgfx::BlendFactor::Zero); // FIX-FXC4
+
+    const PushConstants pc = makeCompositePc(static_cast<float>(tw), static_cast<float>(th), 1, 1); // FIX-FXC4
+
+    drawQuad2d(texId,
+               0.0f, 0.0f, 1.0f, 448.0f / 512.0f,
+               0.0f, 0.0f, static_cast<float>(tw), static_cast<float>(th),
+               pc,
+               false,
+               rdgfx::BlendFactor::One, rdgfx::BlendFactor::Zero,
+               rdgfx::BlendFactor::One, rdgfx::BlendFactor::Zero);
+}
+
+void drawClassicAdditive(const uint8_t *rgba, int w, int h, int strideBytes) // FXC1
+{
+    if (!s_vk.initialized || !s_vk.frameActive || s_vk.cmd == VK_NULL_HANDLE ||
+        !rgba || w <= 0 || h <= 0 || s_vk.targetW == 0u || s_vk.targetH == 0u)
+        return;
+
+    const int tw = static_cast<int>(s_vk.targetW);
+    const int th = static_cast<int>(s_vk.targetH);
+    prepareCompositeState(tw, th, true,
+                          rdgfx::BlendFactor::One, rdgfx::BlendFactor::One,
+                          rdgfx::BlendFactor::One, rdgfx::BlendFactor::One); // FIX-FXC4
+
+    if (s_vk.classicTexId == 0u || s_vk.classicTexW != w || s_vk.classicTexH != h)
+    {
+        if (s_vk.classicTexId != 0u)
+        {
+            rdgfx_vk::freeTexture(s_vk.classicTexId);
+            s_vk.classicTexId = 0u;
+        }
+        SamplerKey samp{rdgfx::TextureFilter::Linear, rdgfx::TextureFilter::Linear,
+                        rdgfx::TextureWrap::Clamp, rdgfx::TextureWrap::Clamp};
+        s_vk.classicTexId = createTexture2DInternal(nullptr, w, h, 1u, samp, false);
+        if (s_vk.classicTexId == 0u)
+            return;
+        s_vk.classicTexW = w;
+        s_vk.classicTexH = h;
+    }
+
+    const GpuTexture *tex = s_vk.textures.find(s_vk.classicTexId);
+    if (!tex)
+        return;
+
+    const uint32_t rowBytes = static_cast<uint32_t>(w) * 4u;
+    const uint32_t srcStride = (strideBytes > 0) ? static_cast<uint32_t>(strideBytes) : rowBytes;
+    const VkDeviceSize totalBytes = static_cast<VkDeviceSize>(rowBytes) * static_cast<uint32_t>(h);
+
+    BufferCopy staging{};
+    if (!createHostBuffer(totalBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging))
+        return;
+    if (srcStride == rowBytes)
+    {
+        std::memcpy(staging.mapped, rgba, static_cast<size_t>(totalBytes));
+    }
+    else
+    {
+        auto *dst = static_cast<uint8_t *>(staging.mapped);
+        for (int y = 0; y < h; ++y)
+            std::memcpy(dst + static_cast<size_t>(y) * rowBytes, rgba + static_cast<size_t>(y) * srcStride, rowBytes);
+    }
+
+    if (s_vk.inRenderPass)
+    {
+        vkCmdEndRendering(s_vk.cmd);
+        s_vk.inRenderPass = false;
+        invalidateCommandBufferState();
+    }
+
+    imageBarrier(s_vk.cmd, tex->image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1u};
+    vkCmdCopyBufferToImage(s_vk.cmd, staging.buffer, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    imageBarrier(s_vk.cmd, tex->image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    vkUnmapMemory(s_vk.device, staging.memory);
+    s_vk.garbageBuffers[s_vk.curFrame].push_back({staging.buffer, staging.memory});
+
+    const float srcWidth = static_cast<float>(w);
+    const float srcHeight = static_cast<float>(h);
+    const float screenWidth = static_cast<float>(s_vk.targetW);
+    const float screenHeight = static_cast<float>(s_vk.targetH);
+    static const float s_aspect = []() {
+        const char *a = std::getenv("PS2X_ASPECT");
+        if (!a || !*a) return 4.0f / 3.0f;
+        if (!std::strcmp(a, "native")) return 0.0f;
+        if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f;
+        if (!std::strcmp(a, "16:10")) return 1.6f;
+        if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f;
+        if (!std::strcmp(a, "fill")) return -1.0f;
+        return 0.0f;
+    }();
+    float dstWidth, dstHeight;
+    if (s_aspect > 0.0f || s_aspect < 0.0f)
+    {
+        const float winAspect = (screenHeight > 0.0f) ? (screenWidth / screenHeight) : (4.0f / 3.0f);
+        const float k = winAspect / (4.0f / 3.0f);
+        float boxAspect = (s_aspect > 0.0f) ? s_aspect : winAspect;
+        if (s_aspect < 0.0f)
+            boxAspect = (k >= 1.0f) ? winAspect : (4.0f / 3.0f);
+        dstWidth = std::min(screenWidth, screenHeight * boxAspect);
+        dstHeight = dstWidth / boxAspect;
+    }
+    else
+    {
+        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+        dstWidth = srcWidth * scale;
+        dstHeight = srcHeight * scale;
+    }
+    const float dstX = (screenWidth - dstWidth) * 0.5f;
+    const float dstY = (screenHeight - dstHeight) * 0.5f;
+
+    const PushConstants pc = makeCompositePc(screenWidth, screenHeight, 0, 0); // FIX-FXC4
+
+    drawQuad2d(s_vk.classicTexId,
+               0.0f, 0.0f, 1.0f, 1.0f,
+               dstX, dstY, dstWidth, dstHeight,
+               pc,
+               true,
+               rdgfx::BlendFactor::One, rdgfx::BlendFactor::One,
+               rdgfx::BlendFactor::One, rdgfx::BlendFactor::One);
+}
+
 bool canCopyBackbuffer() { return s_vk.initialized; }
 
 bool beginBackbufferCopy(rdgfx::BackbufferCopyState &state)
@@ -2835,7 +3150,7 @@ bool copyBackbufferToTexture(rdgfx::BackbufferCopyState &state,
     {
         if (texId != 0u)
         {
-            freeTexture(texId);
+            rdgfx_vk::freeTexture(texId);
             texId = 0u;
         }
         SamplerKey copySamp{rdgfx::TextureFilter::Linear, rdgfx::TextureFilter::Linear,

@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <atomic>
 #include <cstdio>
+#include <cstring> // FIX-FXC3
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -31,12 +32,6 @@
 extern "C" int ps2x_profile_noop() { return 0; }
 extern "C" int __llvm_profile_write_file(void);
 #pragma comment(linker, "/alternatename:__llvm_profile_write_file=ps2x_profile_noop")
-#endif
-
-#if defined(PS2X_HAS_SDL3) // SDL-FE
-extern bool ps2xSdlWanted();
-#else
-inline bool ps2xSdlWanted() { return false; }
 #endif
 
 namespace
@@ -234,7 +229,9 @@ namespace
 
 int main(int argc, char *argv[])
 {
-    if (ps2xSdlWanted()) // SDL-FE
+    const char *fe = std::getenv("PS2X_FRONTEND"); // FIX-FXC3
+    const bool sdlWanted = fe && std::strcmp(fe, "sdl") == 0; // FIX-FXC3
+    if (sdlWanted) // FIX-FXC3
     {
         const char *sdlRd = std::getenv("PS2X_SDL_RD"); // RDG3
         const bool sdlRdOn = sdlRd && sdlRd[0] == '1'; // RDG3
@@ -274,6 +271,13 @@ int main(int argc, char *argv[])
 #endif
         }
     }
+    { // PROBE-FXC2
+        auto envStr = [](const char *n) { const char *v = std::getenv(n); return v ? v : "(unset)"; }; // PROBE-FXC2
+        fprintf(stderr, "[sdl] rd env: VIEW=%s TAKEOVER=%s FBTEX=%s SNAP=%s 2DLATE=%s FORCECLASSIC=%s\n", // PROBE-FXC2
+                envStr("PS2X_RD_VIEW"), envStr("PS2X_RD_TAKEOVER"), envStr("PS2X_RD_FBTEX"), // PROBE-FXC2
+                envStr("PS2X_RD_SNAP"), envStr("PS2X_RD_2DLATE"), envStr("PS2X_RD_FORCECLASSIC")); // PROBE-FXC2
+        fflush(stderr); // PROBE-FXC2
+    } // PROBE-FXC2
     fprintf(stderr, "[boot] runner started\n");
     extern const uint32_t g_ps2RecompiledFunctionTableBase;
     extern const uint32_t g_ps2RecompiledFunctionTableEnd;
