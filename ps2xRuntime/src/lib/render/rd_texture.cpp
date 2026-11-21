@@ -1,6 +1,6 @@
 // FEAT-RD3: Decode GS textures from CPU VRAM and cache by content hash.
 #include "raylib.h"
-#include "rlgl.h"
+#include "rd_gfx.h" // RDG1
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_memory.h"
 
@@ -198,10 +198,9 @@ unsigned int rd6Upload(uint64_t cid, uint32_t w, uint32_t h, uint32_t psm, const
             const size_t n = static_cast<size_t>(img.width) * static_cast<size_t>(img.height);
             for (size_t i = 0; i < n; ++i)
                 p[i * 4 + 3] = static_cast<uint8_t>((static_cast<uint32_t>(p[i * 4 + 3]) + 1u) / 2u);
-            const unsigned int glId = rlLoadTexture(img.data, img.width, img.height, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
-            int mips = 1;
-            rlGenTextureMipmaps(glId, img.width, img.height, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, &mips);
-            rlTextureParameters(glId, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
+            const unsigned int glId = rdgfx::createTextureRGBA8(img.data, img.width, img.height); // RDG1
+            rdgfx::generateMipmaps(glId, img.width, img.height); // RDG1
+            rdgfx::setTextureFilter(glId, true, rdgfx::TextureFilter::MipLinear); // RDG1
             ps2xSafeLog("[texrep] %s <- %s (%dx%d)\n", idStr, rit->second.c_str(), img.width, img.height);
             UnloadImage(img);
             ++g_replacedSinceLog;
@@ -212,7 +211,7 @@ unsigned int rd6Upload(uint64_t cid, uint32_t w, uint32_t h, uint32_t psm, const
         g_replaceFailed.insert(cid);
         ps2xSafeLog("[texrep] %s: failed to load %s, using decoded texture\n", idStr, rit->second.c_str());
     }
-    return rlLoadTexture(rgba.data(), static_cast<int>(w), static_cast<int>(h), PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+    return rdgfx::createTextureRGBA8(rgba.data(), static_cast<int>(w), static_cast<int>(h)); // RDG1
 }
 
 struct RdTexKey // FEAT-RD3
@@ -900,7 +899,7 @@ void ps2xRdTexTickFrame() // FEAT-RD3
             if ((g_texFrame - it->second.lastFrame) >= 600u)
             {
                 if (it->second.glId != 0u)
-                    rlUnloadTexture(it->second.glId);
+                    rdgfx::freeTexture(it->second.glId); // RDG1
                 it = g_texCache.erase(it);
             }
             else
@@ -913,7 +912,7 @@ void ps2xRdTexTickFrame() // FEAT-RD3
             if ((g_texFrame - it->second.lastFrame) >= 600u)
             {
                 if (it->second.glId != 0u)
-                    rlUnloadTexture(it->second.glId);
+                    rdgfx::freeTexture(it->second.glId); // RDG1
                 it = g_glByContentId.erase(it);
             }
             else
@@ -1263,9 +1262,8 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
         if (it->second.contentHash != hash)
         {
             if (it->second.glId != 0u)
-                rlUnloadTexture(it->second.glId);
-            it->second.glId = rlLoadTexture(s_rgba.data(), static_cast<int>(w), static_cast<int>(h),
-                                            PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                rdgfx::freeTexture(it->second.glId); // RDG1
+            it->second.glId = rdgfx::createTextureRGBA8(s_rgba.data(), static_cast<int>(w), static_cast<int>(h)); // RDG1
             it->second.contentHash = hash;
         }
         it->second.clutHash = curClutHash; // FEAT-RD3c
@@ -1279,8 +1277,7 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
         return it->second.glId;
     }
 
-    const unsigned int glId = rlLoadTexture(s_rgba.data(), static_cast<int>(w), static_cast<int>(h),
-                                            PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+    const unsigned int glId = rdgfx::createTextureRGBA8(s_rgba.data(), static_cast<int>(w), static_cast<int>(h)); // RDG1
     g_texCache.emplace(key, RdTexEntry{glId, hash, g_texFrame, g_texFrame, curClutHash}); // FEAT-RD3c
     if (g_probeBt1 && w >= 16u && h >= 16u) // PROBE-BT1
     {

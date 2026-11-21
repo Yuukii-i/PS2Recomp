@@ -2,19 +2,8 @@
 #include <unordered_map>
 #include <cstring>
 #include "raylib.h"
-#include "rlgl.h"
+#include "rd_gfx.h" // RDG1
 #ifdef _WIN32
-extern "C" __declspec(dllimport) void __stdcall glDepthFunc(unsigned int func); // FEAT-RD20 (opengl32 export; rlgl.h does not expose glad here)
-extern "C" __declspec(dllimport) void * __stdcall wglGetProcAddress(const char *name); // FIX-RD79
-extern "C" __declspec(dllimport) void __stdcall glGetIntegerv(unsigned int pname, int *data); // FIX-RD79
-extern "C" __declspec(dllimport) void __stdcall glClearColor(float r, float g, float b, float a); // FIX-RD79
-extern "C" __declspec(dllimport) void __stdcall glClear(unsigned int mask); // FIX-RD79
-extern "C" __declspec(dllimport) void __stdcall glGenTextures(int n, unsigned int *textures); // FIX-RD82G
-extern "C" __declspec(dllimport) void __stdcall glBindTexture(unsigned int target, unsigned int texture); // FIX-RD82G
-extern "C" __declspec(dllimport) void __stdcall glTexImage2D(unsigned int target, int level, int internalformat, int width, int height, int border, unsigned int format, unsigned int type, const void *pixels); // FIX-RD82G
-extern "C" __declspec(dllimport) void __stdcall glTexSubImage2D(unsigned int target, int level, int xoffset, int yoffset, int width, int height, unsigned int format, unsigned int type, const void *pixels); // FIX-RD82G
-extern "C" __declspec(dllimport) void __stdcall glTexParameteri(unsigned int target, unsigned int pname, int param); // FIX-RD82G
-extern "C" __declspec(dllimport) void __stdcall glDrawElements(unsigned int mode, int count, unsigned int type, const void *indices); // FIX-RD90
 extern "C" __declspec(dllimport) int __stdcall QueryPerformanceCounter(long long *lpPerformanceCount); // FIX-RD90
 extern "C" __declspec(dllimport) int __stdcall QueryPerformanceFrequency(long long *lpFrequency); // FIX-RD90
 #endif
@@ -478,22 +467,7 @@ struct RdGpuState
     uint32_t lastMaskedDraws = 0; // FEAT-RD2
     uint32_t lastRtSkipped = 0; // FEAT-RD8
     uint32_t lastPointLineSkipped = 0; // FEAT-RD8
-    Shader shader{};
-    int flipLoc = -1;
-    int mode2dLoc = -1; // FEAT-RD8
-    int fbSizeLoc = -1; // FEAT-RD8
-    int vpZLoc = -1;    // FEAT-RD11
-    int vpALoc = -1;    // FEAT-RD21
-    int vpBLoc = -1;    // FEAT-RD21
-    int atstLoc = -1; // FEAT-RD2
-    int arefLoc = -1; // FEAT-RD2
-    int samplerLoc = -1; // FEAT-RD3
-    int texLoc = -1;     // FEAT-RD3
-    int tfxLoc = -1;     // FEAT-RD3
-    int tccLoc = -1;     // FEAT-RD3
-    int palTexLoc = -1;  // FIX-RD82B
-    int palModeLoc = -1; // FIX-RD82B
-    int palFbLoc = -1;   // FIX-RD84
+    bool shaderReady = false; // RDG1
     float flip[3] = {1.0f, -1.0f, 1.0f}; // FEAT-RD2
     std::vector<RdDrawBatch> drawBatches; // FEAT-RD14
     std::vector<RdVert> local2dScratch; // FEAT-RD8
@@ -541,7 +515,6 @@ struct RdGpuState
     uint64_t totalPointLineSkipped = 0; // FEAT-RD8
     float vpScaleZ = 0.0f;  // FEAT-RD11
     float vpOffsetZ = 0.0f; // FEAT-RD11
-    int fixLoc = -1; // FEAT-RD7
     double totalUploadMs = 0.0; // FIX-RD90
     std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
 };
@@ -664,10 +637,39 @@ struct RdGlCache
     }
 } g_rdc; // FEAT-RD15
 
-void rdSetUniform(int loc, const void *v, int type, int count) // FEAT-RD15
+void rdSetUniformInt(rdgfx::Uniform u, int v) // FEAT-RD15 // RDG1
 {
+    const int loc = static_cast<int>(u);
+    uint32_t w = 0u;
+    std::memcpy(&w, &v, 4);
+    if (loc >= 0 && loc < 64)
+    {
+        if (g_rdc.uniValid[loc] && g_rdc.uni[loc][0] == w && g_rdc.uni[loc][1] == 0u)
+            return;
+        g_rdc.uni[loc][0] = w; g_rdc.uni[loc][1] = 0u; g_rdc.uniValid[loc] = true;
+    }
+    ++g_rdc.calls;
+    rdgfx::setUniformInt(u, v);
+}
+void rdSetUniformFloat(rdgfx::Uniform u, float v) // FEAT-RD15 // RDG1
+{
+    const int loc = static_cast<int>(u);
+    uint32_t w = 0u;
+    std::memcpy(&w, &v, 4);
+    if (loc >= 0 && loc < 64)
+    {
+        if (g_rdc.uniValid[loc] && g_rdc.uni[loc][0] == w && g_rdc.uni[loc][1] == 0u)
+            return;
+        g_rdc.uni[loc][0] = w; g_rdc.uni[loc][1] = 0u; g_rdc.uniValid[loc] = true;
+    }
+    ++g_rdc.calls;
+    rdgfx::setUniformFloat(u, v);
+}
+void rdSetUniformVec2(rdgfx::Uniform u, const float *v) // FEAT-RD15 // RDG1
+{
+    const int loc = static_cast<int>(u);
     uint32_t w[2] = {0u, 0u};
-    std::memcpy(w, v, (type == RL_SHADER_UNIFORM_VEC2) ? 8 : 4);
+    std::memcpy(w, v, 8);
     if (loc >= 0 && loc < 64)
     {
         if (g_rdc.uniValid[loc] && g_rdc.uni[loc][0] == w[0] && g_rdc.uni[loc][1] == w[1])
@@ -675,19 +677,19 @@ void rdSetUniform(int loc, const void *v, int type, int count) // FEAT-RD15
         g_rdc.uni[loc][0] = w[0]; g_rdc.uni[loc][1] = w[1]; g_rdc.uniValid[loc] = true;
     }
     ++g_rdc.calls;
-    rlSetUniform(loc, v, type, count);
+    rdgfx::setUniformVec2(u, v);
 }
 void rdDepthTest(bool on) // FEAT-RD15
 {
     if (g_rdc.depthTest == (on ? 1 : 0)) return;
     g_rdc.depthTest = on ? 1 : 0; ++g_rdc.calls;
-    if (on) rlEnableDepthTest(); else rlDisableDepthTest();
+    rdgfx::setDepthTest(on); // RDG1
 }
 void rdDepthMask(bool on) // FEAT-RD15
 {
     if (g_rdc.depthMask == (on ? 1 : 0)) return;
     g_rdc.depthMask = on ? 1 : 0; ++g_rdc.calls;
-    if (on) rlEnableDepthMask(); else rlDisableDepthMask();
+    rdgfx::setDepthMask(on); // RDG1
 }
 void rdBindTex(unsigned int texId, uint32_t params) // FEAT-RD15
 {
@@ -708,20 +710,19 @@ void rdBindTex(unsigned int texId, uint32_t params) // FEAT-RD15
     {
         const uint32_t old = cached;
         const bool fresh = !(old & 0x80000000u);
-        const int wrapS = (params & 1u) ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT;
-        const int wrapT = (params & 2u) ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT;
-        const int mag = (params & 4u) ? RL_TEXTURE_FILTER_LINEAR : RL_TEXTURE_FILTER_NEAREST;
-        const int mn = (params & 8u) ? RL_TEXTURE_FILTER_LINEAR : RL_TEXTURE_FILTER_NEAREST;
-        if (fresh || ((old ^ want) & 1u)) { rlTextureParameters(texId, RL_TEXTURE_WRAP_S, wrapS); ++g_rdc.calls; }
-        if (fresh || ((old ^ want) & 2u)) { rlTextureParameters(texId, RL_TEXTURE_WRAP_T, wrapT); ++g_rdc.calls; }
-        if (fresh || ((old ^ want) & 4u)) { rlTextureParameters(texId, RL_TEXTURE_MAG_FILTER, mag); ++g_rdc.calls; }
-        if (fresh || ((old ^ want) & 8u)) { rlTextureParameters(texId, RL_TEXTURE_MIN_FILTER, mn); ++g_rdc.calls; }
+        const rdgfx::TextureWrap wrapS = (params & 1u) ? rdgfx::TextureWrap::Clamp : rdgfx::TextureWrap::Repeat; // RDG1
+        const rdgfx::TextureWrap wrapT = (params & 2u) ? rdgfx::TextureWrap::Clamp : rdgfx::TextureWrap::Repeat; // RDG1
+        const rdgfx::TextureFilter mag = (params & 4u) ? rdgfx::TextureFilter::Linear : rdgfx::TextureFilter::Nearest; // RDG1
+        const rdgfx::TextureFilter mn = (params & 8u) ? rdgfx::TextureFilter::Linear : rdgfx::TextureFilter::Nearest; // RDG1
+        if (fresh || ((old ^ want) & 1u)) { rdgfx::setTextureWrap(texId, false, wrapS); ++g_rdc.calls; } // RDG1
+        if (fresh || ((old ^ want) & 2u)) { rdgfx::setTextureWrap(texId, true, wrapT); ++g_rdc.calls; } // RDG1
+        if (fresh || ((old ^ want) & 4u)) { rdgfx::setTextureFilter(texId, false, mag); ++g_rdc.calls; } // RDG1
+        if (fresh || ((old ^ want) & 8u)) { rdgfx::setTextureFilter(texId, true, mn); ++g_rdc.calls; } // RDG1
         cached = want;
     }
     if (g_rdc.bound != texId)
     {
-        rlActiveTextureSlot(0);
-        rlEnableTexture(texId);
+        rdgfx::bindTexture(0u, texId); // RDG1
         g_rdc.bound = texId;
         g_rdc.calls += 2;
     }
@@ -758,7 +759,7 @@ void applyRdFbmsk(uint64_t frame, bool is2d, uint64_t &partialMask)
     const int packed = (ch[0] ? 1 : 0) | (ch[1] ? 2 : 0) | (ch[2] ? 4 : 0) | (ch[3] ? 8 : 0);
     if (packed != g_rdMaskCur)
     {
-        rlColorMask(ch[0], ch[1], ch[2], ch[3]);
+        rdgfx::setColorMask(ch[0], ch[1], ch[2], ch[3]); // RDG1
         ++g_rdc.calls; // FEAT-RD15
         g_rdMaskCur = packed;
     }
@@ -766,12 +767,11 @@ void applyRdFbmsk(uint64_t frame, bool is2d, uint64_t &partialMask)
 
 // FEAT-RD30: AFAIL (TEST bits 12-13) write rules for fragments failing the alpha test
 uint64_t g_rdAfail2Pass = 0, g_rdAfailNever = 0; // FEAT-RD30
-int g_rdAtInvLoc = -1;                           // FEAT-RD30
 void rdSetMaskPacked(int packed)                 // FEAT-RD30
 {
     if (packed == g_rdMaskCur)
         return;
-    rlColorMask((packed & 1) != 0, (packed & 2) != 0, (packed & 4) != 0, (packed & 8) != 0);
+    rdgfx::setColorMask((packed & 1) != 0, (packed & 2) != 0, (packed & 4) != 0, (packed & 8) != 0); // RDG1
     ++g_rdc.calls;
     g_rdMaskCur = packed;
 }
@@ -797,21 +797,19 @@ void rdApplyAfailWrites(int afail, bool zmskOff, int baseMask) // FEAT-RD30
 void applyRdBlend(int blendState, unsigned int vao) // FEAT-RD8
 {
     if (blendState == 0)
-        rlDisableColorBlend();
+        rdgfx::setBlend(false); // RDG1
     else
     {
         const int code = blendState - 1;
         const int sk = code / 128, dk = (code / 16) & 7, ek = code & 3; // FEAT-RD9
-        auto glf = [](int k) { return k == 0 ? RL_ZERO : k == 1 ? RL_ONE : k == 2 ? RL_SRC_ALPHA : k == 3 ? RL_ONE_MINUS_SRC_ALPHA : k == 4 ? RL_DST_ALPHA : RL_ONE_MINUS_DST_ALPHA; };
-        rlEnableColorBlend();
+        auto glf = [](int k) { return k == 0 ? rdgfx::BlendFactor::Zero : k == 1 ? rdgfx::BlendFactor::One : k == 2 ? rdgfx::BlendFactor::SrcAlpha : k == 3 ? rdgfx::BlendFactor::OneMinusSrcAlpha : k == 4 ? rdgfx::BlendFactor::DstAlpha : rdgfx::BlendFactor::OneMinusDstAlpha; }; // RDG1
         if (sk >= 6) // FEAT-RD25: DATE approximation
-            rlSetBlendFactorsSeparate(sk == 6 ? RL_ONE_MINUS_DST_ALPHA : RL_DST_ALPHA, sk == 6 ? RL_DST_ALPHA : RL_ONE_MINUS_DST_ALPHA, RL_ONE, RL_ZERO, RL_FUNC_ADD, RL_FUNC_ADD); // FEAT-RD31
+            rdgfx::setBlend(true, sk == 6 ? rdgfx::BlendFactor::OneMinusDstAlpha : rdgfx::BlendFactor::DstAlpha, sk == 6 ? rdgfx::BlendFactor::DstAlpha : rdgfx::BlendFactor::OneMinusDstAlpha, rdgfx::BlendFactor::One, rdgfx::BlendFactor::Zero, rdgfx::BlendEq::Add, rdgfx::BlendEq::Add); // FEAT-RD31 // RDG1
         else
-        rlSetBlendFactorsSeparate(glf(sk), glf(dk), RL_ONE, RL_ZERO, ek == 0 ? RL_FUNC_ADD : ek == 1 ? RL_FUNC_SUBTRACT : RL_FUNC_REVERSE_SUBTRACT, RL_FUNC_ADD); // FEAT-RD31: GS writes source alpha
-        rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
+            rdgfx::setBlend(true, glf(sk), glf(dk), rdgfx::BlendFactor::One, rdgfx::BlendFactor::Zero, ek == 0 ? rdgfx::BlendEq::Add : ek == 1 ? rdgfx::BlendEq::Subtract : rdgfx::BlendEq::ReverseSubtract, rdgfx::BlendEq::Add); // FEAT-RD31: GS writes source alpha // RDG1
     }
-    rlEnableShader(g_rdGpu.shader.id);
-    rlEnableVertexArray(vao);
+    rdgfx::enableShader(); // RDG1
+    rdgfx::bindVertexArray(vao); // RDG1
     g_rdc.bound = 0u; // FEAT-RD15: raylib flush may rebind default texture
     g_rdc.calls += 4;
 }
@@ -824,23 +822,23 @@ void uploadRdVbo(unsigned int vao, unsigned int &vbo, size_t &capVerts, const st
     if (n > capVerts)
     {
         if (vbo != 0)
-            rlUnloadVertexBuffer(vbo);
+            rdgfx::freeVertexBuffer(vbo); // RDG1
         const size_t newCap = std::max<size_t>(n, capVerts ? capVerts * 2 : 4096);
-        vbo = rlLoadVertexBuffer(nullptr, static_cast<int>(newCap * sizeof(RdVert)), true);
+        vbo = rdgfx::createVertexBuffer(nullptr, static_cast<int>(newCap * sizeof(RdVert)), true); // RDG1
         capVerts = newCap;
 
-        rlEnableVertexArray(vao);
-        rlEnableVertexBuffer(vbo);
-        rlSetVertexAttribute(0, 4, RL_FLOAT, false, sizeof(RdVert), 0);
-        rlEnableVertexAttribute(0);
-        rlSetVertexAttribute(1, 4, RL_UNSIGNED_BYTE, true, sizeof(RdVert), 16);
-        rlEnableVertexAttribute(1);
-        rlSetVertexAttribute(2, 2, RL_FLOAT, false, sizeof(RdVert), 20);
-        rlEnableVertexAttribute(2);
-        rlDisableVertexBuffer();
-        rlDisableVertexArray();
+        rdgfx::bindVertexArray(vao); // RDG1
+        rdgfx::bindVertexBuffer(vbo); // RDG1
+        rdgfx::setVertexAttribute(0, 4, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 0); // RDG1
+        rdgfx::enableVertexAttribute(0); // RDG1
+        rdgfx::setVertexAttribute(1, 4, rdgfx::VertexAttrFormat::UnsignedByte, true, sizeof(RdVert), 16); // RDG1
+        rdgfx::enableVertexAttribute(1); // RDG1
+        rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 20); // RDG1
+        rdgfx::enableVertexAttribute(2); // RDG1
+        rdgfx::bindVertexBuffer(0u); // RDG1
+        rdgfx::bindVertexArray(0u); // RDG1
     }
-    rlUpdateVertexBuffer(vbo, verts.data(), static_cast<int>(n * sizeof(RdVert)), 0);
+    rdgfx::updateVertexBuffer(vbo, verts.data(), static_cast<int>(n * sizeof(RdVert)), 0); // RDG1
 }
 
 void uploadRdSlot(RdGpuSlot &slot, const std::vector<RdVert> &verts, const std::vector<uint32_t> &indices, std::vector<RdBatch> &batches) // FEAT-RD14
@@ -952,40 +950,40 @@ void uploadRdSlot(RdGpuSlot &slot, const std::vector<RdVert> &verts, const std::
     if (nv > slot.vboCapVerts)
     {
         if (slot.vbo != 0)
-            rlUnloadVertexBuffer(slot.vbo);
+            rdgfx::freeVertexBuffer(slot.vbo); // RDG1
         const size_t newCap = std::max<size_t>(nv, slot.vboCapVerts ? slot.vboCapVerts * 2 : 4096);
-        slot.vbo = rlLoadVertexBuffer(nullptr, static_cast<int>(newCap * sizeof(RdVert)), true);
+        slot.vbo = rdgfx::createVertexBuffer(nullptr, static_cast<int>(newCap * sizeof(RdVert)), true); // RDG1
         slot.vboCapVerts = newCap;
         rebindVao = true;
     }
     if (nIdx > slot.eboCapIndices)
     {
         if (slot.ebo != 0)
-            rlUnloadVertexBuffer(slot.ebo);
+            rdgfx::freeIndexBuffer(slot.ebo); // RDG1
         const size_t newCap = std::max<size_t>(nIdx, slot.eboCapIndices ? slot.eboCapIndices * 2 : 8192);
-        slot.ebo = rlLoadVertexBufferElement(nullptr, static_cast<int>(newCap * idxElemSize), true); // FIX-RD90
+        slot.ebo = rdgfx::createIndexBuffer(nullptr, static_cast<int>(newCap * idxElemSize), true); // FIX-RD90 // RDG1
         slot.eboCapIndices = newCap;
         rebindVao = true;
     }
     if (rebindVao)
     {
-        rlEnableVertexArray(slot.vao);
-        rlEnableVertexBuffer(slot.vbo);
-        rlSetVertexAttribute(0, 4, RL_FLOAT, false, sizeof(RdVert), 0);
-        rlEnableVertexAttribute(0);
-        rlSetVertexAttribute(1, 4, RL_UNSIGNED_BYTE, true, sizeof(RdVert), 16);
-        rlEnableVertexAttribute(1);
-        rlSetVertexAttribute(2, 2, RL_FLOAT, false, sizeof(RdVert), 20);
-        rlEnableVertexAttribute(2);
-        rlEnableVertexBufferElement(slot.ebo);
-        rlDisableVertexArray();
-        rlDisableVertexBuffer();
-        rlDisableVertexBufferElement();
+        rdgfx::bindVertexArray(slot.vao); // RDG1
+        rdgfx::bindVertexBuffer(slot.vbo); // RDG1
+        rdgfx::setVertexAttribute(0, 4, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 0); // RDG1
+        rdgfx::enableVertexAttribute(0); // RDG1
+        rdgfx::setVertexAttribute(1, 4, rdgfx::VertexAttrFormat::UnsignedByte, true, sizeof(RdVert), 16); // RDG1
+        rdgfx::enableVertexAttribute(1); // RDG1
+        rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 20); // RDG1
+        rdgfx::enableVertexAttribute(2); // RDG1
+        rdgfx::bindIndexBuffer(slot.ebo); // RDG1
+        rdgfx::bindVertexArray(0u); // RDG1
+        rdgfx::bindVertexBuffer(0u); // RDG1
+        rdgfx::bindIndexBuffer(0u); // RDG1
         slot.curBaseVertex = 0u; // FEAT-RD14b: attributes re-pointed at offset 0
     }
-    rlUpdateVertexBuffer(slot.vbo, verts.data(), static_cast<int>(nv * sizeof(RdVert)), 0);
+    rdgfx::updateVertexBuffer(slot.vbo, verts.data(), static_cast<int>(nv * sizeof(RdVert)), 0); // RDG1
     if (nIdx > 0)
-        rlUpdateVertexBufferElements(slot.ebo, idxPtr, static_cast<int>(nIdx * idxElemSize), 0); // FIX-RD90
+        rdgfx::updateIndexBuffer(slot.ebo, idxPtr, static_cast<int>(nIdx * idxElemSize), 0); // FIX-RD90 // RDG1
     slot.vertCount = nv;
     slot.indexCount = nIdx;
 
@@ -1322,15 +1320,7 @@ static bool rdIdx32On() // FIX-RD90
 }
 static inline void rdDrawElems(uint32_t first, uint32_t count) // FIX-RD90
 {
-#ifdef _WIN32
-    if (rdIdx32On())
-    {
-        glDrawElements(0x0004u /*GL_TRIANGLES*/, static_cast<int>(count), 0x1405u /*GL_UNSIGNED_INT*/,
-                       reinterpret_cast<const void *>(static_cast<size_t>(first) * sizeof(uint32_t)));
-        return;
-    }
-#endif
-    rlDrawVertexArrayElements(static_cast<int>(first), static_cast<int>(count), nullptr);
+    rdgfx::drawIndexed(rdgfx::PrimitiveTopology::Triangles, first, count, rdIdx32On()); // RDG1
 }
 static const bool g_rd2dReasonOn = []{ const char *e = std::getenv("PS2X_RD_2DREASON"); return e && e[0] == '1'; }(); // PROBE-RD62
 static const bool g_rd2dReasonBig = []{ const char *e = std::getenv("PS2X_RD_2DREASON_BIG"); return e && e[0] == '1'; }(); // PROBE-RD62B
@@ -1344,7 +1334,7 @@ static inline bool g_rd2dLateOn() // FIX-CFG2
 static const bool g_rdDimLateOn = []{ const char *e = std::getenv("PS2X_RD_DIMLATE"); return !(e && e[0] == '0'); }(); // FIX-RD66
 static const bool g_rdNoZTest = []{ const char *e = std::getenv("PS2X_RD_NOZTEST"); return e && e[0] == '1'; }(); // PROBE-RD59
 static const float g_rdZBias = []{ const char *e = std::getenv("PS2X_RD_ZBIAS"); return (e && *e) ? static_cast<float>(std::atof(e)) : 0.0f; }(); // PROBE-RD59
-static int g_rdZBiasLoc = -1; // PROBE-RD59
+// RDG1: g_rdZBiasLoc moved to rdgfx::Uniform::ZBias
 struct RdBlendCensus // PROBE-RD29
 {
     typedef std::tuple<int, uint64_t, uint64_t, uint32_t, uint64_t, uint64_t, int> Key; // path, prim, alpha, fbmsk, test, tex0, reason
@@ -1406,8 +1396,7 @@ bool isRdScissorVisible(uint64_t packed, bool have, float fbW, float fbH) // FEA
 }
 
 struct Rd35Rec { uint64_t prim, alpha, frame, tex0; float bb[4]; }; // PROBE-RD35
-extern "C" __declspec(dllimport) unsigned int __stdcall glGetError(void); // PROBE-RD35
-struct Rd35Stats { Rd35Rec last[3]; uint32_t n2d = 0, n3d = 0; bool usedNew = false, valid = false; int chosen2d = -1; uint32_t draws2d = 0, mainSerials = 0, glErr = 0; }; // PROBE-RD35
+struct Rd35Stats { Rd35Rec last[3]; uint32_t n2d = 0, n3d = 0; bool usedNew = false, valid = false; int chosen2d = -1; uint32_t draws2d = 0, mainSerials = 0, glErr = 0; }; // PROBE-RD35 // RDG1
 extern Rd35Stats g_rd35;
 
 bool isRd3dBatchDrawable(const RdBatch &batch, const RdGpuSlot &slot, float fbW, float fbH) // FEAT-RD34
@@ -1692,140 +1681,17 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     if (!g_rdGpu.init)
     {
         g_rdGpu.init = true;
-        static const char *kVs =
-            "#version 330\n"
-            "layout(location = 0) in vec4 aPos;\n"
-            "layout(location = 1) in vec4 aCol;\n"
-            "layout(location = 2) in vec2 aUv;\n" // FEAT-RD3
-            "uniform vec3 uFlip;\n"
-            "uniform int uMode2d;\n" // FEAT-RD8
-            "uniform vec2 uFbSize;\n" // FEAT-RD8
-            "uniform vec2 uVpZ;\n"    // FEAT-RD11
-            "uniform vec4 uVpA;\n"    // FEAT-RD21: sx, sy, ox, oy
-            "uniform vec4 uVpB;\n"    // FEAT-RD21: offx, offy (12.4), aspect k, enable
-            "uniform float uZBias;\n" // PROBE-RD59
-            "out vec4 vCol;\n"
-            "out vec2 vUv;\n" // FEAT-RD3
-            "void main() {\n"
-            "    if (uMode2d != 0) {\n" // FEAT-RD8
-            "        float ndcZ = (uMode2d == 2 && abs(uVpZ.x) > 1e-6) ? clamp(((aPos.z - uVpZ.y) / uVpZ.x) * uFlip.z, -1.0, 1.0) : 0.0;\n" // FEAT-RD11 // FEAT-RD20
-            "        gl_Position = vec4(aPos.x / uFbSize.x * 2.0 - 1.0, 1.0 - aPos.y / uFbSize.y * 2.0, ndcZ, 1.0);\n"
-            "    } else if (uVpB.w > 0.5) {\n" // FEAT-RD21: guard-band VU clip -> GS fb pixels -> ndc (linear in x,y,w)
-            "        float px = aPos.x * uVpA.x + aPos.w * uVpA.z - aPos.w * uVpB.x * (1.0 / 16.0);\n" // FEAT-RD21b
-            "        float py = aPos.y * uVpA.y + aPos.w * uVpA.w - aPos.w * uVpB.y * (1.0 / 16.0);\n" // FEAT-RD21b
-            "        float nx = (2.0 * px / uFbSize.x - aPos.w) / uVpB.z;\n"
-            "        float ny = aPos.w - 2.0 * py / uFbSize.y;\n"
-            "        gl_Position = vec4(nx * uFlip.x, ny * (-uFlip.y), aPos.z * uFlip.z, aPos.w);\n"
-            "    } else {\n"
-            "        gl_Position = vec4(aPos.x * uFlip.x, aPos.y * uFlip.y, aPos.z * uFlip.z, aPos.w);\n"
-            "    }\n"
-            "    if (uMode2d == 0 && uZBias != 0.0) gl_Position.z -= uZBias * gl_Position.w;\n" // PROBE-RD59
-            "    vCol = aCol;\n"
-            "    vUv = aUv;\n" // FEAT-RD3
-            "}\n";
-        static const char *kFs =
-            "#version 330\n"
-            "in vec4 vCol;\n"
-            "in vec2 vUv;\n" // FEAT-RD3
-            "uniform sampler2D uSampler;\n" // FEAT-RD3
-            "uniform sampler2D uPalTex;\n" // FIX-RD82B
-            "uniform int uPalMode;\n" // FIX-RD82B
-            "uniform int uPalFallback;\n" // FIX-RD84
-            "uniform int uTex;\n" // FEAT-RD3
-            "uniform int uTfx;\n" // FEAT-RD3
-            "uniform int uTcc;\n" // FEAT-RD3
-            "uniform int uAtst;\n"
-            "uniform int uAref;\n"
-            "uniform int uAtInvert;\n" // FEAT-RD30
-            "uniform float uFixAlpha;\n" // FEAT-RD7
-            "out vec4 finalColor;\n"
-            "void main() {\n"
-            "    vec3 rgb = vCol.rgb;\n"
-            "    float a_ps2 = vCol.a * 255.0;\n"
-            "    if (uTex != 0) {\n" // FEAT-RD3
-            "        vec4 t = texture(uSampler, vUv);\n"
-            "        if (uPalMode == 1) {\n" // FIX-RD82B
-            "            float l = dot(t.rgb, vec3(0.299, 0.587, 0.114));\n" // FIX-RD82B
-            "            if (uPalFallback != 0)\n" // FIX-RD84
-            "                t.rgb = vec3(0.40, 0.46, 0.80) * l + vec3(0.0, 0.01, 0.05);\n" // FIX-RD84
-            "            else\n" // FIX-RD84
-            "                t = texture(uPalTex, vec2((floor(l * 255.0) + 0.5) / 256.0, 0.5));\n" // FIX-RD82B
-            "        }\n" // FIX-RD82B
-            "        if (uPalMode != 0)\n" // FIX-RD82J
-            "            t.a = 128.0 / 255.0;\n" // FIX-RD82J
-            "        float t_a_ps2 = t.a * 255.0;\n"
-            "        vec3 vc_rgb = vCol.rgb * 255.0;\n"
-            "        float vc_a = vCol.a * 255.0;\n"
-            "        if (uTfx == 0) {\n"
-            "            rgb = t.rgb * vc_rgb / 128.0;\n"
-            "            a_ps2 = (uTcc != 0) ? (t_a_ps2 * vc_a / 128.0) : vc_a;\n"
-            "        } else if (uTfx == 1) {\n"
-            "            rgb = t.rgb;\n"
-            "            a_ps2 = (uTcc != 0) ? t_a_ps2 : vc_a;\n"
-            "        } else if (uTfx == 2) {\n"
-            "            rgb = t.rgb * vc_rgb / 128.0 + vec3(vc_a / 255.0);\n"
-            "            a_ps2 = (uTcc != 0) ? (t_a_ps2 * vc_a / 128.0) : vc_a;\n"
-            "        } else {\n"
-            "            rgb = t.rgb * vc_rgb / 128.0 + vec3(vc_a / 255.0);\n"
-            "            a_ps2 = (uTcc != 0) ? t_a_ps2 : vc_a;\n"
-            "        }\n"
-            "        rgb = clamp(rgb, 0.0, 1.0);\n"
-            "    }\n"
-            "    if (uAtst != 1) {\n"
-            "        int a = int(clamp(a_ps2, 0.0, 255.0) + 0.5);\n"
-            "        bool pass = true;\n"
-            "        if (uAtst == 0) pass = false;\n"
-            "        else if (uAtst == 2) pass = (a < uAref);\n"
-            "        else if (uAtst == 3) pass = (a <= uAref);\n"
-            "        else if (uAtst == 4) pass = (a == uAref);\n"
-            "        else if (uAtst == 5) pass = (a >= uAref);\n"
-            "        else if (uAtst == 6) pass = (a > uAref);\n"
-            "        else if (uAtst == 7) pass = (a != uAref);\n"
-            "        if (uAtInvert != 0) pass = !pass;\n" // FEAT-RD30
-            "        if (!pass) discard;\n"
-            "    }\n"
-            "    finalColor = vec4(rgb, (uFixAlpha >= 0.0) ? min(uFixAlpha, 1.0) : min(a_ps2 / 128.0, 1.0));\n" // FEAT-RD7
-            "}\n";
-        g_rdGpu.shader = LoadShaderFromMemory(kVs, kFs);
-        g_rdGpu.flipLoc = GetShaderLocation(g_rdGpu.shader, "uFlip");
-        g_rdGpu.mode2dLoc = GetShaderLocation(g_rdGpu.shader, "uMode2d"); // FEAT-RD8
-        g_rdGpu.fbSizeLoc = GetShaderLocation(g_rdGpu.shader, "uFbSize"); // FEAT-RD8
-        g_rdGpu.vpZLoc = GetShaderLocation(g_rdGpu.shader, "uVpZ");       // FEAT-RD11
-        g_rdGpu.vpALoc = GetShaderLocation(g_rdGpu.shader, "uVpA");       // FEAT-RD21
-        g_rdGpu.vpBLoc = GetShaderLocation(g_rdGpu.shader, "uVpB");       // FEAT-RD21
-        g_rdGpu.atstLoc = GetShaderLocation(g_rdGpu.shader, "uAtst"); // FEAT-RD2
-        g_rdGpu.arefLoc = GetShaderLocation(g_rdGpu.shader, "uAref"); // FEAT-RD2
-        g_rdAtInvLoc = GetShaderLocation(g_rdGpu.shader, "uAtInvert"); // FEAT-RD30
-        g_rdGpu.fixLoc = GetShaderLocation(g_rdGpu.shader, "uFixAlpha"); // FEAT-RD7
-        g_rdGpu.samplerLoc = GetShaderLocation(g_rdGpu.shader, "uSampler"); // FEAT-RD3
-        g_rdGpu.texLoc = GetShaderLocation(g_rdGpu.shader, "uTex");         // FEAT-RD3
-        g_rdGpu.tfxLoc = GetShaderLocation(g_rdGpu.shader, "uTfx");         // FEAT-RD3
-        g_rdGpu.tccLoc = GetShaderLocation(g_rdGpu.shader, "uTcc");         // FEAT-RD3
-        g_rdGpu.palTexLoc = GetShaderLocation(g_rdGpu.shader, "uPalTex");   // FIX-RD82B
-        g_rdGpu.palModeLoc = GetShaderLocation(g_rdGpu.shader, "uPalMode"); // FIX-RD82B
-        g_rdGpu.palFbLoc = GetShaderLocation(g_rdGpu.shader, "uPalFallback"); // FIX-RD84
-        g_rdZBiasLoc = GetShaderLocation(g_rdGpu.shader, "uZBias");         // PROBE-RD59
-        if (g_rdZBiasLoc >= 0) // PROBE-RD59
-        {
-            const float zb0 = 0.0f;
-            SetShaderValue(g_rdGpu.shader, g_rdZBiasLoc, &zb0, SHADER_UNIFORM_FLOAT);
-        }
-        if (g_rdGpu.samplerLoc >= 0) // FEAT-RD3
-        {
-            int samplerUnit = 0;
-            SetShaderValue(g_rdGpu.shader, g_rdGpu.samplerLoc, &samplerUnit, SHADER_UNIFORM_INT);
-        }
-        // FIX-RD82I: uPalTex=1 set lazily before first palette draw; do not touch uTex/uSampler/uPalMode here
+        g_rdGpu.shaderReady = rdgfx::initShader(); // RDG1
         const char *fe = std::getenv("PS2X_RD_FLIP");
         const int flipBits = (fe && *fe) ? std::atoi(fe) : 0;
         g_rdGpu.flip[0] = 1.0f;
         g_rdGpu.flip[1] = (flipBits & 1) ? 1.0f : -1.0f; // FEAT-RD2: y flip default; bit 1 = do NOT flip y
         g_rdGpu.flip[2] = (flipBits & 2) ? -1.0f : 1.0f;
-        if (g_rdGpu.flipLoc >= 0)
-            SetShaderValue(g_rdGpu.shader, g_rdGpu.flipLoc, g_rdGpu.flip, SHADER_UNIFORM_VEC3);
+        if (rdgfx::hasUniform(rdgfx::Uniform::Flip)) // RDG1
+            rdgfx::setUniformVec3Immediate(rdgfx::Uniform::Flip, g_rdGpu.flip); // RDG1
         for (size_t i = 0; i < kRdSlotCount; ++i) // FEAT-RD14 // FEAT-RD34
-            g_rdGpu.slots[i].vao = rlLoadVertexArray();
-        g_rdGpu.vao2d = rlLoadVertexArray(); // FEAT-RD8
+            g_rdGpu.slots[i].vao = rdgfx::createVertexArray(); // RDG1
+        g_rdGpu.vao2d = rdgfx::createVertexArray(); // FEAT-RD8 // RDG1
     }
 
     { // PROBE-PACE2
@@ -2196,7 +2062,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     static const bool s_draw2d = []{ const char *e = std::getenv("PS2X_RD_2D"); return !(e && e[0] == '0'); }(); // FEAT-RD9
     const bool hasDrawable3d = usedNewComposition ? (candDrawable3d > 0u) : (g_rdGpu.prevDrawn3dCount > 0u); // FEAT-RD34
     const bool hasDrawable2d = (s_draw2d && g_rdGpu.gpu2dVertCount > 0 && g_rdGpu.vao2d != 0 && !g_rdGpu.local2dBatches.empty()); // FEAT-RD34
-    if (g_rdGpu.shader.id == 0 || (!hasDrawable3d && !hasDrawable2d)) // FEAT-RD34(c): never call the clear without drawing something
+    if (!g_rdGpu.shaderReady || (!hasDrawable3d && !hasDrawable2d)) // FEAT-RD34(c): never call the clear without drawing something // RDG1
     {
         ++g_rdGpu.drawsEmpty;
         if (g_rdGpu.lastEmptyReason == 1) ++g_rdGpu.drawsEmptySempty;
@@ -2207,11 +2073,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         return ps2xRdTakeoverOn();
     }
 
-    rlDrawRenderBatchActive();
+    rdgfx::flushBatch(); // RDG1
     ps2xRdTexTickFrame(); // FEAT-RD3
 
-    const int rw = GetRenderWidth();
-    const int rh = GetRenderHeight();
+    int rw = 0, rh = 0;
+    rdgfx::getBackbufferSize(rw, rh); // RDG1
     const int sw = GetScreenWidth();
     const int sh = GetScreenHeight();
     const float scaleX = (sw > 0) ? (static_cast<float>(rw) / static_cast<float>(sw)) : 1.0f;
@@ -2221,27 +2087,25 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     const int vw = static_cast<int>(w * scaleX);
     const int vh = static_cast<int>(h * scaleY);
 
-    rlViewport(vx, vy, vw, vh);
+    rdgfx::setViewport(vx, vy, vw, vh); // RDG1
     // FEAT-RD34b: force known GL state (raylib/ImGui may have changed it since our last frame)
-    rlDisableScissorTest();
-    rlColorMask(true, true, true, true);
+    rdgfx::setScissorTest(false); // RDG1
+    rdgfx::setColorMask(true, true, true, true); // RDG1
     g_rdMaskCur = 15;
-    rlEnableDepthMask();
-    rlEnableColorBlend();
-    rlSetBlendMode(RL_BLEND_ALPHA);
-    rlDisableVertexArray();
+    rdgfx::setDepthMask(true); // RDG1
+    rdgfx::setBlendAlpha(); // RDG1
+    rdgfx::bindVertexArray(0u); // RDG1
     { // FEAT-RD9: clear box alpha to 0 (colour untouched via mask)
-        rlEnableScissorTest();
-        rlScissor(vx, vy, vw, vh);
-        rlColorMask(false, false, false, true);
-        rlClearColor(0, 0, 0, 0);
-        rlClearScreenBuffers();
-        rlColorMask(true, true, true, true);
-        rlDisableScissorTest();
+        rdgfx::setScissorTest(true); // RDG1
+        rdgfx::setScissorRect(vx, vy, vw, vh); // RDG1
+        rdgfx::setColorMask(false, false, false, true); // RDG1
+        rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 0.0f); // RDG1
+        rdgfx::setColorMask(true, true, true, true); // RDG1
+        rdgfx::setScissorTest(false); // RDG1
     }
-    rlEnableDepthTest();
+    rdgfx::setDepthTest(true); // RDG1
     g_rdc.reset(); g_rdc.calls = 0; g_rdc.depthTest = 1; g_rdc.depthMask = 1; // FEAT-RD15 // FEAT-RD34b
-    rlDisableBackfaceCulling();
+    rdgfx::setBackfaceCulling(false); // RDG1
 
     uint64_t unsupBlend = 0; // FEAT-RD2
     uint64_t approxAd = 0;   // FEAT-RD7
@@ -2259,21 +2123,21 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     static uint64_t s_scissorSkipped = 0; // FEAT-RD22
     static uint64_t s_noState3dTotal = 0, s_rtPass3dTotal = 0; // FEAT-RD23
     static uint32_t s_tailClearsDropped = 0u; // FEAT-RD36
-    if ((!g_rdGpu.drawBatches.empty() || g_rdGpu.gpu2dVertCount > 0) && g_rdGpu.shader.id != 0) // FEAT-RD8 // FEAT-RD14
+    if ((!g_rdGpu.drawBatches.empty() || g_rdGpu.gpu2dVertCount > 0) && g_rdGpu.shaderReady) // FEAT-RD8 // FEAT-RD14 // RDG1
     {
-        rlEnableShader(g_rdGpu.shader.id);
+        rdgfx::enableShader(); // RDG1
         int mode2d = 0; // FEAT-RD8
-        if (g_rdGpu.mode2dLoc >= 0)
-            rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+        if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d)) // RDG1
+            rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
         const float fbSize[2] = {
             static_cast<float>(g_rdPresentW.load(std::memory_order_relaxed)),
             static_cast<float>(g_rdPresentH.load(std::memory_order_relaxed))
         };
-        if (g_rdGpu.fbSizeLoc >= 0)
-            rdSetUniform(g_rdGpu.fbSizeLoc, fbSize, RL_SHADER_UNIFORM_VEC2, 1);
+        if (rdgfx::hasUniform(rdgfx::Uniform::FbSize)) // RDG1
+            rdSetUniformVec2(rdgfx::Uniform::FbSize, fbSize); // RDG1
         const float vpZ[2] = { g_rdGpu.vpScaleZ, g_rdGpu.vpOffsetZ }; // FEAT-RD11
-        if (g_rdGpu.vpZLoc >= 0)
-            rdSetUniform(g_rdGpu.vpZLoc, vpZ, RL_SHADER_UNIFORM_VEC2, 1);
+        if (rdgfx::hasUniform(rdgfx::Uniform::VpZ)) // RDG1
+            rdSetUniformVec2(rdgfx::Uniform::VpZ, vpZ); // RDG1
         unsigned int curVao = 0u; // FEAT-RD14
         int prevBlend = -1; // FEAT-RD2b
         size_t n2d = (s_draw2d && g_rdGpu.gpu2dVertCount > 0 && g_rdGpu.vao2d != 0) ? g_rdGpu.local2dBatches.size() : 0; // FEAT-RD36
@@ -2465,13 +2329,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (on)
                 {
                     if (!scisOn)
-                        rlEnableScissorTest();
+                        rdgfx::setScissorTest(true); // RDG1
                     // FEAT-RD34b: always issue the rectangle
-                    rlScissor(r[0], r[1], r[2], r[3]);
+                    rdgfx::setScissorRect(r[0], r[1], r[2], r[3]); // RDG1
                     std::memcpy(scisRect, r, sizeof(r));
                 }
                 else
-                    rlDisableScissorTest();
+                    rdgfx::setScissorTest(false); // RDG1
                 scisOn = on;
                 ++g_rdc.calls;
             }
@@ -2574,8 +2438,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (wantMode2d != mode2d)
             {
                 mode2d = wantMode2d;
-                if (g_rdGpu.mode2dLoc >= 0)
-                    rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+                if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d)) // RDG1
+                    rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
             }
             if (use2dZ)
             {
@@ -2598,7 +2462,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 #ifdef _WIN32
             if (g_rdAlwaysFunc != zAlways2d) // FEAT-RD20
             {
-                glDepthFunc(zAlways2d ? 0x0207u : 0x0203u); // GL_ALWAYS : GL_LEQUAL
+                rdgfx::setDepthFunc(zAlways2d ? rdgfx::DepthFunc::Always : rdgfx::DepthFunc::Lequal); // RDG1
                 g_rdAlwaysFunc = zAlways2d;
             }
 #endif
@@ -2609,7 +2473,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (blendState >= 1 + 6 * 128 && g_rdMaskCur != (g_rdMaskCur & 7)) // FEAT-RD25: no alpha write
             {
                 g_rdMaskCur &= 7;
-                rlColorMask((g_rdMaskCur & 1) != 0, (g_rdMaskCur & 2) != 0, (g_rdMaskCur & 4) != 0, false);
+                rdgfx::setColorMask((g_rdMaskCur & 1) != 0, (g_rdMaskCur & 2) != 0, (g_rdMaskCur & 4) != 0, false); // RDG1
             }
             if (blendState != prevBlend)
             {
@@ -2618,20 +2482,16 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             }
             int atstVal = (atst == 0u) ? 1 : static_cast<int>(atst); // FEAT-RD30
             int arefVal = static_cast<int>((b0.test >> 4) & 0xFFull);
-            if (g_rdGpu.atstLoc >= 0)
-                rdSetUniform(g_rdGpu.atstLoc, &atstVal, RL_SHADER_UNIFORM_INT, 1);
-            if (g_rdGpu.arefLoc >= 0)
-                rdSetUniform(g_rdGpu.arefLoc, &arefVal, RL_SHADER_UNIFORM_INT, 1);
-            if (g_rdGpu.fixLoc >= 0)
-                rdSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Atst)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Atst, atstVal); // RDG1
+            if (rdgfx::hasUniform(rdgfx::Uniform::Aref)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Aref, arefVal); // RDG1
+            if (rdgfx::hasUniform(rdgfx::Uniform::FixAlpha)) // RDG1
+                rdSetUniformFloat(rdgfx::Uniform::FixAlpha, fixAlpha); // RDG1
 
             int texVal = 0, tfxVal = 0, tccVal = 0;
             int palMode = 0; // FIX-RD82B
             int palFallback = 0; // FIX-RD84
-#ifdef _WIN32
-            using PFN_glActiveTexture = void(__stdcall *)(unsigned int); // FIX-RD82G
-            static auto pActiveTex = reinterpret_cast<PFN_glActiveTexture>(wglGetProcAddress("glActiveTexture")); // FIX-RD82G
-#endif
             unsigned int texId = 0u;
             if ((b0.prim >> 4) & 1ull)
             {
@@ -2656,7 +2516,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         else
                         {
                         uint32_t palRgba[256];
-                        if (pActiveTex && g_rdGpu.palModeLoc >= 0 && g_rdGpu.palTexLoc >= 0 && ps2xRdGetClutRgba256(b0.tex0, b0.texa, palRgba))
+                        if (rdgfx::isPaletteTextureSupported() && rdgfx::hasUniform(rdgfx::Uniform::PalMode) && rdgfx::hasUniform(rdgfx::Uniform::PalTex) && ps2xRdGetClutRgba256(b0.tex0, b0.texa, palRgba)) // RDG1
                         {
                             uint32_t maxRgb = 0u; // FIX-RD84
                             const uint32_t firstRgb = palRgba[0] & 0x00FFFFFFu; // FIX-RD84
@@ -2681,42 +2541,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             }
                             else
                             {
-                            static unsigned int s_palTexId = 0u;
-                            static uint32_t s_palLastRgba[256] = {};
-                            static bool s_palHasData = false;
-                            pActiveTex(0x84C0u); // GL_TEXTURE0
-                            int prevTex0 = 0;
-                            glGetIntegerv(0x8069u, &prevTex0); // GL_TEXTURE_BINDING_2D
-                            pActiveTex(0x84C1u); // GL_TEXTURE1
-                            if (s_palTexId == 0u)
-                            {
-                                glGenTextures(1, &s_palTexId);
-                                if (s_palTexId != 0u)
-                                {
-                                    glBindTexture(0x0DE1u, s_palTexId); // GL_TEXTURE_2D
-                                    glTexParameteri(0x0DE1u, 0x2802u, 0x812Fu); // GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE
-                                    glTexParameteri(0x0DE1u, 0x2803u, 0x812Fu); // GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE
-                                    glTexParameteri(0x0DE1u, 0x2800u, 0x2600u); // GL_TEXTURE_MAG_FILTER, GL_NEAREST
-                                    glTexParameteri(0x0DE1u, 0x2801u, 0x2600u); // GL_TEXTURE_MIN_FILTER, GL_NEAREST
-                                    glTexImage2D(0x0DE1u, 0, 0x8058, 256, 1, 0, 0x1908u, 0x1401u, palRgba); // GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE
-                                    std::memcpy(s_palLastRgba, palRgba, sizeof(palRgba));
-                                    s_palHasData = true;
-                                }
-                            }
-                            else
-                            {
-                                glBindTexture(0x0DE1u, s_palTexId); // GL_TEXTURE_2D
-                                if (!s_palHasData || std::memcmp(palRgba, s_palLastRgba, sizeof(palRgba)) != 0)
-                                {
-                                    glTexSubImage2D(0x0DE1u, 0, 0, 0, 256, 1, 0x1908u, 0x1401u, palRgba); // GL_RGBA, GL_UNSIGNED_BYTE
-                                    std::memcpy(s_palLastRgba, palRgba, sizeof(palRgba));
-                                    s_palHasData = true;
-                                }
-                            }
-                            pActiveTex(0x84C0u); // GL_TEXTURE0
-                            glBindTexture(0x0DE1u, static_cast<unsigned int>(prevTex0));
+                            const bool palOk = rdgfx::uploadPaletteTexture(palRgba); // RDG1
                             g_rdc.bound = 0u;
-                            if (s_palTexId != 0u)
+                            if (palOk)
                             {
                                 palMode = 1;
                                 ++s_fbTexPal;
@@ -2754,24 +2581,23 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     tccVal = static_cast<int>((b0.tex0 >> 34) & 1ull);
                 }
             }
-            if (g_rdGpu.texLoc >= 0)
-                rdSetUniform(g_rdGpu.texLoc, &texVal, RL_SHADER_UNIFORM_INT, 1);
-            if (g_rdGpu.tfxLoc >= 0)
-                rdSetUniform(g_rdGpu.tfxLoc, &tfxVal, RL_SHADER_UNIFORM_INT, 1);
-            if (g_rdGpu.tccLoc >= 0)
-                rdSetUniform(g_rdGpu.tccLoc, &tccVal, RL_SHADER_UNIFORM_INT, 1);
-            if (palMode != 0 && g_rdGpu.palModeLoc >= 0) // FIX-RD82I
+            if (rdgfx::hasUniform(rdgfx::Uniform::Tex)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Tex, texVal); // RDG1
+            if (rdgfx::hasUniform(rdgfx::Uniform::Tfx)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Tfx, tfxVal); // RDG1
+            if (rdgfx::hasUniform(rdgfx::Uniform::Tcc)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Tcc, tccVal); // RDG1
+            if (palMode != 0 && rdgfx::hasUniform(rdgfx::Uniform::PalMode)) // FIX-RD82I // RDG1
             {
                 static bool s_palTexSet = false;
-                if (!s_palTexSet && g_rdGpu.palTexLoc >= 0)
+                if (!s_palTexSet && rdgfx::hasUniform(rdgfx::Uniform::PalTex)) // RDG1
                 {
-                    const int palUnit = 1;
-                    rdSetUniform(g_rdGpu.palTexLoc, &palUnit, RL_SHADER_UNIFORM_INT, 1);
+                    rdSetUniformInt(rdgfx::Uniform::PalTex, 1); // RDG1
                     s_palTexSet = true;
                 }
-                rdSetUniform(g_rdGpu.palModeLoc, &palMode, RL_SHADER_UNIFORM_INT, 1);
-                if (palMode == 1 && g_rdGpu.palFbLoc >= 0) // FIX-RD84
-                    rdSetUniform(g_rdGpu.palFbLoc, &palFallback, RL_SHADER_UNIFORM_INT, 1);
+                rdSetUniformInt(rdgfx::Uniform::PalMode, palMode); // RDG1
+                if (palMode == 1 && rdgfx::hasUniform(rdgfx::Uniform::PalFallback)) // FIX-RD84 // RDG1
+                    rdSetUniformInt(rdgfx::Uniform::PalFallback, palFallback); // RDG1
             }
 
             if (rdbDump) rdb2d(b0, 0, totalCount); // PROBE-RD29
@@ -2799,44 +2625,33 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (atst == 0u)
                 {
                     rdApplyAfailWrites(afail, zOff, sMask);
-                    rlDrawVertexArray(static_cast<int>(b0.first), static_cast<int>(totalCount));
+                    rdgfx::drawArrays(rdgfx::PrimitiveTopology::Triangles, static_cast<int>(b0.first), static_cast<int>(totalCount)); // RDG1
                     ++g_rdAfailNever;
                 }
                 else
                 {
-                    rlDrawVertexArray(static_cast<int>(b0.first), static_cast<int>(totalCount));
-                    if (g_rdAtInvLoc >= 0)
-                        rdSetUniform(g_rdAtInvLoc, &one, RL_SHADER_UNIFORM_INT, 1);
+                    rdgfx::drawArrays(rdgfx::PrimitiveTopology::Triangles, static_cast<int>(b0.first), static_cast<int>(totalCount)); // RDG1
+                    if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) // RDG1
+                        rdSetUniformInt(rdgfx::Uniform::AtInvert, one); // RDG1
                     rdApplyAfailWrites(afail, zOff, sMask);
-                    rlDrawVertexArray(static_cast<int>(b0.first), static_cast<int>(totalCount));
-                    if (g_rdAtInvLoc >= 0)
-                        rdSetUniform(g_rdAtInvLoc, &zero, RL_SHADER_UNIFORM_INT, 1);
+                    rdgfx::drawArrays(rdgfx::PrimitiveTopology::Triangles, static_cast<int>(b0.first), static_cast<int>(totalCount)); // RDG1
+                    if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) // RDG1
+                        rdSetUniformInt(rdgfx::Uniform::AtInvert, zero); // RDG1
                     ++g_rdAfail2Pass;
                 }
                 rdSetMaskPacked(sMask);
                 rdDepthMask(sDepth != 0);
             }
             else
-                rlDrawVertexArray(static_cast<int>(b0.first), static_cast<int>(totalCount));
+                rdgfx::drawArrays(rdgfx::PrimitiveTopology::Triangles, static_cast<int>(b0.first), static_cast<int>(totalCount)); // RDG1
             if (palMode != 0) // FIX-RD82B // FIX-RD82G // FIX-RD82I
             {
-                if (g_rdGpu.palModeLoc >= 0)
-                {
-                    const int palZero = 0;
-                    rdSetUniform(g_rdGpu.palModeLoc, &palZero, RL_SHADER_UNIFORM_INT, 1);
-                }
-                if (palMode == 1 && palFallback != 0 && g_rdGpu.palFbLoc >= 0) // FIX-RD84
-                {
-                    const int palFbZero = 0;
-                    rdSetUniform(g_rdGpu.palFbLoc, &palFbZero, RL_SHADER_UNIFORM_INT, 1);
-                }
+                if (rdgfx::hasUniform(rdgfx::Uniform::PalMode)) // RDG1
+                    rdSetUniformInt(rdgfx::Uniform::PalMode, 0); // RDG1
+                if (palMode == 1 && palFallback != 0 && rdgfx::hasUniform(rdgfx::Uniform::PalFallback)) // FIX-RD84 // RDG1
+                    rdSetUniformInt(rdgfx::Uniform::PalFallback, 0); // RDG1
 #ifdef _WIN32
-                if (pActiveTex)
-                {
-                    pActiveTex(0x84C1u); // GL_TEXTURE1
-                    glBindTexture(0x0DE1u, 0u); // GL_TEXTURE_2D
-                    pActiveTex(0x84C0u); // GL_TEXTURE0
-                }
+                rdgfx::unbindPaletteTexture(); // RDG1
 #endif
                 g_rdc.bound = 0u;
             }
@@ -2874,11 +2689,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 return;
             Pace2Scope pace2B4Scope(g_pace2Rd.b4, pace2On); // PROBE-PACE2
             mode2d = 1;
-            if (g_rdGpu.mode2dLoc >= 0)
-                rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
             rdDepthTest(false);
             rdDepthMask(false);
-            rlEnableVertexArray(g_rdGpu.vao2d);
+            rdgfx::bindVertexArray(g_rdGpu.vao2d); // RDG1
 
             while (i2d < n2d && (drawAll || (g_rdGpu.local2dBatches[i2d].afterSerial & 0x3FFFFFFFu) < maxS))
             {
@@ -2982,14 +2797,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 #ifdef _WIN32
             if (g_rdAlwaysFunc) // FEAT-RD20: restore LEQUAL
             {
-                glDepthFunc(0x0203u);
+                rdgfx::setDepthFunc(rdgfx::DepthFunc::Lequal); // RDG1
                 g_rdAlwaysFunc = false;
             }
 #endif
 
             mode2d = 0;
-            if (g_rdGpu.mode2dLoc >= 0)
-                rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
             curVao = 0u; // FEAT-RD14
         };
 
@@ -3189,12 +3004,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdDepthMask(false);
             else
                 rdDepthMask(true);
-            if (g_rdZBias != 0.0f && g_rdZBiasLoc >= 0) // PROBE-RD59
+            if (g_rdZBias != 0.0f && rdgfx::hasUniform(rdgfx::Uniform::ZBias)) // PROBE-RD59 // RDG1
             {
                 const float zb = (ztst == 2u) ? g_rdZBias : 0.0f;
                 if (zb != prevZBias)
                 {
-                    rdSetUniform(g_rdZBiasLoc, &zb, RL_SHADER_UNIFORM_FLOAT, 1);
+                    rdSetUniformFloat(rdgfx::Uniform::ZBias, zb); // RDG1
                     prevZBias = zb;
                 }
             }
@@ -3207,7 +3022,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (blendState >= 1 + 6 * 128 && g_rdMaskCur != (g_rdMaskCur & 7)) // FEAT-RD25: no alpha write
             {
                 g_rdMaskCur &= 7;
-                rlColorMask((g_rdMaskCur & 1) != 0, (g_rdMaskCur & 2) != 0, (g_rdMaskCur & 4) != 0, false);
+                rdgfx::setColorMask((g_rdMaskCur & 1) != 0, (g_rdMaskCur & 2) != 0, (g_rdMaskCur & 4) != 0, false); // RDG1
             }
             if (blendState != prevBlend) // FEAT-RD2b: blend calls flush raylib batch and unbind shader/VAO
             {
@@ -3217,27 +3032,27 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             }
             else if (curVao != slot.vao) // FEAT-RD14
             {
-                rlEnableVertexArray(slot.vao);
+                rdgfx::bindVertexArray(slot.vao); // RDG1
                 curVao = slot.vao;
             }
             if (batch.baseVertex != slot.curBaseVertex) // FEAT-RD14: >65536 vertex split path
             {
-                rlEnableVertexBuffer(slot.vbo);
+                rdgfx::bindVertexBuffer(slot.vbo); // RDG1
                 const int byteOff = static_cast<int>(static_cast<size_t>(batch.baseVertex) * sizeof(RdVert));
-                rlSetVertexAttribute(0, 4, RL_FLOAT, false, sizeof(RdVert), byteOff + 0);
-                rlSetVertexAttribute(1, 4, RL_UNSIGNED_BYTE, true, sizeof(RdVert), byteOff + 16);
-                rlSetVertexAttribute(2, 2, RL_FLOAT, false, sizeof(RdVert), byteOff + 20);
-                rlDisableVertexBuffer();
+                rdgfx::setVertexAttribute(0, 4, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 0); // RDG1
+                rdgfx::setVertexAttribute(1, 4, rdgfx::VertexAttrFormat::UnsignedByte, true, sizeof(RdVert), byteOff + 16); // RDG1
+                rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 20); // RDG1
+                rdgfx::bindVertexBuffer(0u); // RDG1
                 slot.curBaseVertex = batch.baseVertex;
             }
             int atstVal = (atst == 0u) ? 1 : static_cast<int>(atst); // FEAT-RD30: NEVER+AFAIL = single pass without discard
             int arefVal = static_cast<int>((test >> 4) & 0xFFull);
-            if (g_rdGpu.atstLoc >= 0)
-                rdSetUniform(g_rdGpu.atstLoc, &atstVal, RL_SHADER_UNIFORM_INT, 1);
-            if (g_rdGpu.arefLoc >= 0)
-                rdSetUniform(g_rdGpu.arefLoc, &arefVal, RL_SHADER_UNIFORM_INT, 1);
-            if (g_rdGpu.fixLoc >= 0) // FEAT-RD7
-                rdSetUniform(g_rdGpu.fixLoc, &fixAlpha, RL_SHADER_UNIFORM_FLOAT, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Atst)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Atst, atstVal); // RDG1
+            if (rdgfx::hasUniform(rdgfx::Uniform::Aref)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Aref, arefVal); // RDG1
+            if (rdgfx::hasUniform(rdgfx::Uniform::FixAlpha)) // FEAT-RD7 // RDG1
+                rdSetUniformFloat(rdgfx::Uniform::FixAlpha, fixAlpha); // RDG1
 
             { // FEAT-RD22
                 uint64_t sc = 0ull;
@@ -3281,7 +3096,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     }
                 }
             }
-            if (g_rdGpu.vpALoc >= 0 && g_rdGpu.vpBLoc >= 0) // FEAT-RD21
+            if (rdgfx::hasUniform(rdgfx::Uniform::VpA) && rdgfx::hasUniform(rdgfx::Uniform::VpB)) // FEAT-RD21 // RDG1
             {
                 static float s_lastOfx = 0.0f, s_lastOfy = 0.0f;
                 static bool s_haveOff = false, s_loggedNoOff = false;
@@ -3304,8 +3119,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 static bool s_prevValid = false;
                 if (!s_prevValid || std::memcmp(s_prevA, vpA, sizeof(vpA)) != 0 || std::memcmp(s_prevB, vpB, sizeof(vpB)) != 0)
                 {
-                    rlSetUniform(g_rdGpu.vpALoc, vpA, RL_SHADER_UNIFORM_VEC4, 1);
-                    rlSetUniform(g_rdGpu.vpBLoc, vpB, RL_SHADER_UNIFORM_VEC4, 1);
+                    rdgfx::setUniformVec4(rdgfx::Uniform::VpA, vpA); // RDG1
+                    rdgfx::setUniformVec4(rdgfx::Uniform::VpB, vpB); // RDG1
                     std::memcpy(s_prevA, vpA, sizeof(vpA));
                     std::memcpy(s_prevB, vpB, sizeof(vpB));
                     s_prevValid = true;
@@ -3330,12 +3145,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     tccVal = static_cast<int>((tex0 >> 34) & 1ull);
                 }
             }
-            if (g_rdGpu.texLoc >= 0)
-                rdSetUniform(g_rdGpu.texLoc, &texVal, RL_SHADER_UNIFORM_INT, 1);
-            if (g_rdGpu.tfxLoc >= 0)
-                rdSetUniform(g_rdGpu.tfxLoc, &tfxVal, RL_SHADER_UNIFORM_INT, 1);
-            if (g_rdGpu.tccLoc >= 0)
-                rdSetUniform(g_rdGpu.tccLoc, &tccVal, RL_SHADER_UNIFORM_INT, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Tex)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Tex, texVal); // RDG1
+            if (rdgfx::hasUniform(rdgfx::Uniform::Tfx)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Tfx, tfxVal); // RDG1
+            if (rdgfx::hasUniform(rdgfx::Uniform::Tcc)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Tcc, tccVal); // RDG1
 
             if (rd24Dump) // PROBE-RD24
             {
@@ -3456,12 +3271,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 else
                 {
                     rdDrawElems(batch.first, batch.count); // FIX-RD90
-                    if (g_rdAtInvLoc >= 0)
-                        rdSetUniform(g_rdAtInvLoc, &one, RL_SHADER_UNIFORM_INT, 1);
+                    if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) // RDG1
+                        rdSetUniformInt(rdgfx::Uniform::AtInvert, one); // RDG1
                     rdApplyAfailWrites(afail, zOff, sMask);
                     rdDrawElems(batch.first, batch.count); // FIX-RD90
-                    if (g_rdAtInvLoc >= 0)
-                        rdSetUniform(g_rdAtInvLoc, &zero, RL_SHADER_UNIFORM_INT, 1);
+                    if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) // RDG1
+                        rdSetUniformInt(rdgfx::Uniform::AtInvert, zero); // RDG1
                     ++g_rdAfail2Pass;
                 }
                 rdSetMaskPacked(sMask);
@@ -3526,20 +3341,20 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 break;
             }
         }
-        if (g_rdZBias != 0.0f && g_rdZBiasLoc >= 0 && prevZBias != 0.0f) // PROBE-RD59
+        if (g_rdZBias != 0.0f && rdgfx::hasUniform(rdgfx::Uniform::ZBias) && prevZBias != 0.0f) // PROBE-RD59 // RDG1
         {
             prevZBias = 0.0f;
-            rdSetUniform(g_rdZBiasLoc, &prevZBias, RL_SHADER_UNIFORM_FLOAT, 1);
+            rdSetUniformFloat(rdgfx::Uniform::ZBias, prevZBias); // RDG1
         }
         if (!deferred2d.empty()) // FIX-RD63
         {
             Pace2Scope pace2B4DefScope(g_pace2Rd.b4, pace2On); // PROBE-PACE2
             mode2d = 1;
-            if (g_rdGpu.mode2dLoc >= 0)
-                rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
             rdDepthTest(false);
             rdDepthMask(false);
-            rlEnableVertexArray(g_rdGpu.vao2d);
+            rdgfx::bindVertexArray(g_rdGpu.vao2d); // RDG1
             for (size_t idx : deferred2d)
             {
                 if (!allow2dIdx(idx)) // PROBE-RD83
@@ -3552,13 +3367,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 #ifdef _WIN32
             if (g_rdAlwaysFunc)
             {
-                glDepthFunc(0x0203u);
+                rdgfx::setDepthFunc(rdgfx::DepthFunc::Lequal); // RDG1
                 g_rdAlwaysFunc = false;
             }
 #endif
             mode2d = 0;
-            if (g_rdGpu.mode2dLoc >= 0)
-                rdSetUniform(g_rdGpu.mode2dLoc, &mode2d, RL_SHADER_UNIFORM_INT, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d)) // RDG1
+                rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
             curVao = 0u;
         }
         draw2dUntil(0u, true); // FEAT-RD8
@@ -3578,51 +3393,35 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             g_camTl.finish();
         if (scisOn) // FEAT-RD22
         {
-            rlDisableScissorTest();
+            rdgfx::setScissorTest(false); // RDG1
             scisOn = false;
         }
-        rlActiveTextureSlot(0); // FEAT-RD3
-        rlDisableTexture();     // FEAT-RD3
+        rdgfx::bindTexture(0u, 0u); // FEAT-RD3 // RDG1
         g_rdc.bound = 0u; // FEAT-RD15
-        rlDisableVertexArray();
-        rlDisableShader();
+        rdgfx::bindVertexArray(0u); // RDG1
+        rdgfx::disableShader(); // RDG1
     }
 
-    rlDisableScissorTest(); // FEAT-RD34b
-    rlColorMask(true, true, true, true); // FEAT-RD9
+    rdgfx::setScissorTest(false); // FEAT-RD34b // RDG1
+    rdgfx::setColorMask(true, true, true, true); // FEAT-RD9 // RDG1
     g_rdMaskCur = 15;
     (void)partialMask;
-    rlEnableDepthMask();
-    rlEnableColorBlend(); // FEAT-RD2b
-    rlSetBlendMode(RL_BLEND_ALPHA);
-    rlDisableDepthTest();
-    rlEnableBackfaceCulling();
-    rlViewport(0, 0, rw, rh);
+    rdgfx::setDepthMask(true); // RDG1
+    rdgfx::setBlendAlpha(); // FEAT-RD2b // RDG1
+    rdgfx::setDepthTest(false); // RDG1
+    rdgfx::setBackfaceCulling(true); // RDG1
+    rdgfx::setViewport(0, 0, rw, rh); // RDG1
 
-#ifdef _WIN32
     if (rdFbTexOn() && vw > 0 && vh > 0) // FIX-RD79 // FIX-RD80 // FIX-RD81
     {
         Pace2Scope pace2B5Scope(g_pace2Rd.b5, pace2On); // PROBE-PACE2
-        static int s_prevW = 0, s_prevH = 0, s_resW = 0, s_resH = 0, s_lastW = 0, s_lastH = 0; // FIX-RD85
+        static int s_prevW = 0, s_prevH = 0, s_lastW = 0, s_lastH = 0; // FIX-RD85
         static bool s_prevFilled = false; // FIX-RD80
         const int wantW = vw;
         const int wantH = static_cast<int>((static_cast<int64_t>(vh) * 512 + 224) / 448);
-        using PFN_glGenFramebuffers = void(__stdcall *)(int, unsigned int *);
-        using PFN_glBindFramebuffer = void(__stdcall *)(unsigned int, unsigned int);
-        using PFN_glFramebufferTexture2D = void(__stdcall *)(unsigned int, unsigned int, unsigned int, unsigned int, int);
-        using PFN_glBlitFramebuffer = void(__stdcall *)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
-        static auto pGenFbo = reinterpret_cast<PFN_glGenFramebuffers>(wglGetProcAddress("glGenFramebuffers"));
-        static auto pBindFbo = reinterpret_cast<PFN_glBindFramebuffer>(wglGetProcAddress("glBindFramebuffer"));
-        static auto pFbTex2D = reinterpret_cast<PFN_glFramebufferTexture2D>(wglGetProcAddress("glFramebufferTexture2D"));
-        static auto pBlitFbo = reinterpret_cast<PFN_glBlitFramebuffer>(wglGetProcAddress("glBlitFramebuffer"));
-        static unsigned int s_prevFbo = 0u, s_resFbo = 0u, s_resTex = 0u, s_lastSceneFbo = 0u; // FIX-RD85
-        int prevReadFbo = 0, prevDrawFbo = 0, sampleBufs = 0;
-        if (pGenFbo && pBindFbo && pFbTex2D && pBlitFbo)
-        {
-            glGetIntegerv(0x8CAAu, &prevReadFbo); // GL_READ_FRAMEBUFFER_BINDING
-            glGetIntegerv(0x8CA6u, &prevDrawFbo); // GL_DRAW_FRAMEBUFFER_BINDING
-            glGetIntegerv(0x80A8u, &sampleBufs);  // GL_SAMPLE_BUFFERS
-        }
+        static unsigned int s_prevFbo = 0u, s_lastSceneFbo = 0u; // FIX-RD85
+        rdgfx::BackbufferCopyState copyState{}; // RDG1
+        rdgfx::beginBackbufferCopy(copyState); // RDG1
         if (rdSnapOn()) // FIX-RD81: capture finished frame before RD80 blend
         {
             const uint64_t curSnapFrame = ++s_snapFrameSeq; // FIX-RD87
@@ -3658,109 +3457,53 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     if (drawn3dThisFrame == 0u)
                         s_snapSkippedNoGeom += static_cast<uint32_t>(snapReqs.size());
                 }
-                else if (pGenFbo && pBindFbo && pFbTex2D && pBlitFbo)
+                else if (copyState.valid) // RDG1
                 {
-                bool resolved = false;
-                for (const RdSnapReq &req : snapReqs)
-                {
-                    size_t chosen = kRdSnapSlots;
-                    for (size_t si = 0u; si < kRdSnapSlots; ++si)
+                    for (const RdSnapReq &req : snapReqs)
                     {
-                        if (s_snapSlots[si].valid && s_snapSlots[si].destFbp == req.destFbp)
-                        {
-                            chosen = si;
-                            break;
-                        }
-                    }
-                    if (chosen == kRdSnapSlots)
-                    {
+                        size_t chosen = kRdSnapSlots;
                         for (size_t si = 0u; si < kRdSnapSlots; ++si)
                         {
-                            if (!s_snapSlots[si].valid)
+                            if (s_snapSlots[si].valid && s_snapSlots[si].destFbp == req.destFbp)
                             {
                                 chosen = si;
                                 break;
                             }
                         }
-                    }
-                    if (chosen == kRdSnapSlots)
-                    {
-                        chosen = 0u;
-                        for (size_t si = 1u; si < kRdSnapSlots; ++si)
+                        if (chosen == kRdSnapSlots)
                         {
-                            if (s_snapSlots[si].lastUsedFrame < s_snapSlots[chosen].lastUsedFrame)
-                                chosen = si;
+                            for (size_t si = 0u; si < kRdSnapSlots; ++si)
+                            {
+                                if (!s_snapSlots[si].valid)
+                                {
+                                    chosen = si;
+                                    break;
+                                }
+                            }
                         }
-                    }
-                    RdSnapSlot &slot = s_snapSlots[chosen];
-                    if (slot.texId == 0u || slot.w != wantW || slot.h != wantH)
-                    {
-                        if (slot.texId != 0u)
-                            rlUnloadTexture(slot.texId);
-                        slot.texId = rlLoadTexture(nullptr, wantW, wantH, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
-                        slot.w = wantW;
-                        slot.h = wantH;
-                        if (slot.texId != 0u)
+                        if (chosen == kRdSnapSlots)
                         {
-                            rlTextureParameters(slot.texId, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
-                            rlTextureParameters(slot.texId, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
-                            rlTextureParameters(slot.texId, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
-                            rlTextureParameters(slot.texId, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_LINEAR);
-                            if (slot.fbo == 0u)
-                                pGenFbo(1, &slot.fbo);
-                            pBindFbo(0x8CA9u, slot.fbo);
-                            pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, slot.texId, 0);
-                            glClearColor(0.0f, 0.0f, 0.0f, 1.0f); // FIX-RD82J
-                            glClear(0x00004000u);
+                            chosen = 0u;
+                            for (size_t si = 1u; si < kRdSnapSlots; ++si)
+                            {
+                                if (s_snapSlots[si].lastUsedFrame < s_snapSlots[chosen].lastUsedFrame)
+                                    chosen = si;
+                            }
                         }
-                    }
-                    if (slot.texId != 0u && slot.fbo != 0u)
-                    {
+                        RdSnapSlot &slot = s_snapSlots[chosen];
                         const int dstW = std::max(1, std::min(wantW, static_cast<int>((static_cast<int64_t>(wantW) * req.w + 256) / 512)));
                         const int dstH = std::max(1, std::min(wantH, static_cast<int>((static_cast<int64_t>(vh) * req.h + 224) / 448)));
-                        if (sampleBufs > 0)
+                        if (rdgfx::copyBackbufferToTexture(copyState, slot.texId, slot.fbo, slot.w, slot.h,
+                                                           wantW, wantH, vx, vy, vw, vh, dstW, dstH, true)) // RDG1
                         {
-                            if (!resolved)
-                            {
-                                if (s_resTex == 0u || s_resW != vw || s_resH != vh)
-                                {
-                                    if (s_resTex != 0u)
-                                        rlUnloadTexture(s_resTex);
-                                    s_resTex = rlLoadTexture(nullptr, vw, vh, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
-                                    s_resW = vw;
-                                    s_resH = vh;
-                                    if (s_resFbo == 0u)
-                                        pGenFbo(1, &s_resFbo);
-                                    pBindFbo(0x8CA9u, s_resFbo);
-                                    pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, s_resTex, 0);
-                                }
-                                pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
-                                pBindFbo(0x8CA9u, s_resFbo);
-                                pBlitFbo(vx, vy, vx + vw, vy + vh, 0, 0, vw, vh, 0x00004000u, 0x2600u);
-                                resolved = true;
-                            }
-                            pBindFbo(0x8CA8u, s_resFbo);
-                            pBindFbo(0x8CA9u, slot.fbo);
-                            pBlitFbo(0, vh, vw, 0, 0, 0, dstW, dstH, 0x00004000u, 0x2601u);
+                            slot.destFbp = req.destFbp;
+                            slot.valid = true;
+                            slot.lastUsedFrame = s_snapFrameSeq;
+                            ++s_snapCount;
                         }
-                        else
-                        {
-                            pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
-                            pBindFbo(0x8CA9u, slot.fbo);
-                            pBlitFbo(vx, vy + vh, vx + vw, vy, 0, 0, dstW, dstH, 0x00004000u, 0x2601u);
-                        }
-                        rlColorMask(false, false, false, true); // FIX-RD82J
-                        glClearColor(0.0f, 0.0f, 0.0f, 1.0f); // FIX-RD82J
-                        glClear(0x00004000u); // FIX-RD82J
-                        rlColorMask(true, true, true, true); // FIX-RD82J
-                        slot.destFbp = req.destFbp;
-                        slot.valid = true;
-                        slot.lastUsedFrame = s_snapFrameSeq;
-                        ++s_snapCount;
                     }
-                }
-                    pBindFbo(0x8CA8u, static_cast<unsigned int>(prevReadFbo));
-                    pBindFbo(0x8CA9u, static_cast<unsigned int>(prevDrawFbo));
+                    rdgfx::endBackbufferCopy(copyState); // RDG1
+                    copyState.msaaResolved = false; // RDG1
                 }
             }
         }
@@ -3771,93 +3514,34 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             const float clampedF = (dispF < 0.0f) ? 0.0f : dispF;
             const int aInt = static_cast<int>((1.0f - clampedF) * 255.0f + 0.5f);
             const unsigned char alphaByte = static_cast<unsigned char>(aInt < 0 ? 0 : (aInt > 255 ? 255 : aInt));
-            Texture2D prevTex{};
-            prevTex.id = s_prevTexId;
-            prevTex.width = s_prevW;
-            prevTex.height = s_prevH;
-            prevTex.mipmaps = 1;
-            prevTex.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
-            const Rectangle srcRec{0.0f, 0.0f, static_cast<float>(s_prevW), static_cast<float>(s_prevH) * (448.0f / 512.0f)};
-            const Rectangle dstRec{x, y, w, h};
-            const Color tint{255, 255, 255, alphaByte};
-            rlDisableBackfaceCulling();
-            DrawTexturePro(prevTex, srcRec, dstRec, Vector2{0.0f, 0.0f}, 0.0f, tint);
-            rlDrawRenderBatchActive();
-            rlEnableBackfaceCulling();
+            rdgfx::drawTextureOverlay(s_prevTexId, s_prevW, s_prevH,
+                                      0.0f, 0.0f, static_cast<float>(s_prevW), static_cast<float>(s_prevH) * (448.0f / 512.0f),
+                                      x, y, w, h, alphaByte); // RDG1
             ++s_fbTexBlendCount;
         }
-        if (pGenFbo && pBindFbo && pFbTex2D && pBlitFbo)
+        if (copyState.valid) // RDG1
         {
-            bool resResolved = false; // FIX-RD85B
             auto copyToFbTarget = [&](unsigned int &texId, unsigned int &fbo, int &texW, int &texH, bool &filled, uint32_t &copies) { // FIX-RD85B
-                if (texId == 0u || texW != wantW || texH != wantH)
+                const bool willResize = (texId == 0u || texW != wantW || texH != wantH);
+                if (willResize)
                 {
                     if (texId != 0u)
-                    {
                         g_rdc.invalidateTex(texId);
-                        rlUnloadTexture(texId);
-                    }
-                    texId = rlLoadTexture(nullptr, wantW, wantH, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
-                    texW = wantW;
-                    texH = wantH;
                     filled = false;
-                    if (texId != 0u)
-                    {
-                        g_rdc.invalidateTex(texId);
-                        rlTextureParameters(texId, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
-                        rlTextureParameters(texId, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
-                        rlTextureParameters(texId, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
-                        rlTextureParameters(texId, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_LINEAR);
-                        if (fbo == 0u)
-                            pGenFbo(1, &fbo);
-                        pBindFbo(0x8CA9u, fbo); // GL_DRAW_FRAMEBUFFER
-                        pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, texId, 0);
-                        glClearColor(0.0f, 0.0f, 0.0f, 1.0f); // FIX-RD82J
-                        glClear(0x00004000u);
-                    }
                 }
-                if (texId != 0u && fbo != 0u)
+                if (rdgfx::copyBackbufferToTexture(copyState, texId, fbo, texW, texH,
+                                                   wantW, wantH, vx, vy, vw, vh, vw, vh, false)) // RDG1
                 {
-                    if (sampleBufs > 0)
-                    {
-                        if (!resResolved)
-                        {
-                            if (s_resTex == 0u || s_resW != vw || s_resH != vh)
-                            {
-                                if (s_resTex != 0u)
-                                    rlUnloadTexture(s_resTex);
-                                s_resTex = rlLoadTexture(nullptr, vw, vh, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
-                                s_resW = vw;
-                                s_resH = vh;
-                                if (s_resFbo == 0u)
-                                    pGenFbo(1, &s_resFbo);
-                                pBindFbo(0x8CA9u, s_resFbo);
-                                pFbTex2D(0x8CA9u, 0x8CE0u, 0x0DE1u, s_resTex, 0);
-                            }
-                            pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
-                            pBindFbo(0x8CA9u, s_resFbo);
-                            pBlitFbo(vx, vy, vx + vw, vy + vh, 0, 0, vw, vh, 0x00004000u, 0x2600u);
-                            resResolved = true;
-                        }
-                        pBindFbo(0x8CA8u, s_resFbo);
-                        pBindFbo(0x8CA9u, fbo);
-                        pBlitFbo(0, vh, vw, 0, 0, 0, vw, vh, 0x00004000u, 0x2600u);
-                    }
-                    else
-                    {
-                        pBindFbo(0x8CA8u, static_cast<unsigned int>(prevDrawFbo));
-                        pBindFbo(0x8CA9u, fbo);
-                        pBlitFbo(vx, vy + vh, vx + vw, vy, 0, 0, vw, vh, 0x00004000u, 0x2600u);
-                    }
-                    rlColorMask(false, false, false, true); // FIX-RD82J
-                    glClearColor(0.0f, 0.0f, 0.0f, 1.0f); // FIX-RD82J
-                    glClear(0x00004000u); // FIX-RD82J
-                    rlColorMask(true, true, true, true); // FIX-RD82J
+                    if (willResize && texId != 0u)
+                        g_rdc.invalidateTex(texId);
                     ++copies;
                     filled = true;
                 }
-                pBindFbo(0x8CA8u, static_cast<unsigned int>(prevReadFbo));
-                pBindFbo(0x8CA9u, static_cast<unsigned int>(prevDrawFbo));
+                else if (willResize && texId != 0u)
+                {
+                    g_rdc.invalidateTex(texId);
+                }
+                rdgfx::endBackbufferCopy(copyState); // RDG1
             };
             if (!palDrawnThisFrame) // FIX-RD86
                 copyToFbTarget(s_prevTexId, s_prevFbo, s_prevW, s_prevH, s_prevFilled, s_fbTexCopies); // FIX-RD85B
@@ -3867,7 +3551,6 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 copyToFbTarget(s_lastSceneTexId, s_lastSceneFbo, s_lastW, s_lastH, s_lastSceneFilled, s_fbTexLastCopies); // FIX-RD85B
         }
     }
-#endif
 
     if (s_passLog) // FEAT-RD22
     {
@@ -3895,7 +3578,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     if (chosen2dIdx >= 0)
         for (const auto &mr : g_rdGpu.frames2d[chosen2dIdx].mainRanges)
             g_rd35.mainSerials += mr.last - mr.first + 1u;
-    g_rd35.glErr = glGetError();
+    g_rd35.glErr = rdgfx::getLastError(); // RDG1
     g_rd35.valid = true;
     ++g_rdGpu.frames;
     if (drawn3dThisFrame > 0u) // FEAT-RD34
