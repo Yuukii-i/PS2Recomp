@@ -1,11 +1,15 @@
 // FEAT-CFG: user settings file (ps2x.ini) mapped onto the PS2X_* env vars
+#include <atomic> // FIX-P1
+#include <cmath> // FIX-P1
 #include <cstdio>
 #include <cstdlib>
+#include <cstring> // FIX-P1
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <mutex> // FIX-CFG1
 #include <string>
+#include <vector> // FIX-P1
 
 namespace
 {
@@ -224,4 +228,382 @@ void ps2xLoadConfig()
               << " render_scale=" << eff("PS2X_RENDER_SCALE") // FIX-R2
               << " hud_anchor=" << eff("PS2X_HUD_ANCHOR") << std::endl; // FIX-R8
     }); // FIX-CFG1
+}
+
+// FIX-P1: live graphics settings store & ini saver
+namespace
+{
+std::atomic<int> s_gfxAspectMode{0}; // FIX-P1
+std::atomic<float> s_gfxAspectMax{21.0f / 9.0f}; // FIX-P1
+std::atomic<float> s_gfxHudSafeAspect{0.0f}; // FIX-P1
+std::once_flag s_gfxInitOnce; // FIX-P1
+
+void ps2xGfxInitLazy() // FIX-P1
+{
+    std::call_once(s_gfxInitOnce, []() {
+        ps2xLoadConfig();
+
+        const char *a = std::getenv("PS2X_ASPECT");
+        if (a && *a)
+        {
+            if (!std::strcmp(a, "fill")) s_gfxAspectMode.store(1);
+            else if (!std::strcmp(a, "16:9")) s_gfxAspectMode.store(2);
+            else if (!std::strcmp(a, "16:10")) s_gfxAspectMode.store(3);
+            else if (!std::strcmp(a, "native")) s_gfxAspectMode.store(4);
+            else s_gfxAspectMode.store(0);
+        }
+        else
+        {
+            s_gfxAspectMode.store(0);
+        }
+
+        const char *m = std::getenv("PS2X_ASPECT_MAX");
+        if (!m || !*m)
+        {
+            s_gfxAspectMax.store(21.0f / 9.0f);
+        }
+        else if (!std::strcmp(m, "none") || !std::strcmp(m, "NONE"))
+        {
+            s_gfxAspectMax.store(0.0f);
+        }
+        else if (!std::strcmp(m, "21:9"))
+        {
+            s_gfxAspectMax.store(21.0f / 9.0f);
+        }
+        else if (!std::strcmp(m, "32:9"))
+        {
+            s_gfxAspectMax.store(32.0f / 9.0f);
+        }
+        else if (!std::strcmp(m, "16:9"))
+        {
+            s_gfxAspectMax.store(16.0f / 9.0f);
+        }
+        else if (!std::strcmp(m, "16:10"))
+        {
+            s_gfxAspectMax.store(1.6f);
+        }
+        else if (!std::strcmp(m, "4:3"))
+        {
+            s_gfxAspectMax.store(4.0f / 3.0f);
+        }
+        else
+        {
+            const char *colon = std::strchr(m, ':');
+            if (colon)
+            {
+                float num = std::strtof(m, nullptr);
+                float den = std::strtof(colon + 1, nullptr);
+                if (num > 0.0f && den > 0.0f)
+                    s_gfxAspectMax.store(num / den);
+                else
+                    s_gfxAspectMax.store(21.0f / 9.0f);
+            }
+            else
+            {
+                char *end = nullptr;
+                float v = std::strtof(m, &end);
+                if (end != m && v > 0.0f)
+                    s_gfxAspectMax.store(v);
+                else
+                    s_gfxAspectMax.store(21.0f / 9.0f);
+            }
+        }
+
+        const char *h = std::getenv("PS2X_HUD_ANCHOR");
+        if (!h || !*h)
+        {
+            s_gfxHudSafeAspect.store(0.0f);
+        }
+        else
+        {
+            std::string str = h;
+            if (str == "edge")
+            {
+                s_gfxHudSafeAspect.store(0.0f);
+            }
+            else if (str == "16:9" || str == "16/9")
+            {
+                s_gfxHudSafeAspect.store(16.0f / 9.0f);
+            }
+            else if (str == "4:3" || str == "4/3")
+            {
+                s_gfxHudSafeAspect.store(4.0f / 3.0f);
+            }
+            else if (str.rfind("safe=", 0) == 0)
+            {
+                float v = std::strtof(str.c_str() + 5, nullptr);
+                s_gfxHudSafeAspect.store(v <= 0.0f ? 0.0f : v);
+            }
+            else
+            {
+                char *end = nullptr;
+                float v = std::strtof(str.c_str(), &end);
+                if (end != str.c_str() && v > 0.0f)
+                    s_gfxHudSafeAspect.store(v);
+                else
+                    s_gfxHudSafeAspect.store(0.0f);
+            }
+        }
+    });
+}
+} // namespace
+
+int ps2xGfxGetAspectMode() // FIX-P1
+{
+    ps2xGfxInitLazy();
+    return s_gfxAspectMode.load();
+}
+
+void ps2xGfxSetAspectMode(int m) // FIX-P1
+{
+    ps2xGfxInitLazy();
+    s_gfxAspectMode.store(m);
+}
+
+float ps2xGfxGetAspectMax() // FIX-P1
+{
+    ps2xGfxInitLazy();
+    return s_gfxAspectMax.load();
+}
+
+void ps2xGfxSetAspectMax(float a) // FIX-P1
+{
+    ps2xGfxInitLazy();
+    s_gfxAspectMax.store(a);
+}
+
+float ps2xGfxGetHudSafeAspect() // FIX-P1
+{
+    ps2xGfxInitLazy();
+    return s_gfxHudSafeAspect.load();
+}
+
+void ps2xGfxSetHudSafeAspect(float a) // FIX-P1
+{
+    ps2xGfxInitLazy();
+    s_gfxHudSafeAspect.store(a);
+}
+
+bool ps2xGfxSaveIni(int renderScalePct, int vsyncMode, int fullscreen) // FIX-P1
+{
+    std::string aspectStr = "4:3";
+    switch (ps2xGfxGetAspectMode())
+    {
+        case 0: aspectStr = "4:3"; break;
+        case 1: aspectStr = "fill"; break;
+        case 2: aspectStr = "16:9"; break;
+        case 3: aspectStr = "16:10"; break;
+        case 4: aspectStr = "native"; break;
+        default: aspectStr = "4:3"; break;
+    }
+
+    std::string aspectMaxStr;
+    float aMax = ps2xGfxGetAspectMax();
+    if (aMax <= 0.0f)
+    {
+        aspectMaxStr = "none";
+    }
+    else if (std::abs(aMax - 21.0f / 9.0f) < 0.01f)
+    {
+        aspectMaxStr = "21:9";
+    }
+    else if (std::abs(aMax - 32.0f / 9.0f) < 0.01f)
+    {
+        aspectMaxStr = "32:9";
+    }
+    else if (std::abs(aMax - 16.0f / 9.0f) < 0.01f)
+    {
+        aspectMaxStr = "16:9";
+    }
+    else if (std::abs(aMax - 1.6f) < 0.01f)
+    {
+        aspectMaxStr = "16:10";
+    }
+    else if (std::abs(aMax - 4.0f / 3.0f) < 0.01f)
+    {
+        aspectMaxStr = "4:3";
+    }
+    else
+    {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.4g", aMax);
+        aspectMaxStr = buf;
+    }
+
+    std::string hudAnchorStr;
+    float hSafe = ps2xGfxGetHudSafeAspect();
+    if (hSafe <= 0.0f)
+    {
+        hudAnchorStr = "edge";
+    }
+    else if (std::abs(hSafe - 16.0f / 9.0f) < 0.01f)
+    {
+        hudAnchorStr = "16:9";
+    }
+    else if (std::abs(hSafe - 4.0f / 3.0f) < 0.01f)
+    {
+        hudAnchorStr = "4:3";
+    }
+    else
+    {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "safe=%.4g", hSafe);
+        hudAnchorStr = buf;
+    }
+
+    std::string vsyncStr = "on";
+    switch (vsyncMode)
+    {
+        case 0: vsyncStr = "on"; break;
+        case 1: vsyncStr = "mailbox"; break;
+        case 2: vsyncStr = "off"; break;
+        case 3: vsyncStr = "relaxed"; break;
+        default: vsyncStr = "on"; break;
+    }
+
+    const std::vector<std::pair<std::string, std::string>> targetKeys = {
+        {"aspect", aspectStr},
+        {"aspect_max", aspectMaxStr},
+        {"hud_anchor", hudAnchorStr},
+        {"render_scale", std::to_string(renderScalePct)},
+        {"vsync", vsyncStr},
+        {"fullscreen", (fullscreen != 0) ? "1" : "0"}
+    };
+
+    std::map<std::string, bool> keyReplaced;
+    for (const auto &kv : targetKeys)
+        keyReplaced[kv.first] = false;
+
+    std::vector<std::string> lines;
+    {
+        std::ifstream in("ps2x.ini");
+        if (in)
+        {
+            std::string l;
+            while (std::getline(in, l))
+            {
+                if (!l.empty() && l.back() == '\r')
+                    l.pop_back();
+                lines.push_back(l);
+            }
+            in.close();
+        }
+    }
+
+    std::vector<std::string> outLines;
+    bool inGraphics = false;
+    bool graphicsFound = false;
+    bool missingKeysAppended = false;
+
+    auto appendMissingKeys = [&]() {
+        if (missingKeysAppended) return;
+        missingKeysAppended = true;
+        for (const auto &kv : targetKeys)
+        {
+            if (!keyReplaced[kv.first])
+            {
+                outLines.push_back(kv.first + " = " + kv.second);
+                keyReplaced[kv.first] = true;
+            }
+        }
+    };
+
+    for (size_t i = 0; i < lines.size(); ++i)
+    {
+        std::string line = lines[i];
+        std::string trimmed = trim(line);
+
+        if (!trimmed.empty() && trimmed[0] == '[')
+        {
+            size_t e = trimmed.find(']');
+            std::string sec = lower(trim(trimmed.substr(1, (e == std::string::npos) ? std::string::npos : e - 1)));
+            if (sec == "graphics")
+            {
+                inGraphics = true;
+                graphicsFound = true;
+                outLines.push_back(line);
+                continue;
+            }
+            else if (inGraphics)
+            {
+                std::vector<std::string> trailingEmpty;
+                while (!outLines.empty() && trim(outLines.back()).empty())
+                {
+                    trailingEmpty.push_back(outLines.back());
+                    outLines.pop_back();
+                }
+                appendMissingKeys();
+                while (!trailingEmpty.empty())
+                {
+                    outLines.push_back(trailingEmpty.back());
+                    trailingEmpty.pop_back();
+                }
+                inGraphics = false;
+                outLines.push_back(line);
+                continue;
+            }
+        }
+
+        if (inGraphics && !trimmed.empty() && trimmed[0] != '#' && trimmed[0] != ';')
+        {
+            size_t eq = trimmed.find('=');
+            if (eq != std::string::npos)
+            {
+                std::string k = lower(trim(trimmed.substr(0, eq)));
+                for (const auto &kv : targetKeys)
+                {
+                    if (kv.first == k)
+                    {
+                        line = kv.first + " = " + kv.second;
+                        keyReplaced[kv.first] = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        outLines.push_back(line);
+    }
+
+    if (inGraphics && !missingKeysAppended)
+    {
+        std::vector<std::string> trailingEmpty;
+        while (!outLines.empty() && trim(outLines.back()).empty())
+        {
+            trailingEmpty.push_back(outLines.back());
+            outLines.pop_back();
+        }
+        appendMissingKeys();
+        while (!trailingEmpty.empty())
+        {
+            outLines.push_back(trailingEmpty.back());
+            trailingEmpty.pop_back();
+        }
+    }
+    else if (!graphicsFound)
+    {
+        if (!outLines.empty() && !outLines.back().empty())
+            outLines.push_back("");
+        outLines.push_back("[graphics]");
+        appendMissingKeys();
+    }
+
+    std::ofstream out("ps2x.ini");
+    if (!out)
+    {
+        std::cerr << "[cfg] ini save failed" << std::endl;
+        return false;
+    }
+    for (const auto &l : outLines)
+    {
+        out << l << "\n";
+    }
+    out.close();
+    if (!out)
+    {
+        std::cerr << "[cfg] ini save failed" << std::endl;
+        return false;
+    }
+    std::cerr << "[cfg] ini saved" << std::endl;
+    return true;
 }

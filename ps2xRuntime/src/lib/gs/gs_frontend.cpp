@@ -805,6 +805,316 @@ static void rtt0OnFrame() // PROBE-RTT0
 }
 
 static std::mutex s_rd2dCapMutex; // FEAT-RD8
+
+// PROBE-E0: Draw census probe (PS2X_RD_CENSUS=1)
+static const bool s_rdCensusOn = []() {
+    const char *e = std::getenv("PS2X_RD_CENSUS");
+    return e && e[0] == '1';
+}(); // PROBE-E0
+
+struct CensusRtEntry { // PROBE-E0
+    uint32_t fbp = 0;
+    uint32_t fbw = 0;
+    uint8_t psm = 0;
+    uint32_t n = 0;
+};
+struct CensusFbReadEntry { // PROBE-E0
+    uint32_t tbp0 = 0;
+    uint8_t psm = 0;
+    uint32_t n = 0;
+};
+struct CensusAbeEntry { // PROBE-E0
+    uint64_t mode = 0;
+    uint32_t n = 0;
+};
+
+static std::atomic<uint32_t> s_censusDisplayFbp{0xFFFFFFFFu}; // PROBE-E0
+static uint32_t s_censusPrims = 0u; // PROBE-E0
+static uint32_t s_censusTri = 0u; // PROBE-E0
+static uint32_t s_censusSprite = 0u; // PROBE-E0
+static uint32_t s_censusLine = 0u; // PROBE-E0
+static uint32_t s_censusPoint = 0u; // PROBE-E0
+static uint32_t s_censusTme = 0u; // PROBE-E0
+static uint32_t s_censusAbeDraws = 0u; // PROBE-E0
+static uint32_t s_censusFge = 0u; // PROBE-E0
+static uint32_t s_censusLastFogcol = 0u; // PROBE-E0
+static uint32_t s_censusAtst = 0u; // PROBE-E0
+static uint32_t s_censusZteOff = 0u; // PROBE-E0
+static uint32_t s_censusFbmskNonzero = 0u; // PROBE-E0
+static uint32_t s_censusFba = 0u; // PROBE-E0
+static uint32_t s_censusAa1 = 0u; // PROBE-E0
+
+static CensusRtEntry s_censusRt[16]{}; // PROBE-E0
+static size_t s_censusRtCount = 0u; // PROBE-E0
+
+static CensusFbReadEntry s_censusFbRead[16]{}; // PROBE-E0
+static size_t s_censusFbReadCount = 0u; // PROBE-E0
+
+static CensusAbeEntry s_censusAbe[16]{}; // PROBE-E0
+static size_t s_censusAbeCount = 0u; // PROBE-E0
+
+static uint32_t s_censusSeenRtFbps[16]{}; // PROBE-E0
+static size_t s_censusSeenRtFbpCount = 0u; // PROBE-E0
+
+static void rdCensusRecordDraw(const GSPrimitiveBatch &batch) // PROBE-E0
+{
+    const GSContext &ctx = batch.state.context;
+    const GSPrimReg &prim = batch.state.prim;
+
+    std::lock_guard<std::mutex> lock(s_rd2dCapMutex);
+
+    ++s_censusPrims;
+
+    switch (prim.type)
+    {
+    case GS_PRIM_TRIANGLE:
+    case GS_PRIM_TRISTRIP:
+    case GS_PRIM_TRIFAN:
+        ++s_censusTri;
+        break;
+    case GS_PRIM_SPRITE:
+        ++s_censusSprite;
+        break;
+    case GS_PRIM_LINE:
+    case GS_PRIM_LINESTRIP:
+        ++s_censusLine;
+        break;
+    case GS_PRIM_POINT:
+        ++s_censusPoint;
+        break;
+    default:
+        break;
+    }
+
+    if (prim.tme) ++s_censusTme;
+    if (prim.abe) ++s_censusAbeDraws;
+    if (prim.fge) ++s_censusFge;
+    if (prim.aa1) ++s_censusAa1;
+
+    s_censusLastFogcol = static_cast<uint32_t>(batch.state.fogR) |
+                         (static_cast<uint32_t>(batch.state.fogG) << 8) |
+                         (static_cast<uint32_t>(batch.state.fogB) << 16);
+
+    // atst: count where alpha test does not always pass (ATE=1 and ATST!=1/ALWAYS)
+    if ((ctx.test & 1ull) != 0ull && ((ctx.test >> 1) & 7ull) != 1ull)
+        ++s_censusAtst;
+
+    // zte_off: ZTE is bit 16; off when 0
+    if ((ctx.test & (1ull << 16)) == 0ull)
+        ++s_censusZteOff;
+
+    if (ctx.frame.fbmsk != 0u)
+        ++s_censusFbmskNonzero;
+
+    if ((ctx.fba & 1ull) != 0ull)
+        ++s_censusFba;
+
+    const uint32_t dispFbp = s_censusDisplayFbp.load(std::memory_order_relaxed);
+    const bool isDisplay = (dispFbp != 0xFFFFFFFFu && ctx.frame.fbp == dispFbp) || ps2xRdIsDisplayFbp(ctx.frame.fbp);
+
+    // rt: frame regs whose FBP != current display fbp
+    if (!isDisplay)
+    {
+        const uint32_t fbp = ctx.frame.fbp & 0x1FFu;
+        const uint32_t fbw = ctx.frame.fbw;
+        const uint8_t psm = ctx.frame.psm;
+
+        bool foundRtFbp = false;
+        for (size_t i = 0; i < s_censusSeenRtFbpCount; ++i)
+        {
+            if (s_censusSeenRtFbps[i] == fbp)
+            {
+                foundRtFbp = true;
+                break;
+            }
+        }
+        if (!foundRtFbp && s_censusSeenRtFbpCount < 16)
+        {
+            s_censusSeenRtFbps[s_censusSeenRtFbpCount++] = fbp;
+        }
+
+        bool foundRt = false;
+        for (size_t i = 0; i < s_censusRtCount; ++i)
+        {
+            if (s_censusRt[i].fbp == fbp && s_censusRt[i].psm == psm && s_censusRt[i].fbw == fbw)
+            {
+                ++s_censusRt[i].n;
+                foundRt = true;
+                break;
+            }
+        }
+        if (!foundRt && s_censusRtCount < 16)
+        {
+            s_censusRt[s_censusRtCount++] = {fbp, fbw, psm, 1u};
+        }
+    }
+
+    // fbread: tex0 whose address range overlaps any frame buffer base (display fbp or an rt fbp seen this second)
+    if (prim.tme)
+    {
+        uint32_t texFirst = 0u, texLast = 0u;
+        const uint32_t w = 1u << std::min<uint32_t>(ctx.tex0.tw, 10u);
+        const uint32_t h = 1u << std::min<uint32_t>(ctx.tex0.th, 10u);
+        rtt0PageRange(ctx.tex0.tbp0, ctx.tex0.tbw, ctx.tex0.psm, w, h, texFirst, texLast);
+
+        auto overlapsFb = [&](uint32_t baseFbp) -> bool {
+            if (baseFbp == 0xFFFFFFFFu) return false;
+            return (texFirst <= baseFbp && texLast >= baseFbp) ||
+                   (ctx.tex0.tbp0 / 32u == baseFbp) ||
+                   (texFirst >= baseFbp && texFirst < baseFbp + 32u);
+        };
+
+        bool overlaps = overlapsFb(dispFbp);
+        if (!overlaps)
+        {
+            for (int d = 0; d < 4; ++d)
+            {
+                const uint32_t df = s_rdDispFbps[d].load(std::memory_order_relaxed);
+                if (overlapsFb(df)) { overlaps = true; break; }
+            }
+        }
+        if (!overlaps)
+        {
+            for (size_t r = 0; r < s_censusSeenRtFbpCount; ++r)
+            {
+                if (overlapsFb(s_censusSeenRtFbps[r])) { overlaps = true; break; }
+            }
+        }
+
+        if (overlaps)
+        {
+            const uint32_t tbp0 = ctx.tex0.tbp0;
+            const uint8_t psm = ctx.tex0.psm;
+            bool foundFbRead = false;
+            for (size_t i = 0; i < s_censusFbReadCount; ++i)
+            {
+                if (s_censusFbRead[i].tbp0 == tbp0 && s_censusFbRead[i].psm == psm)
+                {
+                    ++s_censusFbRead[i].n;
+                    foundFbRead = true;
+                    break;
+                }
+            }
+            if (!foundFbRead && s_censusFbReadCount < 16)
+            {
+                s_censusFbRead[s_censusFbReadCount++] = {tbp0, psm, 1u};
+            }
+        }
+    }
+
+    // abe: distinct alpha register values (A,B,C,D,FIX) as hex
+    if (prim.abe)
+    {
+        const uint64_t mode = ctx.alpha & 0x000000FF000000FFull;
+        bool foundAbe = false;
+        for (size_t i = 0; i < s_censusAbeCount; ++i)
+        {
+            if (s_censusAbe[i].mode == mode)
+            {
+                ++s_censusAbe[i].n;
+                foundAbe = true;
+                break;
+            }
+        }
+        if (!foundAbe && s_censusAbeCount < 16)
+        {
+            s_censusAbe[s_censusAbeCount++] = {mode, 1u};
+        }
+    }
+}
+
+static void rdCensusFlip(uint32_t displayFbp) // PROBE-E0
+{
+    if (displayFbp != 0xFFFFFFFFu)
+        s_censusDisplayFbp.store(displayFbp, std::memory_order_relaxed);
+
+    static auto s_lastCensusT = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastCensusT).count() < 1000)
+        return;
+    s_lastCensusT = now;
+
+    std::lock_guard<std::mutex> lock(s_rd2dCapMutex);
+
+    std::sort(s_censusRt, s_censusRt + s_censusRtCount, [](const CensusRtEntry &a, const CensusRtEntry &b) {
+        return a.n > b.n;
+    });
+    char rtBuf[256] = "";
+    int rtPos = 0;
+    const size_t rtTop = std::min<size_t>(s_censusRtCount, 5u);
+    for (size_t i = 0; i < rtTop; ++i)
+    {
+        const int rem = static_cast<int>(sizeof(rtBuf)) - rtPos;
+        if (rem <= 1) break;
+        const int written = std::snprintf(rtBuf + rtPos, static_cast<size_t>(rem), "%s%x:%u:%u:%u",
+                                          (i > 0 ? "," : ""), s_censusRt[i].fbp, s_censusRt[i].psm, s_censusRt[i].fbw, s_censusRt[i].n);
+        if (written > 0) rtPos += std::min(written, rem - 1);
+    }
+
+    std::sort(s_censusFbRead, s_censusFbRead + s_censusFbReadCount, [](const CensusFbReadEntry &a, const CensusFbReadEntry &b) {
+        return a.n > b.n;
+    });
+    char fbreadBuf[256] = "";
+    int fbPos = 0;
+    const size_t fbTop = std::min<size_t>(s_censusFbReadCount, 5u);
+    for (size_t i = 0; i < fbTop; ++i)
+    {
+        const int rem = static_cast<int>(sizeof(fbreadBuf)) - fbPos;
+        if (rem <= 1) break;
+        const int written = std::snprintf(fbreadBuf + fbPos, static_cast<size_t>(rem), "%s%x:%u:%u",
+                                          (i > 0 ? "," : ""), s_censusFbRead[i].tbp0, s_censusFbRead[i].psm, s_censusFbRead[i].n);
+        if (written > 0) fbPos += std::min(written, rem - 1);
+    }
+
+    std::sort(s_censusAbe, s_censusAbe + s_censusAbeCount, [](const CensusAbeEntry &a, const CensusAbeEntry &b) {
+        return a.n > b.n;
+    });
+    char abeBuf[256] = "";
+    int abePos = 0;
+    const size_t abeTop = std::min<size_t>(s_censusAbeCount, 6u);
+    for (size_t i = 0; i < abeTop; ++i)
+    {
+        const int rem = static_cast<int>(sizeof(abeBuf)) - abePos;
+        if (rem <= 1) break;
+        const int written = std::snprintf(abeBuf + abePos, static_cast<size_t>(rem), "%s%llx:%u",
+                                          (i > 0 ? "," : ""), static_cast<unsigned long long>(s_censusAbe[i].mode), s_censusAbe[i].n);
+        if (written > 0) abePos += std::min(written, rem - 1);
+    }
+
+    uint32_t dispVal = displayFbp;
+    if (dispVal == 0xFFFFFFFFu)
+    {
+        dispVal = s_censusDisplayFbp.load(std::memory_order_relaxed);
+        if (dispVal == 0xFFFFFFFFu && ps2xRdHasDisplayFbp())
+            dispVal = s_rdDispFbps[0].load(std::memory_order_relaxed);
+        if (dispVal == 0xFFFFFFFFu)
+            dispVal = 0u;
+    }
+
+    ps2xSafeLog("[census] prims=%u tri=%u sprite=%u line=%u point=%u tme=%u abe=%u fge=%u fogcol=0x%06X atst=%u zte_off=%u fbmsk_nonzero=%u fba=%u aa1=%u rt={%s} fbread={%s} abe={%s} disp=0x%X\n",
+                s_censusPrims, s_censusTri, s_censusSprite, s_censusLine, s_censusPoint,
+                s_censusTme, s_censusAbeDraws, s_censusFge, s_censusLastFogcol,
+                s_censusAtst, s_censusZteOff, s_censusFbmskNonzero, s_censusFba, s_censusAa1,
+                rtBuf, fbreadBuf, abeBuf, dispVal);
+
+    s_censusPrims = 0u;
+    s_censusTri = 0u;
+    s_censusSprite = 0u;
+    s_censusLine = 0u;
+    s_censusPoint = 0u;
+    s_censusTme = 0u;
+    s_censusAbeDraws = 0u;
+    s_censusFge = 0u;
+    s_censusAtst = 0u;
+    s_censusZteOff = 0u;
+    s_censusFbmskNonzero = 0u;
+    s_censusFba = 0u;
+    s_censusAa1 = 0u;
+    s_censusRtCount = 0u;
+    s_censusFbReadCount = 0u;
+    s_censusAbeCount = 0u;
+    s_censusSeenRtFbpCount = 0u;
+}
 static std::vector<RdVert> s_rd2dVerts; // FEAT-RD8
 static std::vector<Rd2DBatch> s_rd2dBatches; // FEAT-RD8
 static std::vector<uint8_t> s_rd2dFba; // PROBE-RD78D
@@ -3270,6 +3580,9 @@ void GS::latchHostPresentationFrame()
         ps2_gt_count(2, 1); // PROBE-GT: skip_empty
     }
 
+    if (s_rdCensusOn) // PROBE-E0
+        rdCensusFlip(displayFbp);
+
     // PERF-JD: every 128 latches print the average ms per latch for each stage
     g_presTicks[0].fetch_add(__rdtsc() - pjStart, std::memory_order_relaxed);
     if ((g_presTicks[7].fetch_add(1, std::memory_order_relaxed) + 1u) % 128u == 0u)
@@ -5251,6 +5564,8 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
 
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
+    if (s_rdCensusOn) // PROBE-E0
+        rdCensusRecordDraw(batch);
     const bool isGeomKick = rdNoteKickBookkeeping(batch.state.context, batch.state.prim, batch.state.texa, m_localMemoryStorage); // FEAT-RD42
     if (s_rdGsDrawLogOn) // PROBE-RD60
         rdGsDrawLogRecord(batch.state.context, batch.state.prim, m_vtxQueue, batch.vertexCount, s_rdCurSerial, isGeomKick);

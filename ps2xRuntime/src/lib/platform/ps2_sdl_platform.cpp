@@ -57,6 +57,13 @@ bool ps2xSdlKeyPressedEdge(int sdlScancode);
 bool ps2xSdlImGuiRecord(VkCommandBuffer cb, VkImage swapImage, VkImageView swapView, uint32_t w, uint32_t h);
 #endif // DBG1
 
+bool ps2xSdlGetFullscreen(); // FIX-P2
+void ps2xSdlSetFullscreen(bool on); // FIX-P2
+int  ps2xSdlGetPresentMode(); // FIX-P2
+void ps2xSdlSetPresentMode(int mode); // FIX-P2
+bool ps2xSdlPresentModeSupported(int mode); // FIX-P2
+void ps2xSdlGetWindowPixelSize(int *w, int *h); // FIX-P2
+
 namespace
 {
     constexpr uint32_t kMaxFramesInFlight = 2;
@@ -431,6 +438,49 @@ namespace
         }
     }
 
+    // FIX-P2: present mode state and helpers
+    static int s_requestedPresentMode = -1;
+    static int s_actualPresentMode = 0;
+
+    static int parsePresentModeEnv()
+    {
+        const char *pmEnv = std::getenv("PS2X_VK_PRESENT");
+        if (pmEnv && pmEnv[0])
+        {
+            std::string s = pmEnv;
+            for (char &c : s)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (s == "mailbox") return 1;
+            if (s == "immediate" || s == "off") return 2;
+            if (s == "fifo_relaxed" || s == "relaxed") return 3;
+        }
+        return 0; // FIFO
+    }
+
+    static VkPresentModeKHR modeToVkPresentMode(int mode)
+    {
+        switch (mode)
+        {
+            case 1: return VK_PRESENT_MODE_MAILBOX_KHR;
+            case 2: return VK_PRESENT_MODE_IMMEDIATE_KHR;
+            case 3: return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+            case 0:
+            default: return VK_PRESENT_MODE_FIFO_KHR;
+        }
+    }
+
+    static const char *presentModeName(int mode)
+    {
+        switch (mode)
+        {
+            case 1: return "MAILBOX";
+            case 2: return "IMMEDIATE";
+            case 3: return "FIFO_RELAXED";
+            case 0:
+            default: return "FIFO";
+        }
+    }
+
     bool CreateSwapchain(std::string &err)
     {
         int w = 0, h = 0;
@@ -492,40 +542,14 @@ namespace
             imageCount = caps.maxImageCount;
         }
 
-        // FIX-R1: present mode selection from PS2X_VK_PRESENT
-        const char *pmEnv = std::getenv("PS2X_VK_PRESENT");
-        std::string reqMode = (pmEnv && pmEnv[0]) ? pmEnv : "fifo";
-        std::string reqLower = reqMode;
-        for (char &c : reqLower)
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-        VkPresentModeKHR desiredMode = VK_PRESENT_MODE_FIFO_KHR;
-        const char *desiredName = "FIFO";
-        bool knownMode = true;
-        if (reqLower == "fifo")
+        // FIX-P2: present mode selection from requested mode / env PS2X_VK_PRESENT
+        if (s_requestedPresentMode < 0)
         {
-            desiredMode = VK_PRESENT_MODE_FIFO_KHR;
-            desiredName = "FIFO";
+            s_requestedPresentMode = parsePresentModeEnv();
         }
-        else if (reqLower == "mailbox")
-        {
-            desiredMode = VK_PRESENT_MODE_MAILBOX_KHR;
-            desiredName = "MAILBOX";
-        }
-        else if (reqLower == "immediate" || reqLower == "off")
-        {
-            desiredMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
-            desiredName = "IMMEDIATE";
-        }
-        else if (reqLower == "fifo_relaxed" || reqLower == "relaxed")
-        {
-            desiredMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
-            desiredName = "FIFO_RELAXED";
-        }
-        else
-        {
-            knownMode = false;
-        }
+        const int reqMode = s_requestedPresentMode;
+        VkPresentModeKHR desiredMode = modeToVkPresentMode(reqMode);
+        const char *desiredName = presentModeName(reqMode);
 
         uint32_t modeCount = 0;
         vkGetPhysicalDeviceSurfacePresentModesKHR(g_sdl.physicalDevice, g_sdl.surface, &modeCount, nullptr);
@@ -536,34 +560,34 @@ namespace
         }
 
         bool supported = false;
-        if (knownMode)
+        for (VkPresentModeKHR m : modes)
         {
-            for (VkPresentModeKHR m : modes)
+            if (m == desiredMode)
             {
-                if (m == desiredMode)
-                {
-                    supported = true;
-                    break;
-                }
+                supported = true;
+                break;
             }
         }
 
         VkPresentModeKHR chosenMode = VK_PRESENT_MODE_FIFO_KHR;
         const char *chosenName = "FIFO";
         static bool s_loggedPresentMode = false;
+        static int s_lastLoggedMode = -1;
         if (supported)
         {
             chosenMode = desiredMode;
             chosenName = desiredName;
+            s_actualPresentMode = reqMode; // FIX-P2
         }
         else
         {
-            if (!s_loggedPresentMode && reqLower != "fifo")
+            if (!s_loggedPresentMode && reqMode != 0)
             {
-                std::printf("[sdl] present mode %s unavailable, using FIFO\n", reqMode.c_str());
+                std::printf("[sdl] present mode %s unavailable, using FIFO\n", desiredName);
             }
             chosenMode = VK_PRESENT_MODE_FIFO_KHR;
             chosenName = "FIFO";
+            s_actualPresentMode = 0; // FIX-P2
         }
 
         VkSwapchainCreateInfoKHR sci{};
@@ -596,10 +620,11 @@ namespace
         g_sdl.swapchainImages.resize(actualCount);
         vkGetSwapchainImagesKHR(g_sdl.device, g_sdl.swapchain, &actualCount, g_sdl.swapchainImages.data());
 
-        // FIX-R1: log chosen present mode once
-        if (!s_loggedPresentMode)
+        // FIX-R1 / FIX-P2: log chosen present mode once (or when mode changes)
+        if (!s_loggedPresentMode || s_lastLoggedMode != s_actualPresentMode)
         {
             s_loggedPresentMode = true;
+            s_lastLoggedMode = s_actualPresentMode;
             std::printf("[sdl] present mode=%s imageCount=%u\n", chosenName, actualCount);
         }
 
@@ -1180,9 +1205,7 @@ namespace // FIX-RDG4Q
     {
         if (g_sdl.window && ps2xSdlKeyPressedEdge(SDL_SCANCODE_F11) && !ps2xSdlImGuiWantsKeyboard())
         {
-            bool isFs = (SDL_GetWindowFlags(g_sdl.window) & SDL_WINDOW_FULLSCREEN) != 0;
-            SDL_SetWindowFullscreen(g_sdl.window, !isFs);
-            g_sdl.framebufferResized = true;
+            ps2xSdlSetFullscreen(!ps2xSdlGetFullscreen()); // FIX-P2
             g_sdl.prevKeys[SDL_SCANCODE_F11] = true;
         }
     }
@@ -1422,33 +1445,35 @@ void ps2xSdlPresent()
         const float screenWidth = static_cast<float>(g_sdl.swapchainExtent.width); // FIX-R5
         const float screenHeight = static_cast<float>(g_sdl.swapchainExtent.height); // FIX-R5
 
-        static const float s_aspect = []() { // FIX-R5
-            const char *a = std::getenv("PS2X_ASPECT");
-            if (!a || !*a) return 4.0f / 3.0f;
-            if (!std::strcmp(a, "native")) return 0.0f;
-            if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f;
-            if (!std::strcmp(a, "16:10")) return 1.6f;
-            if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f;
-            if (!std::strcmp(a, "fill")) return 4.0f / 3.0f;
-            return 0.0f;
-        }();
+        // FIX-P2: read aspect mode every frame from ps2xGfxGetAspectMode()
+        extern int ps2xGfxGetAspectMode();
+        const int aspectMode = ps2xGfxGetAspectMode();
+        float curAspect = 4.0f / 3.0f;
+        if (aspectMode == 2)
+            curAspect = 16.0f / 9.0f;
+        else if (aspectMode == 3)
+            curAspect = 1.6f;
+        else if (aspectMode == 4)
+            curAspect = 0.0f; // source region aspect
+        else
+            curAspect = 4.0f / 3.0f; // mode 0 and 1 => 4:3 box
 
-        float dstWidth, dstHeight; // FIX-R5
-        if (s_aspect > 0.0f) // FIX-R5
+        float dstWidth, dstHeight; // FIX-P2
+        if (curAspect > 0.0f) // FIX-P2
         {
-            dstWidth = std::min(screenWidth, screenHeight * s_aspect);
-            dstHeight = dstWidth / s_aspect;
+            dstWidth = std::min(screenWidth, screenHeight * curAspect);
+            dstHeight = dstWidth / curAspect;
         }
-        else // FIX-R5
+        else // FIX-P2
         {
             const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
             dstWidth = srcWidth * scale;
             dstHeight = srcHeight * scale;
         }
-        const int32_t dstW = static_cast<int32_t>(dstWidth); // FIX-R5
-        const int32_t dstH = static_cast<int32_t>(dstHeight); // FIX-R5
-        const int32_t dstX = (static_cast<int32_t>(screenWidth) - dstW) / 2; // FIX-R5
-        const int32_t dstY = (static_cast<int32_t>(screenHeight) - dstH) / 2; // FIX-R5
+        const int32_t dstW = static_cast<int32_t>(dstWidth); // FIX-P2
+        const int32_t dstH = static_cast<int32_t>(dstHeight); // FIX-P2
+        const int32_t dstX = (static_cast<int32_t>(screenWidth) - dstW) / 2; // FIX-P2
+        const int32_t dstY = (static_cast<int32_t>(screenHeight) - dstH) / 2; // FIX-P2
 
         VkImageBlit blit{};
         blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -2144,6 +2169,80 @@ bool ps2xSdlKeyPressedEdge(int sdlScancode) // FIX-DBG1C
     if (sdlScancode < 0 || sdlScancode >= SDL_SCANCODE_COUNT)
         return false;
     return g_sdl.keys[sdlScancode].load(std::memory_order_relaxed) && !g_sdl.prevKeys[sdlScancode];
+}
+
+bool ps2xSdlGetFullscreen() // FIX-P2
+{
+    if (!g_sdl.window)
+        return false;
+    return (SDL_GetWindowFlags(g_sdl.window) & SDL_WINDOW_FULLSCREEN) != 0;
+}
+
+void ps2xSdlSetFullscreen(bool on) // FIX-P2
+{
+    if (!g_sdl.window)
+        return;
+    bool isFs = (SDL_GetWindowFlags(g_sdl.window) & SDL_WINDOW_FULLSCREEN) != 0;
+    if (isFs != on)
+    {
+        SDL_SetWindowFullscreen(g_sdl.window, on);
+        g_sdl.framebufferResized = true;
+    }
+}
+
+int ps2xSdlGetPresentMode() // FIX-P2
+{
+    if (s_requestedPresentMode < 0)
+        s_requestedPresentMode = parsePresentModeEnv();
+    return s_actualPresentMode;
+}
+
+void ps2xSdlSetPresentMode(int mode) // FIX-P2
+{
+    if (mode < 0 || mode > 3)
+        return;
+    if (s_requestedPresentMode != mode)
+    {
+        s_requestedPresentMode = mode;
+        g_sdl.framebufferResized = true;
+    }
+}
+
+bool ps2xSdlPresentModeSupported(int mode) // FIX-P2
+{
+    if (mode == 0)
+        return true;
+    if (mode < 0 || mode > 3)
+        return false;
+    if (!g_sdl.physicalDevice || !g_sdl.surface)
+        return false;
+    uint32_t modeCount = 0;
+    if (vkGetPhysicalDeviceSurfacePresentModesKHR(g_sdl.physicalDevice, g_sdl.surface, &modeCount, nullptr) != VK_SUCCESS || modeCount == 0)
+        return false;
+    std::vector<VkPresentModeKHR> modes(modeCount);
+    if (vkGetPhysicalDeviceSurfacePresentModesKHR(g_sdl.physicalDevice, g_sdl.surface, &modeCount, modes.data()) != VK_SUCCESS)
+        return false;
+    VkPresentModeKHR target = modeToVkPresentMode(mode);
+    for (VkPresentModeKHR m : modes)
+    {
+        if (m == target)
+            return true;
+    }
+    return false;
+}
+
+void ps2xSdlGetWindowPixelSize(int *w, int *h) // FIX-P2
+{
+    int width = static_cast<int>(g_sdl.swapchainExtent.width);
+    int height = static_cast<int>(g_sdl.swapchainExtent.height);
+    if ((width <= 0 || height <= 0) && g_sdl.window)
+    {
+        SDL_GetWindowSizeInPixels(g_sdl.window, &width, &height);
+    }
+    if (w)
+        *w = width;
+    if (h)
+        *h = height;
 }
 
 #endif // PS2X_HAS_SDL3

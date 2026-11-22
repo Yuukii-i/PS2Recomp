@@ -19,6 +19,7 @@ static bool g_rdAlwaysFunc = false; // FEAT-RD20
 #include <map> // PROBE-RD26
 #include <tuple> // PROBE-RD29
 #include <algorithm> // PROBE-RD26
+#include <cmath> // FIX-P1
 #include <mutex>
 #include <vector>
 
@@ -2188,59 +2189,36 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             }
             const float s = h / fbH;
             const float scaleToShader = (s * fbW) / w;
-            // FIX-R8: static HUD safe area anchor mode
-            struct HudAnchorCfg {
-                std::string mode = "edge";
-                float safeAspect = 0.0f;
-                bool isEdge = true;
-            };
-            static const HudAnchorCfg s_hudAnchor = []() {
-                HudAnchorCfg cfg;
-                const char *e = std::getenv("PS2X_HUD_ANCHOR");
-                if (!e || !e[0])
-                    return cfg;
-                std::string str = e;
-                if (str == "edge")
-                    return cfg;
-                if (str == "16:9" || str == "16/9")
-                {
-                    cfg.mode = str;
-                    cfg.safeAspect = 16.0f / 9.0f;
-                    cfg.isEdge = false;
-                    return cfg;
-                }
-                if (str == "4:3" || str == "4/3")
-                {
-                    cfg.mode = str;
-                    cfg.safeAspect = 4.0f / 3.0f;
-                    cfg.isEdge = false;
-                    return cfg;
-                }
-                if (str.rfind("safe=", 0) == 0)
-                {
-                    cfg.mode = str;
-                    cfg.safeAspect = std::strtof(str.c_str() + 5, nullptr);
-                    cfg.isEdge = (cfg.safeAspect <= 0.0f);
-                    return cfg;
-                }
-                char *end = nullptr;
-                float v = std::strtof(str.c_str(), &end);
-                if (end != str.c_str() && v > 0.0f)
-                {
-                    cfg.mode = str;
-                    cfg.safeAspect = v;
-                    cfg.isEdge = false;
-                    return cfg;
-                }
-                return cfg;
-            }();
-            const float safeW = s_hudAnchor.isEdge ? w : std::min(w, h * s_hudAnchor.safeAspect); // FIX-R8
-            const float m = (s_hudAnchor.isEdge || safeW >= w) ? 0.0f : (0.5f * fbW * (1.0f - safeW / w)); // FIX-R8
-            static bool s_hudAnchorLogged = false; // FIX-R8
-            if (!s_hudAnchorLogged) // FIX-R8
+            // FIX-P1: live HUD safe area anchor mode
+            extern float ps2xGfxGetHudSafeAspect(); // FIX-P1
+            const float hudSafeAspect = ps2xGfxGetHudSafeAspect(); // FIX-P1
+            const bool isEdge = (hudSafeAspect <= 0.0f); // FIX-P1
+            const float safeW = isEdge ? w : std::min(w, h * hudSafeAspect); // FIX-P1
+            const float m = (isEdge || safeW >= w) ? 0.0f : (0.5f * fbW * (1.0f - safeW / w)); // FIX-P1
+            static float s_lastHudSafeAspect = -999.0f; // FIX-P1
+            if (std::abs(s_lastHudSafeAspect - hudSafeAspect) > 0.001f) // FIX-P1
             {
-                s_hudAnchorLogged = true; // FIX-R8
-                ps2xSafeLog("[hud] anchor=%s margin=%.1f fb px\n", s_hudAnchor.mode.c_str(), m); // FIX-R8
+                s_lastHudSafeAspect = hudSafeAspect; // FIX-P1
+                const char *modeStr = "edge"; // FIX-P1
+                char modeBuf[32]; // FIX-P1
+                if (hudSafeAspect <= 0.0f)
+                {
+                    modeStr = "edge"; // FIX-P1
+                }
+                else if (std::abs(hudSafeAspect - 16.0f / 9.0f) < 0.01f)
+                {
+                    modeStr = "16:9"; // FIX-P1
+                }
+                else if (std::abs(hudSafeAspect - 4.0f / 3.0f) < 0.01f)
+                {
+                    modeStr = "4:3"; // FIX-P1
+                }
+                else
+                {
+                    std::snprintf(modeBuf, sizeof(modeBuf), "safe=%.2f", hudSafeAspect); // FIX-P1
+                    modeStr = modeBuf; // FIX-P1
+                }
+                ps2xSafeLog("[hud] anchor=%s margin=%.1f fb px\n", modeStr, m); // FIX-P1
             }
             for (const Rd2DBatch &b : g_rdGpu.local2dBatches)
             {

@@ -39,6 +39,7 @@ void ps2xSdlVkEndRdFrame();
 double ps2xSdlVkLastBeginWaitMs(); // PROBE-RDG4P
 VkImageView ps2xSdlVkCurrentSwapView();
 bool ps2xSdlImGuiRecord(VkCommandBuffer cb, VkImage swapImage, VkImageView swapView, uint32_t w, uint32_t h);
+extern int ps2xGfxGetAspectMode(); // FIX-P2
 
 // PROBE-V3B: Pause composite timing probe
 namespace probe_v3b
@@ -3608,28 +3609,25 @@ void drawClassicAdditive(const uint8_t *rgba, int w, int h, int strideBytes) // 
     const float srcHeight = static_cast<float>(h);
     const float screenWidth = static_cast<float>(s_vk.targetW);
     const float screenHeight = static_cast<float>(s_vk.targetH);
-    static const float s_aspect = []() {
-        const char *a = std::getenv("PS2X_ASPECT");
-        if (!a || !*a) return 4.0f / 3.0f;
-        if (!std::strcmp(a, "native")) return 0.0f;
-        if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f;
-        if (!std::strcmp(a, "16:10")) return 1.6f;
-        if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f;
-        if (!std::strcmp(a, "fill")) return -1.0f;
-        return 0.0f;
-    }();
-    float dstWidth, dstHeight;
-    if (s_aspect > 0.0f || s_aspect < 0.0f)
-    {
-        const float winAspect = (screenHeight > 0.0f) ? (screenWidth / screenHeight) : (4.0f / 3.0f);
-        const float k = winAspect / (4.0f / 3.0f);
-        float boxAspect = (s_aspect > 0.0f) ? s_aspect : winAspect;
-        if (s_aspect < 0.0f)
-            boxAspect = (k >= 1.0f) ? winAspect : (4.0f / 3.0f);
-        dstWidth = std::min(screenWidth, screenHeight * boxAspect);
-        dstHeight = dstWidth / boxAspect;
-    }
+    // FIX-P2: read aspect mode every frame from ps2xGfxGetAspectMode()
+    const int aspectMode = ::ps2xGfxGetAspectMode();
+    float aspect = 4.0f / 3.0f;
+    if (aspectMode == 2)
+        aspect = 16.0f / 9.0f;
+    else if (aspectMode == 3)
+        aspect = 1.6f;
+    else if (aspectMode == 4)
+        aspect = 0.0f; // native/source
     else
+        aspect = 4.0f / 3.0f; // 0 and 1(fill) => 4/3 for this CPU frame
+
+    float dstWidth, dstHeight; // FIX-P2
+    if (aspect > 0.0f) // FIX-P2
+    {
+        dstWidth = std::min(screenWidth, screenHeight * aspect);
+        dstHeight = dstWidth / aspect;
+    }
+    else // FIX-P2
     {
         const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
         dstWidth = srcWidth * scale;
