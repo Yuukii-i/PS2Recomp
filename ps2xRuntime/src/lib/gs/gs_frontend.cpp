@@ -6032,7 +6032,10 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             bool isFullScreenClear = false;
             bool isCopyBoundary = false; // FIX-CUT2
             bool isFxCandidate = false; // FIX-FX1
-            const bool wantClearCheck = rdFrameCutOn() && !prim.tme && addCount > 0u && // FEAT-RD55: O(1) early-out when FRAMECUT=0, TME=1, or count==0
+            const bool isFadeQuad = prim.abe && ((ctx.test & 1ull) != 0ull) &&
+                                    (((ctx.test >> 1u) & 7ull) == 6ull) &&
+                                    (((ctx.test >> 4u) & 0xFFull) == 0ull); // FIX-E5c
+            const bool wantClearCheck = rdFrameCutOn() && !prim.tme && addCount > 0u && !isFadeQuad && // FEAT-RD55: O(1) early-out when FRAMECUT=0, TME=1, or count==0 // FIX-E5c
                                         (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
                                         ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull;
             const bool wantCopyCheck = rdFrameCutOn() && s_rdCutCopy && prim.tme && addCount == 6u && // FIX-CUT2 // FIX-CUT2C
