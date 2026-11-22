@@ -1409,6 +1409,128 @@ static inline bool g_rd2dLateOn() // FIX-CFG2
 static const bool g_rdDimLateOn = []{ const char *e = std::getenv("PS2X_RD_DIMLATE"); return !(e && e[0] == '0'); }(); // FIX-RD66
 static const bool g_rdNoZTest = []{ const char *e = std::getenv("PS2X_RD_NOZTEST"); return e && e[0] == '1'; }(); // PROBE-RD59
 static const float g_rdZBias = []{ const char *e = std::getenv("PS2X_RD_ZBIAS"); return (e && *e) ? static_cast<float>(std::atof(e)) : 0.0f; }(); // PROBE-RD59
+// PROBE-E3a: ABE debug filter configuration and counters
+struct AbeFilterConfig
+{
+    bool active = false;
+    int inv = 0;
+    std::string listStr;
+    std::vector<uint64_t> values;
+
+    bool contains(uint64_t v) const
+    {
+        for (uint64_t x : values)
+            if (x == v)
+                return true;
+        return false;
+    }
+};
+
+static const AbeFilterConfig &getAbeFilter() // PROBE-E3a
+{
+    static const AbeFilterConfig cfg = []() {
+        AbeFilterConfig c;
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_ABEFILTER");
+        if (!e || !*e)
+            return c;
+        c.listStr = e;
+        const char *invE = std::getenv("PS2X_RD_ABEFILTER_INV");
+        c.inv = (invE && invE[0] == '1') ? 1 : 0;
+        const char *p = e;
+        while (*p)
+        {
+            while (*p == ' ' || *p == '\t' || *p == ',')
+                ++p;
+            if (!*p)
+                break;
+            char *endp = nullptr;
+            uint64_t val = std::strtoull(p, &endp, 16);
+            if (endp && endp != p)
+            {
+                c.values.push_back(val);
+                p = endp;
+            }
+            else
+            {
+                ++p;
+            }
+        }
+        if (!c.values.empty())
+        {
+            c.active = true;
+            ps2xSafeLog("[abefilter] list=%s inv=%d\n", c.listStr.c_str(), c.inv);
+        }
+        return c;
+    }();
+    return cfg;
+}
+static const AbeFilterConfig &s_abeFilter = getAbeFilter(); // PROBE-E3a
+static uint64_t s_abeDrawn3dSec = 0; // PROBE-E3a
+static uint64_t s_abeDrawn2dSec = 0; // PROBE-E3a
+static uint64_t s_abeSkippedSec = 0; // PROBE-E3a
+// PROBE-E3d: TEX debug filter configuration and counters
+struct TexFilterConfig
+{
+    bool active = false;
+    int inv = 0;
+    std::string listStr;
+    std::vector<uint64_t> values;
+
+    bool contains(uint64_t v) const
+    {
+        for (uint64_t x : values)
+            if (x == v)
+                return true;
+        return false;
+    }
+};
+
+static const TexFilterConfig &getTexFilter() // PROBE-E3d
+{
+    static const TexFilterConfig cfg = []() {
+        TexFilterConfig c;
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_TEXFILTER");
+        if (!e || !*e)
+            return c;
+        c.listStr = e;
+        const char *invE = std::getenv("PS2X_RD_TEXFILTER_INV");
+        c.inv = (invE && invE[0] == '1') ? 1 : 0;
+        const char *p = e;
+        while (*p)
+        {
+            while (*p == ' ' || *p == '\t' || *p == ',')
+                ++p;
+            if (!*p)
+                break;
+            char *endp = nullptr;
+            uint64_t val = std::strtoull(p, &endp, 16);
+            if (endp && endp != p)
+            {
+                c.values.push_back(val);
+                p = endp;
+            }
+            else
+            {
+                ++p;
+            }
+        }
+        if (!c.values.empty())
+        {
+            c.active = true;
+            ps2xSafeLog("[texfilter] n=%u inv=%d\n", static_cast<unsigned>(c.values.size()), c.inv);
+        }
+        return c;
+    }();
+    return cfg;
+}
+static const TexFilterConfig &s_texFilter = getTexFilter(); // PROBE-E3d
+static uint64_t s_texDrawn3dSec = 0; // PROBE-E3d
+static uint64_t s_texDrawn2dSec = 0; // PROBE-E3d
+static uint64_t s_texSkippedSec = 0; // PROBE-E3d
 // RDG1: g_rdZBiasLoc moved to rdgfx::Uniform::ZBias
 struct RdBlendCensus // PROBE-RD29
 {
@@ -2944,6 +3066,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 g_rdc.bound = 0u;
             }
             ++draws2dThisFrame;
+            if (s_abeFilter.active) // PROBE-E3a
+                ++s_abeDrawn2dSec;
+            if (s_texFilter.active) // PROBE-E3d
+                ++s_texDrawn2dSec;
             if (logReason && rd2dReasonDump) // PROBE-RD62
             {
                 const bool texUnres = (((b0.prim >> 4) & 1ull) != 0ull) && (texId == 0u);
@@ -2991,6 +3117,33 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 {
                     ++i2d;
                     continue;
+                }
+                // PROBE-E3a: ABE debug filter for 2D batches
+                if (s_abeFilter.active)
+                {
+                    const bool abe = ((b0.prim >> 6) & 1ull) != 0ull;
+                    const uint64_t maskedAlpha = b0.alpha & 0x000000FF000000FFull;
+                    const bool match = abe && s_abeFilter.contains(maskedAlpha);
+                    const bool draw = s_abeFilter.inv ? !match : match;
+                    if (!draw)
+                    {
+                        ++s_abeSkippedSec;
+                        ++i2d;
+                        continue;
+                    }
+                }
+                // PROBE-E3d: TEX debug filter for 2D batches
+                if (s_texFilter.active)
+                {
+                    const bool tme = ((b0.prim >> 4) & 1ull) != 0ull;
+                    const bool match = tme && s_texFilter.contains(b0.tex0);
+                    const bool draw = s_texFilter.inv ? !match : match;
+                    if (!draw)
+                    {
+                        ++s_texSkippedSec;
+                        ++i2d;
+                        continue;
+                    }
                 }
                 if (b0.count == 0u)
                 {
@@ -3256,6 +3409,32 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             const uint64_t alpha = gsOk ? gsAlpha : batch.alpha;
             constexpr uint64_t kPrimAbeTmeMask = (1ull << 6) | (1ull << 4);
             const uint64_t prim = gsOk ? ((batch.prim & ~kPrimAbeTmeMask) | (gsPrim & kPrimAbeTmeMask)) : batch.prim;
+            // PROBE-E3a: ABE debug filter for 3D batches
+            if (s_abeFilter.active)
+            {
+                const bool abe = ((prim >> 6) & 1ull) != 0ull;
+                const uint64_t maskedAlpha = alpha & 0x000000FF000000FFull;
+                const bool match = abe && s_abeFilter.contains(maskedAlpha);
+                const bool draw = s_abeFilter.inv ? !match : match;
+                if (!draw)
+                {
+                    ++s_abeSkippedSec;
+                    continue;
+                }
+            }
+            const uint64_t tex0 = gsOk ? gsTex0 : batch.tex0; // PROBE-E3d
+            // PROBE-E3d: TEX debug filter for 3D batches
+            if (s_texFilter.active)
+            {
+                const bool tme = ((prim >> 4) & 1ull) != 0ull;
+                const bool match = tme && s_texFilter.contains(tex0);
+                const bool draw = s_texFilter.inv ? !match : match;
+                if (!draw)
+                {
+                    ++s_texSkippedSec;
+                    continue;
+                }
+            }
             if (((prim >> 4) & 1ull) && ps2xRdIsFbFeedback(batch.kickSerial)) // FEAT-RD28b
             {
                 if (rdbDump) rdb3d(1); // PROBE-RD29
@@ -3263,7 +3442,6 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 ++s_fbFeedbackSkipped;
                 continue;
             }
-            const uint64_t tex0 = gsOk ? gsTex0 : batch.tex0;
             const uint64_t tex1 = gsOk ? gsTex1 : batch.tex1;
             const uint64_t clamp = gsOk ? gsClamp : batch.clamp;
             const uint64_t texa = gsOk ? gsTexa : batch.texa;
@@ -3739,6 +3917,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 g_camTl.add3d(batch.camHash, batch.kickSerial, batch.count / 3u, x0, y0, x1, y1, hb);
             }
             ++drawn3dThisFrame; // FEAT-RD34
+            if (s_abeFilter.active) // PROBE-E3a
+                ++s_abeDrawn3dSec;
+            if (s_texFilter.active) // PROBE-E3d
+                ++s_texDrawn3dSec;
             if (batch.kickSerial < min3dSerial) min3dSerial = batch.kickSerial; // PROBE-RD62
             if (batch.kickSerial > max3dSerial) max3dSerial = batch.kickSerial; // PROBE-RD62
             if (afail != 0) // FEAT-RD30
@@ -4146,6 +4328,38 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     g_rdGpu.totalPointLineSkipped += static_cast<uint64_t>(g_rdGpu.lastPointLineSkipped); // FEAT-RD8
     g_rdc.totalCalls += g_rdc.calls; // FEAT-RD15
     const auto now = std::chrono::steady_clock::now();
+    // PROBE-E3a: periodic 1-second ABE filter logging
+    if (s_abeFilter.active)
+    {
+        static auto s_abeLastLog = std::chrono::steady_clock::now();
+        if (now - s_abeLastLog >= std::chrono::seconds(1))
+        {
+            ps2xSafeLog("[abefilter] drawn3d=%llu drawn2d=%llu skipped=%llu\n",
+                        static_cast<unsigned long long>(s_abeDrawn3dSec),
+                        static_cast<unsigned long long>(s_abeDrawn2dSec),
+                        static_cast<unsigned long long>(s_abeSkippedSec));
+            s_abeDrawn3dSec = 0;
+            s_abeDrawn2dSec = 0;
+            s_abeSkippedSec = 0;
+            s_abeLastLog = now;
+        }
+    }
+    // PROBE-E3d: periodic 1-second TEX filter logging
+    if (s_texFilter.active)
+    {
+        static auto s_texLastLog = std::chrono::steady_clock::now();
+        if (now - s_texLastLog >= std::chrono::seconds(1))
+        {
+            ps2xSafeLog("[texfilter] drawn3d=%llu drawn2d=%llu skipped=%llu\n",
+                        static_cast<unsigned long long>(s_texDrawn3dSec),
+                        static_cast<unsigned long long>(s_texDrawn2dSec),
+                        static_cast<unsigned long long>(s_texSkippedSec));
+            s_texDrawn3dSec = 0;
+            s_texDrawn2dSec = 0;
+            s_texSkippedSec = 0;
+            s_texLastLog = now;
+        }
+    }
     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_rdGpu.lastLog).count() >= 5000)
     {
         g_rdGpu.lastLog = now;

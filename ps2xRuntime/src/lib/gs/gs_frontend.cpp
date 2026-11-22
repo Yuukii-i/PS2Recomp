@@ -830,6 +830,71 @@ struct CensusAbeEntry { // PROBE-E0
     uint32_t n = 0;
 };
 
+struct Census2Entry { // PROBE-E3b
+    uint64_t mode = 0;
+    uint32_t n = 0;
+    uint64_t vertsTotal = 0;
+    uint32_t spriteCount = 0;
+    uint32_t tmeCount = 0;
+    uint32_t fgeCount = 0;
+    uint32_t fbmskNonzeroCount = 0;
+    uint32_t fbmskVals[4]{};
+    uint32_t fbmskCounts[4]{};
+    uint32_t ztstHist[4]{};
+    uint32_t zmskCount = 0;
+    uint32_t ateCount = 0;
+    uint16_t ateVals[4]{};
+    uint32_t ateCounts[4]{};
+    uint32_t frameVals[4]{};
+    uint32_t frameCounts[4]{};
+    uint16_t texVals[4]{};
+    uint32_t texCounts[4]{};
+    double bboxWSum = 0.0;
+    double bboxHSum = 0.0;
+    uint32_t dispCount = 0;
+};
+
+static Census2Entry s_census2[8]{}; // PROBE-E3b
+static size_t s_census2Count = 0u;  // PROBE-E3b
+
+template <typename T, size_t N>
+static inline void recordTop(T val, T (&vals)[N], uint32_t (&counts)[N]) // PROBE-E3b
+{
+    for (size_t i = 0; i < N; ++i)
+    {
+        if (counts[i] > 0 && vals[i] == val)
+        {
+            ++counts[i];
+            return;
+        }
+    }
+    for (size_t i = 0; i < N; ++i)
+    {
+        if (counts[i] == 0)
+        {
+            vals[i] = val;
+            counts[i] = 1;
+            return;
+        }
+    }
+}
+
+template <typename T, size_t N>
+static inline T getTop(const T (&vals)[N], const uint32_t (&counts)[N], T defaultVal = T{}) // PROBE-E3b
+{
+    T bestVal = defaultVal;
+    uint32_t bestCount = 0;
+    for (size_t i = 0; i < N; ++i)
+    {
+        if (counts[i] > bestCount)
+        {
+            bestCount = counts[i];
+            bestVal = vals[i];
+        }
+    }
+    return bestVal;
+}
+
 static std::atomic<uint32_t> s_censusDisplayFbp{0xFFFFFFFFu}; // PROBE-E0
 static uint32_t s_censusPrims = 0u; // PROBE-E0
 static uint32_t s_censusTri = 0u; // PROBE-E0
@@ -1041,6 +1106,81 @@ static void rdCensusRecordDraw(const GSPrimitiveBatch &batch, const GSVertex *vt
         {
             s_censusAbe[s_censusAbeCount++] = {mode, 1u};
         }
+
+        // PROBE-E3b: census detail per alpha mode
+        Census2Entry *c2 = nullptr;
+        for (size_t i = 0; i < s_census2Count; ++i)
+        {
+            if (s_census2[i].mode == mode)
+            {
+                c2 = &s_census2[i];
+                break;
+            }
+        }
+        if (!c2 && s_census2Count < 8)
+        {
+            c2 = &s_census2[s_census2Count++];
+            c2->mode = mode;
+        }
+        if (c2)
+        {
+            ++c2->n;
+            c2->vertsTotal += batch.vertexCount;
+            if (prim.type == GS_PRIM_SPRITE) ++c2->spriteCount;
+            if (prim.tme) ++c2->tmeCount;
+            if (prim.fge) ++c2->fgeCount;
+            if (ctx.frame.fbmsk != 0u) ++c2->fbmskNonzeroCount;
+            recordTop(ctx.frame.fbmsk, c2->fbmskVals, c2->fbmskCounts);
+            const uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17u) & 3u);
+            ++c2->ztstHist[ztst];
+            if (ctx.zbuf.zmask) ++c2->zmskCount;
+            if ((ctx.test & 1ull) != 0ull)
+            {
+                ++c2->ateCount;
+                const uint8_t atst = static_cast<uint8_t>((ctx.test >> 1u) & 7ull);
+                const uint8_t aref = static_cast<uint8_t>((ctx.test >> 4u) & 0xFFull);
+                const uint16_t ateCombo = static_cast<uint16_t>((static_cast<uint16_t>(atst) << 8) | aref);
+                recordTop(ateCombo, c2->ateVals, c2->ateCounts);
+            }
+            const uint8_t fpsm = ctx.frame.psm;
+            const uint32_t fbp = ctx.frame.fbp & 0x1FFu;
+            const uint32_t frameCombo = (static_cast<uint32_t>(fpsm) << 16) | (fbp & 0xFFFFu);
+            recordTop(frameCombo, c2->frameVals, c2->frameCounts);
+            if (prim.tme)
+            {
+                const uint8_t tpsm = ctx.tex0.psm;
+                const uint8_t tw = ctx.tex0.tw;
+                const uint8_t th = ctx.tex0.th;
+                const uint16_t texCombo = static_cast<uint16_t>((static_cast<uint16_t>(tpsm) << 8) | (static_cast<uint16_t>(tw & 0xFu) << 4) | (th & 0xFu));
+                recordTop(texCombo, c2->texVals, c2->texCounts);
+            }
+            float bw = 0.0f, bh = 0.0f;
+            const GSVertex *verts = vtxQueue ? vtxQueue : batch.vertices.data();
+            if (verts && batch.vertexCount > 0)
+            {
+                float minX = verts[0].x, maxX = verts[0].x;
+                float minY = verts[0].y, maxY = verts[0].y;
+                for (uint8_t vi = 1; vi < batch.vertexCount; ++vi)
+                {
+                    const float vx = verts[vi].x;
+                    const float vy = verts[vi].y;
+                    if (vx < minX) minX = vx;
+                    if (vx > maxX) maxX = vx;
+                    if (vy < minY) minY = vy;
+                    if (vy > maxY) maxY = vy;
+                }
+                bw = (maxX >= minX) ? (maxX - minX) : 0.0f;
+                bh = (maxY >= minY) ? (maxY - minY) : 0.0f;
+            }
+            else
+            {
+                bw = (ctx.scissor.x1 >= ctx.scissor.x0) ? static_cast<float>(ctx.scissor.x1 + 1u - ctx.scissor.x0) : 0.0f;
+                bh = (ctx.scissor.y1 >= ctx.scissor.y0) ? static_cast<float>(ctx.scissor.y1 + 1u - ctx.scissor.y0) : 0.0f;
+            }
+            c2->bboxWSum += bw;
+            c2->bboxHSum += bh;
+            if (isDisplay) ++c2->dispCount;
+        }
     }
 }
 
@@ -1125,6 +1265,42 @@ static void rdCensusFlip(uint32_t displayFbp) // PROBE-E0
                 s_censusAtst, s_censusZteOff, s_censusFbmskNonzero, s_censusFba, s_censusAa1,
                 rtBuf, fbreadBuf, abeBuf, dispVal);
 
+    // PROBE-E3b: print top 4 alpha modes detail
+    std::sort(s_census2, s_census2 + s_census2Count, [](const Census2Entry &a, const Census2Entry &b) {
+        return a.n > b.n;
+    });
+    const size_t topCensus2 = std::min<size_t>(s_census2Count, 4u);
+    for (size_t i = 0; i < topCensus2; ++i)
+    {
+        const Census2Entry &e = s_census2[i];
+        const double avgv = (e.n > 0u) ? (static_cast<double>(e.vertsTotal) / static_cast<double>(e.n)) : 0.0;
+        const uint32_t topFbmsk = getTop(e.fbmskVals, e.fbmskCounts, 0u);
+        const uint16_t topAte = getTop(e.ateVals, e.ateCounts, static_cast<uint16_t>(0));
+        const uint32_t topAtst = static_cast<uint32_t>((topAte >> 8) & 0x7);
+        const uint32_t topAref = static_cast<uint32_t>(topAte & 0xFF);
+        const uint32_t topFrame = getTop(e.frameVals, e.frameCounts, 0u);
+        const uint32_t topFpsm = topFrame >> 16;
+        const uint32_t topFbp = topFrame & 0xFFFFu;
+        const uint16_t topTex = getTop(e.texVals, e.texCounts, static_cast<uint16_t>(0));
+        const uint32_t topTexPsm = static_cast<uint32_t>((topTex >> 8) & 0x3F);
+        const uint32_t topTw = static_cast<uint32_t>((topTex >> 4) & 0xF);
+        const uint32_t topTh = static_cast<uint32_t>(topTex & 0xF);
+        const double avgBboxW = (e.n > 0u) ? (e.bboxWSum / static_cast<double>(e.n)) : 0.0;
+        const double avgBboxH = (e.n > 0u) ? (e.bboxHSum / static_cast<double>(e.n)) : 0.0;
+
+        ps2xSafeLog("[census2] mode=%llx n=%u avgv=%.1f sprite=%u tme=%u fge=%u fbmsk=%u(%08x) ztst=%u/%u/%u/%u zmsk=%u ate=%u(atst=%u aref=%02x) fpsm=%u fbp=%x tex=psm%u,%ux%u bbox=%.0fx%.0f disp=%u\n",
+                    static_cast<unsigned long long>(e.mode), e.n, avgv,
+                    e.spriteCount, e.tmeCount, e.fgeCount,
+                    e.fbmskNonzeroCount, topFbmsk,
+                    e.ztstHist[0], e.ztstHist[1], e.ztstHist[2], e.ztstHist[3],
+                    e.zmskCount,
+                    e.ateCount, topAtst, topAref,
+                    topFpsm, topFbp,
+                    topTexPsm, topTw, topTh,
+                    avgBboxW, avgBboxH,
+                    e.dispCount);
+    }
+
     s_censusPrims = 0u;
     s_censusTri = 0u;
     s_censusSprite = 0u;
@@ -1147,6 +1323,8 @@ static void rdCensusFlip(uint32_t displayFbp) // PROBE-E0
     s_censusFbReadCount = 0u;
     s_censusAbeCount = 0u;
     s_censusSeenRtFbpCount = 0u;
+    s_census2Count = 0u; // PROBE-E3b
+    std::memset(s_census2, 0, sizeof(s_census2)); // PROBE-E3b
 }
 static std::vector<RdVert> s_rd2dVerts; // FEAT-RD8
 static std::vector<Rd2DBatch> s_rd2dBatches; // FEAT-RD8
@@ -5595,6 +5773,42 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
     return isGeomKick;
 }
 
+// PROBE-E3e: oracle experiment: skip draw categories in the classic GS path
+static const bool s_gsSkipTme0 = []() {
+    const char *e = std::getenv("PS2X_GS_SKIP_TME0");
+    return e && e[0] == '1';
+}();
+
+static const std::vector<uint64_t> s_gsSkipAbeVals = []() {
+    std::vector<uint64_t> vals;
+    const char *e = std::getenv("PS2X_GS_SKIP_ABE");
+    if (!e || !e[0])
+        return vals;
+    const char *p = e;
+    while (*p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == ',')
+            ++p;
+        if (!*p)
+            break;
+        char *end = nullptr;
+        unsigned long long v = std::strtoull(p, &end, 16);
+        if (end != p)
+        {
+            vals.push_back(static_cast<uint64_t>(v) & 0x000000FF000000FFull);
+            p = end;
+        }
+        else
+        {
+            ++p;
+        }
+    }
+    return vals;
+}();
+
+static const bool s_gsSkipActive = s_gsSkipTme0 || !s_gsSkipAbeVals.empty(); // PROBE-E3e
+static std::atomic<uint64_t> s_gsSkipCount{0ull}; // PROBE-E3e
+
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
     if (s_rdCensusOn) // PROBE-E0
@@ -6046,6 +6260,38 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
     GwScope gwS(5); // PROBE-GW primbuild
     s_rdLatchPrims.fetch_add(1u, std::memory_order_relaxed); // FEAT-RD50
     if (g_gwOn) ps2_gw_count(0, 1); // PROBE-GW prims
+    if (s_gsSkipActive) // PROBE-E3e
+    {
+        static auto s_lastSkipReportT = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastSkipReportT).count() >= 1000)
+        {
+            s_lastSkipReportT = now;
+            ps2xSafeLog("[gsskip] skipped=%llu\n", static_cast<unsigned long long>(s_gsSkipCount.load(std::memory_order_relaxed)));
+        }
+
+        if (batch.state.prim.abe)
+        {
+            bool skip = (s_gsSkipTme0 && !batch.state.prim.tme);
+            if (!skip && !s_gsSkipAbeVals.empty())
+            {
+                const uint64_t mode = batch.state.context.alpha & 0x000000FF000000FFull;
+                for (uint64_t v : s_gsSkipAbeVals)
+                {
+                    if (v == mode)
+                    {
+                        skip = true;
+                        break;
+                    }
+                }
+            }
+            if (skip)
+            {
+                s_gsSkipCount.fetch_add(1u, std::memory_order_relaxed);
+                return;
+            }
+        }
+    }
     if (!m_runPrims.empty() && (m_runSerial != m_stateSerial || s_rdRunIsGeom != isGeomKick)) // FEAT-RD18
     {
         if (g_gwOn) ps2_gw_count(3, 1); // PROBE-GW state-serial break

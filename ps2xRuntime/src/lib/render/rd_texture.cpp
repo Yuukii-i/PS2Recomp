@@ -140,6 +140,108 @@ bool g_replaceScanned = false;
 std::unordered_set<uint64_t> g_replaceFailed;
 uint32_t g_rd6Dumped = 0;
 
+// PROBE-E3c: per-texture use tracking & texture dumping configuration
+static const auto s_processStartTime = std::chrono::steady_clock::now();
+
+static const uint32_t s_texdumpMax = []() {
+    const char *e = std::getenv("PS2X_RD_TEXDUMP_MAX");
+    if (e && *e)
+    {
+        unsigned long v = std::strtoul(e, nullptr, 10);
+        if (v > 0)
+            return static_cast<uint32_t>(v);
+    }
+    return 200u;
+}();
+
+static const uint64_t s_texdumpAfterMs = []() {
+    const char *e = std::getenv("PS2X_RD_TEXDUMP_AFTER_MS");
+    if (e && *e)
+    {
+        unsigned long long v = std::strtoull(e, nullptr, 10);
+        return static_cast<uint64_t>(v);
+    }
+    return 0ull;
+}();
+
+struct RdTexUseEntry {
+    uint64_t count = 0;
+    uint64_t tex0 = 0;
+    uint32_t psm = 0;
+    uint32_t w = 0;
+    uint32_t h = 0;
+};
+
+static std::mutex s_texUseMutex;
+static std::unordered_map<uint64_t, RdTexUseEntry> s_texUses;
+static auto s_lastUsesFlush = std::chrono::steady_clock::now();
+
+static void flushTexUsesLocked()
+{
+    if (s_texUses.empty())
+        return;
+    std::vector<std::pair<uint64_t, RdTexUseEntry>> entries(s_texUses.begin(), s_texUses.end());
+    std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
+        return a.second.count > b.second.count;
+    });
+    std::error_code ec;
+    std::filesystem::create_directories("logs/rdtex", ec);
+    if (FILE *f = std::fopen("logs/rdtex/uses.txt", "w"))
+    {
+        const size_t limit = std::min<size_t>(entries.size(), 300u);
+        for (size_t i = 0; i < limit; ++i)
+        {
+            const auto &e = entries[i];
+            std::fprintf(f, "%016llx uses=%llu psm=%u %ux%u tex0=%016llx\n",
+                         static_cast<unsigned long long>(e.first),
+                         static_cast<unsigned long long>(e.second.count),
+                         static_cast<unsigned>(e.second.psm),
+                         e.second.w, e.second.h,
+                         static_cast<unsigned long long>(e.second.tex0));
+        }
+        std::fclose(f);
+    }
+}
+
+static void noteTexUse(uint64_t hash, uint64_t tex0)
+{
+    static const bool s_dump = []() {
+        const char *e = std::getenv("PS2X_RD_TEXDUMP");
+        return e && e[0] == '1';
+    }();
+    if (!s_dump || hash == 0ull)
+        return;
+
+    const uint8_t psm = static_cast<uint8_t>((tex0 >> 20) & 0x3Full);
+    const uint32_t tw = static_cast<uint32_t>((tex0 >> 26) & 0xFull);
+    const uint32_t th = static_cast<uint32_t>((tex0 >> 30) & 0xFull);
+    const uint32_t w = 1u << std::min<uint32_t>(tw, 10u);
+    const uint32_t h = 1u << std::min<uint32_t>(th, 10u);
+
+    std::lock_guard<std::mutex> lk(s_texUseMutex);
+    RdTexUseEntry &entry = s_texUses[hash];
+    ++entry.count;
+    entry.tex0 = tex0;
+    entry.psm = psm;
+    entry.w = w;
+    entry.h = h;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s_lastUsesFlush >= std::chrono::seconds(10))
+    {
+        s_lastUsesFlush = now;
+        flushTexUsesLocked();
+    }
+}
+
+struct RdTexUsesExitFlusher {
+    ~RdTexUsesExitFlusher() {
+        std::lock_guard<std::mutex> lk(s_texUseMutex);
+        flushTexUsesLocked();
+    }
+};
+static RdTexUsesExitFlusher s_texUsesExitFlusher;
+
 void rd6Scan()
 {
     g_replaceScanned = true;
@@ -180,20 +282,46 @@ unsigned int rd6Upload(uint64_t cid, uint32_t w, uint32_t h, uint32_t psm, const
         const char *e = std::getenv("PS2X_RD_TEXDUMP");
         return e && e[0] == '1';
     }();
+    static std::unordered_set<uint64_t> s_rd6SeenBefore; // PROBE-E3c
     char idStr[24];
     std::snprintf(idStr, sizeof(idStr), "%016llx", static_cast<unsigned long long>(cid));
-    if (s_dump && g_rd6Dumped < 2000u)
+    const auto now = std::chrono::steady_clock::now(); // PROBE-E3c
+    const uint64_t elapsedMs = static_cast<uint64_t>( // PROBE-E3c
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - s_processStartTime).count()); // PROBE-E3c
+    if (s_dump) // PROBE-E3c
     {
-        ++g_rd6Dumped;
-        std::error_code ec;
-        std::filesystem::create_directories("logs/rdtex", ec);
-        std::vector<uint8_t> copy(rgba);
-        for (size_t i = 3; i < copy.size(); i += 4)
-            copy[i] = static_cast<uint8_t>(std::min<uint32_t>(static_cast<uint32_t>(copy[i]) * 2u, 255u));
-        Image img{copy.data(), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
-        char path[256];
-        std::snprintf(path, sizeof(path), "logs/rdtex/%s_psm%u_%ux%u.png", idStr, static_cast<unsigned>(psm), w, h);
-        ExportImage(img, path);
+        if (elapsedMs < s_texdumpAfterMs) // PROBE-E3c
+        {
+            s_rd6SeenBefore.insert(cid); // PROBE-E3c
+        }
+        else if (s_rd6SeenBefore.find(cid) == s_rd6SeenBefore.end() && g_rd6Dumped < s_texdumpMax) // PROBE-E3c
+        {
+            ++g_rd6Dumped;
+            std::error_code ec;
+            std::filesystem::create_directories("logs/rdtex", ec);
+            std::vector<uint8_t> copy(rgba);
+            for (size_t i = 3; i < copy.size(); i += 4)
+                copy[i] = static_cast<uint8_t>(std::min<uint32_t>(static_cast<uint32_t>(copy[i]) * 2u, 255u));
+            Image img{copy.data(), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+            char path[256];
+            std::snprintf(path, sizeof(path), "logs/rdtex/%s_psm%u_%ux%u.png", idStr, static_cast<unsigned>(psm), w, h);
+            ExportImage(img, path);
+
+            // PROBE-E3c: raw alpha channel as-is into _a.png
+            std::vector<uint8_t> alphaCopy(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
+            for (size_t i = 0; i < rgba.size(); i += 4)
+            {
+                const uint8_t a = rgba[i + 3];
+                alphaCopy[i] = a;
+                alphaCopy[i + 1] = a;
+                alphaCopy[i + 2] = a;
+                alphaCopy[i + 3] = 255;
+            }
+            Image imgA{alphaCopy.data(), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+            char pathA[256];
+            std::snprintf(pathA, sizeof(pathA), "logs/rdtex/%s_psm%u_%ux%u_a.png", idStr, static_cast<unsigned>(psm), w, h);
+            ExportImage(imgA, pathA);
+        }
     }
     if (!g_replaceScanned)
         rd6Scan();
@@ -1120,12 +1248,14 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
         if (it->second.lastFrame == g_texFrame)
         {
             bt1Reuse(); // PROBE-BT1
+            noteTexUse(it->second.contentHash, tex0); // PROBE-E3c
             return it->second.glId;
         }
         if (!s_checkEveryFrame && (g_texFrame - it->second.lastCheckFrame) < 30u)
         {
             it->second.lastFrame = g_texFrame;
             bt1Reuse(); // PROBE-BT1
+            noteTexUse(it->second.contentHash, tex0); // PROBE-E3c
             return it->second.glId;
         }
     }
@@ -1240,31 +1370,61 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
     g_decNs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_dec1 - t_dec0).count()), std::memory_order_relaxed); // PROBE-V3J
     g_decCount.fetch_add(1, std::memory_order_relaxed); // PROBE-V3J
 
-    { // FEAT-RD3b texture dump
+    { // FEAT-RD3b texture dump // PROBE-E3c
         static const bool s_dump = []() {
             const char *e = std::getenv("PS2X_RD_TEXDUMP");
             return e && e[0] == '1';
         }();
         static std::unordered_set<uint64_t> s_dumped;
-        if (s_dump && s_dumped.size() < 200u && s_dumped.insert(hash).second)
+        static std::unordered_set<uint64_t> s_seenBeforeAfterMs; // PROBE-E3c
+        const auto now = std::chrono::steady_clock::now(); // PROBE-E3c
+        const uint64_t elapsedMs = static_cast<uint64_t>( // PROBE-E3c
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - s_processStartTime).count()); // PROBE-E3c
+
+        if (s_dump)
         {
-            std::error_code ec;
-            std::filesystem::create_directories("logs/rdtex", ec);
-            std::vector<uint8_t> copy(s_rgba);
-            for (size_t i = 3; i < copy.size(); i += 4)
-                copy[i] = static_cast<uint8_t>(std::min<uint32_t>(static_cast<uint32_t>(copy[i]) * 2u, 255u));
-            Image img{copy.data(), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
-            char path[256];
-            std::snprintf(path, sizeof(path), "logs/rdtex/%016llx_psm%u_%ux%u.png",
-                          static_cast<unsigned long long>(hash), static_cast<unsigned>(psm), w, h);
-            ExportImage(img, path);
-            if (FILE *f = std::fopen("logs/rdtex/index.txt", "a"))
+            if (elapsedMs < s_texdumpAfterMs) // PROBE-E3c
             {
-                std::fprintf(f, "%016llx tex0=%016llx psm=%u tw=%u th=%u tbp0=%u tbw=%u cbp=%u cpsm=%u csa=%u\n",
-                             static_cast<unsigned long long>(hash), static_cast<unsigned long long>(tex0),
-                             static_cast<unsigned>(psm), tw, th, tbp0, tbw, cbp, static_cast<unsigned>(cpsm),
-                             static_cast<unsigned>(csa));
-                std::fclose(f);
+                s_seenBeforeAfterMs.insert(hash); // PROBE-E3c
+            }
+            else if (s_seenBeforeAfterMs.find(hash) == s_seenBeforeAfterMs.end() &&
+                     s_dumped.size() < s_texdumpMax && s_dumped.insert(hash).second) // PROBE-E3c
+            {
+                std::error_code ec;
+                std::filesystem::create_directories("logs/rdtex", ec);
+                std::vector<uint8_t> copy(s_rgba);
+                for (size_t i = 3; i < copy.size(); i += 4)
+                    copy[i] = static_cast<uint8_t>(std::min<uint32_t>(static_cast<uint32_t>(copy[i]) * 2u, 255u));
+                Image img{copy.data(), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                char path[256];
+                std::snprintf(path, sizeof(path), "logs/rdtex/%016llx_psm%u_%ux%u.png",
+                              static_cast<unsigned long long>(hash), static_cast<unsigned>(psm), w, h);
+                ExportImage(img, path);
+
+                // PROBE-E3c: Write alpha as-is (do not double it) into _a.png
+                std::vector<uint8_t> alphaCopy(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
+                for (size_t i = 0; i < s_rgba.size(); i += 4)
+                {
+                    const uint8_t a = s_rgba[i + 3];
+                    alphaCopy[i] = a;
+                    alphaCopy[i + 1] = a;
+                    alphaCopy[i + 2] = a;
+                    alphaCopy[i + 3] = 255;
+                }
+                Image imgA{alphaCopy.data(), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                char pathA[256];
+                std::snprintf(pathA, sizeof(pathA), "logs/rdtex/%016llx_psm%u_%ux%u_a.png",
+                              static_cast<unsigned long long>(hash), static_cast<unsigned>(psm), w, h);
+                ExportImage(imgA, pathA);
+
+                if (FILE *f = std::fopen("logs/rdtex/index.txt", "a"))
+                {
+                    std::fprintf(f, "%016llx tex0=%016llx psm=%u tw=%u th=%u tbp0=%u tbw=%u cbp=%u cpsm=%u csa=%u\n",
+                                 static_cast<unsigned long long>(hash), static_cast<unsigned long long>(tex0),
+                                 static_cast<unsigned>(psm), tw, th, tbp0, tbw, cbp, static_cast<unsigned>(cpsm),
+                                 static_cast<unsigned>(csa));
+                    std::fclose(f);
+                }
             }
         }
     }
@@ -1288,6 +1448,7 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
                 g_bt1GlInfo.clear();
             g_bt1GlInfo[it->second.glId] = Bt1Info{w, h, curClutHash, bt1Black, haveNote, bt1ClutZero};
         }
+        noteTexUse(it->second.contentHash, tex0); // PROBE-E3c
         return it->second.glId;
     }
 
@@ -1300,6 +1461,7 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
             g_bt1GlInfo.clear();
         g_bt1GlInfo[glId] = Bt1Info{w, h, curClutHash, bt1Black, haveNote, bt1ClutZero};
     }
+    noteTexUse(hash, tex0); // PROBE-E3c
     return glId;
 }
 
@@ -1726,6 +1888,7 @@ unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t t
                 const uint64_t tex0Key = tex0 & (0x3FFFFFFFFull | (0xFFFFFFull << 37));
                 bt1ReportReuseCid(cid, tex0, tex0Key, psm, tbp0, tbw, cbp, cpsm, isIndexedPsm(psm), serial);
             }
+            noteTexUse(cid, tex0); // PROBE-E3c
             return it->second.glId;
         }
         uint32_t w = 0u, h = 0u, cpsmFeat = 0u;
@@ -1747,6 +1910,7 @@ unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t t
             g_glByContentId.emplace(cid, RdContentGl{glId, g_texFrame});
             ++g_decodesSinceLog;
             ++g_exactSinceLog;
+            noteTexUse(cid, tex0); // PROBE-E3c
             return glId;
         }
     }
