@@ -40,6 +40,7 @@ const char *kVs =
     "layout(location = 0) in vec4 aPos;\n"
     "layout(location = 1) in vec4 aCol;\n"
     "layout(location = 2) in vec2 aUv;\n" // FEAT-RD3
+    "layout(location = 3) in float aFog;\n" // FIX-E1b
     "uniform vec3 uFlip;\n"
     "uniform int uMode2d;\n" // FEAT-RD8
     "uniform vec2 uFbSize;\n" // FEAT-RD8

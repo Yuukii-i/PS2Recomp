@@ -353,7 +353,9 @@ struct RdVert // FEAT-RD8
     float pos[4];
     uint8_t rgba[4];
     float uv[2];
+    float fog; // FIX-E1b
 };
+static_assert(sizeof(RdVert) == 32, "RdVert size"); // FIX-E1b
 
 struct Rd2DBatch // FEAT-RD8
 {
@@ -838,6 +840,11 @@ static uint32_t s_censusTme = 0u; // PROBE-E0
 static uint32_t s_censusAbeDraws = 0u; // PROBE-E0
 static uint32_t s_censusFge = 0u; // PROBE-E0
 static uint32_t s_censusLastFogcol = 0u; // PROBE-E0
+static uint32_t s_censusFogMin = 255u; // PROBE-E1a
+static uint32_t s_censusFogMax = 0u;   // PROBE-E1a
+static uint64_t s_censusFogSum = 0ull; // PROBE-E1a
+static uint32_t s_censusFogCount = 0u; // PROBE-E1a
+static uint32_t s_censusFogHist[8]{};  // PROBE-E1a
 static uint32_t s_censusAtst = 0u; // PROBE-E0
 static uint32_t s_censusZteOff = 0u; // PROBE-E0
 static uint32_t s_censusFbmskNonzero = 0u; // PROBE-E0
@@ -856,7 +863,7 @@ static size_t s_censusAbeCount = 0u; // PROBE-E0
 static uint32_t s_censusSeenRtFbps[16]{}; // PROBE-E0
 static size_t s_censusSeenRtFbpCount = 0u; // PROBE-E0
 
-static void rdCensusRecordDraw(const GSPrimitiveBatch &batch) // PROBE-E0
+static void rdCensusRecordDraw(const GSPrimitiveBatch &batch, const GSVertex *vtxQueue = nullptr) // PROBE-E0 // PROBE-E1a
 {
     const GSContext &ctx = batch.state.context;
     const GSPrimReg &prim = batch.state.prim;
@@ -888,7 +895,21 @@ static void rdCensusRecordDraw(const GSPrimitiveBatch &batch) // PROBE-E0
 
     if (prim.tme) ++s_censusTme;
     if (prim.abe) ++s_censusAbeDraws;
-    if (prim.fge) ++s_censusFge;
+    if (prim.fge)
+    {
+        ++s_censusFge;
+        const GSVertex *verts = vtxQueue ? vtxQueue : batch.vertices.data(); // PROBE-E1a
+        for (uint8_t i = 0; i < batch.vertexCount; ++i)                      // PROBE-E1a
+        {
+            const uint32_t f = verts[i].fog;
+            if (f < s_censusFogMin) s_censusFogMin = f;
+            if (f > s_censusFogMax) s_censusFogMax = f;
+            s_censusFogSum += f;
+            ++s_censusFogCount;
+            const uint32_t bin = std::min<uint32_t>(f / 32u, 7u);
+            ++s_censusFogHist[bin];
+        }
+    }
     if (prim.aa1) ++s_censusAa1;
 
     s_censusLastFogcol = static_cast<uint32_t>(batch.state.fogR) |
@@ -1091,9 +1112,16 @@ static void rdCensusFlip(uint32_t displayFbp) // PROBE-E0
             dispVal = 0u;
     }
 
-    ps2xSafeLog("[census] prims=%u tri=%u sprite=%u line=%u point=%u tme=%u abe=%u fge=%u fogcol=0x%06X atst=%u zte_off=%u fbmsk_nonzero=%u fba=%u aa1=%u rt={%s} fbread={%s} abe={%s} disp=0x%X\n",
+    const uint32_t fogMin = (s_censusFogCount > 0u) ? s_censusFogMin : 0u; // PROBE-E1a
+    const uint32_t fogMax = (s_censusFogCount > 0u) ? s_censusFogMax : 0u; // PROBE-E1a
+    const double fogMean = (s_censusFogCount > 0u) ? (static_cast<double>(s_censusFogSum) / static_cast<double>(s_censusFogCount)) : 0.0; // PROBE-E1a
+
+    ps2xSafeLog("[census] prims=%u tri=%u sprite=%u line=%u point=%u tme=%u abe=%u fge=%u fogcol=0x%06X fog={%u,%u,%.1f,hist:%u/%u/%u/%u/%u/%u/%u/%u} atst=%u zte_off=%u fbmsk_nonzero=%u fba=%u aa1=%u rt={%s} fbread={%s} abe={%s} disp=0x%X\n",
                 s_censusPrims, s_censusTri, s_censusSprite, s_censusLine, s_censusPoint,
                 s_censusTme, s_censusAbeDraws, s_censusFge, s_censusLastFogcol,
+                fogMin, fogMax, fogMean,
+                s_censusFogHist[0], s_censusFogHist[1], s_censusFogHist[2], s_censusFogHist[3],
+                s_censusFogHist[4], s_censusFogHist[5], s_censusFogHist[6], s_censusFogHist[7],
                 s_censusAtst, s_censusZteOff, s_censusFbmskNonzero, s_censusFba, s_censusAa1,
                 rtBuf, fbreadBuf, abeBuf, dispVal);
 
@@ -1105,6 +1133,11 @@ static void rdCensusFlip(uint32_t displayFbp) // PROBE-E0
     s_censusTme = 0u;
     s_censusAbeDraws = 0u;
     s_censusFge = 0u;
+    s_censusFogMin = 255u; // PROBE-E1a
+    s_censusFogMax = 0u;   // PROBE-E1a
+    s_censusFogSum = 0ull; // PROBE-E1a
+    s_censusFogCount = 0u; // PROBE-E1a
+    std::memset(s_censusFogHist, 0, sizeof(s_censusFogHist)); // PROBE-E1a
     s_censusAtst = 0u;
     s_censusZteOff = 0u;
     s_censusFbmskNonzero = 0u;
@@ -5565,7 +5598,7 @@ static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, c
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
     if (s_rdCensusOn) // PROBE-E0
-        rdCensusRecordDraw(batch);
+        rdCensusRecordDraw(batch, m_vtxQueue); // PROBE-E1a
     const bool isGeomKick = rdNoteKickBookkeeping(batch.state.context, batch.state.prim, batch.state.texa, m_localMemoryStorage); // FEAT-RD42
     if (s_rdGsDrawLogOn) // PROBE-RD60
         rdGsDrawLogRecord(batch.state.context, batch.state.prim, m_vtxQueue, batch.vertexCount, s_rdCurSerial, isGeomKick);
@@ -5721,6 +5754,7 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                         out.uv[1] = v.t * invQ;
                     }
                 }
+                out.fog = prim.fge ? (static_cast<float>(v.fog) / 255.0f) : 1.0f; // FIX-E1b
                 return out;
             };
 

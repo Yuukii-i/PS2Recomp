@@ -25,7 +25,9 @@ struct RdVert // FEAT-RD1
     float pos[4];
     uint8_t rgba[4];
     float uv[2]; // FEAT-RD3
+    float fog;   // FIX-E1b
 };
+static_assert(sizeof(RdVert) == 32, "RdVert size"); // FIX-E1b
 struct RdBatch // FEAT-RD2 // FEAT-RD14
 {
     uint32_t first;
@@ -44,6 +46,7 @@ struct RdBatch // FEAT-RD2 // FEAT-RD14
     float vpS[2]; // FEAT-RD21
     float vpO[2]; // FEAT-RD21
     uint32_t camHash; // PROBE-RD26
+    uint32_t fogcol; // FIX-E1c
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern bool ps2xRdActive(); // FEAT-RD49
@@ -878,6 +881,7 @@ struct SceneGs // FEAT-RD2
     uint32_t fba;
     uint32_t ownTex0;
     uint32_t kickSerial; // FEAT-RD5
+    uint32_t fogcol; // FIX-E1c
 };
 
 struct GsShadow // FEAT-RD2
@@ -895,6 +899,7 @@ struct GsShadow // FEAT-RD2
     uint64_t xyoffset[2] = {}; // FEAT-RD40
     uint64_t texa = 0;
     uint64_t texclut = 0;
+    uint32_t fogcol = 0; // FIX-E1c
 };
 
 struct SceneFrame
@@ -989,6 +994,7 @@ inline void applyAD(uint64_t data, uint8_t reg) // FEAT-RD2
     }
     case 0x1Cu: g.texclut = data; break;
     case 0x3Bu: g.texa = data; break;
+    case 0x3Du: g.fogcol = static_cast<uint32_t>(data & 0x00FFFFFFull); break; // FIX-E1c
     case 0x40u: case 0x41u: g.scissor[reg - 0x40u] = data; break; // FEAT-RD40
     case 0x42u: case 0x43u: g.alpha[reg - 0x42u] = data; break;
     case 0x47u: case 0x48u: g.test[reg - 0x47u] = data; break;
@@ -1702,6 +1708,8 @@ inline void onFlush()
                 rv.uv[0] = 0.0f;
                 rv.uv[1] = 0.0f;
             }
+            const uint32_t fByte = (sv.adc >> 4) & 0xFFu; // FIX-E1b
+            rv.fog = static_cast<float>(fByte) / 255.0f;  // FIX-E1b
             return rv;
         };
         for (size_t di = 0; di < cur.draws.size(); ++di) // FEAT-RD2
@@ -1749,6 +1757,7 @@ inline void onFlush()
                     last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf &&
                     last.prim == g.prim && last.tex0 == g.tex0 && last.clamp == g.clamp && last.tex1 == g.tex1 &&
                     last.texa == g.texa &&
+                    last.fogcol == g.fogcol && // FIX-E1c
                     last.vpS[0] == d.vpScale[0] && last.vpS[1] == d.vpScale[1] && last.vpO[0] == d.vpOffset[0] && last.vpO[1] == d.vpOffset[1]) // FEAT-RD3 // FEAT-RD17 // FEAT-RD21
                 {
                     if (last.kickSerial != g.kickSerial) // FEAT-RD17
@@ -1759,7 +1768,7 @@ inline void onFlush()
             }
             t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, 0u, g.alpha, g.test, g.frame, g.zbuf, g.prim, g.tex0,
                                             g.clamp, g.tex1, g.texa, g.kickSerial,
-                                            {d.vpScale[0], d.vpScale[1]}, {d.vpOffset[0], d.vpOffset[1]}}); // FEAT-RD3 // FEAT-RD5 // FEAT-RD14 // FEAT-RD21
+                                            {d.vpScale[0], d.vpScale[1]}, {d.vpOffset[0], d.vpOffset[1]}, 0u, g.fogcol}); // FEAT-RD3 // FEAT-RD5 // FEAT-RD14 // FEAT-RD21 // FIX-E1c
         }
         ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws, vpScaleZ, vpOffsetZ); // FEAT-RD11
     }
@@ -1818,6 +1827,7 @@ inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t
     g.fba = static_cast<uint32_t>(t_scene.gs.fba[ctxt] & 1ull);
     g.ownTex0 = t_scene.curOwnTex0 ? 1u : 0u;
     g.kickSerial = t_scene.curKickSerial; // FEAT-RD5
+    g.fogcol = t_scene.gs.fogcol; // FIX-E1c
     f.gs.push_back(g);
     return f.draws.back();
 }
@@ -1834,7 +1844,7 @@ inline void markGeometryKick(std::vector<uint8_t> &gif, uint32_t gifOff) // FEAT
     }
 }
 
-inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba) // FEAT-RD14
+inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba, float fog = 1.0f) // FEAT-RD14 // FIX-E1b
 {
     ::RdVert rv;
     _mm_storeu_ps(rv.pos, pos);
@@ -1848,6 +1858,7 @@ inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba) // FEAT-RD14
     const __m128 d = _mm_div_ps(stq, q);
     const __m128 nz = _mm_cmpneq_ps(q, _mm_setzero_ps());
     _mm_storel_pi(reinterpret_cast<__m64 *>(rv.uv), _mm_and_ps(d, nz));
+    rv.fog = fog; // FIX-E1b
     return rv;
 }
 
@@ -1909,12 +1920,14 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
     const uint64_t zbuf = t_scene.gs.zbuf[ctxt];
     const uint64_t texa = t_scene.gs.texa;
     const uint32_t kickSerial = t_scene.curKickSerial;
+    const uint32_t fogcol = t_scene.gs.fogcol; // FIX-E1c
     if (!f.rdBatches.empty())
     {
         ::RdBatch &last = f.rdBatches.back();
         if (rdSerialsCanMerge(last.kickSerial, kickSerial) &&
             last.alpha == alpha && last.test == test && last.frame == frame && last.zbuf == zbuf &&
             last.prim == prim && last.tex0 == tex0 && last.clamp == clamp && last.tex1 == tex1 && last.texa == texa &&
+            last.fogcol == fogcol && // FIX-E1c
             last.vpS[0] == f.curVpS[0] && last.vpS[1] == f.curVpS[1] && last.vpO[0] == f.curVpO[0] && last.vpO[1] == f.curVpO[1] && last.camHash == f.curCamHash) // FEAT-RD17 // FEAT-RD21 // PROBE-RD26
         {
             if (last.kickSerial != kickSerial) // FEAT-RD17
@@ -1924,7 +1937,7 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
         }
     }
     f.rdBatches.push_back(::RdBatch{firstIndex, indexCount, 0u, alpha, test, frame, zbuf, prim, tex0, clamp, tex1, texa, kickSerial,
-                                    {f.curVpS[0], f.curVpS[1]}, {f.curVpO[0], f.curVpO[1]}, f.curCamHash}); // FEAT-RD21 // PROBE-RD26
+                                    {f.curVpS[0], f.curVpS[1]}, {f.curVpO[0], f.curVpO[1]}, f.curCamHash, fogcol}); // FEAT-RD21 // PROBE-RD26 // FIX-E1c
 }
 
 inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
@@ -1942,10 +1955,13 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
         for (int32_t k = 0; k < polyCount; ++k)
         {
             const uint32_t qOut = 877u + 4u * static_cast<uint32_t>(k);
+            const uint32_t w3 = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
+            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f; // FIX-E1b
             f.rdVerts[v0 + static_cast<size_t>(k)] = makeRdVert(
                 ldq(vu, 918u + 3u * static_cast<uint32_t>(k)),
                 ldq(vu, qOut + 1u),
-                ldqi(vu, qOut + 2u));
+                ldqi(vu, qOut + 2u),
+                fog); // FIX-E1b
         }
         if (polyCount >= 3)
         {
@@ -2001,13 +2017,16 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
         for (int32_t j = 0; j < N; ++j)
         {
             const uint32_t qOut = (e7 + 1u + 4u * static_cast<uint32_t>(j)) & 0x3FFu;
+            const uint32_t w3 = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
+            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f; // FIX-E1b
             f.rdVerts[v0 + static_cast<size_t>(j)] = makeRdVert(
                 Ps[j],
                 ldq(vu, (qOut + 1u) & 0x3FFu),
-                ldqi(vu, (qOut + 2u) & 0x3FFu));
+                ldqi(vu, (qOut + 2u) & 0x3FFu),
+                fog); // FIX-E1b
             if (j >= 2)
             {
-                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u);
+                const uint32_t adc = w3; // FIX-E1b
                 if (!(adc & 0x8000u))
                 {
                     f.rdIndices.push_back(base + static_cast<uint32_t>(j - 2));
@@ -2080,13 +2099,16 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
         {
             const uint32_t qOut = ubase + 1u + 4u * static_cast<uint32_t>(v);
             const int32_t idx = static_cast<int16_t>(ilw(vu, (i4base + static_cast<uint32_t>(v)) & 0x3FFu, 0u));
+            const uint32_t w3 = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
+            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f; // FIX-E1b
             f.rdVerts[v0 + static_cast<size_t>(v)] = makeRdVert(
                 ldq(vu, (636u + static_cast<uint32_t>(idx)) & 0x3FFu),
                 ldq(vu, qOut + 1u),
-                ldqi(vu, qOut + 2u));
+                ldqi(vu, qOut + 2u),
+                fog); // FIX-E1b
             if (v >= 2)
             {
-                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FEAT-RD27
+                const uint32_t adc = w3; // FEAT-RD27 // FIX-E1b
                 if (!(adc & 0x8000u))
                 {
                     f.rdIndices.push_back(base + static_cast<uint32_t>(v - 2));
@@ -2521,6 +2543,7 @@ static void buildLeanSkinVertsImpl(const uint8_t *vu, int32_t N, uint32_t s2base
             std::memcpy(rv.rgba, &packed, 4);
             rv.uv[0] = uArr[j];
             rv.uv[1] = vArr[j];
+            rv.fog = 1.0f; // FIX-E1b: no F available on lean skinning path
             if (v >= 2 && !(static_cast<uint32_t>(idxs[v]) & 0x8000u))
             {
                 outIndices[ic++] = baseIndex + static_cast<uint32_t>(v - 2);

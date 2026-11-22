@@ -2,6 +2,7 @@
 
 layout(location = 0) in vec4 vCol;
 layout(location = 1) in vec2 vUv;
+layout(location = 2) in float vFog; // FIX-E1c
 
 layout(set = 0, binding = 0) uniform sampler2D uSampler;
 layout(set = 0, binding = 1) uniform sampler2D uPalTex;
@@ -24,6 +25,7 @@ layout(push_constant) uniform PC {
     int uPalMode;
     int uPalFallback;
     int _pad0;
+    vec4 uFog; // FIX-E1c
 } pc;
 
 layout(location = 0) out vec4 finalColor;
@@ -59,6 +61,9 @@ void main() {
             a_ps2 = (pc.uTcc != 0) ? t_a_ps2 : vc_a;
         }
         rgb = clamp(rgb, 0.0, 1.0);
+    }
+    if (pc.uFog.w > 0.5) { // FIX-E1c
+        rgb = mix(pc.uFog.rgb, rgb, clamp(vFog, 0.0, 1.0));
     }
     if (pc.uAtst != 1) {
         int a = int(clamp(a_ps2, 0.0, 255.0) + 0.5);

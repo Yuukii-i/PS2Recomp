@@ -86,8 +86,10 @@ struct PushConstants
     int32_t uPalMode;
     int32_t uPalFallback;
     int32_t _pad0;
+    float uFog[4]; // FIX-E1c
 };
 static_assert(sizeof(PushConstants) <= 128, "PushConstants must fit in 128 bytes");
+static_assert(sizeof(PushConstants) == 128, "PushConstants must be 128 bytes"); // FIX-E1c
 
 struct PipelineKey
 {
@@ -1167,19 +1169,20 @@ VkPipeline getOrCreatePipeline(const PipelineKey &key)
 
     VkVertexInputBindingDescription binding{};
     binding.binding = 0;
-    binding.stride = 28;
+    binding.stride = 32; // FIX-E1b
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attrs[3]{};
+    VkVertexInputAttributeDescription attrs[4]{}; // FIX-E1b
     attrs[0] = {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
     attrs[1] = {1, 0, VK_FORMAT_R8G8B8A8_UNORM, 16};
     attrs[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, 20};
+    attrs[3] = {3, 0, VK_FORMAT_R32_SFLOAT, 28}; // FIX-E1b
 
     VkPipelineVertexInputStateCreateInfo vi{};
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vi.vertexBindingDescriptionCount = 1;
     vi.pVertexBindingDescriptions = &binding;
-    vi.vertexAttributeDescriptionCount = 3;
+    vi.vertexAttributeDescriptionCount = 4; // FIX-E1b
     vi.pVertexAttributeDescriptions = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia{};
@@ -2358,6 +2361,17 @@ void setUniformVec4(rdgfx::Uniform u, const float *v)
         std::memcpy(s_vk.pc.uVpB, v, 4 * sizeof(float));
 }
 
+void setFog(float r, float g, float b, float enable) // FIX-E1c
+{
+    if (s_vk.pc.uFog[0] == r && s_vk.pc.uFog[1] == g && s_vk.pc.uFog[2] == b && s_vk.pc.uFog[3] == enable)
+        return;
+    s_vk.pc.uFog[0] = r;
+    s_vk.pc.uFog[1] = g;
+    s_vk.pc.uFog[2] = b;
+    s_vk.pc.uFog[3] = enable;
+    s_vk.dirtyPushConstants = true;
+}
+
 void flushBatch() {}
 
 void getBackbufferSize(int &rw, int &rh)
@@ -3192,8 +3206,9 @@ void drawTextureOverlay(uint32_t texId, int texW, int texH,
         float pos[4];
         uint8_t col[4];
         float uv[2];
+        float fog; // FIX-E1b
     };
-    static_assert(sizeof(OverlayVertex) == 28, "OverlayVertex must match 28-byte stride");
+    static_assert(sizeof(OverlayVertex) == 32, "OverlayVertex must match 32-byte stride"); // FIX-E1b
     constexpr uint32_t kMaxOverlayQuads = 64u;
     constexpr uint32_t kMaxOverlayVerts = kMaxOverlayQuads * 6u;
 
@@ -3220,12 +3235,12 @@ void drawTextureOverlay(uint32_t texId, int texW, int texH,
     const float y1 = dstY + dstH;
 
     const OverlayVertex quad[6] = {
-        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}},
-        {{x1, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v0}},
-        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}},
-        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}},
-        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}},
-        {{x0, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v1}},
+        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}, 1.0f}, // FIX-E1b
+        {{x1, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v0}, 1.0f}, // FIX-E1b
+        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}, 1.0f}, // FIX-E1b
+        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}, 1.0f}, // FIX-E1b
+        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}, 1.0f}, // FIX-E1b
+        {{x0, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v1}, 1.0f}, // FIX-E1b
     };
 
     const uint32_t firstVertex = s_vk.overlayVertexCursor;

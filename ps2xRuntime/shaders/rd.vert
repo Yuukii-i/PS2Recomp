@@ -3,6 +3,7 @@
 layout(location = 0) in vec4 aPos;
 layout(location = 1) in vec4 aCol;
 layout(location = 2) in vec2 aUv;
+layout(location = 3) in float aFog; // FIX-E1c
 
 layout(push_constant) uniform PC {
     vec4 uFlip;
@@ -22,10 +23,12 @@ layout(push_constant) uniform PC {
     int uPalMode;
     int uPalFallback;
     int _pad0;
+    vec4 uFog; // FIX-E1c
 } pc;
 
 layout(location = 0) out vec4 vCol;
 layout(location = 1) out vec2 vUv;
+layout(location = 2) out float vFog; // FIX-E1c
 
 void main() {
     if (pc.uMode2d != 0) {
@@ -51,4 +54,5 @@ void main() {
     gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;
     vCol = aCol;
     vUv = aUv;
+    vFog = aFog; // FIX-E1c
 }

@@ -25,6 +25,13 @@ static bool g_rdAlwaysFunc = false; // FEAT-RD20
 
 extern void ps2xSafeLog(const char *fmt, ...); // FEAT-RD1
 extern unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t texa); // FEAT-RD5
+#if defined(PS2X_HAS_SDL3)
+namespace rdgfx_vk
+{
+bool active();
+void setFog(float, float, float, float);
+}
+#endif
 
 // PROBE-PACE2
 static inline bool pace2Enabled()
@@ -344,8 +351,9 @@ struct RdVert // FEAT-RD1
     float pos[4];
     uint8_t rgba[4];
     float uv[2]; // FEAT-RD3
+    float fog;   // FIX-E1b
 };
-static_assert(sizeof(RdVert) == 28, "RdVert size"); // FEAT-RD3
+static_assert(sizeof(RdVert) == 32, "RdVert size"); // FEAT-RD3 // FIX-E1b
 
 struct RdBatch // FEAT-RD2 // FEAT-RD14
 {
@@ -365,6 +373,7 @@ struct RdBatch // FEAT-RD2 // FEAT-RD14
     float vpS[2]; // FEAT-RD21
     float vpO[2]; // FEAT-RD21
     uint32_t camHash; // PROBE-RD26
+    uint32_t fogcol; // FIX-E1c
 };
 
 struct Rd2DBatch // FEAT-RD8
@@ -653,6 +662,34 @@ struct RdGlCache
     }
 } g_rdc; // FEAT-RD15
 
+static inline void rdSetFog(float r, float g, float b, float enable) // FIX-E1c
+{
+#if defined(PS2X_HAS_SDL3)
+    if (rdgfx_vk::active())
+        rdgfx_vk::setFog(r, g, b, enable);
+#else
+    (void)r; (void)g; (void)b; (void)enable;
+#endif
+}
+
+static inline bool rdFogEnvEnabled() // FIX-E1c
+{
+    static const bool s_fogEnabled = []{
+        const char *e = std::getenv("PS2X_RD_FOG");
+        return !(e && e[0] == '0');
+    }();
+    return s_fogEnabled;
+}
+
+static inline bool rdFogZeroEnvEnabled() // FIX-E1d
+{
+    static const bool s_fogZero = []{
+        const char *e = std::getenv("PS2X_RD_FOG_ZERO");
+        return e && e[0] == '1';
+    }();
+    return s_fogZero;
+}
+
 void rdSetUniformInt(rdgfx::Uniform u, int v) // FEAT-RD15 // RDG1
 {
     const int loc = static_cast<int>(u);
@@ -851,6 +888,8 @@ void uploadRdVbo(unsigned int vao, unsigned int &vbo, size_t &capVerts, const st
         rdgfx::enableVertexAttribute(1); // RDG1
         rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 20); // RDG1
         rdgfx::enableVertexAttribute(2); // RDG1
+        rdgfx::setVertexAttribute(3, 1, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 28); // FIX-E1b
+        rdgfx::enableVertexAttribute(3); // FIX-E1b
         rdgfx::bindVertexBuffer(0u); // RDG1
         rdgfx::bindVertexArray(0u); // RDG1
     }
@@ -991,6 +1030,8 @@ void uploadRdSlot(RdGpuSlot &slot, const std::vector<RdVert> &verts, const std::
         rdgfx::enableVertexAttribute(1); // RDG1
         rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 20); // RDG1
         rdgfx::enableVertexAttribute(2); // RDG1
+        rdgfx::setVertexAttribute(3, 1, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 28); // FIX-E1b
+        rdgfx::enableVertexAttribute(3); // FIX-E1b
         rdgfx::bindIndexBuffer(slot.ebo); // RDG1
         rdgfx::bindVertexArray(0u); // RDG1
         rdgfx::bindVertexBuffer(0u); // RDG1
@@ -1339,10 +1380,11 @@ static std::vector<RdVert> g_rd24Verts[kRdSlotCount]; // PROBE-RD24 // FEAT-RD34
 static std::vector<uint16_t> g_rd24Idx[kRdSlotCount]; // PROBE-RD24 // FEAT-RD34
 static const bool g_rdBlendOn = []{ const char *e = std::getenv("PS2X_RD_BLENDLOG"); return e && e[0] == '1'; }(); // PROBE-RD29
 static const bool g_rdReasonOn = []{ const char *e = std::getenv("PS2X_RD_DRAWREASON"); return e && e[0] == '1'; }(); // PROBE-RD59
+static const bool g_rdFogLog = []{ const char *e = std::getenv("PS2X_RD_FOGLOG"); return e && e[0] == '1'; }(); // PROBE-E1c
 static bool rdIdx32On() // FIX-RD90
 {
     static const bool s_on = []() {
-        if (g_rd24On || g_rdCamOn || g_rdBlendOn || g_rdReasonOn)
+        if (g_rd24On || g_rdCamOn || g_rdBlendOn || g_rdReasonOn || g_rdFogLog) // PROBE-E1c
             return false;
         extern void ps2xLoadConfig();
         ps2xLoadConfig();
@@ -1653,6 +1695,7 @@ static const bool s_pairLag = []{
 
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
+    rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
     const bool pace2On = pace2Enabled(); // PROBE-PACE2
     if (pace2On) // PROBE-PACE2
         g_pace2Rd = Pace2RdState{};
@@ -1872,7 +1915,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             {
                 g_rdGpu.everUploaded = true;
                 uploadRdSlot(g_rdGpu.slots[idx], g_rdGpu.pendingVerts[idx], g_rdGpu.pendingIndices[idx], g_rdGpu.slots[idx].batches);
-                if (g_rd24On || g_rdCamOn || g_rdBlendOn || g_rdReasonOn) // PROBE-RD24 // PROBE-RD29 // PROBE-RD26 // PROBE-RD59: CPU copy of uploaded verts + final 16-bit indices (relative to batch.baseVertex)
+                if (g_rd24On || g_rdCamOn || g_rdBlendOn || g_rdReasonOn || g_rdFogLog) // PROBE-RD24 // PROBE-RD29 // PROBE-RD26 // PROBE-RD59 // PROBE-E1c: CPU copy of uploaded verts + final 16-bit indices (relative to batch.baseVertex)
                 {
                     g_rd24Verts[idx] = g_rdGpu.pendingVerts[idx];
                     if (g_rdGpu.slots[idx].indexCount != 0)
@@ -2830,6 +2873,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniformInt(rdgfx::Uniform::Tfx, tfxVal); // RDG1
             if (rdgfx::hasUniform(rdgfx::Uniform::Tcc)) // RDG1
                 rdSetUniformInt(rdgfx::Uniform::Tcc, tccVal); // RDG1
+
+            rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c: no fog on 2D batches
             if (palMode != 0 && rdgfx::hasUniform(rdgfx::Uniform::PalMode)) // FIX-RD82I // RDG1
             {
                 static bool s_palTexSet = false;
@@ -2936,6 +2981,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
             rdDepthTest(false);
             rdDepthMask(false);
+            rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
             rdgfx::bindVertexArray(g_rdGpu.vao2d); // RDG1
 
             while (i2d < n2d && (drawAll || (g_rdGpu.local2dBatches[i2d].afterSerial & 0x3FFFFFFFu) < maxS))
@@ -3285,6 +3331,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdgfx::setVertexAttribute(0, 4, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 0); // RDG1
                 rdgfx::setVertexAttribute(1, 4, rdgfx::VertexAttrFormat::UnsignedByte, true, sizeof(RdVert), byteOff + 16); // RDG1
                 rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 20); // RDG1
+                rdgfx::setVertexAttribute(3, 1, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 28); // FIX-E1b
                 rdgfx::bindVertexBuffer(0u); // RDG1
                 slot.curBaseVertex = batch.baseVertex;
             }
@@ -3394,6 +3441,201 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniformInt(rdgfx::Uniform::Tfx, tfxVal); // RDG1
             if (rdgfx::hasUniform(rdgfx::Uniform::Tcc)) // RDG1
                 rdSetUniformInt(rdgfx::Uniform::Tcc, tccVal); // RDG1
+
+            const uint32_t fge = static_cast<uint32_t>((batch.prim >> 5) & 1ull); // FIX-E1c
+            float minFog = 1e30f; // FIX-E1d
+            float maxFog = -1e30f; // FIX-E1d
+            float meanFog = 0.0f; // FIX-E1d
+            uint32_t sampleCount = 0; // FIX-E1d
+
+            if (fge) // FIX-E1d
+            {
+                const std::vector<RdVert> &pv = !g_rd24Verts[db.slotIdx].empty() ? g_rd24Verts[db.slotIdx] : g_rdGpu.pendingVerts[db.slotIdx];
+                const std::vector<uint16_t> &pi = g_rd24Idx[db.slotIdx];
+                const std::vector<uint32_t> &pind = g_rdGpu.pendingIndices[db.slotIdx];
+                const size_t endI = static_cast<size_t>(batch.first) + batch.count;
+                double sumFog = 0.0;
+
+                if (g_rdFogLog)
+                {
+                    if (!pi.empty() && endI <= pi.size())
+                    {
+                        for (size_t k = batch.first; k < endI; ++k)
+                        {
+                            const uint32_t vi = static_cast<uint32_t>(pi[k]) + batch.baseVertex;
+                            if (vi < pv.size())
+                            {
+                                const float f = pv[vi].fog;
+                                if (f < minFog) minFog = f;
+                                if (f > maxFog) maxFog = f;
+                                sumFog += f;
+                                ++sampleCount;
+                            }
+                        }
+                    }
+                    else if (!pind.empty() && endI <= pind.size())
+                    {
+                        for (size_t k = batch.first; k < endI; ++k)
+                        {
+                            const uint32_t vi = pind[k] + batch.baseVertex;
+                            if (vi < pv.size())
+                            {
+                                const float f = pv[vi].fog;
+                                if (f < minFog) minFog = f;
+                                if (f > maxFog) maxFog = f;
+                                sumFog += f;
+                                ++sampleCount;
+                            }
+                        }
+                    }
+                    else if (endI <= pv.size())
+                    {
+                        for (size_t k = batch.first; k < endI; ++k)
+                        {
+                            const float f = pv[k].fog;
+                            if (f < minFog) minFog = f;
+                            if (f > maxFog) maxFog = f;
+                            sumFog += f;
+                            ++sampleCount;
+                        }
+                    }
+                    if (sampleCount > 0)
+                        meanFog = static_cast<float>(sumFog / sampleCount);
+                }
+                else if (!rdFogZeroEnvEnabled())
+                {
+                    if (!pi.empty() && endI <= pi.size())
+                    {
+                        for (size_t k = batch.first; k < endI; ++k)
+                        {
+                            const uint32_t vi = static_cast<uint32_t>(pi[k]) + batch.baseVertex;
+                            if (vi < pv.size() && pv[vi].fog > 0.0f)
+                            {
+                                maxFog = pv[vi].fog;
+                                break;
+                            }
+                        }
+                    }
+                    else if (!pind.empty() && endI <= pind.size())
+                    {
+                        for (size_t k = batch.first; k < endI; ++k)
+                        {
+                            const uint32_t vi = pind[k] + batch.baseVertex;
+                            if (vi < pv.size() && pv[vi].fog > 0.0f)
+                            {
+                                maxFog = pv[vi].fog;
+                                break;
+                            }
+                        }
+                    }
+                    else if (endI <= pv.size())
+                    {
+                        for (size_t k = batch.first; k < endI; ++k)
+                        {
+                            if (pv[k].fog > 0.0f)
+                            {
+                                maxFog = pv[k].fog;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (rdFogEnvEnabled() && fge && (maxFog > 0.0f || rdFogZeroEnvEnabled())) // FIX-E1d
+            {
+                const float r = static_cast<float>(batch.fogcol & 0xFFu) / 255.0f;
+                const float g = static_cast<float>((batch.fogcol >> 8) & 0xFFu) / 255.0f;
+                const float b = static_cast<float>((batch.fogcol >> 16) & 0xFFu) / 255.0f;
+                rdSetFog(r, g, b, 1.0f);
+            }
+            else
+            {
+                rdSetFog(0.0f, 0.0f, 0.0f, 0.0f);
+            }
+
+            if (g_rdFogLog) // PROBE-E1c
+            {
+                struct FogTopBatch {
+                    uint32_t idx = 0;
+                    uint32_t verts = 0;
+                    float minFog = 0.0f;
+                    float maxFog = 0.0f;
+                    float meanFog = 0.0f;
+                    uint64_t prim = 0;
+                    uint32_t tex0low = 0;
+                };
+                static uint32_t s_fogBatches = 0;
+                static uint32_t s_fogAllZero = 0;
+                static uint32_t s_fogAllOne = 0;
+                static uint32_t s_fogVarying = 0;
+                static FogTopBatch s_fogTop[6]{};
+                static uint32_t s_fogTopCount = 0;
+                static std::chrono::steady_clock::time_point s_fogLastTime{};
+
+                if (fge && sampleCount > 0) // FIX-E1d
+                {
+                    ++s_fogBatches;
+                    if (maxFog <= 0.0f)
+                        ++s_fogAllZero;
+                    if (minFog >= 1.0f)
+                        ++s_fogAllOne;
+                    if (minFog < maxFog)
+                        ++s_fogVarying;
+
+                    FogTopBatch cur;
+                    cur.idx = static_cast<uint32_t>(&db - g_rdGpu.drawBatches.data());
+                    cur.verts = batch.count;
+                    cur.minFog = minFog;
+                    cur.maxFog = maxFog;
+                    cur.meanFog = meanFog;
+                    cur.prim = prim;
+                    cur.tex0low = static_cast<uint32_t>(tex0 & 0xFFFFFFFFull);
+
+                    if (s_fogTopCount < 6)
+                    {
+                        s_fogTop[s_fogTopCount++] = cur;
+                        std::sort(s_fogTop, s_fogTop + s_fogTopCount, [](const FogTopBatch &a, const FogTopBatch &b) {
+                            return a.verts > b.verts;
+                        });
+                    }
+                    else if (cur.verts > s_fogTop[5].verts)
+                    {
+                        s_fogTop[5] = cur;
+                        std::sort(s_fogTop, s_fogTop + 6, [](const FogTopBatch &a, const FogTopBatch &b) {
+                            return a.verts > b.verts;
+                        });
+                    }
+                }
+
+                const auto nowFog = std::chrono::steady_clock::now();
+                if (s_fogLastTime.time_since_epoch().count() == 0)
+                {
+                    s_fogLastTime = nowFog;
+                }
+                else if (nowFog - s_fogLastTime >= std::chrono::seconds(1))
+                {
+                    char topBuf[512] = "";
+                    int topLen = 0;
+                    for (uint32_t i = 0; i < s_fogTopCount; ++i)
+                    {
+                        const FogTopBatch &tb = s_fogTop[i];
+                        topLen += std::snprintf(topBuf + topLen, sizeof(topBuf) - topLen,
+                                                "%s%u:%u:%.2f/%.2f/%.2f:%llx:%x",
+                                                (i == 0 ? "" : ", "),
+                                                tb.idx, tb.verts, tb.minFog, tb.maxFog, tb.meanFog,
+                                                static_cast<unsigned long long>(tb.prim), tb.tex0low);
+                    }
+                    ps2xSafeLog("[foglog] fgeBatches=%u allZero=%u allOne=%u varying=%u top=[%s]\n",
+                                s_fogBatches, s_fogAllZero, s_fogAllOne, s_fogVarying, topBuf);
+                    s_fogBatches = 0;
+                    s_fogAllZero = 0;
+                    s_fogAllOne = 0;
+                    s_fogVarying = 0;
+                    s_fogTopCount = 0;
+                    s_fogLastTime = nowFog;
+                }
+            }
 
             if (rd24Dump) // PROBE-RD24
             {
@@ -3597,6 +3839,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
             rdDepthTest(false);
             rdDepthMask(false);
+            rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
             rdgfx::bindVertexArray(g_rdGpu.vao2d); // RDG1
             for (size_t idx : deferred2d)
             {
@@ -3660,6 +3903,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     rdgfx::setDepthTest(false); // RDG1
     rdgfx::setBackfaceCulling(true); // RDG1
     rdgfx::setViewport(0, 0, rw, rh); // RDG1
+    rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
 
     if (rdFbTexOn() && vw > 0 && vh > 0) // FIX-RD79 // FIX-RD80 // FIX-RD81
     {
@@ -3766,6 +4010,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             const float clampedF = (dispF < 0.0f) ? 0.0f : dispF;
             const int aInt = static_cast<int>((1.0f - clampedF) * 255.0f + 0.5f);
             const unsigned char alphaByte = static_cast<unsigned char>(aInt < 0 ? 0 : (aInt > 255 ? 255 : aInt));
+            rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
             rdgfx::drawTextureOverlay(s_prevTexId, s_prevW, s_prevH,
                                       0.0f, 0.0f, static_cast<float>(s_prevW), static_cast<float>(s_prevH) * (448.0f / 512.0f),
                                       x, y, w, h, alphaByte); // RDG1
@@ -3784,6 +4029,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const RdSnapSlot &slot = s_snapSlots[si]; // PROBE-V3A
                 if (!slot.valid || slot.texId == 0u) // PROBE-V3A
                     continue; // PROBE-V3A
+                rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
                 rdgfx::drawTextureOverlay(slot.texId, slot.w, slot.h, // PROBE-V3A
                                           0.0f, 0.0f, static_cast<float>(slot.w), static_cast<float>(slot.h), // PROBE-V3A
                                           x + static_cast<float>(si) * (w / 4.0f), y, w / 4.0f, h / 4.0f, 255); // PROBE-V3A
