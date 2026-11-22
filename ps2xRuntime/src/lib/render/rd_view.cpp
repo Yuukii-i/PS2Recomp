@@ -4112,12 +4112,66 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             rdDepthMask(false);
             rdSetFog(0.0f, 0.0f, 0.0f, 0.0f);
 
-            // (ii) Alpha-only clear of WHOLE target to 0 with scissor off
+            // FIX-E4b: Hoist swirl quad VAO/VBO for alpha-only clear quad and modulate quad
+            static unsigned int s_rdSwirlVao = 0;
+            static unsigned int s_rdSwirlVbo = 0;
+            if (s_rdSwirlVao == 0)
+            {
+                s_rdSwirlVao = rdgfx::createVertexArray();
+                s_rdSwirlVbo = rdgfx::createVertexBuffer(nullptr, static_cast<int>(6 * sizeof(RdVert)), true);
+                rdgfx::bindVertexArray(s_rdSwirlVao);
+                rdgfx::bindVertexBuffer(s_rdSwirlVbo);
+                rdgfx::setVertexAttribute(0, 4, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 0);
+                rdgfx::enableVertexAttribute(0);
+                rdgfx::setVertexAttribute(1, 4, rdgfx::VertexAttrFormat::UnsignedByte, true, sizeof(RdVert), 16);
+                rdgfx::enableVertexAttribute(1);
+                rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 20);
+                rdgfx::enableVertexAttribute(2);
+                rdgfx::setVertexAttribute(3, 1, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 28);
+                rdgfx::enableVertexAttribute(3);
+                rdgfx::bindVertexBuffer(0u);
+                rdgfx::bindVertexArray(0u);
+            }
+            const float quadW = (fbSize[0] > 0.0f) ? fbSize[0] : 512.0f;
+            const float quadH = (fbSize[1] > 0.0f) ? fbSize[1] : 448.0f;
+
+            // (ii) Alpha-only clear of WHOLE target to 0 via full-target quad (FIX-E4b: avoids clearScreenBuffers which wiped RGB in Vulkan)
             rdgfx::setViewport(0, 0, rw, rh);
             rdgfx::setScissorTest(false);
+            rdDepthTest(false);
+            rdDepthMask(false);
+            rdgfx::setBlend(false);
+            prevBlend = -1;
             rdgfx::setColorMask(false, false, false, true);
             g_rdMaskCur = 8;
-            rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 0.0f);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Tex))
+                rdSetUniformInt(rdgfx::Uniform::Tex, 0);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Atst))
+                rdSetUniformInt(rdgfx::Uniform::Atst, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::FixAlpha))
+                rdSetUniformFloat(rdgfx::Uniform::FixAlpha, -1.0f);
+            rdSetFog(0.0f, 0.0f, 0.0f, 0.0f);
+            mode2d = 1;
+            if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d))
+                rdSetUniformInt(rdgfx::Uniform::Mode2d, 1);
+
+            const RdVert clearVerts[6] = { // FIX-E4b
+                {{0.0f, 0.0f, 0.0f, 1.0f}, {255, 255, 255, 0}, {0.0f, 0.0f}, 0.0f},
+                {{quadW, 0.0f, 0.0f, 1.0f}, {255, 255, 255, 0}, {1.0f, 0.0f}, 0.0f},
+                {{0.0f, quadH, 0.0f, 1.0f}, {255, 255, 255, 0}, {0.0f, 1.0f}, 0.0f},
+                {{quadW, 0.0f, 0.0f, 1.0f}, {255, 255, 255, 0}, {1.0f, 0.0f}, 0.0f},
+                {{quadW, quadH, 0.0f, 1.0f}, {255, 255, 255, 0}, {1.0f, 1.0f}, 0.0f},
+                {{0.0f, quadH, 0.0f, 1.0f}, {255, 255, 255, 0}, {0.0f, 1.0f}, 0.0f},
+            };
+            rdgfx::updateVertexBuffer(s_rdSwirlVbo, clearVerts, static_cast<int>(sizeof(clearVerts)), 0);
+            rdgfx::bindVertexArray(s_rdSwirlVao);
+            rdgfx::drawArrays(rdgfx::PrimitiveTopology::Triangles, 0, 6);
+            rdgfx::bindVertexArray(0u);
+
+            rdgfx::setColorMask(true, true, true, true);
+            g_rdMaskCur = 15;
+            rdgfx::setBlendAlpha();
+            prevBlend = -1;
 
             // Restore viewport to 4:3 box (+scissor box if boxClipped)
             rdgfx::setViewport(vx, vy, vw, vh);
@@ -4167,27 +4221,6 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (rdgfx::hasUniform(rdgfx::Uniform::FixAlpha))
                 rdSetUniformFloat(rdgfx::Uniform::FixAlpha, -1.0f);
 
-            static unsigned int s_rdSwirlVao = 0;
-            static unsigned int s_rdSwirlVbo = 0;
-            if (s_rdSwirlVao == 0)
-            {
-                s_rdSwirlVao = rdgfx::createVertexArray();
-                s_rdSwirlVbo = rdgfx::createVertexBuffer(nullptr, static_cast<int>(6 * sizeof(RdVert)), true);
-                rdgfx::bindVertexArray(s_rdSwirlVao);
-                rdgfx::bindVertexBuffer(s_rdSwirlVbo);
-                rdgfx::setVertexAttribute(0, 4, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 0);
-                rdgfx::enableVertexAttribute(0);
-                rdgfx::setVertexAttribute(1, 4, rdgfx::VertexAttrFormat::UnsignedByte, true, sizeof(RdVert), 16);
-                rdgfx::enableVertexAttribute(1);
-                rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 20);
-                rdgfx::enableVertexAttribute(2);
-                rdgfx::setVertexAttribute(3, 1, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 28);
-                rdgfx::enableVertexAttribute(3);
-                rdgfx::bindVertexBuffer(0u);
-                rdgfx::bindVertexArray(0u);
-            }
-            const float quadW = (fbSize[0] > 0.0f) ? fbSize[0] : 512.0f;
-            const float quadH = (fbSize[1] > 0.0f) ? fbSize[1] : 448.0f;
             const RdVert quadVerts[6] = {
                 {{0.0f, 0.0f, 0.0f, 1.0f}, {255, 255, 255, 255}, {0.0f, 0.0f}, 0.0f},
                 {{quadW, 0.0f, 0.0f, 1.0f}, {255, 255, 255, 255}, {1.0f, 0.0f}, 0.0f},
