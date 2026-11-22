@@ -4255,6 +4255,79 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             curVao = 0u;
         }
         draw2dUntil(0u, true); // FEAT-RD8
+        // PROBE-E4c: per-frame swirl probe
+        static const bool s_swirlLog = []{
+            extern void ps2xLoadConfig();
+            ps2xLoadConfig();
+            const char *e = std::getenv("PS2X_RD_SWIRLLOG");
+            return e && e[0] == '1';
+        }();
+        if (s_swirlLog)
+        {
+            static uint32_t s_callCounter = 0;
+            static uint32_t s_lastActiveCall = 0;
+            ++s_callCounter;
+            const uint32_t masks = static_cast<uint32_t>(swirlMask2d.size());
+            const bool active = (masks > 0);
+            if (active)
+                s_lastActiveCall = s_callCounter;
+            const bool inTail = (!active && s_lastActiveCall != 0 && (s_callCounter - s_lastActiveCall <= 8));
+            if (active || inTail)
+            {
+                uint32_t tris = 0;
+                uint32_t sprites = 0;
+                uint32_t firstTriVertCount = 0;
+                float x0 = 0.0f, x1 = 0.0f, y0 = 0.0f, y1 = 0.0f;
+                uint32_t afterSerialFirst = 0;
+                uint32_t afterSerialLast = 0;
+                if (active)
+                {
+                    afterSerialFirst = g_rdGpu.local2dBatches[swirlMask2d.front()].afterSerial;
+                    afterSerialLast = g_rdGpu.local2dBatches[swirlMask2d.back()].afterSerial;
+                    bool hasTri = false;
+                    float bx0 = 1e30f, bx1 = -1e30f, by0 = 1e30f, by1 = -1e30f;
+                    for (size_t idx : swirlMask2d)
+                    {
+                        const Rd2DBatch &b = g_rdGpu.local2dBatches[idx];
+                        const uint64_t ptype = b.prim & 7ull;
+                        if (ptype == 6ull)
+                        {
+                            sprites += (b.count >= 6u ? b.count / 6u : 1u);
+                        }
+                        else
+                        {
+                            tris += b.count / 3u;
+                            if (!hasTri)
+                            {
+                                firstTriVertCount = b.count;
+                                hasTri = true;
+                            }
+                            const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size());
+                            for (size_t vi = b.first; vi < e2; ++vi)
+                            {
+                                const RdVert &v = g_rdGpu.local2dScratch[vi];
+                                if (v.pos[0] < bx0) bx0 = v.pos[0];
+                                if (v.pos[0] > bx1) bx1 = v.pos[0];
+                                if (v.pos[1] < by0) by0 = v.pos[1];
+                                if (v.pos[1] > by1) by1 = v.pos[1];
+                            }
+                        }
+                    }
+                    if (hasTri && bx1 >= bx0 && by1 >= by0)
+                    {
+                        x0 = bx0;
+                        x1 = bx1;
+                        y0 = by0;
+                        y1 = by1;
+                    }
+                }
+                ps2xSafeLog("[swirlf] call=%u masks=%u tris=%u sprites=%u firstTriVertCount=%u bboxX=%.1f..%.1f bboxY=%.1f..%.1f afterSerialFirst=%u afterSerialLast=%u 3d=%u\n",
+                            s_callCounter, masks, tris, sprites, firstTriVertCount,
+                            static_cast<double>(x0), static_cast<double>(x1),
+                            static_cast<double>(y0), static_cast<double>(y1),
+                            afterSerialFirst, afterSerialLast, drawn3dThisFrame);
+            }
+        }
         if (rd2dReasonDump) // PROBE-RD62
         {
             const char *remReason = (!s_draw2d || g_rdGpu.gpu2dVertCount == 0 || g_rdGpu.vao2d == 0) ? "skip-2dDisabled" : "skip-tailClearDrop";
