@@ -2549,6 +2549,30 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             s_fadeCandidatesSec = 0;
         }
     }
+    // PROBE-E5b: feedback / display buffer 2D batch probe
+    static const bool s_fbLog = []{
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_FBLOG");
+        return e && e[0] == '1';
+    }();
+    static uint32_t s_fbDrawCall = 0;
+    static std::chrono::steady_clock::time_point s_fbSecStart{};
+    static uint32_t s_fbLinesSec = 0;
+    if (s_fbLog)
+    {
+        ++s_fbDrawCall;
+        const auto nowFb = std::chrono::steady_clock::now();
+        if (s_fbSecStart.time_since_epoch().count() == 0)
+        {
+            s_fbSecStart = nowFb;
+        }
+        else if (nowFb - s_fbSecStart >= std::chrono::seconds(1))
+        {
+            s_fbSecStart = nowFb;
+            s_fbLinesSec = 0;
+        }
+    }
     if ((!g_rdGpu.drawBatches.empty() || g_rdGpu.gpu2dVertCount > 0) && g_rdGpu.shaderReady) // FEAT-RD8 // FEAT-RD14 // RDG1
     {
         rdgfx::enableShader(); // RDG1
@@ -2610,6 +2634,65 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             static_cast<unsigned long long>(b.test),
                             static_cast<unsigned long long>(b.zbuf),
                             static_cast<unsigned long long>(b.frame));
+            }
+        };
+        auto isFbCandidate = [](const Rd2DBatch &b) -> bool // PROBE-E5b
+        {
+            const bool tme = ((b.prim >> 4) & 1ull) != 0ull;
+            if (!tme)
+                return false;
+            const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull);
+            const uint32_t psm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full);
+            return ps2xRdIsFbFeedback(b.texSerial) || (tbp0 == 0xE00u && psm == 0u);
+        };
+        auto logFbCandidate = [&](size_t idx, const Rd2DBatch &b) // PROBE-E5b
+        {
+            if (s_fbLinesSec < 100u)
+            {
+                ++s_fbLinesSec;
+                float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+                const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size());
+                for (size_t vi = b.first; vi < e2; ++vi)
+                {
+                    const RdVert &v = g_rdGpu.local2dScratch[vi];
+                    x0 = std::min(x0, v.pos[0]); x1 = std::max(x1, v.pos[0]);
+                    y0 = std::min(y0, v.pos[1]); y1 = std::max(y1, v.pos[1]);
+                }
+                const int bx0 = (x1 >= x0) ? static_cast<int>(x0) : 0;
+                const int by0 = (y1 >= y0) ? static_cast<int>(y0) : 0;
+                const int bx1 = (x1 >= x0) ? static_cast<int>(x1) : 0;
+                const int by1 = (y1 >= y0) ? static_cast<int>(y0) : 0;
+                uint32_t col0 = 0u;
+                if (b.count > 0u && b.first < g_rdGpu.local2dScratch.size())
+                {
+                    const RdVert &v0 = g_rdGpu.local2dScratch[b.first];
+                    col0 = (static_cast<uint32_t>(v0.rgba[3]) << 24) |
+                           (static_cast<uint32_t>(v0.rgba[2]) << 16) |
+                           (static_cast<uint32_t>(v0.rgba[1]) << 8) |
+                           static_cast<uint32_t>(v0.rgba[0]);
+                }
+                const unsigned int fix = static_cast<unsigned int>((b.alpha >> 32) & 0xFFull);
+                const uint64_t mode = b.alpha & 0xFF000000FFull;
+                const uint32_t psm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full);
+                const uint32_t tw = static_cast<uint32_t>((b.tex0 >> 26) & 0xFull);
+                const uint32_t th = static_cast<uint32_t>((b.tex0 >> 30) & 0xFull);
+                const uint32_t ate = static_cast<uint32_t>(b.test & 1ull);
+                const uint32_t atst = ate ? static_cast<uint32_t>((b.test >> 1) & 7ull) : 1u;
+                const int afail = (ate && atst != 1u) ? static_cast<int>((b.test >> 12) & 3ull) : 0;
+                const uint32_t zte = static_cast<uint32_t>((b.test >> 16) & 1ull);
+                const uint32_t ztst = static_cast<uint32_t>((b.test >> 17) & 3ull);
+                ps2xSafeLog("[fbq] call=%u i=%zu cnt=%u alpha=0x%llx FIX=0x%02x mode=0x%llx tex0=0x%llx psm=%u tw=%u th=%u test=0x%llx atst=%u afail=%d zte/ztst=%u/%u frame=0x%llx bbox=%d,%d-%d,%d col0=0x%08x fate=?\n",
+                            s_fbDrawCall, idx, static_cast<unsigned int>(b.count),
+                            static_cast<unsigned long long>(b.alpha),
+                            fix,
+                            static_cast<unsigned long long>(mode),
+                            static_cast<unsigned long long>(b.tex0),
+                            psm, tw, th,
+                            static_cast<unsigned long long>(b.test),
+                            atst, afail, zte, ztst,
+                            static_cast<unsigned long long>(b.frame),
+                            bx0, by0, bx1, by1,
+                            col0);
             }
         };
         if (rdgfx::hasUniform(rdgfx::Uniform::FbSize)) // RDG1
@@ -2736,6 +2819,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 {
                     ++s_fadeLinesSec;
                     ps2xSafeLog("[fadeq-fate] i=%zu fate=%s\n", idx, fate);
+                }
+            }
+            if (s_fbLog && isFbCandidate(b)) // PROBE-E5b
+            {
+                if (std::strncmp(fate, "drawn", 5) != 0 && s_fbLinesSec < 100u)
+                {
+                    ++s_fbLinesSec;
+                    ps2xSafeLog("[fbq-fate] i=%zu fate=%s\n", idx, fate);
                 }
             }
             const int cap = g_rd2dReasonBig ? 400 : 60; // PROBE-RD62B
@@ -3123,6 +3214,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniformInt(rdgfx::Uniform::Tfx, tfxVal); // RDG1
             if (rdgfx::hasUniform(rdgfx::Uniform::Tcc)) // RDG1
                 rdSetUniformInt(rdgfx::Uniform::Tcc, tccVal); // RDG1
+            if (s_fbLog && isFbCandidate(b0)) // PROBE-E5b
+            {
+                if (s_fbLinesSec < 100u)
+                {
+                    ++s_fbLinesSec;
+                    ps2xSafeLog("[fbq-fate] i=%zu fate=drawn texId=%u prevTexId=%u isDisplayBatch=%d\n",
+                                idx, texId, s_prevTexId, isRdFbTexDisplayBatch(b0) ? 1 : 0);
+                }
+            }
 
             rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c: no fog on 2D batches
             if (palMode != 0 && rdgfx::hasUniform(rdgfx::Uniform::PalMode)) // FIX-RD82I // RDG1
@@ -3198,7 +3298,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 ++s_abeDrawn2dSec;
             if (s_texFilter.active) // PROBE-E3d
                 ++s_texDrawn2dSec;
-            if (logReason && (rd2dReasonDump || s_fadeLog)) // PROBE-RD62 // PROBE-E5a
+            if (logReason && (rd2dReasonDump || s_fadeLog || s_fbLog)) // PROBE-RD62 // PROBE-E5a // PROBE-E5b
             {
                 const bool texUnres = (((b0.prim >> 4) & 1ull) != 0ull) && (texId == 0u);
                 log2dReason(idx, b0, texUnres ? "drawn-texUnresolved" : "drawn");
@@ -3252,6 +3352,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         ++s_fadeCandidatesSec;
                         logFadeCandidate(i2d, b0);
                     }
+                }
+                // PROBE-E5b: fb-quad probe
+                if (s_fbLog && isFbCandidate(b0))
+                {
+                    logFbCandidate(i2d, b0);
                 }
                 if (!allow2dIdx(i2d)) // PROBE-RD83
                 {
@@ -4441,7 +4546,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             afterSerialFirst, afterSerialLast, drawn3dThisFrame);
             }
         }
-        if (rd2dReasonDump || s_fadeLog) // PROBE-RD62 // PROBE-E5a
+        if (rd2dReasonDump || s_fadeLog || s_fbLog) // PROBE-RD62 // PROBE-E5a // PROBE-E5b
         {
             const char *remReason = (!s_draw2d || g_rdGpu.gpu2dVertCount == 0 || g_rdGpu.vao2d == 0) ? "skip-2dDisabled" : "skip-tailClearDrop";
             for (size_t k = i2d; k < g_rdGpu.local2dBatches.size(); ++k)
@@ -4454,6 +4559,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         ++s_fadeSpritesSec;
                     ++s_fadeCandidatesSec;
                     logFadeCandidate(k, bk);
+                }
+                if (s_fbLog && isFbCandidate(bk)) // PROBE-E5b
+                {
+                    logFbCandidate(k, bk);
                 }
                 log2dReason(k, bk, remReason);
             }
