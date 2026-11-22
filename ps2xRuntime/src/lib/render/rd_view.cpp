@@ -1761,6 +1761,16 @@ static bool isRdCopyBufSkip(const Rd2DBatch &b) // FIX-RD87 // FIX-RD87B
     return findRdSnapTex(b, false) == 0u;
 }
 
+// FEAT-E4a: Swirl transition alpha mask detection and drawing state
+static bool g_rdSwirlMaskDraw = false; // FEAT-E4a
+
+static bool isRdSwirlMask(const Rd2DBatch &b) // FEAT-E4a
+{
+    const bool tme = ((b.prim >> 4) & 1ull) != 0ull;
+    const bool abe = ((b.prim >> 6) & 1ull) != 0ull;
+    return !tme && abe && ((b.alpha & 0x000000FF000000FFull) == 0x64ull);
+}
+
 // PROBE-V3N: draw sequence tracking
 static uint64_t s_v3nLast3dSeq = 0; // PROBE-V3N
 static uint64_t s_v3nLast2dSeq = 0; // PROBE-V3N
@@ -2605,6 +2615,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         int rd2dReasonPrinted = 0;
         uint32_t min3dSerial = 0xFFFFFFFFu, max3dSerial = 0u;
         std::vector<size_t> deferred2d; // FIX-RD63
+        std::vector<size_t> swirlMask2d; // FEAT-E4a
         if (g_rd2dReasonOn)
         {
             static int s_rd2dReasonPrints = 0;
@@ -2834,6 +2845,25 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         {
             if (!allow2dIdx(idx)) // PROBE-RD83
                 return;
+            if (g_rdSwirlMaskDraw) // FEAT-E4a
+            {
+                rdDepthTest(false);
+                rdDepthMask(false);
+                rdgfx::setBlend(false);
+                prevBlend = -1;
+                rdgfx::setColorMask(false, false, false, true);
+                g_rdMaskCur = 8;
+                if (rdgfx::hasUniform(rdgfx::Uniform::Atst))
+                    rdSetUniformInt(rdgfx::Uniform::Atst, 1);
+                if (rdgfx::hasUniform(rdgfx::Uniform::FixAlpha))
+                    rdSetUniformFloat(rdgfx::Uniform::FixAlpha, -1.0f);
+                if (rdgfx::hasUniform(rdgfx::Uniform::Tex))
+                    rdSetUniformInt(rdgfx::Uniform::Tex, 0);
+                rdSetFog(0.0f, 0.0f, 0.0f, 0.0f);
+                rdgfx::drawArrays(rdgfx::PrimitiveTopology::Triangles, static_cast<int>(b0.first), static_cast<int>(totalCount));
+                ++draws2dThisFrame;
+                return;
+            }
             const uint32_t ate = static_cast<uint32_t>(b0.test & 1ull);
             const uint32_t atst = ate ? static_cast<uint32_t>((b0.test >> 1) & 7ull) : 1u;
             const int afail = (ate && atst != 1u) ? static_cast<int>((b0.test >> 12) & 3ull) : 0; // FEAT-RD30
@@ -3148,6 +3178,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (b0.count == 0u)
                 {
                     log2dReason(i2d, b0, "skip-count0"); // PROBE-RD62
+                    ++i2d;
+                    continue;
+                }
+                if (isRdSwirlMask(b0)) // FEAT-E4a
+                {
+                    if (allow2dIdx(i2d))
+                        swirlMask2d.push_back(i2d);
+                    log2dReason(i2d, b0, "swirl-mask");
                     ++i2d;
                     continue;
                 }
@@ -4042,6 +4080,145 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             mode2d = 0;
             if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d)) // RDG1
                 rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
+            curVao = 0u;
+        }
+        if (!swirlMask2d.empty()) // FEAT-E4a
+        {
+            uint32_t numSprites = 0;
+            uint32_t numTris = 0;
+            for (size_t idx : swirlMask2d)
+            {
+                const Rd2DBatch &b = g_rdGpu.local2dBatches[idx];
+                const uint64_t ptype = b.prim & 7ull;
+                if (ptype == 6ull)
+                    numSprites += (b.count >= 6u ? b.count / 6u : 1u);
+                else
+                    numTris += b.count / 3u;
+            }
+            static std::chrono::steady_clock::time_point s_swirlLastLog{};
+            const auto nowSwirl = std::chrono::steady_clock::now();
+            if (s_swirlLastLog.time_since_epoch().count() == 0 || nowSwirl - s_swirlLastLog >= std::chrono::seconds(1))
+            {
+                s_swirlLastLog = nowSwirl;
+                ps2xSafeLog("[swirl] masks=%u sprites=%u tris=%u\n",
+                            static_cast<unsigned int>(swirlMask2d.size()),
+                            numSprites, numTris);
+            }
+
+            mode2d = 1;
+            if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d))
+                rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d);
+            rdDepthTest(false);
+            rdDepthMask(false);
+            rdSetFog(0.0f, 0.0f, 0.0f, 0.0f);
+
+            // (ii) Alpha-only clear of WHOLE target to 0 with scissor off
+            rdgfx::setViewport(0, 0, rw, rh);
+            rdgfx::setScissorTest(false);
+            rdgfx::setColorMask(false, false, false, true);
+            g_rdMaskCur = 8;
+            rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 0.0f);
+
+            // Restore viewport to 4:3 box (+scissor box if boxClipped)
+            rdgfx::setViewport(vx, vy, vw, vh);
+            if (boxClipped)
+            {
+                rdgfx::setScissorTest(true);
+                rdgfx::setScissorRect(vx, vy, vw, vh);
+            }
+            else
+            {
+                rdgfx::setScissorTest(false);
+            }
+
+            // (iii) Draw every mask batch in order
+            rdgfx::bindVertexArray(g_rdGpu.vao2d);
+            g_rdSwirlMaskDraw = true;
+            for (size_t idx : swirlMask2d)
+            {
+                if (!allow2dIdx(idx))
+                    continue;
+                const Rd2DBatch &b = g_rdGpu.local2dBatches[idx];
+                applyScissor(b.scissor, true);
+                emit2dBatch(idx, b, b.count, idx + 1, true, false);
+            }
+            g_rdSwirlMaskDraw = false;
+            rdgfx::setColorMask(true, true, true, true);
+            g_rdMaskCur = 15;
+            rdgfx::setBlendAlpha();
+            prevBlend = -1;
+
+            // (C) Modulate: full-target untextured quad with Result RGB = Dst.rgb * Dst.alpha
+            rdgfx::setViewport(0, 0, rw, rh);
+            rdgfx::setScissorTest(false);
+            rdDepthTest(false);
+            rdDepthMask(false);
+            rdSetFog(0.0f, 0.0f, 0.0f, 0.0f);
+            rdgfx::setColorMask(true, true, true, false);
+            g_rdMaskCur = 7;
+            rdgfx::setBlend(true, rdgfx::BlendFactor::Zero, rdgfx::BlendFactor::DstAlpha, rdgfx::BlendFactor::Zero, rdgfx::BlendFactor::One, rdgfx::BlendEq::Add, rdgfx::BlendEq::Add);
+            prevBlend = -1;
+            if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d))
+                rdSetUniformInt(rdgfx::Uniform::Mode2d, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Tex))
+                rdSetUniformInt(rdgfx::Uniform::Tex, 0);
+            if (rdgfx::hasUniform(rdgfx::Uniform::Atst))
+                rdSetUniformInt(rdgfx::Uniform::Atst, 1);
+            if (rdgfx::hasUniform(rdgfx::Uniform::FixAlpha))
+                rdSetUniformFloat(rdgfx::Uniform::FixAlpha, -1.0f);
+
+            static unsigned int s_rdSwirlVao = 0;
+            static unsigned int s_rdSwirlVbo = 0;
+            if (s_rdSwirlVao == 0)
+            {
+                s_rdSwirlVao = rdgfx::createVertexArray();
+                s_rdSwirlVbo = rdgfx::createVertexBuffer(nullptr, static_cast<int>(6 * sizeof(RdVert)), true);
+                rdgfx::bindVertexArray(s_rdSwirlVao);
+                rdgfx::bindVertexBuffer(s_rdSwirlVbo);
+                rdgfx::setVertexAttribute(0, 4, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 0);
+                rdgfx::enableVertexAttribute(0);
+                rdgfx::setVertexAttribute(1, 4, rdgfx::VertexAttrFormat::UnsignedByte, true, sizeof(RdVert), 16);
+                rdgfx::enableVertexAttribute(1);
+                rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 20);
+                rdgfx::enableVertexAttribute(2);
+                rdgfx::setVertexAttribute(3, 1, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), 28);
+                rdgfx::enableVertexAttribute(3);
+                rdgfx::bindVertexBuffer(0u);
+                rdgfx::bindVertexArray(0u);
+            }
+            const float quadW = (fbSize[0] > 0.0f) ? fbSize[0] : 512.0f;
+            const float quadH = (fbSize[1] > 0.0f) ? fbSize[1] : 448.0f;
+            const RdVert quadVerts[6] = {
+                {{0.0f, 0.0f, 0.0f, 1.0f}, {255, 255, 255, 255}, {0.0f, 0.0f}, 0.0f},
+                {{quadW, 0.0f, 0.0f, 1.0f}, {255, 255, 255, 255}, {1.0f, 0.0f}, 0.0f},
+                {{0.0f, quadH, 0.0f, 1.0f}, {255, 255, 255, 255}, {0.0f, 1.0f}, 0.0f},
+                {{quadW, 0.0f, 0.0f, 1.0f}, {255, 255, 255, 255}, {1.0f, 0.0f}, 0.0f},
+                {{quadW, quadH, 0.0f, 1.0f}, {255, 255, 255, 255}, {1.0f, 1.0f}, 0.0f},
+                {{0.0f, quadH, 0.0f, 1.0f}, {255, 255, 255, 255}, {0.0f, 1.0f}, 0.0f},
+            };
+            rdgfx::updateVertexBuffer(s_rdSwirlVbo, quadVerts, static_cast<int>(sizeof(quadVerts)), 0);
+            rdgfx::bindVertexArray(s_rdSwirlVao);
+            rdgfx::drawArrays(rdgfx::PrimitiveTopology::Triangles, 0, 6);
+            rdgfx::bindVertexArray(0u);
+
+            rdgfx::setColorMask(true, true, true, true);
+            g_rdMaskCur = 15;
+            rdgfx::setBlendAlpha();
+            prevBlend = -1;
+
+            rdgfx::setViewport(vx, vy, vw, vh);
+            if (boxClipped)
+            {
+                rdgfx::setScissorTest(true);
+                rdgfx::setScissorRect(vx, vy, vw, vh);
+            }
+            else
+            {
+                rdgfx::setScissorTest(false);
+            }
+            mode2d = 0;
+            if (rdgfx::hasUniform(rdgfx::Uniform::Mode2d))
+                rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d);
             curVao = 0u;
         }
         draw2dUntil(0u, true); // FEAT-RD8
