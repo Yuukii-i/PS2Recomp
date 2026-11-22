@@ -2188,6 +2188,60 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             }
             const float s = h / fbH;
             const float scaleToShader = (s * fbW) / w;
+            // FIX-R8: static HUD safe area anchor mode
+            struct HudAnchorCfg {
+                std::string mode = "edge";
+                float safeAspect = 0.0f;
+                bool isEdge = true;
+            };
+            static const HudAnchorCfg s_hudAnchor = []() {
+                HudAnchorCfg cfg;
+                const char *e = std::getenv("PS2X_HUD_ANCHOR");
+                if (!e || !e[0])
+                    return cfg;
+                std::string str = e;
+                if (str == "edge")
+                    return cfg;
+                if (str == "16:9" || str == "16/9")
+                {
+                    cfg.mode = str;
+                    cfg.safeAspect = 16.0f / 9.0f;
+                    cfg.isEdge = false;
+                    return cfg;
+                }
+                if (str == "4:3" || str == "4/3")
+                {
+                    cfg.mode = str;
+                    cfg.safeAspect = 4.0f / 3.0f;
+                    cfg.isEdge = false;
+                    return cfg;
+                }
+                if (str.rfind("safe=", 0) == 0)
+                {
+                    cfg.mode = str;
+                    cfg.safeAspect = std::strtof(str.c_str() + 5, nullptr);
+                    cfg.isEdge = (cfg.safeAspect <= 0.0f);
+                    return cfg;
+                }
+                char *end = nullptr;
+                float v = std::strtof(str.c_str(), &end);
+                if (end != str.c_str() && v > 0.0f)
+                {
+                    cfg.mode = str;
+                    cfg.safeAspect = v;
+                    cfg.isEdge = false;
+                    return cfg;
+                }
+                return cfg;
+            }();
+            const float safeW = s_hudAnchor.isEdge ? w : std::min(w, h * s_hudAnchor.safeAspect); // FIX-R8
+            const float m = (s_hudAnchor.isEdge || safeW >= w) ? 0.0f : (0.5f * fbW * (1.0f - safeW / w)); // FIX-R8
+            static bool s_hudAnchorLogged = false; // FIX-R8
+            if (!s_hudAnchorLogged) // FIX-R8
+            {
+                s_hudAnchorLogged = true; // FIX-R8
+                ps2xSafeLog("[hud] anchor=%s margin=%.1f fb px\n", s_hudAnchor.mode.c_str(), m); // FIX-R8
+            }
             for (const Rd2DBatch &b : g_rdGpu.local2dBatches)
             {
                 float minX, maxX, minY, maxY;
@@ -2211,14 +2265,17 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 else if (cx < 0.5f * fbW)
                 {
                     for (uint32_t k = 0u; k < b.count; ++k)
-                        g_rdGpu.local2dScratch[b.first + k].pos[0] *= scaleToShader;
+                    {
+                        float &vx2 = g_rdGpu.local2dScratch[b.first + k].pos[0]; // FIX-R8
+                        vx2 = m + vx2 * scaleToShader; // FIX-R8
+                    }
                 }
                 else
                 {
                     for (uint32_t k = 0u; k < b.count; ++k)
                     {
                         float &vx2 = g_rdGpu.local2dScratch[b.first + k].pos[0];
-                        vx2 = fbW - (fbW - vx2) * scaleToShader;
+                        vx2 = fbW - m - (fbW - vx2) * scaleToShader; // FIX-R8
                     }
                 }
             }
@@ -2260,10 +2317,17 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     const int vy = static_cast<int>((static_cast<float>(sh) - y - h) * scaleY);
     const int vw = static_cast<int>(w * scaleX);
     const int vh = static_cast<int>(h * scaleY);
+    const bool boxClipped = (vw < rw || vh < rh); // FIX-R7
 
     rdgfx::setViewport(vx, vy, vw, vh); // RDG1
     // FEAT-RD34b: force known GL state (raylib/ImGui may have changed it since our last frame)
-    rdgfx::setScissorTest(false); // RDG1
+    if (boxClipped) // FIX-R7
+    {
+        rdgfx::setScissorTest(true);
+        rdgfx::setScissorRect(vx, vy, vw, vh);
+    }
+    else
+        rdgfx::setScissorTest(false); // RDG1
     rdgfx::setColorMask(true, true, true, true); // RDG1
     g_rdMaskCur = 15;
     rdgfx::setDepthMask(true); // RDG1
@@ -2275,7 +2339,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         rdgfx::setColorMask(false, false, false, true); // RDG1
         rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 0.0f); // RDG1
         rdgfx::setColorMask(true, true, true, true); // RDG1
-        rdgfx::setScissorTest(false); // RDG1
+        if (boxClipped) // FIX-R7
+        {
+            rdgfx::setScissorTest(true);
+            rdgfx::setScissorRect(vx, vy, vw, vh);
+        }
+        else
+            rdgfx::setScissorTest(false); // RDG1
     }
     rdgfx::setDepthTest(true); // RDG1
     g_rdc.reset(); g_rdc.calls = 0; g_rdc.depthTest = 1; g_rdc.depthMask = 1; // FEAT-RD15 // FEAT-RD34b
@@ -2496,6 +2566,19 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 r[1] = static_cast<int>(std::floor(bt));
                 r[2] = std::max(0, static_cast<int>(std::ceil(rr)) - r[0]);
                 r[3] = std::max(0, static_cast<int>(std::ceil(tp)) - r[1]);
+                if (boxClipped) // FIX-R7: intersect GS scissor with display box
+                {
+                    const int ix0 = std::max(r[0], vx);
+                    const int ix1 = std::min(r[0] + r[2], vx + vw);
+                    const int iy0 = std::max(r[1], vy);
+                    const int iy1 = std::min(r[1] + r[3], vy + vh);
+                    if (ix1 <= ix0 || iy1 <= iy0)
+                        return false;
+                    r[0] = ix0;
+                    r[1] = iy0;
+                    r[2] = ix1 - ix0;
+                    r[3] = iy1 - iy0;
+                }
                 on = true;
             }
             if (on != scisOn || (on && std::memcmp(r, scisRect, sizeof(r)) != 0))
@@ -2509,7 +2592,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     std::memcpy(scisRect, r, sizeof(r));
                 }
                 else
-                    rdgfx::setScissorTest(false); // RDG1
+                {
+                    if (boxClipped) // FIX-R7
+                    {
+                        rdgfx::setScissorTest(true);
+                        rdgfx::setScissorRect(vx, vy, vw, vh);
+                    }
+                    else
+                        rdgfx::setScissorTest(false); // RDG1
+                }
                 scisOn = on;
                 ++g_rdc.calls;
             }
@@ -3567,7 +3658,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             g_camTl.finish();
         if (scisOn) // FEAT-RD22
         {
-            rdgfx::setScissorTest(false); // RDG1
+            if (boxClipped) // FIX-R7
+            {
+                rdgfx::setScissorTest(true);
+                rdgfx::setScissorRect(vx, vy, vw, vh);
+            }
+            else
+                rdgfx::setScissorTest(false); // RDG1
             scisOn = false;
         }
         rdgfx::bindTexture(0u, 0u); // FEAT-RD3 // RDG1

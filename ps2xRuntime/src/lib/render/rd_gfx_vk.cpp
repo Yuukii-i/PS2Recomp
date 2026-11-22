@@ -330,6 +330,8 @@ struct RdVkState
     // Offscreen render targets
     uint32_t targetW = 0;
     uint32_t targetH = 0;
+    uint32_t swapW = 0; // FIX-R2
+    uint32_t swapH = 0; // FIX-R2
     VkImage colorImage = VK_NULL_HANDLE;
     VkDeviceMemory colorMem = VK_NULL_HANDLE;
     VkImageView colorView = VK_NULL_HANDLE;
@@ -855,6 +857,8 @@ void destroyTargets()
     s_vk.resolveLayout = VK_IMAGE_LAYOUT_UNDEFINED; // RDG2B
     s_vk.targetW = 0;
     s_vk.targetH = 0;
+    s_vk.swapW = 0; // FIX-R2
+    s_vk.swapH = 0; // FIX-R2
 }
 
 bool createImageAndView(uint32_t w, uint32_t h, VkFormat fmt, VkSampleCountFlagBits samples, VkImageUsageFlags usage,
@@ -1958,6 +1962,42 @@ bool init()
     return true;
 }
 
+// FIX-R2: render scale support
+static int s_renderScalePercent = -1;
+
+int getRenderScalePercent()
+{
+    if (s_renderScalePercent < 0)
+    {
+        s_renderScalePercent = 100;
+        if (const char *env = std::getenv("PS2X_RENDER_SCALE"))
+        {
+            char *end = nullptr;
+            long val = std::strtol(env, &end, 10);
+            if (end != env)
+            {
+                while (*end == ' ' || *end == '\t') ++end;
+                if (*end == '%') ++end;
+                while (*end == ' ' || *end == '\t') ++end;
+                if (*end == '\0')
+                {
+                    if (val < 25) val = 25;
+                    if (val > 400) val = 400;
+                    s_renderScalePercent = static_cast<int>(val);
+                }
+            }
+        }
+    }
+    return s_renderScalePercent;
+}
+
+void setRenderScalePercent(int percent)
+{
+    if (percent < 25) percent = 25;
+    if (percent > 400) percent = 400;
+    s_renderScalePercent = percent;
+}
+
 void beginFrame()
 {
     if (!s_vk.initialized)
@@ -1986,13 +2026,55 @@ void beginFrame()
 
     s_vk.cmd = cmd;
     s_vk.swapImage = swapImg;
+    s_vk.swapW = w; // FIX-R2
+    s_vk.swapH = h; // FIX-R2
     s_vk.curFrame = frameIdx;
     s_vk.inRenderPass = false;
     s_vk.firstPassInFrame = true;
     invalidateCommandBufferState(); // PERF-RDG4R
     s_vk.cachedDescSet = VK_NULL_HANDLE;
 
-    if (!ensureTargets(w, h))
+    // FIX-R2: compute scaled target size
+    const int scalePct = getRenderScalePercent();
+    const double scale = static_cast<double>(scalePct) / 100.0;
+    uint32_t targetW = static_cast<uint32_t>(std::max(64.0, std::round(static_cast<double>(w) * scale)));
+    uint32_t targetH = static_cast<uint32_t>(std::max(64.0, std::round(static_cast<double>(h) * scale)));
+
+    VkPhysicalDeviceProperties devProps{};
+    vkGetPhysicalDeviceProperties(s_vk.physicalDevice, &devProps);
+    const uint32_t maxDim = devProps.limits.maxImageDimension2D;
+    double factor = 1.0;
+    if (maxDim > 0 && targetW > maxDim)
+        factor = std::min(factor, static_cast<double>(maxDim) / static_cast<double>(targetW));
+    if (maxDim > 0 && targetH > maxDim)
+        factor = std::min(factor, static_cast<double>(maxDim) / static_cast<double>(targetH));
+    const double pixelBudget = 8192.0 * 8192.0;
+    const double currentPixels = static_cast<double>(targetW) * static_cast<double>(targetH);
+    if (currentPixels > pixelBudget)
+        factor = std::min(factor, std::sqrt(pixelBudget / currentPixels));
+
+    if (factor < 1.0)
+    {
+        targetW = static_cast<uint32_t>(std::max(64.0, std::floor(static_cast<double>(targetW) * factor)));
+        targetH = static_cast<uint32_t>(std::max(64.0, std::floor(static_cast<double>(targetH) * factor)));
+        const int clampedPct = static_cast<int>(std::round((static_cast<double>(targetW) / static_cast<double>(w)) * 100.0));
+        static bool s_clampedLogged = false;
+        if (!s_clampedLogged)
+        {
+            s_clampedLogged = true;
+            std::printf("[rdvk] render scale %d%% clamped to %d%%\n", scalePct, clampedPct);
+        }
+    }
+
+    static bool s_initScaleLogged = false;
+    if (!s_initScaleLogged)
+    {
+        s_initScaleLogged = true;
+        std::printf("[rdvk] render scale=%d%% target %ux%u swapchain %ux%u\n",
+                    scalePct, targetW, targetH, w, h);
+    }
+
+    if (!ensureTargets(targetW, targetH))
     {
         s_vk.frameActive = false;
         return;
@@ -2079,20 +2161,27 @@ void endFrame()
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-    VkImageBlit blit{};
-    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    blit.srcOffsets[0] = {0, 0, 0};
-    blit.srcOffsets[1] = {static_cast<int32_t>(s_vk.targetW), static_cast<int32_t>(s_vk.targetH), 1};
-    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    blit.dstOffsets[0] = {0, 0, 0};
-    blit.dstOffsets[1] = {static_cast<int32_t>(s_vk.targetW), static_cast<int32_t>(s_vk.targetH), 1};
-    vkCmdBlitImage(s_vk.cmd,
-                   srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   s_vk.swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1, &blit, VK_FILTER_NEAREST);
+    // FIX-R2b: guard against zero-extent blit before swapchain exists
+    if (s_vk.swapW != 0 && s_vk.swapH != 0 && s_vk.targetW != 0 && s_vk.targetH != 0)
+    {
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {static_cast<int32_t>(s_vk.targetW), static_cast<int32_t>(s_vk.targetH), 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {static_cast<int32_t>(s_vk.swapW), static_cast<int32_t>(s_vk.swapH), 1}; // FIX-R2
+        const VkFilter blitFilter = (s_vk.targetW == s_vk.swapW && s_vk.targetH == s_vk.swapH) // FIX-R2
+                                        ? VK_FILTER_NEAREST
+                                        : VK_FILTER_LINEAR;
+        vkCmdBlitImage(s_vk.cmd,
+                       srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       s_vk.swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &blit, blitFilter); // FIX-R2
+    }
 
 #if defined(PS2X_HAS_IMGUI) // DBG1
-    ps2xSdlImGuiRecord(s_vk.cmd, s_vk.swapImage, ps2xSdlVkCurrentSwapView(), s_vk.targetW, s_vk.targetH);
+    ps2xSdlImGuiRecord(s_vk.cmd, s_vk.swapImage, ps2xSdlVkCurrentSwapView(), s_vk.swapW, s_vk.swapH); // FIX-R2
 #endif // DBG1
 
     imageBarrier(s_vk.cmd, s_vk.swapImage, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,

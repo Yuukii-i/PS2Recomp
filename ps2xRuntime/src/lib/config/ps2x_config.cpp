@@ -61,6 +61,10 @@ const char *kDefaultIni =
     "fullscreen = 0\n" // FIX-R1
     "# vsync: on (fifo), mailbox, off (immediate) or relaxed (fifo_relaxed)\n" // FIX-R1
     "vsync = on\n" // FIX-R1
+    "# render_scale: offscreen render scale percent (25..400, default 100)\n" // FIX-R2
+    "render_scale = 100\n" // FIX-R2
+    "# hud_anchor: edge, 16:9 or 4:3 (keep 2D HUD in safe area on wide windows)\n" // FIX-R8
+    "hud_anchor = edge\n" // FIX-R8
     "\n"
     "[debug]\n"
     "# background_window: 1 keeps the window behind others\n"
@@ -196,6 +200,16 @@ void ps2xLoadConfig()
     if (!bg.empty())
         setEnvDefault("PS2X_WINDOW_BACKGROUND", bg);
 
+    // FIX-R2: render_scale config key
+    std::string rscale = get("graphics.render_scale");
+    if (!rscale.empty())
+        setEnvDefault("PS2X_RENDER_SCALE", rscale);
+
+    // FIX-R8: hud_anchor config key
+    std::string hudAnchor = lower(get("graphics.hud_anchor"));
+    if (!hudAnchor.empty())
+        setEnvDefault("PS2X_HUD_ANCHOR", hudAnchor);
+
     auto eff = [](const char *n) {
         const char *v = std::getenv(n);
         return std::string(v ? v : "(unset)");
@@ -206,6 +220,8 @@ void ps2xLoadConfig()
               << " msaa=" << eff("PS2X_MSAA")
               << " window=" << eff("PS2X_WINDOW_SIZE")
               << " fullscreen=" << eff("PS2X_FULLSCREEN") // FIX-R1
-              << " vsync=" << eff("PS2X_VK_PRESENT") << std::endl; // FIX-R1
+              << " vsync=" << eff("PS2X_VK_PRESENT") // FIX-R1
+              << " render_scale=" << eff("PS2X_RENDER_SCALE") // FIX-R2
+              << " hud_anchor=" << eff("PS2X_HUD_ANCHOR") << std::endl; // FIX-R8
     }); // FIX-CFG1
 }
