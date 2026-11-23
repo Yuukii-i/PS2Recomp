@@ -2205,6 +2205,78 @@ static void probeE6bScanDmaBlock(uint32_t tagAddr, uint32_t dataAddr, uint32_t q
                     tagAddr, dataPhysAddr, qwc, off, fix); // PROBE-E6b
     } // PROBE-E6b
 } // PROBE-E6b
+ // PROBE-E6c
+static inline bool blurVifProbeOn() // PROBE-E6c
+{ // PROBE-E6c
+    static const bool s_on = []() { // PROBE-E6c
+        const char *e = std::getenv("PS2X_BLURPKT"); // PROBE-E6c
+        return e && e[0] == '1'; // PROBE-E6c
+    }(); // PROBE-E6c
+    return s_on; // PROBE-E6c
+} // PROBE-E6c
+ // PROBE-E6c
+static void probeE6cScanVifBlock(uint32_t tagAddr, uint32_t dataAddr, uint32_t qwc, const uint8_t *data, uint32_t maxAvailQw = 8192u, uint32_t srcPhys = 0u) // PROBE-E6c
+{ // PROBE-E6c
+    if (!data || qwc == 0u || maxAvailQw == 0u) // PROBE-E6c
+        return; // PROBE-E6c
+    const uint32_t scanQw = std::min(qwc, std::min(8192u, maxAvailQw)); // PROBE-E6c
+    int matchQw = -1; // PROBE-E6c
+    uint32_t matchHalf = 0u; // PROBE-E6c
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6c
+    { // PROBE-E6c
+        uint64_t w0 = 0, w1 = 0; // PROBE-E6c
+        std::memcpy(&w0, data + q * 16u, sizeof(uint64_t)); // PROBE-E6c
+        std::memcpy(&w1, data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6c
+        if (w0 == 0x0000000664020E00ULL) // PROBE-E6c
+        { // PROBE-E6c
+            matchQw = static_cast<int>(q); // PROBE-E6c
+            matchHalf = 0u; // PROBE-E6c
+            break; // PROBE-E6c
+        } // PROBE-E6c
+        if (w1 == 0x0000000664020E00ULL) // PROBE-E6c
+        { // PROBE-E6c
+            matchQw = static_cast<int>(q); // PROBE-E6c
+            matchHalf = 1u; // PROBE-E6c
+            break; // PROBE-E6c
+        } // PROBE-E6c
+    } // PROBE-E6c
+    if (matchQw < 0) // PROBE-E6c
+        return; // PROBE-E6c
+ // PROBE-E6c
+    static std::atomic<int64_t> s_lastLogUs{0}; // PROBE-E6c
+    const auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>( // PROBE-E6c
+        std::chrono::steady_clock::now().time_since_epoch()).count(); // PROBE-E6c
+    int64_t prevUs = s_lastLogUs.load(std::memory_order_relaxed); // PROBE-E6c
+    if (nowUs - prevUs >= 25000) // at most 40 lines/s // PROBE-E6c
+    { // PROBE-E6c
+        s_lastLogUs.store(nowUs, std::memory_order_relaxed); // PROBE-E6c
+        const uint32_t dataPhysAddr = (ps2IsScratchpadAddress(dataAddr)) ? dataAddr : ((dataAddr >= PS2_RAM_SIZE) ? (dataAddr & PS2_RAM_MASK) : dataAddr); // PROBE-E6c
+        const uint32_t off = static_cast<uint32_t>(matchQw) * 16u + matchHalf * 8u; // PROBE-E6c
+        uint8_t before[4] = {0}; // PROBE-E6c
+        if (off >= 4u) // PROBE-E6c
+        { // PROBE-E6c
+            std::memcpy(before, data + off - 4u, 4u); // PROBE-E6c
+        } // PROBE-E6c
+        else if (srcPhys + off >= 4u) // PROBE-E6c
+        { // PROBE-E6c
+            std::memcpy(before, data + off - 4u, 4u); // PROBE-E6c
+        } // PROBE-E6c
+        uint8_t after[8] = {0}; // PROBE-E6c
+        const uint32_t totalAvailBytes = maxAvailQw * 16u; // PROBE-E6c
+        if (off + 8u + 8u <= totalAvailBytes) // PROBE-E6c
+        { // PROBE-E6c
+            std::memcpy(after, data + off + 8u, 8u); // PROBE-E6c
+        } // PROBE-E6c
+        else if (off + 8u < totalAvailBytes) // PROBE-E6c
+        { // PROBE-E6c
+            std::memcpy(after, data + off + 8u, totalAvailBytes - (off + 8u)); // PROBE-E6c
+        } // PROBE-E6c
+        ps2xSafeLog("[blurvif] tagaddr=0x%08x dataaddr=0x%08x qwc=%u off=%u ctx=%02x%02x%02x%02x_%02x%02x%02x%02x%02x%02x%02x%02x\n", // PROBE-E6c
+                    tagAddr, dataPhysAddr, qwc, off, // PROBE-E6c
+                    before[0], before[1], before[2], before[3], // PROBE-E6c
+                    after[0], after[1], after[2], after[3], after[4], after[5], after[6], after[7]); // PROBE-E6c
+    } // PROBE-E6c
+} // PROBE-E6c
 
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
@@ -2748,6 +2820,19 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                             probeE6bScanDmaBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw); // PROBE-E6b
                                         } // PROBE-E6b
                                     } // PROBE-E6b
+                                    if (blurVifProbeOn() && channelBase == 0x10009000u && hasPayload) // PROBE-E6c
+                                    { // PROBE-E6c
+                                        uint32_t src = 0; // PROBE-E6c
+                                        try { src = translateAddress(dataAddr); } catch (...) {} // PROBE-E6c
+                                        const bool scratch = isScratchpad(dataAddr); // PROBE-E6c
+                                        const uint8_t *base2 = scratch ? m_scratchpad : m_rdram; // PROBE-E6c
+                                        const uint32_t maxSz2 = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE; // PROBE-E6c
+                                        if (base2 && src < maxSz2) // PROBE-E6c
+                                        { // PROBE-E6c
+                                            const uint32_t availQw = (maxSz2 - src) / 16u; // PROBE-E6c
+                                            probeE6cScanVifBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw, src); // PROBE-E6c
+                                        } // PROBE-E6c
+                                    } // PROBE-E6c
 
                                     if (hasPayload)
                                         appendData(dataAddr, tagQwc);
@@ -3118,6 +3203,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                             const uint32_t availQw = (maxSz2 - src) / 16u; // PROBE-E6b
                                             probeE6bScanDmaBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw); // PROBE-E6b
                                         } // PROBE-E6b
+                                        if (blurVifProbeOn() && channelBase == 0x10009000u && base2 && src < maxSz2) // PROBE-E6c
+                                        { // PROBE-E6c
+                                            const uint32_t availQw = (maxSz2 - src) / 16u; // PROBE-E6c
+                                            probeE6cScanVifBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw, src); // PROBE-E6c
+                                        } // PROBE-E6c
 
                                         if (src < maxSz2 && bytes <= maxSz2 - src)
                                         {
