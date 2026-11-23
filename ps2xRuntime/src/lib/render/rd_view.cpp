@@ -84,6 +84,189 @@ extern "C" void ps2xRdPace2Take(int64_t *out6)
     out6[5] = g_pace2Rd.b5;
     g_pace2Rd = Pace2RdState{};
 }
+static inline bool fg6StateCacheEnabled() // FEAT-FG6
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_RD_STATECACHE");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+// PROBE-FG5
+static inline bool fg5DrawProfEnabled()
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_RD_DRAWPROF");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+static inline int64_t fg5QpcNow()
+{
+#ifdef _WIN32
+    long long t = 0;
+    QueryPerformanceCounter(&t);
+    return static_cast<int64_t>(t);
+#else
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+}
+static inline double fg5QpcToMs(int64_t ticks)
+{
+#ifdef _WIN32
+    static const double s_invFreqMs = []() {
+        long long f = 0;
+        QueryPerformanceFrequency(&f);
+        return (f > 0) ? (1000.0 / static_cast<double>(f)) : 1.0;
+    }();
+    return static_cast<double>(ticks) * s_invFreqMs;
+#else
+    return static_cast<double>(ticks) * 1e-6;
+#endif
+}
+struct Fg5DrawProfAcc
+{
+    uint32_t frames = 0;
+    int64_t totalTicks = 0;
+    int64_t uploadTicks = 0;
+    int64_t prepTicks = 0; // FEAT-FG6
+    int64_t texLookupTicks = 0;
+    int64_t stateBindTicks = 0;
+    int64_t uniformsTicks = 0;
+    int64_t drawCallsTicks = 0;
+    int64_t other2DTicks = 0;
+    int64_t submitTicks = 0;
+    uint64_t nBatches = 0;
+    uint64_t nDraws = 0;
+    uint64_t nTexBinds = 0;
+    uint64_t nStateChanges = 0;
+    uint64_t nUniformUpdates = 0;
+    uint64_t skippedState = 0; // FEAT-FG6
+    uint64_t skippedUniform = 0; // FEAT-FG6
+    uint64_t mergedDraws = 0; // FEAT-FG6
+    uint64_t chgTex = 0;
+    uint64_t chgAlpha = 0;
+    uint64_t chgTest = 0;
+    uint64_t chgPrim = 0;
+    uint64_t chgZbuf = 0;
+    uint64_t chgFog = 0;
+    uint64_t chgFrame = 0; // PROBE-FG7
+    uint64_t chgClamp = 0; // PROBE-FG7
+    uint64_t chgTex1 = 0; // PROBE-FG7
+    uint64_t chgTexa = 0; // PROBE-FG7
+    uint64_t chgVpS0 = 0; // PROBE-FG7
+    uint64_t chgVpS1 = 0; // PROBE-FG7
+    uint64_t chgVpO0 = 0; // PROBE-FG7
+    uint64_t chgVpO1 = 0; // PROBE-FG7
+    uint64_t chgCamHash = 0; // PROBE-FG7
+    uint64_t chgDisc = 0; // PROBE-FG7
+    uint64_t chgPipeKey = 0; // PROBE-FG7
+    uint64_t chgBlend = 0; // PROBE-FG7
+    uint64_t chgDepthFunc = 0; // PROBE-FG7
+    uint64_t chgScissor = 0; // PROBE-FG7
+    uint64_t chgPcUpdates = 0; // PROBE-FG7
+    uint64_t chgPcBytes = 0; // PROBE-FG7
+    int64_t prepFiltersTicks = 0; // PROBE-FG7
+    int64_t prepTexKeyTicks = 0; // PROBE-FG7
+    int64_t prepVertexFixTicks = 0; // PROBE-FG7
+    uint64_t fg8PcWordHist[32] = {}; // PROBE-FG8
+    std::chrono::steady_clock::time_point secStart{};
+};
+static Fg5DrawProfAcc g_fg5Prof;
+static bool g_fg5In3d = false;
+struct Fg7FieldPairs // PROBE-FG7
+{
+    uint64_t count = 0;
+    uint64_t oldV[8] = {};
+    uint64_t newV[8] = {};
+    uint8_t nPairs = 0;
+    void record(uint64_t o, uint64_t n)
+    {
+        ++count;
+        if (nPairs >= 8) return;
+        for (uint8_t i = 0; i < nPairs; ++i)
+            if (oldV[i] == o && newV[i] == n) return;
+        oldV[nPairs] = o;
+        newV[nPairs] = n;
+        ++nPairs;
+    }
+};
+enum Fg7ChgId // PROBE-FG7
+{
+    FG7_TEX0 = 0, FG7_ALPHA, FG7_TEST, FG7_FRAME, FG7_ZBUF, FG7_PRIM,
+    FG7_CLAMP, FG7_TEX1, FG7_TEXA, FG7_VPS0, FG7_VPS1, FG7_VPO0, FG7_VPO1,
+    FG7_CAMHASH, FG7_FOGCOL, FG7_DISC, FG7_PIPEKEY, FG7_BLEND, FG7_DEPTHFUNC, FG7_SCISSOR,
+    FG7_NUM_FIELDS
+};
+static const char *const kFg7FieldNames[FG7_NUM_FIELDS] = { // PROBE-FG7
+    "tex0", "alpha", "test", "frame", "zbuf", "prim",
+    "clamp", "tex1", "texa", "vpS0", "vpS1", "vpO0", "vpO1",
+    "camHash", "fogcol", "disc", "pipeKey", "blend", "depthFunc", "scissor"
+};
+struct Fg7Top3Tracker // PROBE-FG7
+{
+    Fg7FieldPairs fields[FG7_NUM_FIELDS];
+    std::chrono::steady_clock::time_point winStart{};
+};
+static Fg7Top3Tracker g_fg7Top3;
+extern "C" void ps2xRdDrawProfAddFg7Pc(uint64_t pcUpdates, uint64_t pcBytes) // PROBE-FG7
+{
+    g_fg5Prof.chgPcUpdates += pcUpdates;
+    g_fg5Prof.chgPcBytes += pcBytes;
+}
+static const char *const kFg8PcWordNames[32] = { // PROBE-FG8
+    "uFlip[0]", "uFlip[1]", "uFlip[2]", "uFlip[3]",
+    "uVpA[0]", "uVpA[1]", "uVpA[2]", "uVpA[3]",
+    "uVpB[0]", "uVpB[1]", "uVpB[2]", "uVpB[3]",
+    "uFbSize[0]", "uFbSize[1]", "uVpZ[0]", "uVpZ[1]",
+    "uZBias", "uFixAlpha", "uMode2d", "uAtst",
+    "uAref", "uAtInvert", "uTex", "uTfx",
+    "uTcc", "uPalMode", "uPalFallback", "_pad0",
+    "uFog[0]", "uFog[1]", "uFog[2]", "uFog[3]"
+};
+struct Fg8PcWordPairs // PROBE-FG8
+{
+    uint64_t count = 0;
+    uint32_t oldV[6] = {};
+    uint32_t newV[6] = {};
+    uint8_t nPairs = 0;
+    void record(uint32_t o, uint32_t n)
+    {
+        ++count;
+        if (nPairs >= 6) return;
+        for (uint8_t i = 0; i < nPairs; ++i)
+            if (oldV[i] == o && newV[i] == n) return;
+        oldV[nPairs] = o;
+        newV[nPairs] = n;
+        ++nPairs;
+    }
+};
+static Fg8PcWordPairs g_fg8Pc5s[32]; // PROBE-FG8
+extern "C" void ps2xRdDrawProfAddFg8PcWord(uint32_t wordIdx, uint32_t oldVal, uint32_t newVal) // PROBE-FG8
+{
+    if (wordIdx >= 32u) return;
+    ++g_fg5Prof.fg8PcWordHist[wordIdx];
+    g_fg8Pc5s[wordIdx].record(oldVal, newVal);
+}
+extern "C" bool ps2xRdDrawProfIn3d()
+{
+    return g_fg5In3d;
+}
+extern "C" void ps2xRdDrawProfAddVk(int64_t stateBindTicks, int64_t uniformTicks, int64_t drawCallTicks,
+                                    uint64_t nStateChanges, uint64_t nUniformUpdates, uint64_t nDraws)
+{
+    g_fg5Prof.stateBindTicks += stateBindTicks;
+    g_fg5Prof.uniformsTicks += uniformTicks;
+    g_fg5Prof.drawCallsTicks += drawCallTicks;
+    g_fg5Prof.nStateChanges += nStateChanges;
+    g_fg5Prof.nUniformUpdates += nUniformUpdates;
+    g_fg5Prof.nDraws += nDraws;
+}
+extern "C" void ps2xRdDrawProfAddFg6(uint64_t skippedState, uint64_t skippedUniform) // FEAT-FG6
+{
+    g_fg5Prof.skippedState += skippedState;
+    g_fg5Prof.skippedUniform += skippedUniform;
+}
 extern void ps2xRdBt2SetKind(int kind); // PROBE-BT2
 extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD19
 extern bool ps2xRdHasDisplayFbp(); // FEAT-RD19
@@ -779,10 +962,13 @@ struct RdGlCache
     uint64_t calls = 0, totalCalls = 0;
     uint32_t uni[64][2];
     bool uniValid[64];
+    float fogR = 0.0f, fogG = 0.0f, fogB = 0.0f, fogEn = 0.0f; // FEAT-FG6
+    bool fogValid = false; // FEAT-FG6
     uint32_t frame = 0;
     void reset()
     {
         bound = 0u; depthTest = -1; depthMask = -1;
+        fogValid = false; // FEAT-FG6
         std::memset(uniValid, 0, sizeof(uniValid));
         if ((++frame % 600u) == 0u)
         {
@@ -810,6 +996,16 @@ struct RdGlCache
 
 static inline void rdSetFog(float r, float g, float b, float enable) // FIX-E1c
 {
+    if (fg6StateCacheEnabled()) // FEAT-FG6
+    {
+        if (g_rdc.fogValid && g_rdc.fogR == r && g_rdc.fogG == g && g_rdc.fogB == b && g_rdc.fogEn == enable)
+        {
+            if (fg5DrawProfEnabled() && g_fg5In3d) ++g_fg5Prof.skippedUniform;
+            return;
+        }
+        g_rdc.fogR = r; g_rdc.fogG = g; g_rdc.fogB = b; g_rdc.fogEn = enable;
+        g_rdc.fogValid = true;
+    }
 #if defined(PS2X_HAS_SDL3)
     if (rdgfx_vk::active())
         rdgfx_vk::setFog(r, g, b, enable);
@@ -844,7 +1040,10 @@ void rdSetUniformInt(rdgfx::Uniform u, int v) // FEAT-RD15 // RDG1
     if (loc >= 0 && loc < 64)
     {
         if (g_rdc.uniValid[loc] && g_rdc.uni[loc][0] == w && g_rdc.uni[loc][1] == 0u)
+        {
+            if (fg6StateCacheEnabled() && fg5DrawProfEnabled() && g_fg5In3d) ++g_fg5Prof.skippedUniform; // FEAT-FG6
             return;
+        }
         g_rdc.uni[loc][0] = w; g_rdc.uni[loc][1] = 0u; g_rdc.uniValid[loc] = true;
     }
     ++g_rdc.calls;
@@ -858,7 +1057,10 @@ void rdSetUniformFloat(rdgfx::Uniform u, float v) // FEAT-RD15 // RDG1
     if (loc >= 0 && loc < 64)
     {
         if (g_rdc.uniValid[loc] && g_rdc.uni[loc][0] == w && g_rdc.uni[loc][1] == 0u)
+        {
+            if (fg6StateCacheEnabled() && fg5DrawProfEnabled() && g_fg5In3d) ++g_fg5Prof.skippedUniform; // FEAT-FG6
             return;
+        }
         g_rdc.uni[loc][0] = w; g_rdc.uni[loc][1] = 0u; g_rdc.uniValid[loc] = true;
     }
     ++g_rdc.calls;
@@ -872,7 +1074,10 @@ void rdSetUniformVec2(rdgfx::Uniform u, const float *v) // FEAT-RD15 // RDG1
     if (loc >= 0 && loc < 64)
     {
         if (g_rdc.uniValid[loc] && g_rdc.uni[loc][0] == w[0] && g_rdc.uni[loc][1] == w[1])
+        {
+            if (fg6StateCacheEnabled() && fg5DrawProfEnabled() && g_fg5In3d) ++g_fg5Prof.skippedUniform; // FEAT-FG6
             return;
+        }
         g_rdc.uni[loc][0] = w[0]; g_rdc.uni[loc][1] = w[1]; g_rdc.uniValid[loc] = true;
     }
     ++g_rdc.calls;
@@ -880,13 +1085,21 @@ void rdSetUniformVec2(rdgfx::Uniform u, const float *v) // FEAT-RD15 // RDG1
 }
 void rdDepthTest(bool on) // FEAT-RD15
 {
-    if (g_rdc.depthTest == (on ? 1 : 0)) return;
+    if (g_rdc.depthTest == (on ? 1 : 0))
+    {
+        if (fg6StateCacheEnabled() && fg5DrawProfEnabled() && g_fg5In3d) ++g_fg5Prof.skippedState; // FEAT-FG6
+        return;
+    }
     g_rdc.depthTest = on ? 1 : 0; ++g_rdc.calls;
     rdgfx::setDepthTest(on); // RDG1
 }
 void rdDepthMask(bool on) // FEAT-RD15
 {
-    if (g_rdc.depthMask == (on ? 1 : 0)) return;
+    if (g_rdc.depthMask == (on ? 1 : 0))
+    {
+        if (fg6StateCacheEnabled() && fg5DrawProfEnabled() && g_fg5In3d) ++g_fg5Prof.skippedState; // FEAT-FG6
+        return;
+    }
     g_rdc.depthMask = on ? 1 : 0; ++g_rdc.calls;
     rdgfx::setDepthMask(on); // RDG1
 }
@@ -925,6 +1138,10 @@ void rdBindTex(unsigned int texId, uint32_t params) // FEAT-RD15
         g_rdc.bound = texId;
         g_rdc.calls += 2;
     }
+    else if (fg6StateCacheEnabled() && fg5DrawProfEnabled() && g_fg5In3d) // FEAT-FG6
+    {
+        ++g_fg5Prof.skippedState;
+    }
 }
 
 // FEAT-RD9: FBMSK (frame>>32) -> GL colour mask; logs first 8 distinct values per class
@@ -962,6 +1179,10 @@ void applyRdFbmsk(uint64_t frame, bool is2d, uint64_t &partialMask)
         ++g_rdc.calls; // FEAT-RD15
         g_rdMaskCur = packed;
     }
+    else if (fg6StateCacheEnabled() && fg5DrawProfEnabled() && g_fg5In3d) // FEAT-FG6
+    {
+        ++g_fg5Prof.skippedState;
+    }
 }
 
 // FEAT-RD30: AFAIL (TEST bits 12-13) write rules for fragments failing the alpha test
@@ -969,7 +1190,10 @@ uint64_t g_rdAfail2Pass = 0, g_rdAfailNever = 0; // FEAT-RD30
 void rdSetMaskPacked(int packed)                 // FEAT-RD30
 {
     if (packed == g_rdMaskCur)
+    {
+        if (fg6StateCacheEnabled() && fg5DrawProfEnabled() && g_fg5In3d) ++g_fg5Prof.skippedState; // FEAT-FG6
         return;
+    }
     rdgfx::setColorMask((packed & 1) != 0, (packed & 2) != 0, (packed & 4) != 0, (packed & 8) != 0); // RDG1
     ++g_rdc.calls;
     g_rdMaskCur = packed;
@@ -1009,7 +1233,8 @@ void applyRdBlend(int blendState, unsigned int vao) // FEAT-RD8
     }
     rdgfx::enableShader(); // RDG1
     rdgfx::bindVertexArray(vao); // RDG1
-    g_rdc.bound = 0u; // FEAT-RD15: raylib flush may rebind default texture
+    if (!fg6StateCacheEnabled()) // FEAT-FG6
+        g_rdc.bound = 0u; // FEAT-RD15: raylib flush may rebind default texture
     g_rdc.calls += 4;
 }
 
@@ -2373,6 +2598,8 @@ bool ps2xRdInterpCanExtraPresent(const char **reasonOut) // FEAT-FG4
 
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
+    const bool drawProfOn = fg5DrawProfEnabled(); // PROBE-FG5
+    const int64_t fg5TotalT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
     rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
     const bool pace2On = pace2Enabled(); // PROBE-PACE2
     if (pace2On) // PROBE-PACE2
@@ -2808,6 +3035,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
     { // PROBE-PACE2
         Pace2Scope pace2B2Scope(g_pace2Rd.b2, pace2On); // PROBE-PACE2
+        const int64_t fg5UpT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
         for (size_t idx = 0; idx < kRdSlotCount; ++idx) // FEAT-RD14 // FEAT-RD34
         {
             if (pendingUpload[idx])
@@ -2841,6 +3069,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 s_fg4ExtraUploadMsSum += static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(upT1 - upT0).count()) * 1e-6;
             }
         }
+        if (drawProfOn) // PROBE-FG5
+            g_fg5Prof.uploadTicks += (fg5QpcNow() - fg5UpT0);
     }
 
     const float fbW = static_cast<float>(g_rdPresentW.load(std::memory_order_relaxed)); // FEAT-RD34
@@ -4520,7 +4750,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         };
 
         if (g_rdGpu.activeGMin > 0u) // FEAT-RD13: draw frame-start 2D draws (clears/backgrounds) first
+        {
+            const int64_t fg52dT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
             draw2dUntil(g_rdGpu.activeGMin, false);
+            if (drawProfOn) // PROBE-FG5
+                g_fg5Prof.other2DTicks += (fg5QpcNow() - fg52dT0);
+        }
         bool rd24Dump = false; // PROBE-RD24
         int rd24BigN = 0;
         std::vector<std::string> rd24Ref;
@@ -4550,13 +4785,97 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         }
         float prevZBias = 0.0f; // PROBE-RD59
         const int64_t pace2B4Before3d = pace2On ? g_pace2Rd.b4 : 0; // PROBE-PACE2
+        bool fg5PrevValid = false; // PROBE-FG5
+        uint64_t fg5PrevTex0 = 0, fg5PrevAlpha = 0, fg5PrevTest = 0, fg5PrevPrim = 0, fg5PrevZbuf = 0, fg5PrevFog = 0; // PROBE-FG5
+        uint64_t fg7PrevFrame = 0, fg7PrevClamp = 0, fg7PrevTex1 = 0, fg7PrevTexa = 0; // PROBE-FG7
+        uint32_t fg7PrevVpS0 = 0, fg7PrevVpS1 = 0, fg7PrevVpO0 = 0, fg7PrevVpO1 = 0, fg7PrevCamHash = 0; // PROBE-FG7
+        uint32_t fg7PrevVao = 0, fg7PrevBaseVertex = 0, fg7PrevFirst = 0, fg7PrevCount = 0; // PROBE-FG7
+        uint64_t fg7PrevPipeKey = 0, fg7PrevScissor = 0; // PROBE-FG7
+        int fg7PrevBlend = 0, fg7PrevDepthFunc = 0; // PROBE-FG7
+        const bool hasDisplayFbp = ps2xRdHasDisplayFbp(); // FIX-FG7
+        uint64_t prevBlendPrim = 0, prevBlendAlpha = 0, prevBlendTest = 0; // FIX-FG7
+        int prevBlendVal = 0; float prevBlendFixAlpha = -1.0f; bool prevBlendValid = false; // FIX-FG7
+        uint64_t prevFbmskFrame = 0; bool prevFbmskValid = false; // FIX-FG7
+        const bool stateCacheOn = fg6StateCacheEnabled(); // FEAT-FG6
+        const bool fogEnvOn = rdFogEnvEnabled(); // FEAT-FG6
+        const bool fogZeroOn = rdFogZeroEnvEnabled(); // FEAT-FG6
+        struct Pending3dDraw // FEAT-FG6
+        {
+            bool active = false;
+            uint32_t first = 0;
+            uint32_t count = 0;
+            uint32_t vao = 0;
+            uint32_t baseVertex = 0;
+            bool depthTest = false;
+            bool depthMask = false;
+            float zBias = 0.0f;
+            int colorMask = 0;
+            int blendState = 0;
+            int atst = 0;
+            int aref = 0;
+            float fixAlpha = 0.0f;
+            bool scOk = false;
+            uint64_t scRaw = 0ull;
+            float vpA[4] = {};
+            float vpB[4] = {};
+            unsigned int texId = 0u;
+            uint32_t texParams = 0u;
+            int texVal = 0;
+            int tfxVal = 0;
+            int tccVal = 0;
+            float fog[4] = {};
+        } pending3d;
+        auto flushPending3d = [&]() { // FEAT-FG6
+            if (!pending3d.active)
+                return;
+            if (drawProfOn) g_fg5In3d = true;
+            rdDrawElems(pending3d.first, pending3d.count);
+            g_fg5In3d = false;
+            pending3d.active = false;
+        };
+        struct Fg5PrepScope // FEAT-FG6
+        {
+            bool on;
+            int64_t t0;
+            int64_t sub0;
+            Fg5PrepScope(bool enabled)
+                : on(enabled),
+                  t0(enabled ? fg5QpcNow() : 0),
+                  sub0(enabled ? (g_fg5Prof.other2DTicks + g_fg5Prof.texLookupTicks + g_fg5Prof.stateBindTicks + g_fg5Prof.uniformsTicks + g_fg5Prof.drawCallsTicks) : 0) {}
+            ~Fg5PrepScope()
+            {
+                if (on)
+                {
+                    const int64_t sub1 = g_fg5Prof.other2DTicks + g_fg5Prof.texLookupTicks + g_fg5Prof.stateBindTicks + g_fg5Prof.uniformsTicks + g_fg5Prof.drawCallsTicks;
+                    const int64_t dt = (fg5QpcNow() - t0) - (sub1 - sub0);
+                    if (dt > 0)
+                        g_fg5Prof.prepTicks += dt;
+                }
+            }
+        };
+        bool fg6VpReset = stateCacheOn; // FEAT-FG6
 
     { // PROBE-PACE2
             Pace2Scope pace2B3Scope(g_pace2Rd.b3, pace2On); // PROBE-PACE2
             for (const RdDrawBatch &db : g_rdGpu.drawBatches) // FEAT-RD2 // FEAT-RD14
         {
+            Fg5PrepScope fg5PrepScope(drawProfOn); // FEAT-FG6
             const RdBatch &batch = db.batch;
-            draw2dUntil(batch.kickSerial, false); // FEAT-RD8
+            if (stateCacheOn && pending3d.active) // FEAT-FG6
+            {
+                const uint32_t maxS = batch.kickSerial & 0x3FFFFFFFu;
+                if (i2d < n2d && (g_rdGpu.local2dBatches[i2d].afterSerial & 0x3FFFFFFFu) < maxS)
+                    flushPending3d();
+            }
+            if (drawProfOn) // PROBE-FG5
+            {
+                const int64_t fg52dT0 = fg5QpcNow();
+                draw2dUntil(batch.kickSerial, false); // FEAT-RD8
+                g_fg5Prof.other2DTicks += (fg5QpcNow() - fg52dT0);
+            }
+            else
+                draw2dUntil(batch.kickSerial, false); // FEAT-RD8
+            struct Fg7FiltScope { bool on; int64_t t0; bool done = false; Fg7FiltScope(bool e) : on(e), t0(e ? fg5QpcNow() : 0) {} void stop() { if (on && !done) { g_fg5Prof.prepFiltersTicks += (fg5QpcNow() - t0); done = true; } } ~Fg7FiltScope() { stop(); } } fg7FiltScope(drawProfOn); // PROBE-FG7
             RdGpuSlot &slot = g_rdGpu.slots[db.slotIdx]; // FEAT-RD14
             if (batch.count == 0u || slot.vao == 0u)
                 continue;
@@ -4667,15 +4986,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             (reason == 0) ? "" : "skipped-",
                             (reason == 0) ? "none" : rname);
             };
-            if (ps2xRdHasDisplayFbp() && !ps2xRdIsDisplayFbp(static_cast<uint32_t>(frame & 0x1FFull))) // FEAT-RD19
+            if (hasDisplayFbp && !ps2xRdIsDisplayFbp(static_cast<uint32_t>(frame & 0x1FFull))) // FEAT-RD19 // FIX-FG7
             {
                 if (rdbDump) rdb3d(2); // PROBE-RD29
                 if (reasonDump && reasonPrinted < 30) rdReasonLog(2); // PROBE-RD59
                 ++g_rdGpu.rtSkipped3d;
                 continue;
             }
+            uint64_t xoMp = 0ull; // FEAT-FG6
             { // FEAT-RD23 // FEAT-RD33: only batches with GS-thread state are drawn (S already encodes main pass)
-                uint64_t xoMp = 0ull;
                 if (!gsOk || !ps2xRdLookupXyoff(batch.kickSerial, xoMp))
                 {
                     if (rdbDump) rdb3d(3); // PROBE-RD29
@@ -4763,6 +5082,381 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (reasonDump && reasonPrinted < 30) rdReasonLog(5); // PROBE-RD59
                 continue;
             }
+            if (stateCacheOn) // FEAT-FG6
+            {
+                const bool wantDepthTest = !(g_rdNoZTest || !zte || ztst == 1u);
+                const bool wantDepthMask = !((zbuf >> 32) & 1ull);
+                const float wantZBias = (g_rdZBias != 0.0f && rdgfx::hasUniform(rdgfx::Uniform::ZBias)) ? ((ztst == 2u) ? g_rdZBias : 0.0f) : 0.0f;
+                float fixAlpha = -1.0f;
+                int blendState = 0;
+                if (prevBlendValid && prim == prevBlendPrim && alpha == prevBlendAlpha && test == prevBlendTest) // FIX-FG7
+                {
+                    blendState = prevBlendVal;
+                    fixAlpha = prevBlendFixAlpha;
+                }
+                else
+                {
+                    blendState = computeRdBlend(prim, alpha, unsupBlend, approxAd, fixAlpha);
+                    blendState = applyRdDate(test, prim, blendState);
+                    prevBlendPrim = prim; prevBlendAlpha = alpha; prevBlendTest = test;
+                    prevBlendVal = blendState; prevBlendFixAlpha = fixAlpha; prevBlendValid = true;
+                }
+                const uint32_t fbmsk = static_cast<uint32_t>(frame >> 32);
+                int wantColorMask = (((fbmsk & 0xFFu) != 0xFFu) ? 1 : 0) |
+                                    ((((fbmsk >> 8) & 0xFFu) != 0xFFu) ? 2 : 0) |
+                                    ((((fbmsk >> 16) & 0xFFu) != 0xFFu) ? 4 : 0) |
+                                    ((((fbmsk >> 24) & 0xFFu) != 0xFFu) ? 8 : 0);
+                if (blendState >= 1 + 6 * 128)
+                    wantColorMask &= 7;
+                int atstVal = (atst == 0u) ? 1 : static_cast<int>(atst);
+                int arefVal = static_cast<int>((test >> 4) & 0xFFull);
+                uint64_t sc = 0ull;
+                const bool scOk = ps2xRdLookupScissor(batch.kickSerial, sc);
+                if (!isRdScissorVisible(sc, scOk, fbSize[0], fbSize[1]))
+                {
+                    if (rdbDump) rdb3d(7);
+                    if (reasonDump && reasonPrinted < 30) rdReasonLog(7);
+                    ++s_scissorSkipped;
+                    continue;
+                }
+                const float ofx = static_cast<float>(xoMp & 0xFFFFull);
+                const float ofy = static_cast<float>((xoMp >> 32) & 0xFFFFull);
+                const bool vpOk = (batch.vpS[0] != 0.0f && batch.vpS[1] != 0.0f);
+                const float vpA[4] = {batch.vpS[0], batch.vpS[1], batch.vpO[0], batch.vpO[1]};
+                const float vpB[4] = {ofx, ofy, (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f, vpOk ? 1.0f : 0.0f};
+                fg7FiltScope.stop(); // PROBE-FG7
+                const int64_t fg7TexT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG7
+                const int64_t fg7TexLookup0 = drawProfOn ? g_fg5Prof.texLookupTicks : 0; // PROBE-FG7
+                int texVal = 0, tfxVal = 0, tccVal = 0;
+                unsigned int texId = 0u;
+                uint32_t texParams = 0u;
+                if ((prim >> 4) & 1ull)
+                {
+                    ps2xRdBt2SetKind(0);
+                    const int64_t fg5TxT0 = drawProfOn ? fg5QpcNow() : 0;
+                    texId = ps2xRdGetTextureForBatch(batch.kickSerial, tex0, texa);
+                    if (drawProfOn)
+                        g_fg5Prof.texLookupTicks += (fg5QpcNow() - fg5TxT0);
+                    if (texId != 0u)
+                    {
+                        const uint32_t wms = static_cast<uint32_t>(clamp & 3ull);
+                        const uint32_t wmt = static_cast<uint32_t>((clamp >> 2) & 3ull);
+                        texParams = (wms != 0u ? 1u : 0u) | (wmt != 0u ? 2u : 0u) | ((((tex1 >> 5) & 1ull) != 0ull) ? 4u : 0u) | ((((tex1 >> 6) & 7ull) != 0ull) ? 8u : 0u);
+                        texVal = 1;
+                        tfxVal = static_cast<int>((tex0 >> 35) & 3ull);
+                        tccVal = static_cast<int>((tex0 >> 34) & 1ull);
+                    }
+                }
+                if (drawProfOn) // PROBE-FG7
+                {
+                    const int64_t dtTex = (fg5QpcNow() - fg7TexT0) - (g_fg5Prof.texLookupTicks - fg7TexLookup0);
+                    if (dtTex > 0) g_fg5Prof.prepTexKeyTicks += dtTex;
+                }
+                const int64_t fg7VfT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG7
+                const uint32_t fge = static_cast<uint32_t>((batch.prim >> 5) & 1ull);
+                float minFog = 1e30f, maxFog = -1e30f, meanFog = 0.0f;
+                uint32_t sampleCount = 0;
+                if (fge && fogEnvOn) // FIX-FG7
+                {
+                    const std::vector<RdVert> &pv = !g_rd24Verts[db.slotIdx].empty() ? g_rd24Verts[db.slotIdx] : g_rdGpu.pendingVerts[db.slotIdx];
+                    const std::vector<uint16_t> &pi = g_rd24Idx[db.slotIdx];
+                    const std::vector<uint32_t> &pind = g_rdGpu.pendingIndices[db.slotIdx];
+                    const size_t endI = static_cast<size_t>(batch.first) + batch.count;
+                    if (!g_rdFogLog && !fogZeroOn)
+                    {
+                        if (!pi.empty() && endI <= pi.size())
+                        {
+                            for (size_t k = batch.first; k < endI; ++k)
+                            {
+                                const uint32_t vi = static_cast<uint32_t>(pi[k]) + batch.baseVertex;
+                                if (vi < pv.size() && pv[vi].fog > 0.0f) { maxFog = pv[vi].fog; break; }
+                            }
+                        }
+                        else if (!pind.empty() && endI <= pind.size())
+                        {
+                            for (size_t k = batch.first; k < endI; ++k)
+                            {
+                                const uint32_t vi = pind[k] + batch.baseVertex;
+                                if (vi < pv.size() && pv[vi].fog > 0.0f) { maxFog = pv[vi].fog; break; }
+                            }
+                        }
+                        else if (endI <= pv.size())
+                        {
+                            for (size_t k = batch.first; k < endI; ++k)
+                            {
+                                if (pv[k].fog > 0.0f) { maxFog = pv[k].fog; break; }
+                            }
+                        }
+                    }
+                }
+                float fogCol[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                if (fogEnvOn && fge && (maxFog > 0.0f || fogZeroOn))
+                {
+                    fogCol[0] = static_cast<float>(batch.fogcol & 0xFFu) / 255.0f;
+                    fogCol[1] = static_cast<float>((batch.fogcol >> 8) & 0xFFu) / 255.0f;
+                    fogCol[2] = static_cast<float>((batch.fogcol >> 16) & 0xFFu) / 255.0f;
+                    fogCol[3] = 1.0f;
+                }
+                const bool canMerge = pending3d.active && afail == 0 &&
+                    pending3d.vao == slot.vao &&
+                    pending3d.baseVertex == batch.baseVertex &&
+                    pending3d.first + pending3d.count == batch.first &&
+                    pending3d.depthTest == wantDepthTest &&
+                    pending3d.depthMask == wantDepthMask &&
+                    pending3d.zBias == wantZBias &&
+                    pending3d.colorMask == wantColorMask &&
+                    pending3d.blendState == blendState &&
+                    pending3d.atst == atstVal &&
+                    pending3d.aref == arefVal &&
+                    pending3d.fixAlpha == fixAlpha &&
+                    pending3d.scOk == scOk &&
+                    (!scOk || pending3d.scRaw == sc) &&
+                    std::memcmp(pending3d.vpA, vpA, sizeof(vpA)) == 0 &&
+                    std::memcmp(pending3d.vpB, vpB, sizeof(vpB)) == 0 &&
+                    pending3d.texId == texId &&
+                    (texId == 0u || pending3d.texParams == texParams) &&
+                    pending3d.texVal == texVal &&
+                    pending3d.tfxVal == tfxVal &&
+                    pending3d.tccVal == tccVal &&
+                    std::memcmp(pending3d.fog, fogCol, sizeof(fogCol)) == 0;
+                if (drawProfOn) g_fg5Prof.prepVertexFixTicks += (fg5QpcNow() - fg7VfT0); // PROBE-FG7
+                if (canMerge)
+                {
+                    pending3d.count += batch.count;
+                    if (drawProfOn)
+                    {
+                        ++g_fg5Prof.mergedDraws;
+                        ++g_fg5Prof.nBatches;
+                    }
+                    ++drawn3dThisFrame;
+                    if (s_abeFilter.active) ++s_abeDrawn3dSec;
+                    if (s_texFilter.active) ++s_texDrawn3dSec;
+                    if (batch.kickSerial < min3dSerial) min3dSerial = batch.kickSerial;
+                    if (batch.kickSerial > max3dSerial) max3dSerial = batch.kickSerial;
+                    continue;
+                }
+                flushPending3d();
+                const int64_t fg5StT0 = drawProfOn ? fg5QpcNow() : 0;
+                rdDepthTest(wantDepthTest);
+                rdDepthMask(wantDepthMask);
+                if (drawProfOn) g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5StT0);
+                if (g_rdZBias != 0.0f && rdgfx::hasUniform(rdgfx::Uniform::ZBias))
+                {
+                    const int64_t fg5UT0 = drawProfOn ? fg5QpcNow() : 0;
+                    if (wantZBias != prevZBias)
+                    {
+                        rdSetUniformFloat(rdgfx::Uniform::ZBias, wantZBias);
+                        prevZBias = wantZBias;
+                    }
+                    else if (drawProfOn)
+                        ++g_fg5Prof.skippedUniform;
+                    if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5UT0);
+                }
+                const int64_t fg5St2T0 = drawProfOn ? fg5QpcNow() : 0;
+                if (!prevFbmskValid || ((frame ^ prevFbmskFrame) >> 32) != 0ull) // FIX-FG7
+                {
+                    applyRdFbmsk(frame, false, partialMask);
+                    prevFbmskFrame = frame;
+                    prevFbmskValid = true;
+                }
+                else if (drawProfOn)
+                    ++g_fg5Prof.skippedState;
+                if (blendState >= 1 + 6 * 128 && g_rdMaskCur != (g_rdMaskCur & 7))
+                {
+                    g_rdMaskCur &= 7;
+                    rdgfx::setColorMask((g_rdMaskCur & 1) != 0, (g_rdMaskCur & 2) != 0, (g_rdMaskCur & 4) != 0, false);
+                }
+                if (blendState != prevBlend)
+                {
+                    applyRdBlend(blendState, slot.vao);
+                    prevBlend = blendState;
+                    curVao = slot.vao;
+                }
+                else
+                {
+                    if (drawProfOn) ++g_fg5Prof.skippedState;
+                    if (curVao != slot.vao)
+                    {
+                        rdgfx::bindVertexArray(slot.vao);
+                        curVao = slot.vao;
+                    }
+                }
+                if (batch.baseVertex != slot.curBaseVertex)
+                {
+                    rdgfx::bindVertexBuffer(slot.vbo);
+                    const int byteOff = static_cast<int>(static_cast<size_t>(batch.baseVertex) * sizeof(RdVert));
+                    rdgfx::setVertexAttribute(0, 4, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 0);
+                    rdgfx::setVertexAttribute(1, 4, rdgfx::VertexAttrFormat::UnsignedByte, true, sizeof(RdVert), byteOff + 16);
+                    rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 20);
+                    rdgfx::setVertexAttribute(3, 1, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 28);
+                    rdgfx::bindVertexBuffer(0u);
+                    slot.curBaseVertex = batch.baseVertex;
+                }
+                if (drawProfOn) g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5St2T0);
+                const int64_t fg5U2T0 = drawProfOn ? fg5QpcNow() : 0;
+                if (rdgfx::hasUniform(rdgfx::Uniform::Atst)) rdSetUniformInt(rdgfx::Uniform::Atst, atstVal);
+                if (rdgfx::hasUniform(rdgfx::Uniform::Aref)) rdSetUniformInt(rdgfx::Uniform::Aref, arefVal);
+                if (rdgfx::hasUniform(rdgfx::Uniform::FixAlpha)) rdSetUniformFloat(rdgfx::Uniform::FixAlpha, fixAlpha);
+                if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5U2T0);
+                {
+                    const int64_t fg5ScT0 = drawProfOn ? fg5QpcNow() : 0;
+                    const bool scVis = applyScissor(sc, scOk);
+                    if (drawProfOn) g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5ScT0);
+                    if (!scVis)
+                    {
+                        if (rdbDump) rdb3d(7);
+                        if (reasonDump && reasonPrinted < 30) rdReasonLog(7);
+                        ++s_scissorSkipped;
+                        continue;
+                    }
+                }
+                if (rdgfx::hasUniform(rdgfx::Uniform::VpA) && rdgfx::hasUniform(rdgfx::Uniform::VpB))
+                {
+                    const int64_t fg5VpT0 = drawProfOn ? fg5QpcNow() : 0;
+                    static float s_prevA[4] = {}, s_prevB[4] = {};
+                    static bool s_prevValid = false;
+                    if (fg6VpReset) { s_prevValid = false; fg6VpReset = false; }
+                    if (!s_prevValid || std::memcmp(s_prevA, vpA, sizeof(vpA)) != 0 || std::memcmp(s_prevB, vpB, sizeof(vpB)) != 0)
+                    {
+                        rdgfx::setUniformVec4(rdgfx::Uniform::VpA, vpA);
+                        rdgfx::setUniformVec4(rdgfx::Uniform::VpB, vpB);
+                        std::memcpy(s_prevA, vpA, sizeof(vpA));
+                        std::memcpy(s_prevB, vpB, sizeof(vpB));
+                        s_prevValid = true;
+                        g_rdc.calls += 2;
+                    }
+                    else if (drawProfOn)
+                        g_fg5Prof.skippedUniform += 2;
+                    if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5VpT0);
+                }
+                if (texId != 0u)
+                {
+                    const int64_t fg5TbT0 = drawProfOn ? fg5QpcNow() : 0;
+                    if (drawProfOn && g_rdc.bound != texId) ++g_fg5Prof.nTexBinds;
+                    rdBindTex(texId, texParams);
+                    if (drawProfOn) g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5TbT0);
+                }
+                {
+                    const int64_t fg5U3T0 = drawProfOn ? fg5QpcNow() : 0;
+                    if (rdgfx::hasUniform(rdgfx::Uniform::Tex)) rdSetUniformInt(rdgfx::Uniform::Tex, texVal);
+                    if (rdgfx::hasUniform(rdgfx::Uniform::Tfx)) rdSetUniformInt(rdgfx::Uniform::Tfx, tfxVal);
+                    if (rdgfx::hasUniform(rdgfx::Uniform::Tcc)) rdSetUniformInt(rdgfx::Uniform::Tcc, tccVal);
+                    if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5U3T0);
+                }
+                {
+                    const int64_t fg5UT0 = drawProfOn ? fg5QpcNow() : 0;
+                    if (drawProfOn) g_fg5In3d = true;
+                    rdSetFog(fogCol[0], fogCol[1], fogCol[2], fogCol[3]);
+                    g_fg5In3d = false;
+                    if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5UT0);
+                }
+                ++drawn3dThisFrame;
+                if (s_abeFilter.active) ++s_abeDrawn3dSec;
+                if (s_texFilter.active) ++s_texDrawn3dSec;
+                if (batch.kickSerial < min3dSerial) min3dSerial = batch.kickSerial;
+                if (batch.kickSerial > max3dSerial) max3dSerial = batch.kickSerial;
+                if (drawProfOn)
+                {
+                    ++g_fg5Prof.nBatches;
+                    const uint64_t fg5FogKey = fge ? (0x1000000ull | (static_cast<uint64_t>(batch.fogcol) & 0xFFFFFFull)) : 0ull;
+                    uint32_t vpS0Bits = 0, vpS1Bits = 0, vpO0Bits = 0, vpO1Bits = 0; // PROBE-FG7
+                    std::memcpy(&vpS0Bits, &batch.vpS[0], 4); std::memcpy(&vpS1Bits, &batch.vpS[1], 4);
+                    std::memcpy(&vpO0Bits, &batch.vpO[0], 4); std::memcpy(&vpO1Bits, &batch.vpO[1], 4);
+                    const uint64_t fg7PipeKey = (static_cast<uint64_t>(wantDepthTest ? 1 : 0)) |
+                        (static_cast<uint64_t>(wantDepthMask ? 1 : 0) << 1) |
+                        (static_cast<uint64_t>(wantColorMask & 0xF) << 2) |
+                        (static_cast<uint64_t>(blendState & 0xFFFF) << 6) |
+                        (static_cast<uint64_t>(ztst & 3u) << 22);
+                    const int fg7DepthFunc = static_cast<int>(ztst);
+                    const uint64_t fg7ScissorKey = scOk ? (0x8000000000000000ull | (sc & 0x7FFFFFFFFFFFFFFFull)) : 0ull;
+                    const bool fg7Disc = fg5PrevValid && (fg7PrevVao != slot.vao || fg7PrevBaseVertex != batch.baseVertex || (fg7PrevFirst + fg7PrevCount) != batch.first);
+                    if (fg5PrevValid)
+                    {
+                        if (tex0 != fg5PrevTex0) { ++g_fg5Prof.chgTex; g_fg7Top3.fields[FG7_TEX0].record(fg5PrevTex0, tex0); }
+                        if (alpha != fg5PrevAlpha) { ++g_fg5Prof.chgAlpha; g_fg7Top3.fields[FG7_ALPHA].record(fg5PrevAlpha, alpha); }
+                        if (test != fg5PrevTest) { ++g_fg5Prof.chgTest; g_fg7Top3.fields[FG7_TEST].record(fg5PrevTest, test); }
+                        if (frame != fg7PrevFrame) { ++g_fg5Prof.chgFrame; g_fg7Top3.fields[FG7_FRAME].record(fg7PrevFrame, frame); }
+                        if (zbuf != fg5PrevZbuf) { ++g_fg5Prof.chgZbuf; g_fg7Top3.fields[FG7_ZBUF].record(fg5PrevZbuf, zbuf); }
+                        if (prim != fg5PrevPrim) { ++g_fg5Prof.chgPrim; g_fg7Top3.fields[FG7_PRIM].record(fg5PrevPrim, prim); }
+                        if (clamp != fg7PrevClamp) { ++g_fg5Prof.chgClamp; g_fg7Top3.fields[FG7_CLAMP].record(fg7PrevClamp, clamp); }
+                        if (tex1 != fg7PrevTex1) { ++g_fg5Prof.chgTex1; g_fg7Top3.fields[FG7_TEX1].record(fg7PrevTex1, tex1); }
+                        if (texa != fg7PrevTexa) { ++g_fg5Prof.chgTexa; g_fg7Top3.fields[FG7_TEXA].record(fg7PrevTexa, texa); }
+                        if (vpS0Bits != fg7PrevVpS0) { ++g_fg5Prof.chgVpS0; g_fg7Top3.fields[FG7_VPS0].record(fg7PrevVpS0, vpS0Bits); }
+                        if (vpS1Bits != fg7PrevVpS1) { ++g_fg5Prof.chgVpS1; g_fg7Top3.fields[FG7_VPS1].record(fg7PrevVpS1, vpS1Bits); }
+                        if (vpO0Bits != fg7PrevVpO0) { ++g_fg5Prof.chgVpO0; g_fg7Top3.fields[FG7_VPO0].record(fg7PrevVpO0, vpO0Bits); }
+                        if (vpO1Bits != fg7PrevVpO1) { ++g_fg5Prof.chgVpO1; g_fg7Top3.fields[FG7_VPO1].record(fg7PrevVpO1, vpO1Bits); }
+                        if (batch.camHash != fg7PrevCamHash) { ++g_fg5Prof.chgCamHash; g_fg7Top3.fields[FG7_CAMHASH].record(fg7PrevCamHash, batch.camHash); }
+                        if (fg5FogKey != fg5PrevFog) { ++g_fg5Prof.chgFog; g_fg7Top3.fields[FG7_FOGCOL].record(fg5PrevFog, fg5FogKey); }
+                        if (fg7Disc) { ++g_fg5Prof.chgDisc; g_fg7Top3.fields[FG7_DISC].record(fg7PrevFirst + fg7PrevCount, batch.first); }
+                        if (fg7PipeKey != fg7PrevPipeKey) { ++g_fg5Prof.chgPipeKey; g_fg7Top3.fields[FG7_PIPEKEY].record(fg7PrevPipeKey, fg7PipeKey); }
+                        if (blendState != fg7PrevBlend) { ++g_fg5Prof.chgBlend; g_fg7Top3.fields[FG7_BLEND].record(static_cast<uint64_t>(fg7PrevBlend), static_cast<uint64_t>(blendState)); }
+                        if (fg7DepthFunc != fg7PrevDepthFunc) { ++g_fg5Prof.chgDepthFunc; g_fg7Top3.fields[FG7_DEPTHFUNC].record(static_cast<uint64_t>(fg7PrevDepthFunc), static_cast<uint64_t>(fg7DepthFunc)); }
+                        if (fg7ScissorKey != fg7PrevScissor) { ++g_fg5Prof.chgScissor; g_fg7Top3.fields[FG7_SCISSOR].record(fg7PrevScissor, fg7ScissorKey); }
+                    }
+                    fg5PrevValid = true;
+                    fg5PrevTex0 = tex0; fg5PrevAlpha = alpha; fg5PrevTest = test;
+                    fg5PrevPrim = prim; fg5PrevZbuf = zbuf; fg5PrevFog = fg5FogKey;
+                    fg7PrevFrame = frame; fg7PrevClamp = clamp; fg7PrevTex1 = tex1; fg7PrevTexa = texa;
+                    fg7PrevVpS0 = vpS0Bits; fg7PrevVpS1 = vpS1Bits; fg7PrevVpO0 = vpO0Bits; fg7PrevVpO1 = vpO1Bits;
+                    fg7PrevCamHash = batch.camHash; fg7PrevVao = slot.vao; fg7PrevBaseVertex = batch.baseVertex;
+                    fg7PrevFirst = batch.first; fg7PrevCount = batch.count;
+                    fg7PrevPipeKey = fg7PipeKey; fg7PrevBlend = blendState; fg7PrevDepthFunc = fg7DepthFunc; fg7PrevScissor = fg7ScissorKey;
+                    g_fg5In3d = true;
+                }
+                if (afail != 0)
+                {
+                    const int sMask = g_rdMaskCur;
+                    const int sDepth = g_rdc.depthMask;
+                    const bool zOff = ((zbuf >> 32) & 1ull) == 0ull;
+                    const int zero = 0, one = 1;
+                    if (atst == 0u)
+                    {
+                        rdApplyAfailWrites(afail, zOff, sMask);
+                        rdDrawElems(batch.first, batch.count);
+                        ++g_rdAfailNever;
+                    }
+                    else
+                    {
+                        rdDrawElems(batch.first, batch.count);
+                        if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) rdSetUniformInt(rdgfx::Uniform::AtInvert, one);
+                        rdApplyAfailWrites(afail, zOff, sMask);
+                        rdDrawElems(batch.first, batch.count);
+                        if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) rdSetUniformInt(rdgfx::Uniform::AtInvert, zero);
+                        ++g_rdAfail2Pass;
+                    }
+                    rdSetMaskPacked(sMask);
+                    rdDepthMask(sDepth != 0);
+                }
+                else
+                {
+                    pending3d.active = true;
+                    pending3d.first = batch.first;
+                    pending3d.count = batch.count;
+                    pending3d.vao = slot.vao;
+                    pending3d.baseVertex = batch.baseVertex;
+                    pending3d.depthTest = wantDepthTest;
+                    pending3d.depthMask = wantDepthMask;
+                    pending3d.zBias = wantZBias;
+                    pending3d.colorMask = wantColorMask;
+                    pending3d.blendState = blendState;
+                    pending3d.atst = atstVal;
+                    pending3d.aref = arefVal;
+                    pending3d.fixAlpha = fixAlpha;
+                    pending3d.scOk = scOk;
+                    pending3d.scRaw = sc;
+                    std::memcpy(pending3d.vpA, vpA, sizeof(vpA));
+                    std::memcpy(pending3d.vpB, vpB, sizeof(vpB));
+                    pending3d.texId = texId;
+                    pending3d.texParams = texParams;
+                    pending3d.texVal = texVal;
+                    pending3d.tfxVal = tfxVal;
+                    pending3d.tccVal = tccVal;
+                    std::memcpy(pending3d.fog, fogCol, sizeof(fogCol));
+                }
+                g_fg5In3d = false;
+                continue;
+            }
+            const int64_t fg5StT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
             if (g_rdNoZTest || !zte || ztst == 1u) // PROBE-RD59
                 rdDepthTest(false);
             else
@@ -4771,16 +5465,22 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdDepthMask(false);
             else
                 rdDepthMask(true);
+            if (drawProfOn) // PROBE-FG5
+                g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5StT0);
             if (g_rdZBias != 0.0f && rdgfx::hasUniform(rdgfx::Uniform::ZBias)) // PROBE-RD59 // RDG1
             {
+                const int64_t fg5UT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
                 const float zb = (ztst == 2u) ? g_rdZBias : 0.0f;
                 if (zb != prevZBias)
                 {
                     rdSetUniformFloat(rdgfx::Uniform::ZBias, zb); // RDG1
                     prevZBias = zb;
                 }
+                if (drawProfOn) // PROBE-FG5
+                    g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5UT0);
             }
 
+            const int64_t fg5St2T0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
             // FEAT-RD7: blendState 0 = off, else 1 + sfk*64 + dfk*16 + eqk (factor kinds: 0 ZERO, 1 ONE, 2 C, 3 1-C)
             applyRdFbmsk(frame, false, partialMask); // FEAT-RD9
             float fixAlpha = -1.0f;
@@ -4813,6 +5513,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdgfx::bindVertexBuffer(0u); // RDG1
                 slot.curBaseVertex = batch.baseVertex;
             }
+            if (drawProfOn) // PROBE-FG5
+                g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5St2T0);
+            const int64_t fg5U2T0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
             int atstVal = (atst == 0u) ? 1 : static_cast<int>(atst); // FEAT-RD30: NEVER+AFAIL = single pass without discard
             int arefVal = static_cast<int>((test >> 4) & 0xFFull);
             if (rdgfx::hasUniform(rdgfx::Uniform::Atst)) // RDG1
@@ -4821,11 +5524,17 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniformInt(rdgfx::Uniform::Aref, arefVal); // RDG1
             if (rdgfx::hasUniform(rdgfx::Uniform::FixAlpha)) // FEAT-RD7 // RDG1
                 rdSetUniformFloat(rdgfx::Uniform::FixAlpha, fixAlpha); // RDG1
+            if (drawProfOn) // PROBE-FG5
+                g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5U2T0);
 
             { // FEAT-RD22
+                const int64_t fg5ScT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
                 uint64_t sc = 0ull;
                 const bool scOk = ps2xRdLookupScissor(batch.kickSerial, sc);
-                if (!applyScissor(sc, scOk))
+                const bool scVis = applyScissor(sc, scOk);
+                if (drawProfOn) // PROBE-FG5
+                    g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5ScT0);
+                if (!scVis)
                 {
                     if (rdbDump) rdb3d(7); // PROBE-RD29
                     if (reasonDump && reasonPrinted < 30) rdReasonLog(7); // PROBE-RD59
@@ -4866,6 +5575,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             }
             if (rdgfx::hasUniform(rdgfx::Uniform::VpA) && rdgfx::hasUniform(rdgfx::Uniform::VpB)) // FEAT-RD21 // RDG1
             {
+                const int64_t fg5VpT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
                 static float s_lastOfx = 0.0f, s_lastOfy = 0.0f;
                 static bool s_haveOff = false, s_loggedNoOff = false;
                 uint64_t xo = 0ull;
@@ -4894,6 +5604,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     s_prevValid = true;
                     g_rdc.calls += 2;
                 }
+                if (drawProfOn) // PROBE-FG5
+                    g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5VpT0);
             }
 
             int texVal = 0; // FEAT-RD3
@@ -4902,23 +5614,36 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if ((prim >> 4) & 1ull)
             {
                 ps2xRdBt2SetKind(0); // PROBE-BT2
+                const int64_t fg5TxT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
                 const unsigned int texId = ps2xRdGetTextureForBatch(batch.kickSerial, tex0, texa); // FEAT-RD5
+                if (drawProfOn) // PROBE-FG5
+                    g_fg5Prof.texLookupTicks += (fg5QpcNow() - fg5TxT0);
                 if (texId != 0u)
                 {
+                    const int64_t fg5TbT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
+                    if (drawProfOn && g_rdc.bound != texId) // PROBE-FG5
+                        ++g_fg5Prof.nTexBinds;
                     const uint32_t wms = static_cast<uint32_t>(clamp & 3ull);
                     const uint32_t wmt = static_cast<uint32_t>((clamp >> 2) & 3ull);
                     rdBindTex(texId, (wms != 0u ? 1u : 0u) | (wmt != 0u ? 2u : 0u) | ((((tex1 >> 5) & 1ull) != 0ull) ? 4u : 0u) | ((((tex1 >> 6) & 7ull) != 0ull) ? 8u : 0u)); // FEAT-RD15
+                    if (drawProfOn) // PROBE-FG5
+                        g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5TbT0);
                     texVal = 1;
                     tfxVal = static_cast<int>((tex0 >> 35) & 3ull);
                     tccVal = static_cast<int>((tex0 >> 34) & 1ull);
                 }
             }
-            if (rdgfx::hasUniform(rdgfx::Uniform::Tex)) // RDG1
-                rdSetUniformInt(rdgfx::Uniform::Tex, texVal); // RDG1
-            if (rdgfx::hasUniform(rdgfx::Uniform::Tfx)) // RDG1
-                rdSetUniformInt(rdgfx::Uniform::Tfx, tfxVal); // RDG1
-            if (rdgfx::hasUniform(rdgfx::Uniform::Tcc)) // RDG1
-                rdSetUniformInt(rdgfx::Uniform::Tcc, tccVal); // RDG1
+            {
+                const int64_t fg5U3T0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
+                if (rdgfx::hasUniform(rdgfx::Uniform::Tex)) // RDG1
+                    rdSetUniformInt(rdgfx::Uniform::Tex, texVal); // RDG1
+                if (rdgfx::hasUniform(rdgfx::Uniform::Tfx)) // RDG1
+                    rdSetUniformInt(rdgfx::Uniform::Tfx, tfxVal); // RDG1
+                if (rdgfx::hasUniform(rdgfx::Uniform::Tcc)) // RDG1
+                    rdSetUniformInt(rdgfx::Uniform::Tcc, tccVal); // RDG1
+                if (drawProfOn) // PROBE-FG5
+                    g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5U3T0);
+            }
 
             const uint32_t fge = static_cast<uint32_t>((batch.prim >> 5) & 1ull); // FIX-E1c
             float minFog = 1e30f; // FIX-E1d
@@ -5349,6 +6074,28 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             r0, g0, b0, a0);
             };
 
+            if (drawProfOn) // PROBE-FG5
+            {
+                ++g_fg5Prof.nBatches;
+                const uint64_t fg5FogKey = fge ? (0x1000000ull | (static_cast<uint64_t>(batch.fogcol) & 0xFFFFFFull)) : 0ull;
+                if (fg5PrevValid)
+                {
+                    if (tex0 != fg5PrevTex0) ++g_fg5Prof.chgTex;
+                    if (alpha != fg5PrevAlpha) ++g_fg5Prof.chgAlpha;
+                    if (test != fg5PrevTest) ++g_fg5Prof.chgTest;
+                    if (prim != fg5PrevPrim) ++g_fg5Prof.chgPrim;
+                    if (zbuf != fg5PrevZbuf) ++g_fg5Prof.chgZbuf;
+                    if (fg5FogKey != fg5PrevFog) ++g_fg5Prof.chgFog;
+                }
+                fg5PrevValid = true;
+                fg5PrevTex0 = tex0;
+                fg5PrevAlpha = alpha;
+                fg5PrevTest = test;
+                fg5PrevPrim = prim;
+                fg5PrevZbuf = zbuf;
+                fg5PrevFog = fg5FogKey;
+                g_fg5In3d = true;
+            }
             if (afail != 0) // FEAT-RD30
             {
                 const int sMask = g_rdMaskCur;
@@ -5383,7 +6130,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 probeE9aLog(); // PROBE-E9a
                 rdDrawElems(batch.first, batch.count); // FEAT-RD14 // FIX-RD90
             }
+            g_fg5In3d = false; // PROBE-FG5
             }
+            if (stateCacheOn) flushPending3d(); // FEAT-FG6
         }
         if (pace2On) // PROBE-PACE2
             g_pace2Rd.b3 -= (g_pace2Rd.b4 - pace2B4Before3d);
@@ -5447,6 +6196,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             prevZBias = 0.0f;
             rdSetUniformFloat(rdgfx::Uniform::ZBias, prevZBias); // RDG1
         }
+        const int64_t fg5Tail2dT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
         if (!deferred2d.empty()) // FIX-RD63
         {
             Pace2Scope pace2B4DefScope(g_pace2Rd.b4, pace2On); // PROBE-PACE2
@@ -5651,6 +6401,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             curVao = 0u;
         }
         draw2dUntil(0u, true); // FEAT-RD8
+        if (drawProfOn) // PROBE-FG5
+            g_fg5Prof.other2DTicks += (fg5QpcNow() - fg5Tail2dT0);
         // PROBE-E4c: per-frame swirl probe
         static const bool s_swirlLog = []{
             extern void ps2xLoadConfig();
@@ -5787,6 +6539,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
     if (rdFbTexOn() && vw > 0 && vh > 0) // FIX-RD79 // FIX-RD80 // FIX-RD81
     {
+        const int64_t fg5SubT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
         Pace2Scope pace2B5Scope(g_pace2Rd.b5, pace2On); // PROBE-PACE2
         static int s_lastW = 0, s_lastH = 0; // FIX-RD85 // FXC1
         const int wantW = vw;
@@ -5956,6 +6709,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (rdFbTexLastOn() && drawn3dThisFrame >= rdFbTexLast3dMin()) // FIX-RD85 // FIX-RD85B
                 copyToFbTarget(s_lastSceneTexId, s_lastSceneFbo, s_lastW, s_lastH, s_lastSceneFilled, s_fbTexLastCopies); // FIX-RD85B
         }
+        if (drawProfOn) // PROBE-FG5
+            g_fg5Prof.submitTicks += (fg5QpcNow() - fg5SubT0);
     }
 
     if (s_passLog) // FEAT-RD22
@@ -6030,6 +6785,121 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     g_rdGpu.totalPointLineSkipped += static_cast<uint64_t>(g_rdGpu.lastPointLineSkipped); // FEAT-RD8
     g_rdc.totalCalls += g_rdc.calls; // FEAT-RD15
     const auto now = std::chrono::steady_clock::now();
+    if (drawProfOn) // PROBE-FG5
+    {
+        ++g_fg5Prof.frames;
+        g_fg5Prof.totalTicks += (fg5QpcNow() - fg5TotalT0);
+        if (g_fg5Prof.secStart.time_since_epoch().count() == 0)
+            g_fg5Prof.secStart = now;
+        else if (now - g_fg5Prof.secStart >= std::chrono::seconds(1) && g_fg5Prof.frames > 0)
+        {
+            const uint32_t f = g_fg5Prof.frames;
+            const double invF = 1.0 / static_cast<double>(f);
+            ps2xSafeLog("[drawprof] frames=%u total=%.2f upload=%.2f prep=%.2f texLookup=%.2f stateBind=%.2f uniforms=%.2f drawCalls=%.2f other2D=%.2f submit=%.2f nBatches=%.0f nDraws=%.0f nTexBinds=%.0f nStateChanges=%.0f nUniformUpdates=%.0f chg=tex:%u alpha:%u test:%u prim:%u zbuf:%u fog:%u\n",
+                        f,
+                        fg5QpcToMs(g_fg5Prof.totalTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.uploadTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.prepTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.texLookupTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.stateBindTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.uniformsTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.drawCallsTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.other2DTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.submitTicks) * invF,
+                        static_cast<double>(g_fg5Prof.nBatches) * invF,
+                        static_cast<double>(g_fg5Prof.nDraws) * invF,
+                        static_cast<double>(g_fg5Prof.nTexBinds) * invF,
+                        static_cast<double>(g_fg5Prof.nStateChanges) * invF,
+                        static_cast<double>(g_fg5Prof.nUniformUpdates) * invF,
+                        static_cast<unsigned int>(g_fg5Prof.chgTex / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgAlpha / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgTest / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgPrim / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgZbuf / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgFog / f));
+            ps2xSafeLog("[drawprof2] skippedState=%u skippedUniform=%u merged=%u prepFilters=%.2f prepTexKey=%.2f prepVertexFix=%.2f prepMisc=%.2f\n", // FEAT-FG6 // PROBE-FG7
+                        static_cast<unsigned int>(g_fg5Prof.skippedState / f),
+                        static_cast<unsigned int>(g_fg5Prof.skippedUniform / f),
+                        static_cast<unsigned int>(g_fg5Prof.mergedDraws / f),
+                        fg5QpcToMs(g_fg5Prof.prepFiltersTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.prepTexKeyTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.prepVertexFixTicks) * invF,
+                        fg5QpcToMs(std::max<int64_t>(0, g_fg5Prof.prepTicks - g_fg5Prof.prepFiltersTicks - g_fg5Prof.prepTexKeyTicks - g_fg5Prof.prepVertexFixTicks)) * invF);
+            ps2xSafeLog("[drawprof-chg] frame:%u clamp:%u tex1:%u texa:%u vpS:%u/%u vpO:%u/%u camHash:%u disc:%u pipe:%u blend:%u depth:%u scis:%u pcUpd:%u pcBytes:%u\n", // PROBE-FG7
+                        static_cast<unsigned int>(g_fg5Prof.chgFrame / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgClamp / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgTex1 / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgTexa / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgVpS0 / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgVpS1 / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgVpO0 / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgVpO1 / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgCamHash / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgDisc / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgPipeKey / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgBlend / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgDepthFunc / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgScissor / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgPcUpdates / f),
+                        static_cast<unsigned int>(g_fg5Prof.chgPcBytes / f));
+            { // PROBE-FG8: per-frame PushConstants changed byte-offset histogram
+                std::string pcHistLine;
+                for (uint32_t w = 0u; w < 32u; ++w)
+                {
+                    const unsigned int cnt = static_cast<unsigned int>(g_fg5Prof.fg8PcWordHist[w] / f);
+                    if (cnt == 0u) continue;
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), " %u(%s)=%u", w * 4u, kFg8PcWordNames[w], cnt);
+                    pcHistLine += buf;
+                }
+                if (!pcHistLine.empty())
+                    ps2xSafeLog("[drawprof-pc]%s\n", pcHistLine.c_str());
+            }
+            if (g_fg7Top3.winStart.time_since_epoch().count() == 0) // PROBE-FG7
+                g_fg7Top3.winStart = now;
+            else if (now - g_fg7Top3.winStart >= std::chrono::seconds(5))
+            {
+                int top[3] = {-1, -1, -1};
+                for (int i = 0; i < FG7_NUM_FIELDS; ++i)
+                {
+                    const uint64_t c = g_fg7Top3.fields[i].count;
+                    if (c == 0) continue;
+                    if (top[0] < 0 || c > g_fg7Top3.fields[top[0]].count) { top[2] = top[1]; top[1] = top[0]; top[0] = i; }
+                    else if (top[1] < 0 || c > g_fg7Top3.fields[top[1]].count) { top[2] = top[1]; top[1] = i; }
+                    else if (top[2] < 0 || c > g_fg7Top3.fields[top[2]].count) { top[2] = i; }
+                }
+                for (int k = 0; k < 3; ++k)
+                {
+                    if (top[k] < 0) break;
+                    const Fg7FieldPairs &fp = g_fg7Top3.fields[top[k]];
+                    ps2xSafeLog("[drawprof-top3] #%d %s=%llu pairs(%u): %llx->%llx %llx->%llx %llx->%llx %llx->%llx %llx->%llx %llx->%llx %llx->%llx %llx->%llx\n",
+                                k + 1, kFg7FieldNames[top[k]], static_cast<unsigned long long>(fp.count), static_cast<unsigned int>(fp.nPairs),
+                                static_cast<unsigned long long>(fp.oldV[0]), static_cast<unsigned long long>(fp.newV[0]),
+                                static_cast<unsigned long long>(fp.oldV[1]), static_cast<unsigned long long>(fp.newV[1]),
+                                static_cast<unsigned long long>(fp.oldV[2]), static_cast<unsigned long long>(fp.newV[2]),
+                                static_cast<unsigned long long>(fp.oldV[3]), static_cast<unsigned long long>(fp.newV[3]),
+                                static_cast<unsigned long long>(fp.oldV[4]), static_cast<unsigned long long>(fp.newV[4]),
+                                static_cast<unsigned long long>(fp.oldV[5]), static_cast<unsigned long long>(fp.newV[5]),
+                                static_cast<unsigned long long>(fp.oldV[6]), static_cast<unsigned long long>(fp.newV[6]),
+                                static_cast<unsigned long long>(fp.oldV[7]), static_cast<unsigned long long>(fp.newV[7]));
+                }
+                g_fg7Top3 = Fg7Top3Tracker{};
+                g_fg7Top3.winStart = now;
+                for (uint32_t w = 0u; w < 32u; ++w) // PROBE-FG8
+                {
+                    const Fg8PcWordPairs &wp = g_fg8Pc5s[w];
+                    if (wp.count == 0) continue;
+                    ps2xSafeLog("[drawprof-pc5s] off=%u(%s)=%llu pairs(%u): %x->%x %x->%x %x->%x %x->%x %x->%x %x->%x\n",
+                                w * 4u, kFg8PcWordNames[w], static_cast<unsigned long long>(wp.count), static_cast<unsigned int>(wp.nPairs),
+                                wp.oldV[0], wp.newV[0], wp.oldV[1], wp.newV[1], wp.oldV[2], wp.newV[2],
+                                wp.oldV[3], wp.newV[3], wp.oldV[4], wp.newV[4], wp.oldV[5], wp.newV[5]);
+                }
+                std::memset(g_fg8Pc5s, 0, sizeof(g_fg8Pc5s));
+            }
+            g_fg5Prof = Fg5DrawProfAcc{};
+            g_fg5Prof.secStart = now;
+        }
+    }
     // PROBE-E3a: periodic 1-second ABE filter logging
     if (s_abeFilter.active)
     {

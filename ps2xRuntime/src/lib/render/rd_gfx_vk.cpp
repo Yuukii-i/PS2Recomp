@@ -40,6 +40,28 @@ double ps2xSdlVkLastBeginWaitMs(); // PROBE-RDG4P
 VkImageView ps2xSdlVkCurrentSwapView();
 bool ps2xSdlImGuiRecord(VkCommandBuffer cb, VkImage swapImage, VkImageView swapView, uint32_t w, uint32_t h);
 extern int ps2xGfxGetAspectMode(); // FIX-P2
+extern "C" bool ps2xRdDrawProfIn3d(); // PROBE-FG5
+extern "C" void ps2xRdDrawProfAddVk(int64_t stateBindTicks, int64_t uniformTicks, int64_t drawCallTicks,
+                                    uint64_t nStateChanges, uint64_t nUniformUpdates, uint64_t nDraws); // PROBE-FG5
+extern "C" void ps2xRdDrawProfAddFg6(uint64_t skippedState, uint64_t skippedUniform); // FEAT-FG6
+extern "C" void ps2xRdDrawProfAddFg7Pc(uint64_t pcUpdates, uint64_t pcBytes); // PROBE-FG7
+extern "C" void ps2xRdDrawProfAddFg8PcWord(uint32_t wordIdx, uint32_t oldVal, uint32_t newVal); // PROBE-FG8
+static inline bool fg6StateCacheEnabled() // FEAT-FG6
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_RD_STATECACHE");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+static inline bool fg5ProfActive() // FEAT-FG6
+{
+    static const bool s_fg5On = []() {
+        const char *e = std::getenv("PS2X_RD_DRAWPROF");
+        return e && e[0] == '1';
+    }();
+    return s_fg5On && ps2xRdDrawProfIn3d();
+}
 
 // PROBE-V3B: Pause composite timing probe
 namespace probe_v3b
@@ -399,6 +421,7 @@ struct RdVkState
     VkDescriptorSet lastBoundDescSet = VK_NULL_HANDLE;
     bool lastPcValid = false;
     PushConstants lastPc{};
+    int32_t curAtInvert = 0; // FIX-FG8
     bool lastVpValid = false;
     VkViewport lastVp{};
     bool lastScValid = false;
@@ -1005,6 +1028,7 @@ void invalidateCommandBufferState()
     s_vk.dirtyScissor = true;
     s_vk.dirtyTextures = true;
     s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8
     s_vk.dirtyVertexBuffer = true;
     s_vk.dirtyIndexBuffer = true;
 }
@@ -1662,6 +1686,11 @@ uint32_t resolveBoundEbo()
 bool prepareDraw()
 {
     ProbeDrawScope drawProbe; // PROBE-RDG4P
+    const bool fg5On = fg5ProfActive(); // PROBE-FG5 // FEAT-FG6
+    const int64_t fg5PrepT0 = fg5On ? probeQpcNow() : 0; // PROBE-FG5
+    int64_t fg5UniformTicks = 0; // PROBE-FG5
+    uint64_t fg5StateChanges = 0; // PROBE-FG5
+    uint64_t fg5UniformUpdates = 0; // PROBE-FG5
     if (!s_vk.frameActive || !s_vk.shaderReady || s_vk.cmd == VK_NULL_HANDLE)
     {
         ++s_vk.statNoFrame; // PROBE-RDG3B
@@ -1696,9 +1725,11 @@ bool prepareDraw()
     {
         vkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vk.cachedPipeline);
         s_vk.boundPipeline = s_vk.cachedPipeline;
+        if (fg5On) ++fg5StateChanges; // PROBE-FG5
     }
 
     // PERF-RDG4R: only emit vkCmdSetViewport / vkCmdSetScissor when effective state changed.
+    if (fg5On && (s_vk.dirtyViewport || s_vk.dirtyScissor)) ++fg5StateChanges; // PROBE-FG5
     applyViewportAndScissorIfDirty();
 
     // FIX-RDG3C / PERF-RDG4R: only resolve textures, samplers, and hash DescCacheKey when dirty.
@@ -1798,16 +1829,53 @@ bool prepareDraw()
     {
         vkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vk.pipelineLayout, 0, 1, &s_vk.cachedDescSet, 0, nullptr);
         s_vk.lastBoundDescSet = s_vk.cachedDescSet;
+        if (fg5On) ++fg5StateChanges; // PROBE-FG5
     }
 
-    // PERF-RDG4R: only push constants when dirty and changed.
+    // PERF-RDG4R / FIX-FG7: only push the changed 4-byte-aligned push-constant span.
     if (s_vk.dirtyPushConstants || !s_vk.lastPcValid)
     {
-        if (!s_vk.lastPcValid || std::memcmp(&s_vk.pc, &s_vk.lastPc, sizeof(PushConstants)) != 0)
+        uint32_t byteOff = 0u;
+        uint32_t byteSize = 0u;
+        if (!s_vk.lastPcValid)
         {
+            byteOff = 0u;
+            byteSize = static_cast<uint32_t>(sizeof(PushConstants));
+        }
+        else
+        {
+            const uint32_t *curW = reinterpret_cast<const uint32_t *>(&s_vk.pc);
+            const uint32_t *oldW = reinterpret_cast<const uint32_t *>(&s_vk.lastPc);
+            constexpr uint32_t kWords = static_cast<uint32_t>(sizeof(PushConstants) / 4u);
+            uint32_t firstW = kWords;
+            uint32_t lastW = 0u;
+            for (uint32_t w = 0u; w < kWords; ++w)
+            {
+                if (curW[w] != oldW[w])
+                {
+                    if (firstW == kWords) firstW = w;
+                    lastW = w;
+                    if (fg5On) ps2xRdDrawProfAddFg8PcWord(w, oldW[w], curW[w]); // PROBE-FG8
+                }
+            }
+            if (firstW < kWords)
+            {
+                byteOff = firstW * 4u;
+                byteSize = (lastW - firstW + 1u) * 4u;
+            }
+        }
+        if (byteSize > 0u)
+        {
+            const int64_t fg5UT0 = fg5On ? probeQpcNow() : 0; // PROBE-FG5
             vkCmdPushConstants(s_vk.cmd, s_vk.pipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                               0, sizeof(PushConstants), &s_vk.pc);
+                               byteOff, byteSize, reinterpret_cast<const uint8_t *>(&s_vk.pc) + byteOff);
+            if (fg5On) // PROBE-FG5 / PROBE-FG7
+            {
+                fg5UniformTicks += (probeQpcNow() - fg5UT0);
+                ++fg5UniformUpdates;
+                ps2xRdDrawProfAddFg7Pc(1, byteSize);
+            }
             s_vk.lastPc = s_vk.pc;
             s_vk.lastPcValid = true;
         }
@@ -1831,6 +1899,7 @@ bool prepareDraw()
             vkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &vb, &offset);
             s_vk.lastBoundVb = vb;
             s_vk.lastBoundVbOffset = offset;
+            if (fg5On) ++fg5StateChanges; // PROBE-FG5
         }
         s_vk.dirtyVertexBuffer = false;
     }
@@ -1838,6 +1907,11 @@ bool prepareDraw()
     ++s_vk.statDraws;
     if (s_vk.logEnabled) // PROBE-RDG4P
         ++s_vk.curFrameDraws;
+    if (fg5On) // PROBE-FG5
+    {
+        const int64_t prepTicks = (probeQpcNow() - fg5PrepT0) - fg5UniformTicks;
+        ps2xRdDrawProfAddVk(prepTicks > 0 ? prepTicks : 0, fg5UniformTicks, 0, fg5StateChanges, fg5UniformUpdates, 0);
+    }
     return true;
 }
 
@@ -2290,8 +2364,42 @@ bool hasUniform(rdgfx::Uniform) { return true; }
 
 void setUniformInt(rdgfx::Uniform u, int v)
 {
+    if (u == rdgfx::Uniform::AtInvert && fg6StateCacheEnabled()) // FIX-FG8: pass via firstInstance
+    {
+        if (s_vk.lastPcValid && s_vk.curAtInvert == v)
+        {
+            if (fg5ProfActive()) ps2xRdDrawProfAddFg6(0, 1);
+            return;
+        }
+        ++s_vk.statUniformSets;
+        s_vk.curAtInvert = v;
+        return;
+    }
+    if (fg6StateCacheEnabled() && s_vk.lastPcValid) // FEAT-FG6
+    {
+        bool same = false;
+        switch (u)
+        {
+        case rdgfx::Uniform::Mode2d: same = (s_vk.pc.uMode2d == v); break;
+        case rdgfx::Uniform::Atst: same = (s_vk.pc.uAtst == v); break;
+        case rdgfx::Uniform::Aref: same = (s_vk.pc.uAref == v); break;
+        case rdgfx::Uniform::AtInvert: same = (s_vk.pc.uAtInvert == v); break;
+        case rdgfx::Uniform::PalMode: same = (s_vk.pc.uPalMode == v); break;
+        case rdgfx::Uniform::PalFallback: same = (s_vk.pc.uPalFallback == v); break;
+        case rdgfx::Uniform::Tex: same = (s_vk.pc.uTex == v); break;
+        case rdgfx::Uniform::Tfx: same = (s_vk.pc.uTfx == v); break;
+        case rdgfx::Uniform::Tcc: same = (s_vk.pc.uTcc == v); break;
+        default: break;
+        }
+        if (same)
+        {
+            if (fg5ProfActive()) ps2xRdDrawProfAddFg6(0, 1);
+            return;
+        }
+    }
     ++s_vk.statUniformSets; // PROBE-RDG3B
-    s_vk.dirtyPushConstants = true; // PERF-RDG4R
+    s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8 // PERF-RDG4R
     switch (u)
     {
     case rdgfx::Uniform::Mode2d: s_vk.pc.uMode2d = v; break;
@@ -2309,8 +2417,24 @@ void setUniformInt(rdgfx::Uniform u, int v)
 
 void setUniformFloat(rdgfx::Uniform u, float v)
 {
+    if (fg6StateCacheEnabled() && s_vk.lastPcValid) // FEAT-FG6
+    {
+        bool same = false;
+        switch (u)
+        {
+        case rdgfx::Uniform::ZBias: same = (s_vk.pc.uZBias == v); break;
+        case rdgfx::Uniform::FixAlpha: same = (s_vk.pc.uFixAlpha == v); break;
+        default: break;
+        }
+        if (same)
+        {
+            if (fg5ProfActive()) ps2xRdDrawProfAddFg6(0, 1);
+            return;
+        }
+    }
     ++s_vk.statUniformSets; // PROBE-RDG3B
-    s_vk.dirtyPushConstants = true; // PERF-RDG4R
+    s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8 // PERF-RDG4R
     switch (u)
     {
     case rdgfx::Uniform::ZBias: s_vk.pc.uZBias = v; break;
@@ -2322,8 +2446,22 @@ void setUniformFloat(rdgfx::Uniform u, float v)
 void setUniformVec2(rdgfx::Uniform u, const float *v)
 {
     if (!v) return;
+    if (fg6StateCacheEnabled() && s_vk.lastPcValid) // FEAT-FG6
+    {
+        bool same = false;
+        if (u == rdgfx::Uniform::FbSize)
+            same = (s_vk.pc.uFbSize[0] == v[0] && s_vk.pc.uFbSize[1] == v[1]);
+        else if (u == rdgfx::Uniform::VpZ)
+            same = (s_vk.pc.uVpZ[0] == v[0] && s_vk.pc.uVpZ[1] == v[1]);
+        if (same)
+        {
+            if (fg5ProfActive()) ps2xRdDrawProfAddFg6(0, 1);
+            return;
+        }
+    }
     ++s_vk.statUniformSets; // PROBE-RDG3B
-    s_vk.dirtyPushConstants = true; // PERF-RDG4R
+    s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8 // PERF-RDG4R
     if (u == rdgfx::Uniform::FbSize)
     {
         s_vk.pc.uFbSize[0] = v[0];
@@ -2339,8 +2477,17 @@ void setUniformVec2(rdgfx::Uniform u, const float *v)
 void setUniformVec3Immediate(rdgfx::Uniform u, const float *v)
 {
     if (!v) return;
+    if (fg6StateCacheEnabled() && s_vk.lastPcValid && u == rdgfx::Uniform::Flip) // FEAT-FG6
+    {
+        if (s_vk.pc.uFlip[0] == v[0] && s_vk.pc.uFlip[1] == v[1] && s_vk.pc.uFlip[2] == v[2])
+        {
+            if (fg5ProfActive()) ps2xRdDrawProfAddFg6(0, 1);
+            return;
+        }
+    }
     ++s_vk.statUniformSets; // PROBE-RDG3B
-    s_vk.dirtyPushConstants = true; // PERF-RDG4R
+    s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8 // PERF-RDG4R
     if (u == rdgfx::Uniform::Flip)
     {
         s_vk.pc.uFlip[0] = v[0];
@@ -2353,8 +2500,22 @@ void setUniformVec3Immediate(rdgfx::Uniform u, const float *v)
 void setUniformVec4(rdgfx::Uniform u, const float *v)
 {
     if (!v) return;
+    if (fg6StateCacheEnabled() && s_vk.lastPcValid) // FEAT-FG6
+    {
+        bool same = false;
+        if (u == rdgfx::Uniform::VpA)
+            same = (std::memcmp(s_vk.pc.uVpA, v, 4 * sizeof(float)) == 0);
+        else if (u == rdgfx::Uniform::VpB)
+            same = (std::memcmp(s_vk.pc.uVpB, v, 4 * sizeof(float)) == 0);
+        if (same)
+        {
+            if (fg5ProfActive()) ps2xRdDrawProfAddFg6(0, 1);
+            return;
+        }
+    }
     ++s_vk.statUniformSets; // PROBE-RDG3B
-    s_vk.dirtyPushConstants = true; // PERF-RDG4R
+    s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8 // PERF-RDG4R
     if (u == rdgfx::Uniform::VpA)
         std::memcpy(s_vk.pc.uVpA, v, 4 * sizeof(float));
     else if (u == rdgfx::Uniform::VpB)
@@ -2370,6 +2531,7 @@ void setFog(float r, float g, float b, float enable) // FIX-E1c
     s_vk.pc.uFog[2] = b;
     s_vk.pc.uFog[3] = enable;
     s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8
 }
 
 void flushBatch() {}
@@ -2690,7 +2852,12 @@ void drawArrays(rdgfx::PrimitiveTopology, int first, int count)
     }
     if (!prepareDraw())
         return;
-    vkCmdDraw(s_vk.cmd, static_cast<uint32_t>(count), 1, static_cast<uint32_t>(first), 0);
+    const bool fg5On = fg5ProfActive(); // PROBE-FG5 // FEAT-FG6
+    const int64_t fg5DrawT0 = fg5On ? probeQpcNow() : 0; // PROBE-FG5
+    const uint32_t firstInst = fg6StateCacheEnabled() ? (s_vk.curAtInvert != 0 ? 1u : 0u) : 0u; // FIX-FG8
+    vkCmdDraw(s_vk.cmd, static_cast<uint32_t>(count), 1, static_cast<uint32_t>(first), firstInst); // FIX-FG8
+    if (fg5On) // PROBE-FG5
+        ps2xRdDrawProfAddVk(0, 0, probeQpcNow() - fg5DrawT0, 0, 0, 1);
 }
 
 void drawIndexed(rdgfx::PrimitiveTopology, uint32_t first, uint32_t count, bool idx32)
@@ -2705,6 +2872,9 @@ void drawIndexed(rdgfx::PrimitiveTopology, uint32_t first, uint32_t count, bool 
     }
     if (!prepareDraw())
         return;
+    const bool fg5On = fg5ProfActive(); // PROBE-FG5 // FEAT-FG6
+    const int64_t fg5IbT0 = fg5On ? probeQpcNow() : 0; // PROBE-FG5
+    uint64_t fg5IbChg = 0; // PROBE-FG5
     // PERF-RDG4R: only resolve and bind index buffer when dirty or index type changed.
     const VkIndexType idxType = idx32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
     if (s_vk.dirtyIndexBuffer || s_vk.lastBoundIb == VK_NULL_HANDLE || idxType != s_vk.lastBoundIbType)
@@ -2722,10 +2892,18 @@ void drawIndexed(rdgfx::PrimitiveTopology, uint32_t first, uint32_t count, bool 
             vkCmdBindIndexBuffer(s_vk.cmd, eb, 0, idxType);
             s_vk.lastBoundIb = eb;
             s_vk.lastBoundIbType = idxType;
+            if (fg5On) fg5IbChg = 1; // PROBE-FG5
         }
         s_vk.dirtyIndexBuffer = false;
     }
-    vkCmdDrawIndexed(s_vk.cmd, count, 1, first, 0, 0);
+    const int64_t fg5DrawT0 = fg5On ? probeQpcNow() : 0; // PROBE-FG5
+    const uint32_t firstInst = fg6StateCacheEnabled() ? (s_vk.curAtInvert != 0 ? 1u : 0u) : 0u; // FIX-FG8
+    vkCmdDrawIndexed(s_vk.cmd, count, 1, first, 0, firstInst); // FIX-FG8
+    if (fg5On) // PROBE-FG5
+    {
+        const int64_t fg5T1 = probeQpcNow();
+        ps2xRdDrawProfAddVk(fg5DrawT0 - fg5IbT0, 0, fg5T1 - fg5DrawT0, fg5IbChg, 0, 1);
+    }
 }
 
 uint32_t createTexture2DInternal(const void *data, int w, int h, uint32_t mipLevels, const SamplerKey &sampler, bool clearBlackOpaque) // RDG2B
@@ -3294,6 +3472,7 @@ void drawTextureOverlay(uint32_t texId, int texW, int texH,
     s_vk.boundTex[1] = 0u;
     // PERF-RDG4R: mark dirty before overlay draw
     s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8
     s_vk.dirtyPipeline = true;
     s_vk.dirtyViewport = true;
     s_vk.dirtyScissor = true;
@@ -3320,6 +3499,7 @@ void drawTextureOverlay(uint32_t texId, int texW, int texH,
     s_vk.boundTex[1] = savedTex1;
     // PERF-RDG4R: mark dirty after restoring state
     s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8
     s_vk.dirtyPipeline = true;
     s_vk.dirtyViewport = true;
     s_vk.dirtyScissor = true;
@@ -3408,6 +3588,7 @@ static void drawQuad2d(uint32_t texId,
     s_vk.boundTex[0] = texId;
     s_vk.boundTex[1] = 0u;
     s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8
     s_vk.dirtyPipeline = true;
     s_vk.dirtyViewport = true;
     s_vk.dirtyScissor = true;
@@ -3432,6 +3613,7 @@ static void drawQuad2d(uint32_t texId,
     s_vk.boundTex[0] = savedTex0;
     s_vk.boundTex[1] = savedTex1;
     s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8
     s_vk.dirtyPipeline = true;
     s_vk.dirtyViewport = true;
     s_vk.dirtyScissor = true;
@@ -3492,6 +3674,7 @@ static void prepareCompositeState(int tw, int th,
     s_vk.dirtyScissor = true;
     s_vk.dirtyTextures = true;
     s_vk.dirtyPushConstants = true;
+    s_vk.curAtInvert = 0; // FIX-FG8
     s_vk.dirtyVertexBuffer = true;
     s_vk.dirtyIndexBuffer = true;
 }

@@ -29,6 +29,7 @@ layout(push_constant) uniform PC {
 layout(location = 0) out vec4 vCol;
 layout(location = 1) out vec2 vUv;
 layout(location = 2) out float vFog; // FIX-E1c
+layout(location = 3) flat out int vAtInvert; // FIX-FG8
 
 void main() {
     if (pc.uMode2d != 0) {
@@ -55,4 +56,5 @@ void main() {
     vCol = aCol;
     vUv = aUv;
     vFog = aFog; // FIX-E1c
+    vAtInvert = int(gl_InstanceIndex); // FIX-FG8
 }

@@ -3,6 +3,7 @@
 layout(location = 0) in vec4 vCol;
 layout(location = 1) in vec2 vUv;
 layout(location = 2) in float vFog; // FIX-E1c
+layout(location = 3) flat in int vAtInvert; // FIX-FG8
 
 layout(set = 0, binding = 0) uniform sampler2D uSampler;
 layout(set = 0, binding = 1) uniform sampler2D uPalTex;
@@ -75,7 +76,7 @@ void main() {
         else if (pc.uAtst == 5) pass = (a >= pc.uAref);
         else if (pc.uAtst == 6) pass = (a > pc.uAref);
         else if (pc.uAtst == 7) pass = (a != pc.uAref);
-        if (pc.uAtInvert != 0) pass = !pass;
+        if ((pc.uAtInvert | vAtInvert) != 0) pass = !pass; // FIX-FG8
         if (!pass) discard;
     }
     finalColor = vec4(rgb, (pc.uFixAlpha >= 0.0) ? min(pc.uFixAlpha, 1.0) : min(a_ps2 / 128.0, 1.0));
