@@ -618,10 +618,25 @@ static const bool s_rdInterpOn = []() { // FEAT-FG3
     const char *e = std::getenv("PS2X_RD_INTERP");
     return e && e[0] == '1';
 }();
+static const uint32_t s_fg4Rate = []() -> uint32_t { // FEAT-FG4
+    if (!s_rdInterpOn)
+        return 1u;
+    const char *e = std::getenv("PS2X_RD_INTERP_RATE");
+    if (!e || !*e)
+        return 2u;
+    const int v = std::atoi(e);
+    if (v < 2) return 2u;
+    if (v > 4) return 4u;
+    return static_cast<uint32_t>(v);
+}();
 static float s_fg3T = []() { // FEAT-FG3
     const char *e = std::getenv("PS2X_RD_INTERP_T");
     return (e && *e) ? static_cast<float>(std::atof(e)) : 0.5f;
 }();
+static float s_fg4LastAppliedT = -1.0f; // FEAT-FG4
+static uint32_t s_fg4LastGenBatches = 0u; // FEAT-FG4
+static uint32_t s_fg4LastGenTeleportSkipped = 0u; // FEAT-FG4
+static bool s_fg4HasInterpData = false; // FEAT-FG4
 struct Fg3BatchPos // FEAT-FG3 // FIX-FG3b
 {
     uint64_t k1 = 0;
@@ -634,6 +649,9 @@ static std::vector<float> s_fg3PrevGenXyz; // FIX-FG3b
 static std::vector<RdVert> s_fg3BaseVerts[kRdSlotCount]; // FEAT-FG3
 static std::vector<float> s_fg3PrevPos[kRdSlotCount]; // FEAT-FG3
 static std::vector<uint8_t> s_fg3VertMatched[kRdSlotCount]; // FIX-FG3b
+static bool s_fg4SlotMoved[kRdSlotCount] = {}; // FIX-FG4c
+static double s_fg4ExtraUploadMsSum = 0.0; // FIX-FG4c
+static uint64_t s_fg4ExtraUploadVertsSum = 0u; // FIX-FG4c
 static double s_fg3LastApplyUs = 0.0; // FEAT-FG3
 static std::chrono::steady_clock::time_point s_fg3SecStart{}; // FEAT-FG3
 static uint32_t s_fg3Slots = 0u; // FEAT-FG3
@@ -2320,6 +2338,39 @@ void ps2xRdInterpSetT(float t) // FEAT-FG3
     s_fg3T = t;
 }
 
+bool ps2xRdInterpActive() // FEAT-FG4
+{
+    return s_rdInterpOn;
+}
+
+void ps2xRdFg4TakeUploadStats(double *msOut, uint64_t *vertsOut) // FIX-FG4c
+{
+    if (msOut) *msOut = s_fg4ExtraUploadMsSum;
+    if (vertsOut) *vertsOut = s_fg4ExtraUploadVertsSum;
+    s_fg4ExtraUploadMsSum = 0.0;
+    s_fg4ExtraUploadVertsSum = 0u;
+}
+
+bool ps2xRdInterpCanExtraPresent(const char **reasonOut) // FEAT-FG4
+{
+    if (!s_rdInterpOn || !s_fg4HasInterpData)
+    {
+        if (reasonOut) *reasonOut = "no_interp_data";
+        return false;
+    }
+    if (!g_rdGpu.hasCompleteComposition || g_rdGpu.drawBatches.empty())
+    {
+        if (reasonOut) *reasonOut = "not_main_pass";
+        return false;
+    }
+    if (s_fg4LastGenBatches > 0u && s_fg4LastGenTeleportSkipped * 4u > s_fg4LastGenBatches)
+    {
+        if (reasonOut) *reasonOut = "teleport_cut";
+        return false;
+    }
+    return true;
+}
+
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
     rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
@@ -2337,6 +2388,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     int chosen2dIdx = -1;     // FEAT-RD33
     uint32_t coverFail = 0;   // PROBE-V3O
     bool pendingUpload[kRdSlotCount] = {}; // FEAT-RD14 // FEAT-RD34
+    bool extraVertUpload[kRdSlotCount] = {}; // FIX-FG4c
     uint32_t evictedMaxSnap = 0u; // FEAT-RD34
     bool v3nNew3d = false; // PROBE-V3N
     bool v3nNew2d = false; // PROBE-V3N
@@ -2507,6 +2559,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             pendingUpload[idx] = true;
                             if (s_rdInterpOn) // FEAT-FG3
                             {
+                                s_fg4SlotMoved[idx] = false; // FIX-FG4c
                                 const std::vector<RdVert> &bv = s_fg3BaseVerts[idx];
                                 const std::vector<uint32_t> &biList = g_rdGpu.pendingIndices[idx];
                                 const size_t bvSize = bv.size();
@@ -2555,6 +2608,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         const size_t nCur = fg3CurRefs.size();
                         const size_t nPrev = s_fg3PrevGen.size();
                         s_fg3Batches += static_cast<uint32_t>(nCur);
+                        uint32_t fg4GenTeleport = 0u; // FEAT-FG4
                         if (nPrev > 0u)
                         {
                             static std::vector<uint8_t> curMatched; // FIX-FG3b: reuse static buffers
@@ -2634,6 +2688,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                                 if (teleport)
                                 {
                                     ++s_fg3TeleportSkipped;
+                                    ++fg4GenTeleport; // FEAT-FG4
                                     continue;
                                 }
                                 float * __restrict pp = s_fg3PrevPos[cr.slotIdx].data();
@@ -2644,9 +2699,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                                     const uint32_t vi = (useIdx ? biList[bNew.first + k] : (bNew.first + k)) + bNew.baseVertex;
                                     if (vi >= bvSize)
                                         continue;
-                                    pp[static_cast<size_t>(vi) * 3u + 0u] = prXyz[static_cast<size_t>(k) * 3u + 0u];
-                                    pp[static_cast<size_t>(vi) * 3u + 1u] = prXyz[static_cast<size_t>(k) * 3u + 1u];
-                                    pp[static_cast<size_t>(vi) * 3u + 2u] = prXyz[static_cast<size_t>(k) * 3u + 2u];
+                                    const float px = prXyz[static_cast<size_t>(k) * 3u + 0u]; // FIX-FG4c
+                                    const float py = prXyz[static_cast<size_t>(k) * 3u + 1u]; // FIX-FG4c
+                                    const float pz = prXyz[static_cast<size_t>(k) * 3u + 2u]; // FIX-FG4c
+                                    pp[static_cast<size_t>(vi) * 3u + 0u] = px;
+                                    pp[static_cast<size_t>(vi) * 3u + 1u] = py;
+                                    pp[static_cast<size_t>(vi) * 3u + 2u] = pz;
+                                    if (px != bv[vi].pos[0] || py != bv[vi].pos[1] || pz != bv[vi].pos[2]) // FIX-FG4c
+                                        s_fg4SlotMoved[cr.slotIdx] = true;
                                     if (vm[vi] == 0u) // FIX-FG3b: count unique interpolated vertices
                                     {
                                         vm[vi] = 1u;
@@ -2657,7 +2717,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         }
                         s_fg3PrevGen.swap(fg3NextGen);
                         s_fg3PrevGenXyz.swap(fg3NextGenXyz);
+                        s_fg4LastGenBatches = static_cast<uint32_t>(nCur); // FEAT-FG4
+                        s_fg4LastGenTeleportSkipped = fg4GenTeleport; // FEAT-FG4
+                        s_fg4HasInterpData = (nPrev > 0u); // FEAT-FG4
+                        if (s_fg4Rate >= 2u) // FEAT-FG4: apply t=0 on arrival in RATE mode
+                            s_fg3T = 0.0f;
                         rdInterpApply(s_fg3T, pendingUpload); // FIX-FG3b
+                        s_fg4LastAppliedT = s_fg3T; // FEAT-FG4
                         const auto nowFg3 = std::chrono::steady_clock::now();
                         if (s_fg3SecStart.time_since_epoch().count() == 0)
                         {
@@ -2701,6 +2767,27 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 return ps2xRdTakeoverOn();
             }
         }
+        if (s_rdInterpOn && g_rdGpu.hasCompleteComposition && s_fg3T != s_fg4LastAppliedT) // FEAT-FG4
+        {
+            bool reuploadSlots[kRdSlotCount] = {};
+            bool anyReupload = false;
+            for (const RdDrawBatch &db : g_rdGpu.drawBatches)
+            {
+                if (db.slotIdx < kRdSlotCount && !pendingUpload[db.slotIdx] &&
+                    !extraVertUpload[db.slotIdx] && s_fg4SlotMoved[db.slotIdx] && // FIX-FG4c
+                    !s_fg3BaseVerts[db.slotIdx].empty() &&
+                    s_fg3PrevPos[db.slotIdx].size() == s_fg3BaseVerts[db.slotIdx].size() * 3u &&
+                    g_rdGpu.pendingVerts[db.slotIdx].size() == s_fg3BaseVerts[db.slotIdx].size())
+                {
+                    reuploadSlots[db.slotIdx] = true;
+                    extraVertUpload[db.slotIdx] = true; // FIX-FG4c
+                    anyReupload = true;
+                }
+            }
+            if (anyReupload)
+                rdInterpApply(s_fg3T, reuploadSlots);
+            s_fg4LastAppliedT = s_fg3T; // FIX-FG4c
+        }
     }
 
     if (!g_rdGpu.init)
@@ -2735,6 +2822,23 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     else
                         g_rd24Idx[idx].clear();
                 }
+            }
+            else if (extraVertUpload[idx]) // FIX-FG4c: single VBO sub-update per moved slot, no index/batch re-upload
+            {
+                const auto upT0 = std::chrono::steady_clock::now();
+                RdGpuSlot &slot = g_rdGpu.slots[idx];
+                const std::vector<RdVert> &verts = g_rdGpu.pendingVerts[idx];
+                const size_t nv = verts.size();
+                if (nv > 0u)
+                {
+                    if (slot.vbo != 0u && nv <= slot.vboCapVerts)
+                        rdgfx::updateVertexBuffer(slot.vbo, verts.data(), static_cast<int>(nv * sizeof(RdVert)), 0);
+                    else
+                        uploadRdSlot(slot, verts, g_rdGpu.pendingIndices[idx], slot.batches);
+                    s_fg4ExtraUploadVertsSum += static_cast<uint64_t>(nv);
+                }
+                const auto upT1 = std::chrono::steady_clock::now();
+                s_fg4ExtraUploadMsSum += static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(upT1 - upT0).count()) * 1e-6;
             }
         }
     }
@@ -2771,6 +2875,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         {
             s_fg3PrevGen.clear();
             s_fg3PrevGenXyz.clear(); // FIX-FG3b
+            s_fg4LastAppliedT = -1.0f; // FEAT-FG4
+            s_fg4LastGenBatches = 0u; // FEAT-FG4
+            s_fg4LastGenTeleportSkipped = 0u; // FEAT-FG4
+            s_fg4HasInterpData = false; // FEAT-FG4
         }
         for (size_t i = 0; i < kRdSlotCount; ++i)
         {
@@ -2783,6 +2891,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 s_fg3BaseVerts[i].clear();
                 s_fg3PrevPos[i].clear();
                 s_fg3VertMatched[i].clear(); // FIX-FG3b
+                s_fg4SlotMoved[i] = false; // FIX-FG4c
             }
         }
     }

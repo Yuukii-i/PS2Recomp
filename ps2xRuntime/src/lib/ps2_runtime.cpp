@@ -12,6 +12,10 @@ extern bool ps2xRdViewOn(); // FEAT-RD1
 extern bool ps2xRdActive(); // FEAT-RD49
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
+extern bool ps2xRdInterpActive(); // FEAT-FG4
+extern void ps2xRdInterpSetT(float t); // FEAT-FG4
+extern bool ps2xRdInterpCanExtraPresent(const char **reasonOut); // FEAT-FG4
+extern void ps2xRdFg4TakeUploadStats(double *msOut, uint64_t *vertsOut); // FIX-FG4c
 extern "C" void ps2xRdPace2Take(int64_t *out6); // PROBE-PACE2
 extern "C" __declspec(dllimport) void __stdcall glReadPixels(int, int, int, int, unsigned int, unsigned int, void *); // PROBE-RD35
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
@@ -39,6 +43,7 @@ extern void ps2xSdlPresent();
 extern const uint8_t *ps2xSdlLastFrameRgba(uint32_t &w, uint32_t &h, uint32_t &strideBytes); // FXC1
 extern void ps2xSdlSetTitle(const char *t);
 extern void ps2xSdlShutdown();
+extern int ps2xSdlGetPresentMode(); // FEAT-FG4
 
 // PROBE-V3B: Pause composite timing probe
 namespace probe_v3b
@@ -66,6 +71,7 @@ inline void ps2xSdlPresent() {}
 inline const uint8_t *ps2xSdlLastFrameRgba(uint32_t &, uint32_t &, uint32_t &) { return nullptr; } // FXC1
 inline void ps2xSdlSetTitle(const char *) {}
 inline void ps2xSdlShutdown() {}
+inline int ps2xSdlGetPresentMode() { return 0; } // FEAT-FG4
 #endif
 #include "probe_ae.h"
 #include "probe_ae.cpp"
@@ -152,6 +158,9 @@ extern "C" __declspec(dllimport) int __stdcall SetWaitableTimer(void *hTimer, co
 extern "C" __declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void *hHandle, unsigned long dwMilliseconds); // FIX-PACE1
 extern "C" __declspec(dllimport) void __stdcall Sleep(unsigned long dwMilliseconds); // FIX-PACE1
 extern "C" __declspec(dllimport) unsigned int __stdcall timeBeginPeriod(unsigned int uPeriod); // FIX-V3F
+extern "C" __declspec(dllimport) void *__stdcall GetDC(void *hWnd); // FEAT-FG4
+extern "C" __declspec(dllimport) int __stdcall ReleaseDC(void *hWnd, void *hDC); // FEAT-FG4
+extern "C" __declspec(dllimport) int __stdcall GetDeviceCaps(void *hdc, int index); // FEAT-FG4
 #endif
 
 // FIX-PACE1 / FIX-PACE4: swap-time frame pacing & telemetry helpers
@@ -429,6 +438,108 @@ static inline void paceBeforeSwapSdl(bool hasNewFrame, int64_t presT0Qpc)
             s_sdlPaceLogLastQpc = swapStampQpc;
         }
     }
+}
+
+// FEAT-FG4: display-rate pacing helpers for interpolation
+static inline uint32_t fg4GetRate()
+{
+    static const uint32_t s_rate = []() -> uint32_t {
+        const char *e = std::getenv("PS2X_RD_INTERP_RATE");
+        if (!e || !*e) return 2u;
+        const int v = std::atoi(e);
+        if (v < 2) return 2u;
+        if (v > 4) return 4u;
+        return static_cast<uint32_t>(v);
+    }();
+    return s_rate;
+}
+
+static inline int fg4GetDisplayHz()
+{
+#ifdef _WIN32
+    void *hdc = GetDC(nullptr);
+    if (hdc)
+    {
+        const int hz = GetDeviceCaps(hdc, 116); // VREFRESH
+        ReleaseDC(nullptr, hdc);
+        if (hz > 1)
+            return hz;
+    }
+#endif
+    return 60;
+}
+
+template <typename EarlyFn>
+static inline bool fg4WaitUntilQpc(int64_t targetQpc, int64_t maxWaitTicks, int64_t qpcFreq, EarlyFn &&earlyArrived,
+                                   int64_t *waitTicksOut = nullptr, int64_t *spinTicksOut = nullptr) // FIX-FG4c
+{
+    const int64_t entryQpc = paceQpcNow(); // FIX-FG4c
+    int64_t nowQpc = entryQpc;
+    if (nowQpc >= targetQpc)
+    {
+        if (waitTicksOut) *waitTicksOut = 0; // FIX-FG4c
+        if (spinTicksOut) *spinTicksOut = 0; // FIX-FG4c
+        return true;
+    }
+    const int64_t startQpc = nowQpc;
+    const int64_t coarseMarginTicks = (qpcFreq * 7) / 10000; // FIX-FG4c: ~0.7 ms before target
+    const int64_t maxSpinTicks = std::max<int64_t>(1, qpcFreq / 1000); // FIX-FG4c: never spin > 1 ms per wait
+    const int64_t coarseTargetQpc = targetQpc - coarseMarginTicks;
+    if (nowQpc < coarseTargetQpc && !earlyArrived())
+    {
+#ifdef _WIN32
+        static void *s_fg4Timer = []() -> void * {
+            void *h = CreateWaitableTimerExW(nullptr, nullptr, 0x2u, 0x1F0003u);
+            if (!h)
+                timeBeginPeriod(1);
+            return h;
+        }();
+        const int64_t remTicks = std::min(coarseTargetQpc - nowQpc, maxWaitTicks);
+        if (s_fg4Timer)
+        {
+            const double remSec = static_cast<double>(remTicks) / static_cast<double>(qpcFreq);
+            long long due100ns = -static_cast<long long>(remSec * 10000000.0);
+            const unsigned long maxWaitMs = static_cast<unsigned long>((maxWaitTicks * 1000LL) / qpcFreq) + 2ul;
+            if (due100ns < 0 && SetWaitableTimer(s_fg4Timer, &due100ns, 0, nullptr, nullptr, 0))
+                WaitForSingleObject(s_fg4Timer, maxWaitMs);
+        }
+        else
+        {
+            const unsigned long ms = static_cast<unsigned long>(remTicks * 1000LL / qpcFreq);
+            if (ms > 0)
+                Sleep(ms);
+        }
+#else
+        const int64_t remTicks = std::min(coarseTargetQpc - nowQpc, maxWaitTicks); // FIX-FG4c
+        const long long remNs = static_cast<long long>((static_cast<double>(remTicks) / static_cast<double>(qpcFreq)) * 1000000000.0); // FIX-FG4c
+        if (remNs > 0) // FIX-FG4c
+            std::this_thread::sleep_for(std::chrono::nanoseconds(remNs)); // FIX-FG4c
+#endif
+    }
+    const int64_t spinStartQpc = paceQpcNow(); // FIX-FG4c
+    bool early = false; // FIX-FG4c
+    while (true)
+    {
+        const int64_t curQpc = paceQpcNow(); // FIX-FG4c
+        if (curQpc >= targetQpc || (curQpc - startQpc) >= maxWaitTicks)
+            break;
+        if (earlyArrived())
+        {
+            early = true; // FIX-FG4c
+            break;
+        }
+        if ((curQpc - spinStartQpc) >= maxSpinTicks) // FIX-FG4c: cap spin at 1 ms per wait
+            break;
+#if defined(_WIN32) || defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+        _mm_pause();
+#else
+        std::this_thread::yield();
+#endif
+    }
+    const int64_t exitQpc = paceQpcNow(); // FIX-FG4c
+    if (waitTicksOut) *waitTicksOut = exitQpc - entryQpc; // FIX-FG4c
+    if (spinTicksOut) *spinTicksOut = exitQpc - spinStartQpc; // FIX-FG4c
+    return !early && !earlyArrived();
 }
 
 static inline void paceAfterSwapSdl()
@@ -7587,7 +7698,9 @@ void PS2Runtime::run()
                     }
                     const float dstX = (screenWidth - dstWidth) * 0.5f; // RDG3
                     const float dstY = (screenHeight - dstHeight) * 0.5f; // RDG3
+                    const int64_t fg4RealDrawT0 = ps2xRdInterpActive() ? paceQpcNow() : 0; // FIX-FG4c
                     (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight); // RDG3
+                    const int64_t fg4RealDrawT1 = ps2xRdInterpActive() ? paceQpcNow() : 0; // FIX-FG4c
                     extern void ps2xRdGetDrawSeqs(uint64_t *seq3d, uint64_t *seq2d, uint32_t *flags); // PROBE-V3N
                     uint64_t pub3d = 0, pub2d = 0; // PROBE-V3N
                     uint32_t drawFlags = 0; // PROBE-V3N
@@ -7622,18 +7735,232 @@ void PS2Runtime::run()
                     }
                     if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
                         m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
+                    // FIX-FG4b: check FG4 enablement before real-present pacing so real presents do not block until the next 60 Hz boundary
+                    static bool s_fg4Checked = false; // FIX-FG4b
+                    static bool s_fg4Enabled = false; // FIX-FG4b
+                    static int s_fg4Hz = 0; // FIX-FG4b
+                    static int s_fg4Pm = 0; // FIX-FG4b
+                    if (ps2xRdInterpActive() && !s_fg4Checked) // FIX-FG4b
+                    {
+                        s_fg4Checked = true;
+                        s_fg4Pm = ps2xSdlGetPresentMode();
+                        s_fg4Hz = fg4GetDisplayHz();
+                        const uint32_t fg4RateInit = fg4GetRate();
+                        if ((s_fg4Pm == 0 || s_fg4Pm == 3) && s_fg4Hz < static_cast<int>(fg4RateInit * 60u))
+                        {
+                            ps2xSafeLog("[fg4] disabled: display is locked to %d Hz, need >= %u x 60\n", s_fg4Hz, fg4RateInit);
+                            ps2xSafeLog("[fg4] fifo-locked hz=%d\n", s_fg4Hz); // FIX-FG4b
+                            s_fg4Enabled = false;
+                        }
+                        else
+                        {
+                            s_fg4Enabled = true;
+                        }
+                    }
+                    const bool fg4BypassPace = ps2xRdInterpActive() && s_fg4Enabled; // FIX-FG4b
                     const int64_t tWorkEnd = paceQpcNow(); // PROBE-V3I
-                    paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
+                    const int64_t fg4BlockT0 = ps2xRdInterpActive() ? tWorkEnd : 0; // FIX-FG4b
+                    paceBeforeSwapSdl(hasNewFrame && !fg4BypassPace, presT0Qpc); // FIX-V3F // FIX-FG4b
                     const int64_t tWaitEnd = paceQpcNow(); // PROBE-V3I
                     rdgfx_vk::endFrame(); // RDG3
                     ps2xSdlForcePoll(); // FIX-RDG4Q
                     const int64_t tPresEnd = paceQpcNow(); // PROBE-V3I
                     paceAfterSwapSdl(); // FIX-V3F
+                    const int64_t fg4BlockT1 = ps2xRdInterpActive() ? paceQpcNow() : 0; // FIX-FG4b
                     const auto st = calcFt3Stages(tSeen, tWorkEnd, tWaitEnd, tPresEnd); // PROBE-V3I
                     extern double ps2xRdTexTakeDecodeMs(uint32_t *countOut); // PROBE-V3J
                     uint32_t texDecN = 0; // PROBE-V3J
                     const float texDecMs = static_cast<float>(ps2xRdTexTakeDecodeMs(&texDecN)); // PROBE-V3J
                     ft3Record(ft3Tag, currentPresentSeq, currentGsKicks, st.seenGap, st.work, st.wait, st.pres, drawMs, texDecMs, texDecN, b1Ms, b2Ms, b3Ms, b4Ms, b5Ms, beginMs, totalMs, pub3d, pub2d, drawFlags, gen3d, gen2d, chosen2d, coverFail); // PROBE-V3L // PROBE-V3N // PROBE-V3O
+
+                    // FEAT-FG4: display-rate pacing for interpolation (extra presents with varying t)
+                    if (ps2xRdInterpActive())
+                    {
+                        const uint32_t fg4Rate = fg4GetRate();
+                        static int64_t s_fg4LastArrivalQpc = 0;
+                        static double s_fg4SmoothedDMs = 0.0;
+                        static int64_t s_fg4LogLastQpc = 0;
+                        static uint32_t s_fg4RealPresents = 0u;
+                        static uint32_t s_fg4ExtraPresents = 0u;
+                        static uint32_t s_fg4Skipped = 0u;
+                        static uint32_t s_fg4LateExtras = 0u;
+                        static uint32_t s_fg4BreakEarly = 0u; // FIX-FG4b
+                        static uint32_t s_fg4BreakWait = 0u; // FIX-FG4b
+                        static double s_fg4BlockMsSum = 0.0; // FIX-FG4b
+                        static uint32_t s_fg4BlockCount = 0u; // FIX-FG4b
+                        static double s_fg4RealDrawMsSum = 0.0; // FIX-FG4c
+                        static uint32_t s_fg4RealDrawCount = 0u; // FIX-FG4c
+                        static double s_fg4ExtraDrawMsSum = 0.0; // FIX-FG4c
+                        static uint32_t s_fg4ExtraDrawCount = 0u; // FIX-FG4c
+                        static double s_fg4WaitMsSum = 0.0; // FIX-FG4c
+                        static double s_fg4SpinMsSum = 0.0; // FIX-FG4c
+                        static uint32_t s_fg4WaitCount = 0u; // FIX-FG4c
+                        static double s_fg4ExtraSwapMsSum = 0.0; // FIX-FG4c
+                        static uint32_t s_fg4Overrun = 0u; // FIX-FG4c
+                        static int64_t s_fg4EstExtraTicks = 0; // FIX-FG4c
+                        static uint32_t s_fg4SkipLoggedMask = 0u;
+
+                        const int64_t qpcFreqFg4 = paceQpcFreq();
+                        if (s_fg4Enabled && hasNewFrame && qpcFreqFg4 > 0)
+                        {
+                            s_fg4BlockMsSum += static_cast<double>(fg4BlockT1 - fg4BlockT0) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4b
+                            ++s_fg4BlockCount; // FIX-FG4b
+                            s_fg4RealDrawMsSum += static_cast<double>(fg4RealDrawT1 - fg4RealDrawT0) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                            ++s_fg4RealDrawCount; // FIX-FG4c
+                            if (s_fg4LastArrivalQpc != 0)
+                            {
+                                const double rawDMs = static_cast<double>(tSeen - s_fg4LastArrivalQpc) * 1000.0 / static_cast<double>(qpcFreqFg4);
+                                const double clampedDMs = std::max(8.0, std::min(40.0, rawDMs));
+                                s_fg4SmoothedDMs = (s_fg4SmoothedDMs <= 0.0) ? clampedDMs : std::max(8.0, std::min(40.0, 0.2 * clampedDMs + 0.8 * s_fg4SmoothedDMs));
+                            }
+                            s_fg4LastArrivalQpc = tSeen;
+                            ++s_fg4RealPresents;
+
+                            if (s_fg4SmoothedDMs > 0.0 && !ps2xSdlShouldClose())
+                            {
+                                const char *skipReason = nullptr;
+                                if (!ps2xRdInterpCanExtraPresent(&skipReason))
+                                {
+                                    ++s_fg4Skipped;
+                                    const uint32_t bit = (skipReason && skipReason[0] == 't') ? 1u : ((skipReason && skipReason[0] == 'n' && skipReason[1] == 'o' && skipReason[2] == 't') ? 2u : 4u);
+                                    if ((s_fg4SkipLoggedMask & bit) == 0u)
+                                    {
+                                        s_fg4SkipLoggedMask |= bit;
+                                        ps2xSafeLog("[fg4] skip reason=%s\n", skipReason ? skipReason : "unknown");
+                                    }
+                                }
+                                else
+                                {
+                                    const int64_t dTicks = static_cast<int64_t>(std::llround(s_fg4SmoothedDMs * static_cast<double>(qpcFreqFg4) / 1000.0));
+                                    const int64_t estArrivalQpc = tSeen + dTicks; // FIX-FG4c
+                                    const int64_t earlyMarginTicks = dTicks / 4; // FIX-FG4b: abandon only if next frame arrived > D*0.25 before planned extra time
+                                    const auto newFrameArrived = [&]() -> bool { // FIX-FG4b
+                                        return vblankLatchOn ? (g_hostPresentSeq.load(std::memory_order_acquire) != currentPresentSeq)
+                                                             : (g_gsFrameKicks.load(std::memory_order_acquire) != currentGsKicks);
+                                    };
+                                    int64_t nextArrivalQpc = 0; // FIX-FG4b
+                                    for (uint32_t k = 1u; k < fg4Rate; ++k)
+                                    {
+                                        const int64_t targetQpc = tSeen + (dTicks * static_cast<int64_t>(k)) / static_cast<int64_t>(fg4Rate);
+                                        const auto earlyArrived = [&]() -> bool { // FIX-FG4b
+                                            if (ps2xSdlShouldClose())
+                                                return true;
+                                            if (newFrameArrived())
+                                            {
+                                                if (nextArrivalQpc == 0)
+                                                    nextArrivalQpc = paceQpcNow();
+                                                if (nextArrivalQpc < (targetQpc - earlyMarginTicks))
+                                                    return true;
+                                            }
+                                            return false;
+                                        };
+                                        if (earlyArrived())
+                                        {
+                                            if (k == 1u)
+                                                ++s_fg4BreakEarly; // FIX-FG4b
+                                            break;
+                                        }
+                                        if (std::max(paceQpcNow(), targetQpc) + s_fg4EstExtraTicks > estArrivalQpc) // FIX-FG4c
+                                        {
+                                            s_fg4Skipped += (fg4Rate - k);
+                                            ++s_fg4Overrun;
+                                            break;
+                                        }
+                                        int64_t waitTicks = 0; // FIX-FG4c
+                                        int64_t spinTicks = 0; // FIX-FG4c
+                                        const bool waitOk = fg4WaitUntilQpc(targetQpc, dTicks, qpcFreqFg4, earlyArrived, &waitTicks, &spinTicks); // FIX-FG4c
+                                        s_fg4WaitMsSum += static_cast<double>(waitTicks) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                                        s_fg4SpinMsSum += static_cast<double>(spinTicks) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                                        ++s_fg4WaitCount; // FIX-FG4c
+                                        if (!waitOk)
+                                        {
+                                            ++s_fg4BreakWait; // FIX-FG4b
+                                            break;
+                                        }
+                                        const int64_t afterWaitQpc = paceQpcNow(); // FIX-FG4c
+                                        if (afterWaitQpc + s_fg4EstExtraTicks > estArrivalQpc) // FIX-FG4c
+                                        {
+                                            s_fg4Skipped += (fg4Rate - k);
+                                            ++s_fg4Overrun;
+                                            break;
+                                        }
+                                        if (afterWaitQpc > targetQpc + (2 * qpcFreqFg4 / 1000))
+                                            ++s_fg4LateExtras;
+                                        ps2xRdInterpSetT(static_cast<float>(k) / static_cast<float>(fg4Rate));
+                                        const int64_t extraT0Qpc = paceQpcNow();
+                                        rdgfx_vk::beginFrame();
+                                        rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 1.0f);
+                                        const int64_t extraDrawT0 = paceQpcNow(); // FIX-FG4c
+                                        (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight);
+                                        const int64_t extraDrawT1 = paceQpcNow(); // FIX-FG4c
+                                        s_fg4ExtraDrawMsSum += static_cast<double>(extraDrawT1 - extraDrawT0) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                                        ++s_fg4ExtraDrawCount; // FIX-FG4c
+                                        if (m_debugUiInitialized && m_debugUiDrawCallback)
+                                            m_debugUiDrawCallback(*this, m_debugUiUserData);
+                                        const int64_t extraSwapT0 = paceQpcNow(); // FIX-FG4c
+                                        paceBeforeSwapSdl(false, extraT0Qpc);
+                                        rdgfx_vk::endFrame();
+                                        ps2xSdlForcePoll();
+                                        paceAfterSwapSdl();
+                                        const int64_t extraSwapT1 = paceQpcNow(); // FIX-FG4c
+                                        s_fg4ExtraSwapMsSum += static_cast<double>(extraSwapT1 - extraSwapT0) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                                        const int64_t thisExtraTicks = (extraDrawT1 - extraDrawT0) + (extraSwapT1 - extraSwapT0); // FIX-FG4c
+                                        s_fg4EstExtraTicks = (s_fg4EstExtraTicks == 0) ? thisExtraTicks : ((s_fg4EstExtraTicks * 3 + thisExtraTicks) / 4); // FIX-FG4c
+                                        ++s_fg4ExtraPresents;
+                                        if (extraSwapT1 > estArrivalQpc && (k + 1u) < fg4Rate) // FIX-FG4c
+                                        {
+                                            s_fg4Skipped += (fg4Rate - 1u - k);
+                                            ++s_fg4Overrun;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (s_fg4Enabled && qpcFreqFg4 > 0)
+                        {
+                            const int64_t nowFg4 = paceQpcNow();
+                            if (s_fg4LogLastQpc == 0)
+                                s_fg4LogLastQpc = nowFg4;
+                            else if ((nowFg4 - s_fg4LogLastQpc) >= qpcFreqFg4)
+                            {
+                                const double avgBlockMs = s_fg4BlockCount ? (s_fg4BlockMsSum / static_cast<double>(s_fg4BlockCount)) : 0.0; // FIX-FG4b
+                                const double avgDrawRealMs = s_fg4RealDrawCount ? (s_fg4RealDrawMsSum / static_cast<double>(s_fg4RealDrawCount)) : 0.0; // FIX-FG4c
+                                const double avgDrawExtraMs = s_fg4ExtraDrawCount ? (s_fg4ExtraDrawMsSum / static_cast<double>(s_fg4ExtraDrawCount)) : 0.0; // FIX-FG4c
+                                const double avgWaitMs = s_fg4WaitCount ? (s_fg4WaitMsSum / static_cast<double>(s_fg4WaitCount)) : 0.0; // FIX-FG4c
+                                const double avgCpuSpinMs = s_fg4WaitCount ? (s_fg4SpinMsSum / static_cast<double>(s_fg4WaitCount)) : 0.0; // FIX-FG4c
+                                const double avgSwapMs = s_fg4ExtraPresents ? (s_fg4ExtraSwapMsSum / static_cast<double>(s_fg4ExtraPresents)) : 0.0; // FIX-FG4c
+                                double extraUploadMsSum = 0.0; // FIX-FG4c
+                                uint64_t extraUploadVertsSum = 0u; // FIX-FG4c
+                                ps2xRdFg4TakeUploadStats(&extraUploadMsSum, &extraUploadVertsSum); // FIX-FG4c
+                                const double avgUploadMs = s_fg4ExtraPresents ? (extraUploadMsSum / static_cast<double>(s_fg4ExtraPresents)) : 0.0; // FIX-FG4c
+                                const double avgUploadVerts = s_fg4ExtraPresents ? (static_cast<double>(extraUploadVertsSum) / static_cast<double>(s_fg4ExtraPresents)) : 0.0; // FIX-FG4c
+                                ps2xSafeLog("[fg4] rate=%u D=%.2fms realPresents=%u extraPresents=%u skipped=%u lateExtras=%u breakEarly=%u breakWait=%u hz=%d pm=%d blockMs=%.2f drawRealMs=%.2f drawExtraMs=%.2f waitMs=%.2f swapMs=%.2f uploadMs=%.2f cpuSpinMs=%.2f uploadVerts=%.0f overrun=%u\n",
+                                            fg4Rate, s_fg4SmoothedDMs, s_fg4RealPresents, s_fg4ExtraPresents, s_fg4Skipped, s_fg4LateExtras,
+                                            s_fg4BreakEarly, s_fg4BreakWait, s_fg4Hz, s_fg4Pm, avgBlockMs,
+                                            avgDrawRealMs, avgDrawExtraMs, avgWaitMs, avgSwapMs, avgUploadMs, avgCpuSpinMs, avgUploadVerts, s_fg4Overrun); // FIX-FG4b // FIX-FG4c
+                                s_fg4RealPresents = 0u;
+                                s_fg4ExtraPresents = 0u;
+                                s_fg4Skipped = 0u;
+                                s_fg4LateExtras = 0u;
+                                s_fg4BreakEarly = 0u; // FIX-FG4b
+                                s_fg4BreakWait = 0u; // FIX-FG4b
+                                s_fg4BlockMsSum = 0.0; // FIX-FG4b
+                                s_fg4BlockCount = 0u; // FIX-FG4b
+                                s_fg4RealDrawMsSum = 0.0; // FIX-FG4c
+                                s_fg4RealDrawCount = 0u; // FIX-FG4c
+                                s_fg4ExtraDrawMsSum = 0.0; // FIX-FG4c
+                                s_fg4ExtraDrawCount = 0u; // FIX-FG4c
+                                s_fg4WaitMsSum = 0.0; // FIX-FG4c
+                                s_fg4SpinMsSum = 0.0; // FIX-FG4c
+                                s_fg4WaitCount = 0u; // FIX-FG4c
+                                s_fg4ExtraSwapMsSum = 0.0; // FIX-FG4c
+                                s_fg4Overrun = 0u; // FIX-FG4c
+                                s_fg4LogLastQpc = nowFg4;
+                            }
+                        }
+                    }
                 }
                 else // RDG3
                 {
