@@ -183,6 +183,9 @@ struct Fg5DrawProfAcc
     uint64_t fg9BindVbIbCnt = 0; // PROBE-FG9
     uint64_t fg9DynStateCnt = 0; // PROBE-FG9
     uint64_t fg9PushConstCnt = 0; // PROBE-FG9
+    uint32_t fg10ExtraReplay = 0; // FEAT-FG10
+    uint32_t fg10ExtraFull = 0; // FEAT-FG10
+    int64_t fg10ReplayTicks = 0; // FEAT-FG10
     std::chrono::steady_clock::time_point secStart{};
 };
 static Fg5DrawProfAcc g_fg5Prof;
@@ -854,6 +857,59 @@ static float s_fg4LastAppliedT = -1.0f; // FEAT-FG4
 static uint32_t s_fg4LastGenBatches = 0u; // FEAT-FG4
 static uint32_t s_fg4LastGenTeleportSkipped = 0u; // FEAT-FG4
 static bool s_fg4HasInterpData = false; // FEAT-FG4
+static bool s_fg10InterpTSet = false; // FEAT-FG10
+static const bool s_fg10InterpCheckOn = []() { // FEAT-FG10
+    const char *e = std::getenv("PS2X_RD_INTERP_CHECK");
+    return e && e[0] == '1';
+}();
+struct Fg10DrawRec // FEAT-FG10
+{
+    uint32_t kickSerial = 0u;
+    uint32_t slotIdx = 0u;
+    uint32_t first = 0u;
+    uint32_t count = 0u;
+    uint32_t baseVertex = 0u;
+    uint32_t batchCount = 1u;
+    bool depthTest = false;
+    bool depthMask = false;
+    float zBias = 0.0f;
+    int colorMask = 15;
+    int blendState = 0;
+    int atstVal = 1;
+    int arefVal = 0;
+    float fixAlpha = -1.0f;
+    int afail = 0;
+    uint32_t atst = 1u;
+    bool zOff = false;
+    bool scOk = false;
+    uint64_t scRaw = 0ull;
+    float vpA[4] = {};
+    float vpB[4] = {};
+    unsigned int texId = 0u;
+    uint32_t texParams = 0u;
+    int texVal = 0;
+    int tfxVal = 0;
+    int tccVal = 0;
+    float fog[4] = {};
+};
+struct Fg10DrawCache // FEAT-FG10
+{
+    bool valid = false;
+    uint64_t gen3d = 0u;
+    uint64_t gen2d = 0u;
+    int rw = 0;
+    int rh = 0;
+    int vx = 0;
+    int vy = 0;
+    int vw = 0;
+    int vh = 0;
+    float flip[3] = {};
+    float aspectK = 1.0f;
+    uint32_t min3dSerial = 0xFFFFFFFFu;
+    uint32_t max3dSerial = 0u;
+    std::vector<Fg10DrawRec> draws;
+};
+static Fg10DrawCache s_fg10Cache; // FEAT-FG10
 struct Fg3BatchPos // FEAT-FG3 // FIX-FG3b
 {
     uint64_t k1 = 0;
@@ -881,17 +937,26 @@ static uint32_t s_fg3TotalVerts = 0u; // FEAT-FG3
 static void rdInterpApply(float t, const bool uploadedThisGen[kRdSlotCount]) // FEAT-FG3 // FIX-FG3b
 {
     const auto t0 = std::chrono::steady_clock::now();
-    if (t != 1.0f) // FIX-FG3b: t==1.0f leaves pendingVerts bit-identical to non-interp
+    for (size_t idx = 0; idx < kRdSlotCount; ++idx)
     {
-        for (size_t idx = 0; idx < kRdSlotCount; ++idx)
+        if (!uploadedThisGen[idx])
+            continue;
+        const size_t n = s_fg3BaseVerts[idx].size();
+        if (n == 0u || s_fg3PrevPos[idx].size() != n * 3u || g_rdGpu.pendingVerts[idx].size() != n)
+            continue;
+        RdVert * __restrict dst = g_rdGpu.pendingVerts[idx].data();
+        const RdVert * __restrict base = s_fg3BaseVerts[idx].data();
+        if (t == 1.0f) // FEAT-FG10: restore exact base positions for t=1 extras
         {
-            if (!uploadedThisGen[idx])
-                continue;
-            const size_t n = s_fg3BaseVerts[idx].size();
-            if (n == 0u || s_fg3PrevPos[idx].size() != n * 3u || g_rdGpu.pendingVerts[idx].size() != n)
-                continue;
-            RdVert * __restrict dst = g_rdGpu.pendingVerts[idx].data();
-            const RdVert * __restrict base = s_fg3BaseVerts[idx].data();
+            for (size_t vi = 0; vi < n; ++vi)
+            {
+                dst[vi].pos[0] = base[vi].pos[0];
+                dst[vi].pos[1] = base[vi].pos[1];
+                dst[vi].pos[2] = base[vi].pos[2];
+            }
+        }
+        else
+        {
             const float * __restrict prev = s_fg3PrevPos[idx].data();
             for (size_t vi = 0; vi < n; ++vi)
             {
@@ -2595,6 +2660,7 @@ static const bool s_pairLag = []{
 void ps2xRdInterpSetT(float t) // FEAT-FG3
 {
     s_fg3T = t;
+    s_fg10InterpTSet = true; // FEAT-FG10
 }
 
 bool ps2xRdInterpActive() // FEAT-FG4
@@ -2632,6 +2698,8 @@ bool ps2xRdInterpCanExtraPresent(const char **reasonOut) // FEAT-FG4
 
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
+    const bool fg10ExtraReq = s_rdInterpOn && s_fg10InterpTSet; // FEAT-FG10
+    s_fg10InterpTSet = false; // FEAT-FG10
     const bool drawProfOn = fg5DrawProfEnabled(); // PROBE-FG5
     const int64_t fg5TotalT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
     rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
@@ -3143,6 +3211,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             s_fg4LastGenBatches = 0u; // FEAT-FG4
             s_fg4LastGenTeleportSkipped = 0u; // FEAT-FG4
             s_fg4HasInterpData = false; // FEAT-FG4
+            s_fg10Cache.valid = false; // FEAT-FG10
+            s_fg10Cache.draws.clear(); // FEAT-FG10
+            s_fg10InterpTSet = false; // FEAT-FG10
         }
         for (size_t i = 0; i < kRdSlotCount; ++i)
         {
@@ -3682,6 +3753,47 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     const int vw = static_cast<int>(w * scaleX);
     const int vh = static_cast<int>(h * scaleY);
     const bool boxClipped = (vw < rw || vh < rh); // FIX-R7
+    const float fg10AspectK = (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f; // FEAT-FG10
+    const bool fg10Replay = fg10ExtraReq && !needRealign && !g_rdGpu.drawBatches.empty() && // FEAT-FG10
+        g_rdGpu.hasCompleteComposition && s_fg10Cache.valid &&
+        s_fg10Cache.gen3d == g_rdGpu.last3dSeq &&
+        s_fg10Cache.gen2d == g_rdGpu.last2dSeq &&
+        s_fg10Cache.rw == rw && s_fg10Cache.rh == rh &&
+        s_fg10Cache.vx == vx && s_fg10Cache.vy == vy &&
+        s_fg10Cache.vw == vw && s_fg10Cache.vh == vh &&
+        std::memcmp(s_fg10Cache.flip, g_rdGpu.flip, sizeof(g_rdGpu.flip)) == 0 &&
+        s_fg10Cache.aspectK == fg10AspectK;
+    const bool fg10Record = s_rdInterpOn && !fg10Replay && !g_rdGpu.drawBatches.empty() && g_rdGpu.hasCompleteComposition; // FEAT-FG10
+    if (drawProfOn && fg10ExtraReq) // FEAT-FG10
+    {
+        if (fg10Replay)
+            ++g_fg5Prof.fg10ExtraReplay;
+        else
+            ++g_fg5Prof.fg10ExtraFull;
+    }
+    if (s_fg10InterpCheckOn && fg10ExtraReq && std::fabs(s_fg3T - 1.0f) < 1e-6f) // FEAT-FG10
+    {
+        uint32_t posMismatch = 0u;
+        for (size_t idx = 0; idx < kRdSlotCount; ++idx)
+        {
+            if (g_rdGpu.slots[idx].seq == 0u || s_fg3BaseVerts[idx].empty())
+                continue;
+            const std::vector<RdVert> &pv = g_rdGpu.pendingVerts[idx];
+            const std::vector<RdVert> &bv = s_fg3BaseVerts[idx];
+            if (pv.size() != bv.size())
+            {
+                posMismatch += static_cast<uint32_t>(bv.size());
+                continue;
+            }
+            for (size_t vi = 0; vi < bv.size(); ++vi)
+            {
+                if (pv[vi].pos[0] != bv[vi].pos[0] || pv[vi].pos[1] != bv[vi].pos[1] ||
+                    pv[vi].pos[2] != bv[vi].pos[2] || pv[vi].pos[3] != bv[vi].pos[3])
+                    ++posMismatch;
+            }
+        }
+        ps2xSafeLog("[fg10] posMismatch=%u\n", posMismatch);
+    }
 
     rdgfx::setViewport(vx, vy, vw, vh); // RDG1
     // FEAT-RD34b: force known GL state (raylib/ImGui may have changed it since our last frame)
@@ -4840,6 +4952,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             uint32_t count = 0;
             uint32_t vao = 0;
             uint32_t baseVertex = 0;
+            uint32_t kickSerial = 0u; // FEAT-FG10
+            uint32_t slotIdx = 0u; // FEAT-FG10
+            uint32_t batchCount = 0u; // FEAT-FG10
             bool depthTest = false;
             bool depthMask = false;
             float zBias = 0.0f;
@@ -4862,6 +4977,38 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         auto flushPending3d = [&]() { // FEAT-FG6
             if (!pending3d.active)
                 return;
+            if (fg10Record) // FEAT-FG10
+            {
+                Fg10DrawRec rec{};
+                rec.kickSerial = pending3d.kickSerial;
+                rec.slotIdx = pending3d.slotIdx;
+                rec.first = pending3d.first;
+                rec.count = pending3d.count;
+                rec.baseVertex = pending3d.baseVertex;
+                rec.batchCount = pending3d.batchCount;
+                rec.depthTest = pending3d.depthTest;
+                rec.depthMask = pending3d.depthMask;
+                rec.zBias = pending3d.zBias;
+                rec.colorMask = pending3d.colorMask;
+                rec.blendState = pending3d.blendState;
+                rec.atstVal = pending3d.atst;
+                rec.arefVal = pending3d.aref;
+                rec.fixAlpha = pending3d.fixAlpha;
+                rec.afail = 0;
+                rec.atst = 1u;
+                rec.zOff = false;
+                rec.scOk = pending3d.scOk;
+                rec.scRaw = pending3d.scRaw;
+                std::memcpy(rec.vpA, pending3d.vpA, sizeof(rec.vpA));
+                std::memcpy(rec.vpB, pending3d.vpB, sizeof(rec.vpB));
+                rec.texId = pending3d.texId;
+                rec.texParams = pending3d.texParams;
+                rec.texVal = pending3d.texVal;
+                rec.tfxVal = pending3d.tfxVal;
+                rec.tccVal = pending3d.tccVal;
+                std::memcpy(rec.fog, pending3d.fog, sizeof(rec.fog));
+                s_fg10Cache.draws.push_back(rec);
+            }
             if (drawProfOn) g_fg5In3d = true;
             rdDrawElems(pending3d.first, pending3d.count);
             g_fg5In3d = false;
@@ -4891,6 +5038,165 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
     { // PROBE-PACE2
             Pace2Scope pace2B3Scope(g_pace2Rd.b3, pace2On); // PROBE-PACE2
+            if (fg10Replay) // FEAT-FG10
+            {
+                const int64_t fg10RepT0 = drawProfOn ? fg5QpcNow() : 0;
+                float prevVpA[4] = {}, prevVpB[4] = {};
+                bool prevVpValid = false;
+                for (const Fg10DrawRec &rec : s_fg10Cache.draws)
+                {
+                    if (drawProfOn)
+                    {
+                        const int64_t fg52dT0 = fg5QpcNow();
+                        draw2dUntil(rec.kickSerial, false);
+                        g_fg5Prof.other2DTicks += (fg5QpcNow() - fg52dT0);
+                    }
+                    else
+                    {
+                        draw2dUntil(rec.kickSerial, false);
+                    }
+                    RdGpuSlot &slot = g_rdGpu.slots[rec.slotIdx];
+                    if (rec.count == 0u || slot.vao == 0u)
+                        continue;
+                    const int64_t fg5StT0 = drawProfOn ? fg5QpcNow() : 0;
+                    rdDepthTest(rec.depthTest);
+                    rdDepthMask(rec.depthMask);
+                    if (drawProfOn) g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5StT0);
+                    if (g_rdZBias != 0.0f && rdgfx::hasUniform(rdgfx::Uniform::ZBias))
+                    {
+                        const int64_t fg5UT0 = drawProfOn ? fg5QpcNow() : 0;
+                        if (rec.zBias != prevZBias)
+                        {
+                            rdSetUniformFloat(rdgfx::Uniform::ZBias, rec.zBias);
+                            prevZBias = rec.zBias;
+                        }
+                        else if (drawProfOn)
+                            ++g_fg5Prof.skippedUniform;
+                        if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5UT0);
+                    }
+                    const int64_t fg5St2T0 = drawProfOn ? fg5QpcNow() : 0;
+                    rdSetMaskPacked(rec.colorMask);
+                    if (rec.blendState != prevBlend)
+                    {
+                        applyRdBlend(rec.blendState, slot.vao);
+                        prevBlend = rec.blendState;
+                        curVao = slot.vao;
+                    }
+                    else
+                    {
+                        if (drawProfOn) ++g_fg5Prof.skippedState;
+                        if (curVao != slot.vao)
+                        {
+                            rdgfx::bindVertexArray(slot.vao);
+                            curVao = slot.vao;
+                        }
+                    }
+                    if (rec.baseVertex != slot.curBaseVertex)
+                    {
+                        rdgfx::bindVertexBuffer(slot.vbo);
+                        const int byteOff = static_cast<int>(static_cast<size_t>(rec.baseVertex) * sizeof(RdVert));
+                        rdgfx::setVertexAttribute(0, 4, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 0);
+                        rdgfx::setVertexAttribute(1, 4, rdgfx::VertexAttrFormat::UnsignedByte, true, sizeof(RdVert), byteOff + 16);
+                        rdgfx::setVertexAttribute(2, 2, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 20);
+                        rdgfx::setVertexAttribute(3, 1, rdgfx::VertexAttrFormat::Float, false, sizeof(RdVert), byteOff + 28);
+                        rdgfx::bindVertexBuffer(0u);
+                        slot.curBaseVertex = rec.baseVertex;
+                    }
+                    if (drawProfOn) g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5St2T0);
+                    const int64_t fg5U2T0 = drawProfOn ? fg5QpcNow() : 0;
+                    if (rdgfx::hasUniform(rdgfx::Uniform::Atst)) rdSetUniformInt(rdgfx::Uniform::Atst, rec.atstVal);
+                    if (rdgfx::hasUniform(rdgfx::Uniform::Aref)) rdSetUniformInt(rdgfx::Uniform::Aref, rec.arefVal);
+                    if (rdgfx::hasUniform(rdgfx::Uniform::FixAlpha)) rdSetUniformFloat(rdgfx::Uniform::FixAlpha, rec.fixAlpha);
+                    if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5U2T0);
+                    {
+                        const int64_t fg5ScT0 = drawProfOn ? fg5QpcNow() : 0;
+                        applyScissor(rec.scRaw, rec.scOk);
+                        if (drawProfOn) g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5ScT0);
+                    }
+                    if (rdgfx::hasUniform(rdgfx::Uniform::VpA) && rdgfx::hasUniform(rdgfx::Uniform::VpB))
+                    {
+                        const int64_t fg5VpT0 = drawProfOn ? fg5QpcNow() : 0;
+                        if (!prevVpValid || std::memcmp(prevVpA, rec.vpA, sizeof(rec.vpA)) != 0 || std::memcmp(prevVpB, rec.vpB, sizeof(rec.vpB)) != 0)
+                        {
+                            rdgfx::setUniformVec4(rdgfx::Uniform::VpA, rec.vpA);
+                            rdgfx::setUniformVec4(rdgfx::Uniform::VpB, rec.vpB);
+                            std::memcpy(prevVpA, rec.vpA, sizeof(rec.vpA));
+                            std::memcpy(prevVpB, rec.vpB, sizeof(rec.vpB));
+                            prevVpValid = true;
+                            g_rdc.calls += 2;
+                        }
+                        else if (drawProfOn)
+                            g_fg5Prof.skippedUniform += 2;
+                        if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5VpT0);
+                    }
+                    if (rec.texId != 0u)
+                    {
+                        const int64_t fg5TbT0 = drawProfOn ? fg5QpcNow() : 0;
+                        if (drawProfOn && g_rdc.bound != rec.texId) ++g_fg5Prof.nTexBinds;
+                        rdBindTex(rec.texId, rec.texParams);
+                        if (drawProfOn) g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5TbT0);
+                    }
+                    {
+                        const int64_t fg5U3T0 = drawProfOn ? fg5QpcNow() : 0;
+                        if (rdgfx::hasUniform(rdgfx::Uniform::Tex)) rdSetUniformInt(rdgfx::Uniform::Tex, rec.texVal);
+                        if (rdgfx::hasUniform(rdgfx::Uniform::Tfx)) rdSetUniformInt(rdgfx::Uniform::Tfx, rec.tfxVal);
+                        if (rdgfx::hasUniform(rdgfx::Uniform::Tcc)) rdSetUniformInt(rdgfx::Uniform::Tcc, rec.tccVal);
+                        if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5U3T0);
+                    }
+                    {
+                        const int64_t fg5UT0 = drawProfOn ? fg5QpcNow() : 0;
+                        if (drawProfOn) g_fg5In3d = true;
+                        rdSetFog(rec.fog[0], rec.fog[1], rec.fog[2], rec.fog[3]);
+                        g_fg5In3d = false;
+                        if (drawProfOn) g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5UT0);
+                    }
+                    drawn3dThisFrame += rec.batchCount;
+                    if (drawProfOn)
+                    {
+                        g_fg5Prof.nBatches += rec.batchCount;
+                        g_fg5In3d = true;
+                    }
+                    if (rec.afail != 0)
+                    {
+                        const int sMask = g_rdMaskCur;
+                        const int sDepth = g_rdc.depthMask;
+                        const int zero = 0, one = 1;
+                        if (rec.atst == 0u)
+                        {
+                            rdApplyAfailWrites(rec.afail, rec.zOff, sMask);
+                            rdDrawElems(rec.first, rec.count);
+                            ++g_rdAfailNever;
+                        }
+                        else
+                        {
+                            rdDrawElems(rec.first, rec.count);
+                            if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) rdSetUniformInt(rdgfx::Uniform::AtInvert, one);
+                            rdApplyAfailWrites(rec.afail, rec.zOff, sMask);
+                            rdDrawElems(rec.first, rec.count);
+                            if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) rdSetUniformInt(rdgfx::Uniform::AtInvert, zero);
+                            ++g_rdAfail2Pass;
+                        }
+                        rdSetMaskPacked(sMask);
+                        rdDepthMask(sDepth != 0);
+                    }
+                    else
+                    {
+                        rdDrawElems(rec.first, rec.count);
+                    }
+                    g_fg5In3d = false;
+                }
+                min3dSerial = s_fg10Cache.min3dSerial;
+                max3dSerial = s_fg10Cache.max3dSerial;
+                if (drawProfOn)
+                    g_fg5Prof.fg10ReplayTicks += (fg5QpcNow() - fg10RepT0);
+            }
+            else
+            {
+            if (fg10Record) // FEAT-FG10
+            {
+                s_fg10Cache.draws.clear();
+                s_fg10Cache.valid = false;
+            }
             for (const RdDrawBatch &db : g_rdGpu.drawBatches) // FEAT-RD2 // FEAT-RD14
         {
             Fg5PrepScope fg5PrepScope(drawProfOn); // FEAT-FG6
@@ -5257,6 +5563,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (canMerge)
                 {
                     pending3d.count += batch.count;
+                    ++pending3d.batchCount; // FEAT-FG10
                     if (drawProfOn)
                     {
                         ++g_fg5Prof.mergedDraws;
@@ -5439,6 +5746,38 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 }
                 if (afail != 0)
                 {
+                    if (fg10Record) // FEAT-FG10
+                    {
+                        Fg10DrawRec rec{};
+                        rec.kickSerial = batch.kickSerial;
+                        rec.slotIdx = db.slotIdx;
+                        rec.first = batch.first;
+                        rec.count = batch.count;
+                        rec.baseVertex = batch.baseVertex;
+                        rec.batchCount = 1u;
+                        rec.depthTest = wantDepthTest;
+                        rec.depthMask = wantDepthMask;
+                        rec.zBias = wantZBias;
+                        rec.colorMask = wantColorMask;
+                        rec.blendState = blendState;
+                        rec.atstVal = atstVal;
+                        rec.arefVal = arefVal;
+                        rec.fixAlpha = fixAlpha;
+                        rec.afail = afail;
+                        rec.atst = atst;
+                        rec.zOff = ((zbuf >> 32) & 1ull) == 0ull;
+                        rec.scOk = scOk;
+                        rec.scRaw = sc;
+                        std::memcpy(rec.vpA, vpA, sizeof(rec.vpA));
+                        std::memcpy(rec.vpB, vpB, sizeof(rec.vpB));
+                        rec.texId = texId;
+                        rec.texParams = texParams;
+                        rec.texVal = texVal;
+                        rec.tfxVal = tfxVal;
+                        rec.tccVal = tccVal;
+                        std::memcpy(rec.fog, fogCol, sizeof(rec.fog));
+                        s_fg10Cache.draws.push_back(rec);
+                    }
                     const int sMask = g_rdMaskCur;
                     const int sDepth = g_rdc.depthMask;
                     const bool zOff = ((zbuf >> 32) & 1ull) == 0ull;
@@ -5468,6 +5807,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     pending3d.count = batch.count;
                     pending3d.vao = slot.vao;
                     pending3d.baseVertex = batch.baseVertex;
+                    pending3d.kickSerial = batch.kickSerial; // FEAT-FG10
+                    pending3d.slotIdx = db.slotIdx; // FEAT-FG10
+                    pending3d.batchCount = 1u; // FEAT-FG10
                     pending3d.depthTest = wantDepthTest;
                     pending3d.depthMask = wantDepthMask;
                     pending3d.zBias = wantZBias;
@@ -5561,10 +5903,32 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (drawProfOn) // PROBE-FG5
                 g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5U2T0);
 
+            Fg10DrawRec fg10Rec{}; // FEAT-FG10
+            if (fg10Record)
+            {
+                fg10Rec.kickSerial = batch.kickSerial;
+                fg10Rec.slotIdx = db.slotIdx;
+                fg10Rec.first = batch.first;
+                fg10Rec.count = batch.count;
+                fg10Rec.baseVertex = batch.baseVertex;
+                fg10Rec.batchCount = 1u;
+                fg10Rec.depthTest = !(g_rdNoZTest || !zte || ztst == 1u);
+                fg10Rec.depthMask = !((zbuf >> 32) & 1ull);
+                fg10Rec.zBias = (g_rdZBias != 0.0f && rdgfx::hasUniform(rdgfx::Uniform::ZBias)) ? prevZBias : 0.0f;
+                fg10Rec.colorMask = g_rdMaskCur;
+                fg10Rec.blendState = blendState;
+                fg10Rec.atstVal = atstVal;
+                fg10Rec.arefVal = arefVal;
+                fg10Rec.fixAlpha = fixAlpha;
+                fg10Rec.afail = afail;
+                fg10Rec.atst = atst;
+                fg10Rec.zOff = ((zbuf >> 32) & 1ull) == 0ull;
+            }
             { // FEAT-RD22
                 const int64_t fg5ScT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
                 uint64_t sc = 0ull;
                 const bool scOk = ps2xRdLookupScissor(batch.kickSerial, sc);
+                if (fg10Record) { fg10Rec.scOk = scOk; fg10Rec.scRaw = sc; } // FEAT-FG10
                 const bool scVis = applyScissor(sc, scOk);
                 if (drawProfOn) // PROBE-FG5
                     g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5ScT0);
@@ -5627,6 +5991,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const bool vpOk = (batch.vpS[0] != 0.0f && batch.vpS[1] != 0.0f);
                 const float vpA[4] = {batch.vpS[0], batch.vpS[1], batch.vpO[0], batch.vpO[1]};
                 const float vpB[4] = {s_lastOfx, s_lastOfy, (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f, vpOk ? 1.0f : 0.0f};
+                if (fg10Record) { std::memcpy(fg10Rec.vpA, vpA, sizeof(vpA)); std::memcpy(fg10Rec.vpB, vpB, sizeof(vpB)); } // FEAT-FG10
                 static float s_prevA[4] = {}, s_prevB[4] = {};
                 static bool s_prevValid = false;
                 if (!s_prevValid || std::memcmp(s_prevA, vpA, sizeof(vpA)) != 0 || std::memcmp(s_prevB, vpB, sizeof(vpB)) != 0)
@@ -5659,12 +6024,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         ++g_fg5Prof.nTexBinds;
                     const uint32_t wms = static_cast<uint32_t>(clamp & 3ull);
                     const uint32_t wmt = static_cast<uint32_t>((clamp >> 2) & 3ull);
-                    rdBindTex(texId, (wms != 0u ? 1u : 0u) | (wmt != 0u ? 2u : 0u) | ((((tex1 >> 5) & 1ull) != 0ull) ? 4u : 0u) | ((((tex1 >> 6) & 7ull) != 0ull) ? 8u : 0u)); // FEAT-RD15
+                    const uint32_t texP = (wms != 0u ? 1u : 0u) | (wmt != 0u ? 2u : 0u) | ((((tex1 >> 5) & 1ull) != 0ull) ? 4u : 0u) | ((((tex1 >> 6) & 7ull) != 0ull) ? 8u : 0u); // FEAT-FG10
+                    rdBindTex(texId, texP); // FEAT-RD15
                     if (drawProfOn) // PROBE-FG5
                         g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5TbT0);
                     texVal = 1;
                     tfxVal = static_cast<int>((tex0 >> 35) & 3ull);
                     tccVal = static_cast<int>((tex0 >> 34) & 1ull);
+                    if (fg10Record) { fg10Rec.texId = texId; fg10Rec.texParams = texP; fg10Rec.texVal = texVal; fg10Rec.tfxVal = tfxVal; fg10Rec.tccVal = tccVal; } // FEAT-FG10
                 }
             }
             {
@@ -5785,6 +6152,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const float g = static_cast<float>((batch.fogcol >> 8) & 0xFFu) / 255.0f;
                 const float b = static_cast<float>((batch.fogcol >> 16) & 0xFFu) / 255.0f;
                 rdSetFog(r, g, b, 1.0f);
+                if (fg10Record) { fg10Rec.fog[0] = r; fg10Rec.fog[1] = g; fg10Rec.fog[2] = b; fg10Rec.fog[3] = 1.0f; } // FEAT-FG10
             }
             else
             {
@@ -6130,6 +6498,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 fg5PrevFog = fg5FogKey;
                 g_fg5In3d = true;
             }
+            if (fg10Record) // FEAT-FG10
+                s_fg10Cache.draws.push_back(fg10Rec);
             if (afail != 0) // FEAT-RD30
             {
                 const int sMask = g_rdMaskCur;
@@ -6167,6 +6537,23 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             g_fg5In3d = false; // PROBE-FG5
             }
             if (stateCacheOn) flushPending3d(); // FEAT-FG6
+            if (fg10Record) // FEAT-FG10
+            {
+                s_fg10Cache.gen3d = g_rdGpu.last3dSeq;
+                s_fg10Cache.gen2d = g_rdGpu.last2dSeq;
+                s_fg10Cache.rw = rw;
+                s_fg10Cache.rh = rh;
+                s_fg10Cache.vx = vx;
+                s_fg10Cache.vy = vy;
+                s_fg10Cache.vw = vw;
+                s_fg10Cache.vh = vh;
+                std::memcpy(s_fg10Cache.flip, g_rdGpu.flip, sizeof(g_rdGpu.flip));
+                s_fg10Cache.aspectK = fg10AspectK;
+                s_fg10Cache.min3dSerial = min3dSerial;
+                s_fg10Cache.max3dSerial = max3dSerial;
+                s_fg10Cache.valid = true;
+            }
+            }
         }
         if (pace2On) // PROBE-PACE2
             g_pace2Rd.b3 -= (g_pace2Rd.b4 - pace2B4Before3d);
@@ -6829,7 +7216,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         {
             const uint32_t f = g_fg5Prof.frames;
             const double invF = 1.0 / static_cast<double>(f);
-            ps2xSafeLog("[drawprof] frames=%u total=%.2f upload=%.2f prep=%.2f texLookup=%.2f stateBind=%.2f uniforms=%.2f drawCalls=%.2f other2D=%.2f submit=%.2f nBatches=%.0f nDraws=%.0f nTexBinds=%.0f nStateChanges=%.0f nUniformUpdates=%.0f chg=tex:%u alpha:%u test:%u prim:%u zbuf:%u fog:%u\n",
+            ps2xSafeLog("[drawprof] frames=%u total=%.2f upload=%.2f prep=%.2f texLookup=%.2f stateBind=%.2f uniforms=%.2f drawCalls=%.2f other2D=%.2f submit=%.2f nBatches=%.0f nDraws=%.0f nTexBinds=%.0f nStateChanges=%.0f nUniformUpdates=%.0f chg=tex:%u alpha:%u test:%u prim:%u zbuf:%u fog:%u extraReplay=%u extraFull=%u replayMs=%.2f\n",
                         f,
                         fg5QpcToMs(g_fg5Prof.totalTicks) * invF,
                         fg5QpcToMs(g_fg5Prof.uploadTicks) * invF,
@@ -6850,7 +7237,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         static_cast<unsigned int>(g_fg5Prof.chgTest / f),
                         static_cast<unsigned int>(g_fg5Prof.chgPrim / f),
                         static_cast<unsigned int>(g_fg5Prof.chgZbuf / f),
-                        static_cast<unsigned int>(g_fg5Prof.chgFog / f));
+                        static_cast<unsigned int>(g_fg5Prof.chgFog / f),
+                        g_fg5Prof.fg10ExtraReplay,
+                        g_fg5Prof.fg10ExtraFull,
+                        fg5QpcToMs(g_fg5Prof.fg10ReplayTicks) * invF);
             ps2xSafeLog("[drawprof2] skippedState=%u skippedUniform=%u merged=%u prepFilters=%.2f prepTexKey=%.2f prepVertexFix=%.2f prepMisc=%.2f\n", // FEAT-FG6 // PROBE-FG7
                         static_cast<unsigned int>(g_fg5Prof.skippedState / f),
                         static_cast<unsigned int>(g_fg5Prof.skippedUniform / f),
