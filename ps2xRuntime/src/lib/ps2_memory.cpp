@@ -2142,6 +2142,70 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     }
 }
 
+static inline bool blurDmaProbeOn() // PROBE-E6b
+{ // PROBE-E6b
+    static const bool s_on = []() { // PROBE-E6b
+        const char *e = std::getenv("PS2X_BLURPKT"); // PROBE-E6b
+        return e && e[0] == '1'; // PROBE-E6b
+    }(); // PROBE-E6b
+    return s_on; // PROBE-E6b
+} // PROBE-E6b
+
+static void probeE6bScanDmaBlock(uint32_t tagAddr, uint32_t dataAddr, uint32_t qwc, const uint8_t *data, uint32_t maxAvailQw = 4096u) // PROBE-E6b
+{ // PROBE-E6b
+    if (!data || qwc == 0u || maxAvailQw == 0u) // PROBE-E6b
+        return; // PROBE-E6b
+    const uint32_t scanQw = std::min(qwc, std::min(4096u, maxAvailQw)); // PROBE-E6b
+    int tex0Index = -1; // PROBE-E6b
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6b
+    { // PROBE-E6b
+        uint64_t w0 = 0, w1 = 0; // PROBE-E6b
+        std::memcpy(&w0, data + q * 16u, sizeof(uint64_t)); // PROBE-E6b
+        std::memcpy(&w1, data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6b
+        if (w0 == 0x0000000664020E00ULL || w1 == 0x0000000664020E00ULL) // PROBE-E6b
+        { // PROBE-E6b
+            tex0Index = static_cast<int>(q); // PROBE-E6b
+            break; // PROBE-E6b
+        } // PROBE-E6b
+    } // PROBE-E6b
+    if (tex0Index < 0) // PROBE-E6b
+        return; // PROBE-E6b
+ // PROBE-E6b
+    uint32_t fix = 0xFFu; // PROBE-E6b
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6b
+    { // PROBE-E6b
+        uint64_t words[2]; // PROBE-E6b
+        std::memcpy(&words[0], data + q * 16u, sizeof(uint64_t)); // PROBE-E6b
+        std::memcpy(&words[1], data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6b
+        bool foundAlpha = false; // PROBE-E6b
+        for (int k = 0; k < 2; ++k) // PROBE-E6b
+        { // PROBE-E6b
+            uint64_t w = words[k]; // PROBE-E6b
+            if ((w & 0xFFULL) == 0x64ULL && ((w >> 8ULL) & 0x00FFFFFFULL) == 0ULL) // PROBE-E6b
+            { // PROBE-E6b
+                fix = static_cast<uint32_t>((w >> 32ULL) & 0xFFULL); // PROBE-E6b
+                foundAlpha = true; // PROBE-E6b
+                break; // PROBE-E6b
+            } // PROBE-E6b
+        } // PROBE-E6b
+        if (foundAlpha) // PROBE-E6b
+            break; // PROBE-E6b
+    } // PROBE-E6b
+ // PROBE-E6b
+    static std::atomic<int64_t> s_lastLogUs{0}; // PROBE-E6b
+    const auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>( // PROBE-E6b
+        std::chrono::steady_clock::now().time_since_epoch()).count(); // PROBE-E6b
+    int64_t prevUs = s_lastLogUs.load(std::memory_order_relaxed); // PROBE-E6b
+    if (nowUs - prevUs >= 25000) // at most 40 lines/s // PROBE-E6b
+    { // PROBE-E6b
+        s_lastLogUs.store(nowUs, std::memory_order_relaxed); // PROBE-E6b
+        const uint32_t dataPhysAddr = (dataAddr >= PS2_RAM_SIZE) ? (dataAddr & PS2_RAM_MASK) : dataAddr; // PROBE-E6b
+        const uint32_t off = static_cast<uint32_t>(tex0Index) * 16u; // PROBE-E6b
+        ps2xSafeLog("[blurdma] tagaddr=0x%08x dataaddr=0x%08x qwc=%u off=%u fixbyte=0x%02x\n", // PROBE-E6b
+                    tagAddr, dataPhysAddr, qwc, off, fix); // PROBE-E6b
+    } // PROBE-E6b
+} // PROBE-E6b
+
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
     size_t timerIndex = 0u;
@@ -2671,6 +2735,20 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                     if (transferTagData)
                                         appendVifTagData(currentTagAddr);
 
+                                    if (blurDmaProbeOn() && channelBase == 0x1000A000u && hasPayload) // PROBE-E6b
+                                    { // PROBE-E6b
+                                        uint32_t src = 0; // PROBE-E6b
+                                        try { src = translateAddress(dataAddr); } catch (...) {} // PROBE-E6b
+                                        const bool scratch = isScratchpad(dataAddr); // PROBE-E6b
+                                        const uint8_t *base2 = scratch ? m_scratchpad : m_rdram; // PROBE-E6b
+                                        const uint32_t maxSz2 = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE; // PROBE-E6b
+                                        if (base2 && src < maxSz2) // PROBE-E6b
+                                        { // PROBE-E6b
+                                            const uint32_t availQw = (maxSz2 - src) / 16u; // PROBE-E6b
+                                            probeE6bScanDmaBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw); // PROBE-E6b
+                                        } // PROBE-E6b
+                                    } // PROBE-E6b
+
                                     if (hasPayload)
                                         appendData(dataAddr, tagQwc);
 
@@ -3034,6 +3112,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                             base2 = scratch ? m_scratchpad : m_rdram;
                                             maxSz2 = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
                                         }
+
+                                        if (blurDmaProbeOn() && channelBase == 0x1000A000u && base2 && src < maxSz2) // PROBE-E6b
+                                        { // PROBE-E6b
+                                            const uint32_t availQw = (maxSz2 - src) / 16u; // PROBE-E6b
+                                            probeE6bScanDmaBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw); // PROBE-E6b
+                                        } // PROBE-E6b
 
                                         if (src < maxSz2 && bytes <= maxSz2 - src)
                                         {
@@ -3842,6 +3926,7 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
 {
     if (m_path3Masked || m_path3MaskedFifo.empty())
         return;
+    // PROBE-E6b: submit sites without guest address (flushMaskedPath3Packets/emit) are skipped
 
     auto emit = [&](const uint8_t *packetData, uint32_t packetSize)
     {
@@ -4290,6 +4375,10 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
     const uint8_t *payload = nullptr;
     if (!resolveContiguous(tadr + 16u, payloadBytes, payload))
         return false;
+    if (blurDmaProbeOn()) // PROBE-E6b
+    { // PROBE-E6b
+        probeE6bScanDmaBlock(tadr, tadr + 16u, tag.qwc, payload, tag.qwc); // PROBE-E6b
+    } // PROBE-E6b
     ps2_gs_async_fence(); // PERF-GK
     if (!gs.processNativePackedGIFPacket(payload, payloadBytes))
         return false;
