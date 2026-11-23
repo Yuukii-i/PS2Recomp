@@ -2410,6 +2410,12 @@ void EeScheduler::processPendingEvents()
 
 void EeScheduler::processDueDeadlines()
 {
+    static const bool s_hostLock = []() { // FIX-E8d
+        const char *e = std::getenv("PS2X_VBLANK_HOSTLOCK"); // FIX-E8d
+        const bool on = !(e && std::strcmp(e, "0") == 0); // FIX-E8d
+        ps2xSafeLog("[e8d] vblank host lock: %s\n", on ? "on" : "off"); // FIX-E8d
+        return on; // FIX-E8d
+    }(); // FIX-E8d
     static thread_local std::vector<ScheduledEvent> s_dueScratch; // PERF-SA
     static thread_local int s_dueDepth = 0; // PERF-SA
     const bool outer = (s_dueDepth++ == 0); // PERF-SA
@@ -2420,10 +2426,27 @@ void EeScheduler::processDueDeadlines()
     {
         due.clear(); // PERF-SA
         {
+            const auto now = std::chrono::steady_clock::now(); // FIX-E8d
             std::unique_lock lock(m_eventMutex);
             auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
-                                              [this](const ScheduledEvent &item)
-                                              { return item.deadlineCycle <= m_eeCycle; });
+                                              [this, now](ScheduledEvent &item) // FIX-E8d
+                                              { // FIX-E8d
+                                                  if (item.deadlineCycle > m_eeCycle) // FIX-E8d
+                                                  { // FIX-E8d
+                                                      return false; // FIX-E8d
+                                                  } // FIX-E8d
+                                                  if (s_hostLock && // FIX-E8d
+                                                      (item.event.type == EeEventType::VBlankStart || // FIX-E8d
+                                                       item.event.type == EeEventType::VBlankEnd)) // FIX-E8d
+                                                  { // FIX-E8d
+                                                      if (now < item.hostDeadline - std::chrono::microseconds(500)) // FIX-E8d
+                                                      { // FIX-E8d
+                                                          item.deadlineCycle += kVBlankPeriodCycles / 32; // FIX-E8d
+                                                          return false; // FIX-E8d
+                                                      } // FIX-E8d
+                                                  } // FIX-E8d
+                                                  return true; // FIX-E8d
+                                              }); // FIX-E8d
             if (firstFuture == m_deadlines.begin())
             {
                 updateNextDeadline();
