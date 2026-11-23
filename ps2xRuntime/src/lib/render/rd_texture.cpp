@@ -1958,6 +1958,22 @@ unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t t
     return ps2xRdGetTexture(tex0, texa);
 }
 
+// PROBE-E8e
+static std::atomic<uint32_t> s_e8eMaxWritten{0};
+static std::atomic<uint32_t> s_e8eWritesSec{0};
+
+uint32_t ps2xRdE8eStateHead(uint32_t *writesOut)
+{
+    if (writesOut)
+        *writesOut = s_e8eWritesSec.exchange(0u, std::memory_order_relaxed);
+    return s_e8eMaxWritten.load(std::memory_order_relaxed);
+}
+
+uint32_t ps2xRdE8eSlotSerial(uint32_t serial)
+{
+    return g_stateRing[serial & (kRdRingSize - 1u)].serial.load(std::memory_order_relaxed);
+}
+
 void ps2xRdNoteState(uint32_t serial, uint64_t prim, uint64_t alpha, uint64_t test, uint64_t frame,
                      uint64_t zbuf, uint64_t tex0, uint64_t tex1, uint64_t clamp, uint64_t texa, uint64_t fba) // FEAT-RD17
 {
@@ -1976,6 +1992,10 @@ void ps2xRdNoteState(uint32_t serial, uint64_t prim, uint64_t alpha, uint64_t te
     slot.texa.store(texa, std::memory_order_relaxed);
     slot.fba.store(fba, std::memory_order_relaxed);
     slot.serial.store(serial, std::memory_order_release);
+    // PROBE-E8e
+    s_e8eWritesSec.fetch_add(1u, std::memory_order_relaxed);
+    uint32_t curMax = s_e8eMaxWritten.load(std::memory_order_relaxed);
+    while (serial > curMax && !s_e8eMaxWritten.compare_exchange_weak(curMax, serial, std::memory_order_relaxed)) {}
 }
 
 void ps2xRdNoteXyoff(uint32_t serial, uint64_t xyoff) // FEAT-RD21

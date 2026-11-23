@@ -289,10 +289,13 @@ static void rdRollPassFrame() // FEAT-RD23: called once per presented frame
 {
     uint32_t best = 0u;
     uint64_t bestKey = ~0ull;
+    struct E8fSlot { uint64_t k; uint32_t n; }; // PROBE-E8f
+    E8fSlot seenSlots[8]; // PROBE-E8f
     for (int i = 0; i < 8; ++i)
     {
         const uint32_t n = s_rdPassCnt[i].exchange(0u, std::memory_order_relaxed);
         const uint64_t k = s_rdPassKey[i].exchange(~0ull, std::memory_order_relaxed);
+        seenSlots[i] = {k, n}; // PROBE-E8f
         if (k != ~0ull && n > best)
         {
             best = n;
@@ -301,6 +304,79 @@ static void rdRollPassFrame() // FEAT-RD23: called once per presented frame
     }
     if (best > 0u)
         s_rdMainKey.store(bestKey, std::memory_order_relaxed);
+
+    // PROBE-E8f: accumulate pass statistics per second
+    static const bool s_e8fPassLog = []{
+        const char *e = std::getenv("PS2X_RD_PASSLOG");
+        return e && e[0] == '1';
+    }();
+    if (s_e8fPassLog)
+    {
+        struct PassAcc { uint64_t key; uint32_t n; uint32_t won; };
+        static std::vector<PassAcc> s_acc;
+        static auto s_lastLog = std::chrono::steady_clock::now();
+
+        for (int i = 0; i < 8; ++i)
+        {
+            const uint64_t k = seenSlots[i].k;
+            const uint32_t n = seenSlots[i].n;
+            if (k == ~0ull || n == 0u)
+                continue;
+            bool found = false;
+            for (auto &entry : s_acc)
+            {
+                if (entry.key == k)
+                {
+                    entry.n += n;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                s_acc.push_back({k, n, 0u});
+        }
+        if (best > 0u && bestKey != ~0ull)
+        {
+            for (auto &entry : s_acc)
+            {
+                if (entry.key == bestKey)
+                {
+                    entry.won += 1u;
+                    break;
+                }
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - s_lastLog >= std::chrono::seconds(1))
+        {
+            std::sort(s_acc.begin(), s_acc.end(), [](const PassAcc &a, const PassAcc &b) {
+                return a.n > b.n;
+            });
+            const uint64_t chKey = s_rdMainKey.load(std::memory_order_relaxed);
+            const uint32_t chFbp = (chKey != ~0ull) ? static_cast<uint32_t>((chKey >> 32) & 0x1FFull) : 0u;
+            const uint32_t chOfx = (chKey != ~0ull) ? static_cast<uint32_t>((chKey >> 16) & 0xFFFFull) : 0u;
+            const uint32_t chOfy = (chKey != ~0ull) ? static_cast<uint32_t>(chKey & 0xFFFFull) : 0u;
+
+            struct KeyDec { uint32_t fbp = 0, ofx = 0, ofy = 0, n = 0, won = 0; };
+            KeyDec top[3];
+            for (size_t i = 0; i < 3 && i < s_acc.size(); ++i)
+            {
+                top[i].fbp = static_cast<uint32_t>((s_acc[i].key >> 32) & 0x1FFull);
+                top[i].ofx = static_cast<uint32_t>((s_acc[i].key >> 16) & 0xFFFFull);
+                top[i].ofy = static_cast<uint32_t>(s_acc[i].key & 0xFFFFull);
+                top[i].n = s_acc[i].n;
+                top[i].won = s_acc[i].won;
+            }
+            ps2xSafeLog("[e8f-pass] chosen fbp=%u ofx=%u ofy=%u | k0 fbp=%u ofx=%u ofy=%u n=%u won=%u | k1 fbp=%u ofx=%u ofy=%u n=%u won=%u | k2 fbp=%u ofx=%u ofy=%u n=%u won=%u\n",
+                        chFbp, chOfx, chOfy,
+                        top[0].fbp, top[0].ofx, top[0].ofy, top[0].n, top[0].won,
+                        top[1].fbp, top[1].ofx, top[1].ofy, top[1].n, top[1].won,
+                        top[2].fbp, top[2].ofx, top[2].ofy, top[2].n, top[2].won);
+            s_acc.clear();
+            s_lastLog = now;
+        }
+    }
 }
 bool ps2xRdIsMainPass(uint32_t fbp, uint64_t xyoffset) // FEAT-RD23: xyoffset = ofx | ofy<<32
 {
@@ -3094,6 +3170,36 @@ void GS::latchHostPresentationFrame()
                     }
                 }
                 s_pubKickRecs.clear();
+            }
+            // PROBE-E8f: count published frames, frames with numMainRanges==0, and total main serials
+            static const bool s_e8fPubLog = []{
+                const char *e = std::getenv("PS2X_RD_PASSLOG");
+                return e && e[0] == '1';
+            }();
+            if (s_e8fPubLog)
+            {
+                static uint32_t s_e8fPubFrames = 0u;
+                static uint32_t s_e8fPubNoMain = 0u;
+                static uint32_t s_e8fPubMainSerials = 0u;
+                static auto s_e8fPubLast = std::chrono::steady_clock::now();
+
+                ++s_e8fPubFrames;
+                const size_t numRanges = s_pubRanges.size() / 2u;
+                if (numRanges == 0u)
+                    ++s_e8fPubNoMain;
+                for (size_t ri = 0; ri < numRanges; ++ri)
+                    s_e8fPubMainSerials += (s_pubRanges[ri * 2u + 1u] - s_pubRanges[ri * 2u] + 1u);
+
+                const auto now = std::chrono::steady_clock::now();
+                if (now - s_e8fPubLast >= std::chrono::seconds(1))
+                {
+                    ps2xSafeLog("[e8f-pub] frames=%u noMain=%u mainSerials=%u\n",
+                                s_e8fPubFrames, s_e8fPubNoMain, s_e8fPubMainSerials);
+                    s_e8fPubFrames = 0u;
+                    s_e8fPubNoMain = 0u;
+                    s_e8fPubMainSerials = 0u;
+                    s_e8fPubLast = now;
+                }
             }
             const uint32_t filterFbp = (frameHasGeom && frameGeomFbp != 0xFFFFFFFFu) ? frameGeomFbp : ((displayFbp != 0xFFFFFFFFu) ? displayFbp : s_rdMainFbp); // FEAT-RD18b
             // PROBE-RD57: 2D batch filter logging & keep-all test switch

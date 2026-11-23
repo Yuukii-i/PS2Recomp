@@ -96,6 +96,20 @@ extern uint64_t ps2xRdMainXyoff(); // FEAT-RD23
 extern bool ps2xRdIsFbFeedback(uint32_t serial); // FEAT-RD28b
 extern uint32_t ps2xRdFbPageRanges(uint32_t *first, uint32_t *last); // FIX-RD79
 extern bool ps2xRdGetClutRgba256(uint64_t tex0, uint64_t texa, uint32_t out[256]); // FIX-RD82B
+extern uint32_t ps2xRdE8eStateHead(uint32_t *writesOut); // PROBE-E8e
+extern uint32_t ps2xRdE8eSlotSerial(uint32_t serial); // PROBE-E8e
+static const bool s_stateLogOn = []{ // PROBE-E8e
+    const char *e = std::getenv("PS2X_RD_STATELOG");
+    return e && e[0] == '1';
+}();
+static uint32_t s_e8eBatches3d = 0u; // PROBE-E8e
+static uint32_t s_e8eNoState = 0u; // PROBE-E8e
+static uint32_t s_e8eGsOkFalse = 0u; // PROBE-E8e
+static uint32_t s_e8eWrapped = 0u; // PROBE-E8e
+static uint32_t s_e8eNeverWritten = 0u; // PROBE-E8e
+static uint32_t s_e8eZero = 0u; // PROBE-E8e
+static uint32_t s_e8eMinKick = ~0u; // PROBE-E8e
+static uint32_t s_e8eMaxKick = 0u; // PROBE-E8e
 extern uint64_t g_ps2xGuestFlipSeq; // PROBE-E7b
 static uint32_t s_fbFeedbackSkipped = 0u; // FEAT-RD28b
 static uint32_t s_fbTexUsed = 0u; // FIX-RD79
@@ -434,7 +448,7 @@ static bool rdIdx32On(); // FIX-RD90
 
 namespace
 {
-constexpr size_t kRdSlotCount = 6u; // FEAT-RD34
+constexpr size_t kRdSlotCount = 24u; // FEAT-RD34 // FIX-E8g
 std::mutex g_rdMutex;
 Rd3DFrame g_rd3dRing[kRdSlotCount]; // FEAT-RD13 // FEAT-RD34
 bool g_rdPinnedSlots[kRdSlotCount] = {}; // FEAT-RD34
@@ -482,7 +496,7 @@ struct RdGpuState
     bool init = false;
     bool everUploaded = false;
     RdGpuSlot slots[kRdSlotCount]; // FEAT-RD14 // FEAT-RD34
-    size_t activeOrder[kRdSlotCount] = {0, 1, 2, 3, 4, 5}; // FEAT-RD14 // FEAT-RD34
+    size_t activeOrder[kRdSlotCount] = {}; // FEAT-RD14 // FEAT-RD34 // FIX-E8g
     std::vector<RdVert> pendingVerts[kRdSlotCount]; // FEAT-RD14 // FEAT-RD34
     std::vector<uint32_t> pendingIndices[kRdSlotCount]; // FEAT-RD14 // FEAT-RD34
     std::vector<uint16_t> idx16Scratch; // FEAT-RD14
@@ -2080,10 +2094,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     static double s_avgMainSerials = 0.0; // FEAT-RD37
     static uint32_t s_consecPartial = 0u; // FEAT-RD37
     static uint32_t s_partialFrames = 0u; // FEAT-RD37
+    static uint32_t s_consecKeptPrev = 0u; // FIX-E8g
+    static uint32_t s_e8gKeepCapped = 0u; // FIX-E8g
+    static uint32_t s_e8gStaleRejected = 0u; // FIX-E8g
     if (g_rdNeedGpuReset.exchange(false, std::memory_order_acq_rel)) // FEAT-RD49: clear stale composition/EMA/slot state after reset
     {
         s_avgMainSerials = 0.0;
         s_consecPartial = 0u;
+        s_consecKeptPrev = 0u; // FIX-E8g
         g_rdGpu.hasCompleteComposition = false;
         g_rdGpu.prevDrawn3dCount = 0u;
         g_rdGpu.lastMainSerialCount = 0u;
@@ -2150,6 +2168,48 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             }
         }
 
+        // PROBE-E8f: candidate 3D batches histogram and composition rejection probe
+        static const bool s_e8fPassLog = []{
+            const char *e = std::getenv("PS2X_RD_PASSLOG");
+            return e && e[0] == '1';
+        }();
+        struct HistEntryE8f { uint64_t key; uint32_t count; }; // PROBE-E8f
+        static std::vector<HistEntryE8f> s_e8fComp3dHist; // PROBE-E8f
+        static uint32_t s_e8fR0 = 0u, s_e8fR1 = 0u, s_e8fR2 = 0u, s_e8fR3 = 0u, s_e8fR4 = 0u, s_e8fKeptPrev = 0u; // PROBE-E8f
+        static auto s_e8fCompLast = std::chrono::steady_clock::now(); // PROBE-E8f
+        if (s_e8fPassLog)
+        {
+            for (const RdDrawBatch &db : candBatches)
+            {
+                uint64_t gsPrim = 0ull, gsAlpha = 0ull, gsTest = 0ull, gsFrame = 0ull, gsZbuf = 0ull;
+                uint64_t gsTex0 = 0ull, gsTex1 = 0ull, gsClamp = 0ull, gsTexa = 0ull, gsFba = 0ull;
+                uint32_t fbp = 0u;
+                if (ps2xRdLookupState(db.batch.kickSerial, gsPrim, gsAlpha, gsTest, gsFrame,
+                                      gsZbuf, gsTex0, gsTex1, gsClamp, gsTexa, gsFba))
+                {
+                    fbp = static_cast<uint32_t>(gsFrame & 0x1FFull);
+                }
+                uint64_t xo = 0ull;
+                ps2xRdLookupXyoff(db.batch.kickSerial, xo);
+                const uint32_t ofx = static_cast<uint32_t>(xo & 0xFFFFull);
+                const uint32_t ofy = static_cast<uint32_t>((xo >> 32) & 0xFFFFull);
+                const uint64_t k = (static_cast<uint64_t>(fbp & 0x1FFu) << 32) | ((static_cast<uint64_t>(ofx) & 0xFFFFull) << 16) | (static_cast<uint64_t>(ofy) & 0xFFFFull);
+
+                bool found = false;
+                for (auto &entry : s_e8fComp3dHist)
+                {
+                    if (entry.key == k)
+                    {
+                        ++entry.count;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    s_e8fComp3dHist.push_back({k, 1u});
+            }
+        }
+
         int candEmptyReason = 0; // FEAT-RD34: 1=Sempty, 2=missing, 3=overwritten, 4=skipped
         if (chosen2d.mainRanges.empty())
             candEmptyReason = 1;
@@ -2166,6 +2226,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 candEmptyReason = 4;
         }
 
+        if (s_e8fPassLog) // PROBE-E8f
+        {
+            if (candEmptyReason == 0) ++s_e8fR0;
+            else if (candEmptyReason == 1) ++s_e8fR1;
+            else if (candEmptyReason == 2) ++s_e8fR2;
+            else if (candEmptyReason == 3) ++s_e8fR3;
+            else if (candEmptyReason == 4) ++s_e8fR4;
+        }
+
         // FEAT-RD37: reject partially captured compositions (< 0.6 * exponential average), adapting after 4 consecutive
         const uint32_t candSerials = chosen2d.mainSerialCount; // FEAT-RD37
         bool rejectPartial = false; // FEAT-RD37
@@ -2179,14 +2248,48 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         }
 
         // FEAT-RD34(b): if a composition would draw 0 3D batches while the previous had > 0, present the previous instead
-        if ((candDrawable3d == 0u && g_rdGpu.prevDrawn3dCount > 0u) || rejectPartial) // FEAT-RD34 // FEAT-RD37
+        bool wantKeepPrev = (candDrawable3d == 0u && g_rdGpu.prevDrawn3dCount > 0u) || rejectPartial; // FEAT-RD34 // FEAT-RD37
+        bool keepCapped = false; // FIX-E8g
+        if (wantKeepPrev) // FIX-E8g
         {
+            bool stale = false; // FIX-E8g: state aged out check on first and last batch
+            if (!g_rdGpu.drawBatches.empty())
+            {
+                uint64_t dummyXo = 0ull;
+                if (!ps2xRdLookupXyoff(g_rdGpu.drawBatches.front().batch.kickSerial, dummyXo) ||
+                    !ps2xRdLookupXyoff(g_rdGpu.drawBatches.back().batch.kickSerial, dummyXo))
+                {
+                    stale = true;
+                }
+            }
+            if (stale)
+            {
+                ++s_e8gStaleRejected; // FIX-E8g
+                wantKeepPrev = false; // FIX-E8g
+            }
+            else if (s_consecKeptPrev >= 3u) // FIX-E8g: cap consecutive keep-previous hold at 3
+            {
+                ++s_e8gKeepCapped; // FIX-E8g
+                wantKeepPrev = false; // FIX-E8g
+                keepCapped = true; // FIX-E8g
+            }
+            else
+            {
+                ++s_consecKeptPrev; // FIX-E8g
+            }
+        }
+
+        if (wantKeepPrev)
+        {
+            if (s_e8fPassLog) // PROBE-E8f
+                ++s_e8fKeptPrev;
             if (rejectPartial) // FEAT-RD37
                 ++s_partialFrames; // FEAT-RD37
             needRealign = false;
         }
         else
         {
+            s_consecKeptPrev = 0u; // FIX-E8g: reset counter whenever a new composition is accepted
             if (!g_rdGpu.hasCompleteComposition || s_avgMainSerials <= 0.0 || s_consecPartial >= 4u) // FEAT-RD37
                 s_avgMainSerials = static_cast<double>(candSerials); // FEAT-RD37
             else // FEAT-RD37
@@ -2216,10 +2319,68 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             std::lock_guard<std::mutex> lock(g_rdMutex); // FEAT-RD34(a): pin slots referenced by last presented composition
             for (size_t i = 0; i < kRdSlotCount; ++i)
                 g_rdPinnedSlots[i] = false;
-            for (const RdDrawBatch &db : g_rdGpu.drawBatches)
+            if (!keepCapped) // FIX-E8g: unpin all slots on keep cap
             {
-                if (db.slotIdx < kRdSlotCount)
-                    g_rdPinnedSlots[db.slotIdx] = true;
+                for (const RdDrawBatch &db : g_rdGpu.drawBatches)
+                {
+                    if (db.slotIdx < kRdSlotCount)
+                        g_rdPinnedSlots[db.slotIdx] = true;
+                }
+            }
+        }
+
+        if (s_e8fPassLog) // PROBE-E8f
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - s_e8fCompLast >= std::chrono::seconds(1))
+            {
+                std::sort(s_e8fComp3dHist.begin(), s_e8fComp3dHist.end(), [](const HistEntryE8f &a, const HistEntryE8f &b) {
+                    return a.count > b.count;
+                });
+                struct KeyDec { uint32_t fbp = 0, ofx = 0, ofy = 0, n = 0; };
+                KeyDec top[3];
+                for (size_t i = 0; i < 3 && i < s_e8fComp3dHist.size(); ++i)
+                {
+                    top[i].fbp = static_cast<uint32_t>((s_e8fComp3dHist[i].key >> 32) & 0x1FFull);
+                    top[i].ofx = static_cast<uint32_t>((s_e8fComp3dHist[i].key >> 16) & 0xFFFFull);
+                    top[i].ofy = static_cast<uint32_t>(s_e8fComp3dHist[i].key & 0xFFFFull);
+                    top[i].n = s_e8fComp3dHist[i].count;
+                }
+                ps2xSafeLog("[e8f-comp] r0=%u r1=%u r2=%u r3=%u r4=%u keptPrev=%u | 3d k0 fbp=%u ofx=%u ofy=%u n=%u | k1 fbp=%u ofx=%u ofy=%u n=%u | k2 fbp=%u ofx=%u ofy=%u n=%u\n",
+                            s_e8fR0, s_e8fR1, s_e8fR2, s_e8fR3, s_e8fR4, s_e8fKeptPrev,
+                            top[0].fbp, top[0].ofx, top[0].ofy, top[0].n,
+                            top[1].fbp, top[1].ofx, top[1].ofy, top[1].n,
+                            top[2].fbp, top[2].ofx, top[2].ofy, top[2].n);
+                s_e8fR0 = 0u;
+                s_e8fR1 = 0u;
+                s_e8fR2 = 0u;
+                s_e8fR3 = 0u;
+                s_e8fR4 = 0u;
+                s_e8fKeptPrev = 0u;
+                s_e8fComp3dHist.clear();
+                s_e8fCompLast = now;
+            }
+        }
+        if (s_e8fPassLog) // FIX-E8g
+        {
+            static auto s_e8gLastLog = std::chrono::steady_clock::now();
+            const auto nowE8g = std::chrono::steady_clock::now();
+            if (nowE8g - s_e8gLastLog >= std::chrono::seconds(1))
+            {
+                uint32_t slotsPinned = 0u;
+                {
+                    std::lock_guard<std::mutex> lock(g_rdMutex);
+                    for (size_t i = 0; i < kRdSlotCount; ++i)
+                    {
+                        if (g_rdPinnedSlots[i])
+                            ++slotsPinned;
+                    }
+                }
+                ps2xSafeLog("[e8g] keepCapped=%u staleRejected=%u slotsPinned=%u\n",
+                            s_e8gKeepCapped, s_e8gStaleRejected, slotsPinned);
+                s_e8gKeepCapped = 0u;
+                s_e8gStaleRejected = 0u;
+                s_e8gLastLog = nowE8g;
             }
         }
     }
@@ -3605,6 +3766,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             RdGpuSlot &slot = g_rdGpu.slots[db.slotIdx]; // FEAT-RD14
             if (batch.count == 0u || slot.vao == 0u)
                 continue;
+            if (s_stateLogOn) // PROBE-E8e
+            {
+                ++s_e8eBatches3d;
+                if (batch.kickSerial < s_e8eMinKick)
+                    s_e8eMinKick = batch.kickSerial;
+                if (batch.kickSerial > s_e8eMaxKick)
+                    s_e8eMaxKick = batch.kickSerial;
+            }
             uint64_t gsPrim = 0ull, gsAlpha = 0ull, gsTest = 0ull, gsFrame = 0ull, gsZbuf = 0ull; // FEAT-RD17
             uint64_t gsTex0 = 0ull, gsTex1 = 0ull, gsClamp = 0ull, gsTexa = 0ull, gsFba = 0ull;   // FEAT-RD17
             const bool gsOk = ps2xRdLookupState(batch.kickSerial, gsPrim, gsAlpha, gsTest, gsFrame,
@@ -3718,6 +3887,28 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     if (rdbDump) rdb3d(3); // PROBE-RD29
                     if (reasonDump && reasonPrinted < 30) rdReasonLog(3); // PROBE-RD59
                     ++s_noState3dTotal;
+                    if (s_stateLogOn) // PROBE-E8e
+                    {
+                        ++s_e8eNoState;
+                        if (!gsOk)
+                            ++s_e8eGsOkFalse;
+                        if (batch.kickSerial == 0u)
+                        {
+                            ++s_e8eZero;
+                        }
+                        else
+                        {
+                            const uint32_t head = ps2xRdE8eStateHead(nullptr);
+                            const uint32_t slotSerial = ps2xRdE8eSlotSerial(batch.kickSerial);
+                            if (slotSerial != batch.kickSerial)
+                            {
+                                if (head >= batch.kickSerial && (head - batch.kickSerial >= 65536u))
+                                    ++s_e8eWrapped;
+                                else
+                                    ++s_e8eNeverWritten;
+                            }
+                        }
+                    }
                     continue;
                 }
             }
@@ -4943,6 +5134,30 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             s_texDrawn2dSec = 0;
             s_texSkippedSec = 0;
             s_texLastLog = now;
+        }
+    }
+    // PROBE-E8e: periodic 1-second state ring probe
+    if (s_stateLogOn)
+    {
+        static auto s_e8eLastLog = std::chrono::steady_clock::now();
+        if (now - s_e8eLastLog >= std::chrono::seconds(1))
+        {
+            uint32_t writesSec = 0u;
+            const uint32_t head = ps2xRdE8eStateHead(&writesSec);
+            const uint32_t minK = (s_e8eBatches3d > 0u) ? s_e8eMinKick : 0u;
+            const uint32_t maxK = (s_e8eBatches3d > 0u) ? s_e8eMaxKick : 0u;
+            ps2xSafeLog("[e8e] head=%u writes/s=%u batches3d/s=%u noState=%u gsOkFalse=%u wrapped=%u neverWritten=%u zero=%u minKick=%u maxKick=%u\n",
+                        head, writesSec, s_e8eBatches3d, s_e8eNoState, s_e8eGsOkFalse,
+                        s_e8eWrapped, s_e8eNeverWritten, s_e8eZero, minK, maxK);
+            s_e8eBatches3d = 0u;
+            s_e8eNoState = 0u;
+            s_e8eGsOkFalse = 0u;
+            s_e8eWrapped = 0u;
+            s_e8eNeverWritten = 0u;
+            s_e8eZero = 0u;
+            s_e8eMinKick = ~0u;
+            s_e8eMaxKick = 0u;
+            s_e8eLastLog = now;
         }
     }
     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_rdGpu.lastLog).count() >= 5000)
