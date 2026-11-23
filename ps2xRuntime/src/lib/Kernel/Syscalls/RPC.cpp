@@ -625,6 +625,99 @@ static void onCid1Vblank()
     deliverCid1Batch(toDeliver, vbl, remaining);
 }
 
+// FIX-T3: Synchronous SifCallRpc blocking against modelled CID1/IOP completion time (PS2X_RPC_BLOCK=1).
+static constexpr uint32_t kRpcBlockExternalType = 0x52504342u; // 'RPCB' // FIX-T3
+struct PendingRpcBlock // FIX-T3
+{ // FIX-T3
+    uint64_t token = 0; // FIX-T3
+    EeScheduler *sched = nullptr; // FIX-T3
+    uint64_t dueVbl = 0; // FIX-T3
+    uint64_t deadlineEeCycle = 0; // FIX-T3
+    int tid = 0; // FIX-T3
+    uint32_t sid = 0; // FIX-T3
+    uint32_t fno = 0; // FIX-T3
+}; // FIX-T3
+static std::mutex s_rpcBlockMutex; // FIX-T3
+static std::vector<PendingRpcBlock> s_pendingRpcBlocks; // FIX-T3
+static std::atomic<bool> s_hasPendingRpcBlocks{false}; // FIX-T3
+static std::atomic<uint64_t> s_nextRpcBlockToken{1}; // FIX-T3
+
+static inline bool isRpcBlockEnabled() noexcept // FIX-T3
+{ // FIX-T3
+    static const bool s_enabled = []() -> bool { // FIX-T3
+        const char *env = std::getenv("PS2X_RPC_BLOCK"); // FIX-T3
+        return env && std::strcmp(env, "1") == 0; // FIX-T3
+    }(); // FIX-T3
+    return s_enabled; // FIX-T3
+} // FIX-T3
+
+static void deliverRpcBlocks(uint64_t vbl) // FIX-T3
+{ // FIX-T3
+    if (!s_hasPendingRpcBlocks.load(std::memory_order_acquire)) // FIX-T3
+        return; // FIX-T3
+    std::vector<PendingRpcBlock> ready; // FIX-T3
+    { // FIX-T3
+        std::lock_guard<std::mutex> lock(s_rpcBlockMutex); // FIX-T3
+        auto it = s_pendingRpcBlocks.begin(); // FIX-T3
+        while (it != s_pendingRpcBlocks.end()) // FIX-T3
+        { // FIX-T3
+            if (it->dueVbl <= vbl) // FIX-T3
+            { // FIX-T3
+                ready.push_back(*it); // FIX-T3
+                it = s_pendingRpcBlocks.erase(it); // FIX-T3
+            } // FIX-T3
+            else // FIX-T3
+            { // FIX-T3
+                ++it; // FIX-T3
+            } // FIX-T3
+        } // FIX-T3
+        s_hasPendingRpcBlocks.store(!s_pendingRpcBlocks.empty(), std::memory_order_release); // FIX-T3
+    } // FIX-T3
+    for (const auto &entry : ready) // FIX-T3
+    { // FIX-T3
+        if (entry.sched) // FIX-T3
+        { // FIX-T3
+            entry.sched->completeExternalWait(kRpcBlockExternalType, entry.token, 0); // FIX-T3
+        } // FIX-T3
+    } // FIX-T3
+} // FIX-T3
+
+static void checkRpcBlockTimeouts(EeScheduler *sched, uint64_t eeCycle) // FIX-T3
+{ // FIX-T3
+    if (!sched || !s_hasPendingRpcBlocks.load(std::memory_order_acquire)) // FIX-T3
+        return; // FIX-T3
+    constexpr uint64_t kMaxBlockCycles = 10ull * EeScheduler::kEeClockHz; // FIX-T3
+    std::vector<PendingRpcBlock> timedOut; // FIX-T3
+    { // FIX-T3
+        std::lock_guard<std::mutex> lock(s_rpcBlockMutex); // FIX-T3
+        auto it = s_pendingRpcBlocks.begin(); // FIX-T3
+        while (it != s_pendingRpcBlocks.end()) // FIX-T3
+        { // FIX-T3
+            if (it->sched == sched) // FIX-T3
+            { // FIX-T3
+                if (it->deadlineEeCycle == 0u) // FIX-T3
+                { // FIX-T3
+                    it->deadlineEeCycle = eeCycle + kMaxBlockCycles; // FIX-T3
+                } // FIX-T3
+                else if (eeCycle >= it->deadlineEeCycle) // FIX-T3
+                { // FIX-T3
+                    timedOut.push_back(*it); // FIX-T3
+                    it = s_pendingRpcBlocks.erase(it); // FIX-T3
+                    continue; // FIX-T3
+                } // FIX-T3
+            } // FIX-T3
+            ++it; // FIX-T3
+        } // FIX-T3
+        s_hasPendingRpcBlocks.store(!s_pendingRpcBlocks.empty(), std::memory_order_release); // FIX-T3
+    } // FIX-T3
+    for (const auto &entry : timedOut) // FIX-T3
+    { // FIX-T3
+        ps2xSafeLog("[rpcblock] timeout tid=%d sid=0x%08x fno=0x%x\n", // FIX-T3
+                    entry.tid, entry.sid, entry.fno); // FIX-T3
+        entry.sched->completeExternalWait(kRpcBlockExternalType, entry.token, 0); // FIX-T3
+    } // FIX-T3
+} // FIX-T3
+
 
     namespace
     {
@@ -1569,7 +1662,7 @@ uint64_t vblDiff = 0;
 
     void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        std::lock_guard<std::recursive_mutex> rpcCallLock(g_sif_call_rpc_mutex);
+        std::unique_lock<std::recursive_mutex> rpcCallLock(g_sif_call_rpc_mutex); // FIX-T3
 
         const uint32_t clientPtr = getRegU32(ctx, 4);
         const uint32_t rpcNum = getRegU32(ctx, 5);
@@ -2044,6 +2137,60 @@ uint64_t vblDiff = 0;
             };
             runtime->eeScheduler().invokeCurrent(std::move(invocation));
         }
+        if (isRpcBlockEnabled() && // FIX-T3
+            (mode & kSifRpcModeNowait) == 0u && // FIX-T3
+            runtime != nullptr) // FIX-T3
+        { // FIX-T3
+            EeScheduler &sched = runtime->eeScheduler(); // FIX-T3
+            if (sched.isExecutingGuest()) // FIX-T3
+            { // FIX-T3
+                if (GuestThread *self = sched.currentThread()) // FIX-T3
+                { // FIX-T3
+                    uint64_t curVbl = 0; // FIX-T3
+                    uint64_t dueVbl = 0; // FIX-T3
+                    { // FIX-T3
+                        std::lock_guard<std::mutex> lock(s_cid1LatMutex); // FIX-T3
+                        curVbl = s_cid1VblankCounter; // FIX-T3
+                        for (const auto &item : s_cid1PendingReplies) // FIX-T3
+                        { // FIX-T3
+                            if (item.dueVbl > dueVbl) // FIX-T3
+                                dueVbl = item.dueVbl; // FIX-T3
+                        } // FIX-T3
+                    } // FIX-T3
+                    { // FIX-T3
+                        std::lock_guard<std::mutex> lock(s_cid1DriveModel.mtx); // FIX-T3
+                        const uint64_t modelDue = static_cast<uint64_t>(std::ceil(s_cid1DriveModel.busyUntilVbl)); // FIX-T3
+                        if (modelDue > dueVbl) // FIX-T3
+                            dueVbl = modelDue; // FIX-T3
+                    } // FIX-T3
+                    if (dueVbl > curVbl) // FIX-T3
+                    { // FIX-T3
+                        const int tid = self->id; // FIX-T3
+                        const int dueDeltaVbl = static_cast<int>(dueVbl - curVbl); // FIX-T3
+                        const auto startHost = std::chrono::steady_clock::now(); // FIX-T3
+                        const uint64_t token = s_nextRpcBlockToken.fetch_add(1, std::memory_order_relaxed); // FIX-T3
+                        { // FIX-T3
+                            std::lock_guard<std::mutex> lock(s_rpcBlockMutex); // FIX-T3
+                            s_pendingRpcBlocks.push_back(PendingRpcBlock{token, &sched, dueVbl, 0u, tid, sid, rpcNum}); // FIX-T3
+                            s_hasPendingRpcBlocks.store(true, std::memory_order_release); // FIX-T3
+                        } // FIX-T3
+                        rpcCallLock.unlock(); // FIX-T3
+                        sched.waitExternal( // FIX-T3
+                            EeWaitReason::External, // FIX-T3
+                            kRpcBlockExternalType, // FIX-T3
+                            token, // FIX-T3
+                            [finishCall, tid, sid, rpcNum, mode, dueDeltaVbl, startHost](R5900Context &parentCtx) mutable // FIX-T3
+                            { // FIX-T3
+                                finishCall(nullptr, parentCtx); // FIX-T3
+                                const double blockedMs = std::chrono::duration<double, std::milli>( // FIX-T3
+                                    std::chrono::steady_clock::now() - startHost).count(); // FIX-T3
+                                ps2xSafeLog("[rpcblock] tid=%d sid=0x%08x fno=0x%x mode=0x%x dueVbl=+%d blockedMs=%.1f\n", // FIX-T3
+                                            tid, sid, rpcNum, mode, dueDeltaVbl, blockedMs); // FIX-T3
+                            }); // FIX-T3
+                    } // FIX-T3
+                } // FIX-T3
+            } // FIX-T3
+        } // FIX-T3
         finishCall(nullptr, *ctx);
     }
 
@@ -3448,9 +3595,39 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram)
     }
 }
 
+void ps2xRpcBlockCheckTimeout(EeScheduler *sched, uint64_t eeCycle) // FIX-T3
+{ // FIX-T3
+    ps2_syscalls::checkRpcBlockTimeouts(sched, eeCycle); // FIX-T3
+} // FIX-T3
+
+uint64_t ps2xCid1DriveBusyUntilVbl() // FIX-T4
+{ // FIX-T4
+    uint64_t curVbl = 0; // FIX-T4
+    { // FIX-T4
+        std::lock_guard<std::mutex> lock(ps2_syscalls::s_cid1LatMutex); // FIX-T4
+        curVbl = ps2_syscalls::s_cid1VblankCounter; // FIX-T4
+    } // FIX-T4
+    uint64_t modelDue = 0; // FIX-T4
+    { // FIX-T4
+        std::lock_guard<std::mutex> lock(ps2_syscalls::s_cid1DriveModel.mtx); // FIX-T4
+        modelDue = static_cast<uint64_t>(std::ceil(ps2_syscalls::s_cid1DriveModel.busyUntilVbl)); // FIX-T4
+    } // FIX-T4
+    return (modelDue > curVbl) ? modelDue : 0u; // FIX-T4
+} // FIX-T4
+
+uint64_t ps2xRegisterCid1VblankBlock(EeScheduler *sched, uint64_t dueVbl, int tid) // FIX-T4
+{ // FIX-T4
+    const uint64_t token = ps2_syscalls::s_nextRpcBlockToken.fetch_add(1, std::memory_order_relaxed); // FIX-T4
+    std::lock_guard<std::mutex> lock(ps2_syscalls::s_rpcBlockMutex); // FIX-T4
+    ps2_syscalls::s_pendingRpcBlocks.push_back(ps2_syscalls::PendingRpcBlock{token, sched, dueVbl, 0u, tid, 0u, 0u}); // FIX-T4
+    ps2_syscalls::s_hasPendingRpcBlocks.store(true, std::memory_order_release); // FIX-T4
+    return token; // FIX-T4
+} // FIX-T4
+
 void ps2xCid1Vblank() // FIX-AU5
 {
     ps2_syscalls::onCid1Vblank();
+    ps2_syscalls::deliverRpcBlocks(ps2_syscalls::s_cid1VblankCounter); // FIX-T3
     static const bool s_au11Enabled = []() { // PROBE-AU11
         const char *env = std::getenv("PS2X_AU11_PROBE"); // PROBE-AU11
         return env && std::strcmp(env, "1") == 0; // PROBE-AU11
