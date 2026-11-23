@@ -5811,6 +5811,15 @@ static const std::vector<uint64_t> s_gsSkipAbeVals = []() {
 static const bool s_gsSkipActive = s_gsSkipTme0 || !s_gsSkipAbeVals.empty(); // PROBE-E3e
 static std::atomic<uint64_t> s_gsSkipCount{0ull}; // PROBE-E3e
 
+static bool writesNoColour(uint64_t test, uint64_t frameMaskBits) // FIX-E8b
+{
+    const bool ate = (test & 1ull) != 0ull;
+    const uint64_t atst = (test >> 1ull) & 7ull;
+    const uint64_t afail = (test >> 12ull) & 3ull;
+    return (ate && atst == 0ull && (afail == 0ull || afail == 2ull)) ||
+           ((frameMaskBits & 0xFFFFFFFFull) == 0xFFFFFFFFull);
+}
+
 void GS::queueDraw(const GSPrimitiveBatch &batch)
 {
     if (s_rdCensusOn) // PROBE-E0
@@ -6039,7 +6048,8 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                                     (((ctx.test >> 4u) & 0xFFull) == 0ull); // FIX-E5c
             const bool wantClearCheck = rdFrameCutOn() && !prim.tme && addCount > 0u && !isFadeQuad && // FEAT-RD55: O(1) early-out when FRAMECUT=0, TME=1, or count==0 // FIX-E5c
                                         (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
-                                        ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull;
+                                        ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull &&
+                                        !writesNoColour(ctx.test, ctx.frame.fbmsk); // FIX-E8b
             const bool wantCopyCheck = rdFrameCutOn() && s_rdCutCopy && prim.tme && addCount == 6u && // FIX-CUT2 // FIX-CUT2C
                                        ctx.frame.fbp != 0u && ctx.frame.psm == 0u; // FIX-CUT2C
             const bool fxActive = s_rdFxOn && ps2xRdTakeoverOn(); // FIX-FX4

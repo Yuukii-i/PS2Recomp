@@ -1776,6 +1776,15 @@ static bool isRdSwirlMask(const Rd2DBatch &b) // FEAT-E4a
     return !tme && abe && ((b.alpha & 0x000000FF000000FFull) == 0x64ull);
 }
 
+static bool writesNoColour(uint64_t test, uint64_t frameMaskBits) // FIX-E8b
+{
+    const bool ate = (test & 1ull) != 0ull;
+    const uint64_t atst = (test >> 1ull) & 7ull;
+    const uint64_t afail = (test >> 12ull) & 3ull;
+    return (ate && atst == 0ull && (afail == 0ull || afail == 2ull)) ||
+           ((frameMaskBits & 0xFFFFFFFFull) == 0xFFFFFFFFull);
+}
+
 // PROBE-V3N: draw sequence tracking
 static uint64_t s_v3nLast3dSeq = 0; // PROBE-V3N
 static uint64_t s_v3nLast2dSeq = 0; // PROBE-V3N
@@ -4285,6 +4294,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (ptype != 6ull && ptype != 3ull && ptype != 4ull && ptype != 5ull)
                     continue;
                 if (((b.frame >> 32) & 0xFFFFFFull) != 0ull)
+                    continue;
+                if (writesNoColour(b.test, (b.frame >> 32) & 0xFFFFFFFFull)) // FIX-E8b
                     continue;
                 const bool abeOff = ((b.prim >> 6) & 1ull) == 0ull;
                 const bool alphaReplace = (b.alpha & 0xFFull) == 0x44ull;
