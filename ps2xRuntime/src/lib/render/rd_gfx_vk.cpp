@@ -46,6 +46,12 @@ extern "C" void ps2xRdDrawProfAddVk(int64_t stateBindTicks, int64_t uniformTicks
 extern "C" void ps2xRdDrawProfAddFg6(uint64_t skippedState, uint64_t skippedUniform); // FEAT-FG6
 extern "C" void ps2xRdDrawProfAddFg7Pc(uint64_t pcUpdates, uint64_t pcBytes); // PROBE-FG7
 extern "C" void ps2xRdDrawProfAddFg8PcWord(uint32_t wordIdx, uint32_t oldVal, uint32_t newVal); // PROBE-FG8
+extern "C" void ps2xRdDrawProfAddFg9Bind(int64_t pipeLookTicks, uint64_t pipeLookCnt, uint64_t pipeMissCnt,
+                                         int64_t bindPipeTicks, uint64_t bindPipeCnt,
+                                         int64_t bindDescTicks, uint64_t bindDescCnt,
+                                         int64_t bindVbIbTicks, uint64_t bindVbIbCnt,
+                                         int64_t dynStateTicks, uint64_t dynStateCnt,
+                                         int64_t pushConstTicks, uint64_t pushConstCnt); // PROBE-FG9
 static inline bool fg6StateCacheEnabled() // FEAT-FG6
 {
     static const bool s_on = []() {
@@ -235,17 +241,29 @@ struct GarbageTexture
     uint64_t bytes = 0; // FIX-V3E
 };
 
-// FIX-RDG3C
+// FIX-RDG3C / FIX-FG9
 struct DescCacheKey
 {
     uint32_t tex0 = 0;
     uint32_t tex1 = 0;
     uint32_t samp0 = 0;
     uint32_t samp1 = 0;
+    uint64_t hash64 = 0; // FIX-FG9
+
+    void computeHash() // FIX-FG9
+    {
+        uint64_t h1 = (static_cast<uint64_t>(tex0) << 32) | tex1;
+        uint64_t h2 = (static_cast<uint64_t>(samp0) << 32) | samp1;
+        h1 ^= h2 * 0x9e3779b97f4a7c15ull;
+        h1 ^= h1 >> 30;
+        h1 *= 0xbf58476d1ce4e5b9ull;
+        h1 ^= h1 >> 27;
+        hash64 = h1;
+    }
 
     bool operator==(const DescCacheKey &o) const
     {
-        return tex0 == o.tex0 && tex1 == o.tex1 && samp0 == o.samp0 && samp1 == o.samp1;
+        return hash64 == o.hash64 && tex0 == o.tex0 && tex1 == o.tex1 && samp0 == o.samp0 && samp1 == o.samp1;
     }
 };
 
@@ -253,13 +271,7 @@ struct DescCacheKeyHash
 {
     size_t operator()(const DescCacheKey &k) const
     {
-        uint64_t h1 = (static_cast<uint64_t>(k.tex0) << 32) | k.tex1;
-        uint64_t h2 = (static_cast<uint64_t>(k.samp0) << 32) | k.samp1;
-        h1 ^= h2 * 0x9e3779b97f4a7c15ull;
-        h1 ^= h1 >> 30;
-        h1 *= 0xbf58476d1ce4e5b9ull;
-        h1 ^= h1 >> 27;
-        return static_cast<size_t>(h1);
+        return static_cast<size_t>(k.hash64); // FIX-FG9
     }
 };
 
@@ -417,6 +429,12 @@ struct RdVkState
     VkSampler cachedSampler[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     uint32_t cachedEffTexId[2] = {0, 0};
     VkDescriptorSet cachedDescSet = VK_NULL_HANDLE;
+    uint64_t lastPipePacked = 0; // FIX-FG9
+    VkPipeline lastPipeHandle = VK_NULL_HANDLE; // FIX-FG9
+    bool lastPipeValid = false; // FIX-FG9
+    DescCacheKey lastDescKey{}; // FIX-FG9
+    VkDescriptorSet lastDescCacheSet = VK_NULL_HANDLE; // FIX-FG9
+    uint32_t lastDescCacheFrame = UINT32_MAX; // FIX-FG9
 
     VkDescriptorSet lastBoundDescSet = VK_NULL_HANDLE;
     bool lastPcValid = false;
@@ -1033,7 +1051,7 @@ void invalidateCommandBufferState()
     s_vk.dirtyIndexBuffer = true;
 }
 
-void applyViewportAndScissorIfDirty()
+void applyViewportAndScissorIfDirty(uint64_t *outCalls = nullptr) // PROBE-FG9
 {
     if (!s_vk.frameActive)
         return;
@@ -1052,6 +1070,7 @@ void applyViewportAndScissorIfDirty()
             vkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
             s_vk.lastVp = vp;
             s_vk.lastVpValid = true;
+            if (outCalls) ++(*outCalls); // PROBE-FG9
         }
         s_vk.dirtyViewport = false;
     }
@@ -1066,6 +1085,7 @@ void applyViewportAndScissorIfDirty()
             vkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
             s_vk.lastSc = sc;
             s_vk.lastScValid = true;
+            if (outCalls) ++(*outCalls); // PROBE-FG9
         }
         s_vk.dirtyScissor = false;
     }
@@ -1174,12 +1194,23 @@ VkBlendOp toVkBlendOp(rdgfx::BlendEq eq)
     return VK_BLEND_OP_ADD;
 }
 
-VkPipeline getOrCreatePipeline(const PipelineKey &key)
+VkPipeline getOrCreatePipeline(const PipelineKey &key, bool *outMiss = nullptr) // PROBE-FG9
 {
     const uint64_t packed = key.pack();
+    if (fg6StateCacheEnabled() && s_vk.lastPipeValid && s_vk.lastPipePacked == packed) // FIX-FG9
+        return s_vk.lastPipeHandle;
     auto it = s_vk.pipelines.find(packed);
     if (it != s_vk.pipelines.end())
+    {
+        if (fg6StateCacheEnabled()) // FIX-FG9
+        {
+            s_vk.lastPipePacked = packed;
+            s_vk.lastPipeHandle = it->second;
+            s_vk.lastPipeValid = true;
+        }
         return it->second;
+    }
+    if (outMiss) *outMiss = true; // PROBE-FG9
 
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1283,6 +1314,12 @@ VkPipeline getOrCreatePipeline(const PipelineKey &key)
         return VK_NULL_HANDLE;
 
     s_vk.pipelines[packed] = pipe;
+    if (fg6StateCacheEnabled()) // FIX-FG9
+    {
+        s_vk.lastPipePacked = packed;
+        s_vk.lastPipeHandle = pipe;
+        s_vk.lastPipeValid = true;
+    }
     return pipe;
 }
 
@@ -1691,6 +1728,8 @@ bool prepareDraw()
     int64_t fg5UniformTicks = 0; // PROBE-FG5
     uint64_t fg5StateChanges = 0; // PROBE-FG5
     uint64_t fg5UniformUpdates = 0; // PROBE-FG5
+    int64_t fg9PipeLookT = 0, fg9BindPipeT = 0, fg9BindDescT = 0, fg9BindVbT = 0, fg9DynStateT = 0; // PROBE-FG9
+    uint64_t fg9PipeLookC = 0, fg9PipeMissC = 0, fg9BindPipeC = 0, fg9BindDescC = 0, fg9BindVbC = 0, fg9DynStateC = 0; // PROBE-FG9
     if (!s_vk.frameActive || !s_vk.shaderReady || s_vk.cmd == VK_NULL_HANDLE)
     {
         ++s_vk.statNoFrame; // PROBE-RDG3B
@@ -1713,8 +1752,16 @@ bool prepareDraw()
     }
     if (s_vk.dirtyPipeline || s_vk.cachedPipeline == VK_NULL_HANDLE)
     {
-        s_vk.cachedPipeline = getOrCreatePipeline(s_vk.pipeKey);
+        const int64_t t0 = fg5On ? probeQpcNow() : 0; // PROBE-FG9
+        bool pipeMiss = false; // PROBE-FG9
+        s_vk.cachedPipeline = getOrCreatePipeline(s_vk.pipeKey, fg5On ? &pipeMiss : nullptr);
         s_vk.dirtyPipeline = false;
+        if (fg5On) // PROBE-FG9
+        {
+            fg9PipeLookT += (probeQpcNow() - t0);
+            ++fg9PipeLookC;
+            if (pipeMiss) ++fg9PipeMissC;
+        }
     }
     if (s_vk.cachedPipeline == VK_NULL_HANDLE)
     {
@@ -1723,16 +1770,27 @@ bool prepareDraw()
     }
     if (s_vk.cachedPipeline != s_vk.boundPipeline)
     {
+        const int64_t t0 = fg5On ? probeQpcNow() : 0; // PROBE-FG9
         vkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vk.cachedPipeline);
         s_vk.boundPipeline = s_vk.cachedPipeline;
-        if (fg5On) ++fg5StateChanges; // PROBE-FG5
+        if (fg5On) // PROBE-FG5 / PROBE-FG9
+        {
+            ++fg5StateChanges;
+            fg9BindPipeT += (probeQpcNow() - t0);
+            ++fg9BindPipeC;
+        }
     }
 
     // PERF-RDG4R: only emit vkCmdSetViewport / vkCmdSetScissor when effective state changed.
     if (fg5On && (s_vk.dirtyViewport || s_vk.dirtyScissor)) ++fg5StateChanges; // PROBE-FG5
-    applyViewportAndScissorIfDirty();
+    {
+        const int64_t t0 = fg5On ? probeQpcNow() : 0; // PROBE-FG9
+        applyViewportAndScissorIfDirty(fg5On ? &fg9DynStateC : nullptr);
+        if (fg5On) fg9DynStateT += (probeQpcNow() - t0); // PROBE-FG9
+    }
 
     // FIX-RDG3C / PERF-RDG4R: only resolve textures, samplers, and hash DescCacheKey when dirty.
+    const int64_t fg9DescT0 = fg5On ? probeQpcNow() : 0; // PROBE-FG9
     if (s_vk.dirtyTextures || s_vk.cachedDescSet == VK_NULL_HANDLE ||
         !s_vk.cachedTex[0] || !s_vk.cachedTex[1])
     {
@@ -1778,47 +1836,62 @@ bool prepareDraw()
         s_vk.cachedSampler[0] = samp0;
         s_vk.cachedSampler[1] = samp1;
 
-        const DescCacheKey cacheKey{effId0, effId1, tex0->sampler.pack(), tex1->sampler.pack()};
-        auto &cache = s_vk.descCaches[s_vk.curFrame];
+        DescCacheKey cacheKey{effId0, effId1, tex0->sampler.pack(), tex1->sampler.pack(), 0}; // FIX-FG9
+        cacheKey.computeHash(); // FIX-FG9
         VkDescriptorSet ds = VK_NULL_HANDLE;
-        if (auto cit = cache.find(cacheKey); cit != cache.end())
+        if (fg6StateCacheEnabled() && s_vk.lastDescCacheFrame == s_vk.curFrame &&
+            s_vk.lastDescCacheSet != VK_NULL_HANDLE && cacheKey == s_vk.lastDescKey) // FIX-FG9
         {
-            ds = cit->second;
-            if (s_vk.logEnabled) // PROBE-RDG4P
-                ++s_vk.curFrameDescHits;
+            ds = s_vk.lastDescCacheSet;
         }
         else
         {
-            if (!allocDescriptorSet(s_vk.curFrame, ds))
+            auto &cache = s_vk.descCaches[s_vk.curFrame];
+            if (auto cit = cache.find(cacheKey); cit != cache.end())
             {
-                s_vk.cachedDescSet = VK_NULL_HANDLE;
-                ++s_vk.statNoDesc; // PROBE-RDG3B
-                return false;
+                ds = cit->second;
+                if (s_vk.logEnabled) // PROBE-RDG4P
+                    ++s_vk.curFrameDescHits;
             }
-            if (s_vk.logEnabled) // PROBE-RDG4P
-                ++s_vk.curFrameDescMisses;
+            else
+            {
+                if (!allocDescriptorSet(s_vk.curFrame, ds))
+                {
+                    s_vk.cachedDescSet = VK_NULL_HANDLE;
+                    ++s_vk.statNoDesc; // PROBE-RDG3B
+                    return false;
+                }
+                if (s_vk.logEnabled) // PROBE-RDG4P
+                    ++s_vk.curFrameDescMisses;
 
-            VkDescriptorImageInfo imgInfos[2]{};
-            imgInfos[0] = {samp0, tex0->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            imgInfos[1] = {samp1, tex1->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                VkDescriptorImageInfo imgInfos[2]{};
+                imgInfos[0] = {samp0, tex0->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                imgInfos[1] = {samp1, tex1->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
-            VkWriteDescriptorSet writes[2]{};
-            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[0].dstSet = ds;
-            writes[0].dstBinding = 0;
-            writes[0].descriptorCount = 1;
-            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[0].pImageInfo = &imgInfos[0];
+                VkWriteDescriptorSet writes[2]{};
+                writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[0].dstSet = ds;
+                writes[0].dstBinding = 0;
+                writes[0].descriptorCount = 1;
+                writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                writes[0].pImageInfo = &imgInfos[0];
 
-            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[1].dstSet = ds;
-            writes[1].dstBinding = 1;
-            writes[1].descriptorCount = 1;
-            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[1].pImageInfo = &imgInfos[1];
+                writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[1].dstSet = ds;
+                writes[1].dstBinding = 1;
+                writes[1].descriptorCount = 1;
+                writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                writes[1].pImageInfo = &imgInfos[1];
 
-            vkUpdateDescriptorSets(s_vk.device, 2, writes, 0, nullptr);
-            cache.emplace(cacheKey, ds);
+                vkUpdateDescriptorSets(s_vk.device, 2, writes, 0, nullptr);
+                cache.emplace(cacheKey, ds);
+            }
+            if (fg6StateCacheEnabled()) // FIX-FG9
+            {
+                s_vk.lastDescKey = cacheKey;
+                s_vk.lastDescCacheSet = ds;
+                s_vk.lastDescCacheFrame = s_vk.curFrame;
+            }
         }
 
         s_vk.cachedDescSet = ds;
@@ -1829,8 +1902,13 @@ bool prepareDraw()
     {
         vkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_vk.pipelineLayout, 0, 1, &s_vk.cachedDescSet, 0, nullptr);
         s_vk.lastBoundDescSet = s_vk.cachedDescSet;
-        if (fg5On) ++fg5StateChanges; // PROBE-FG5
+        if (fg5On) // PROBE-FG5 / PROBE-FG9
+        {
+            ++fg5StateChanges;
+            ++fg9BindDescC;
+        }
     }
+    if (fg5On) fg9BindDescT += (probeQpcNow() - fg9DescT0); // PROBE-FG9
 
     // PERF-RDG4R / FIX-FG7: only push the changed 4-byte-aligned push-constant span.
     if (s_vk.dirtyPushConstants || !s_vk.lastPcValid)
@@ -1885,6 +1963,7 @@ bool prepareDraw()
     // FIX-RDG3C / PERF-RDG4R: resolve VBO only when vertex binding is dirty.
     if (s_vk.dirtyVertexBuffer || s_vk.lastBoundVb == VK_NULL_HANDLE)
     {
+        const int64_t t0 = fg5On ? probeQpcNow() : 0; // PROBE-FG9
         VkDeviceSize offset = 0;
         const uint32_t activeVbo = resolveBoundVbo(&offset);
         const GpuBuffer *vbo = s_vk.vbos.find(activeVbo);
@@ -1899,18 +1978,29 @@ bool prepareDraw()
             vkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &vb, &offset);
             s_vk.lastBoundVb = vb;
             s_vk.lastBoundVbOffset = offset;
-            if (fg5On) ++fg5StateChanges; // PROBE-FG5
+            if (fg5On) // PROBE-FG5 / PROBE-FG9
+            {
+                ++fg5StateChanges;
+                ++fg9BindVbC;
+            }
         }
         s_vk.dirtyVertexBuffer = false;
+        if (fg5On) fg9BindVbT += (probeQpcNow() - t0); // PROBE-FG9
     }
 
     ++s_vk.statDraws;
     if (s_vk.logEnabled) // PROBE-RDG4P
         ++s_vk.curFrameDraws;
-    if (fg5On) // PROBE-FG5
+    if (fg5On) // PROBE-FG5 / PROBE-FG9
     {
         const int64_t prepTicks = (probeQpcNow() - fg5PrepT0) - fg5UniformTicks;
         ps2xRdDrawProfAddVk(prepTicks > 0 ? prepTicks : 0, fg5UniformTicks, 0, fg5StateChanges, fg5UniformUpdates, 0);
+        ps2xRdDrawProfAddFg9Bind(fg9PipeLookT, fg9PipeLookC, fg9PipeMissC,
+                                 fg9BindPipeT, fg9BindPipeC,
+                                 fg9BindDescT, fg9BindDescC,
+                                 fg9BindVbT, fg9BindVbC,
+                                 fg9DynStateT, fg9DynStateC,
+                                 fg5UniformTicks, fg5UniformUpdates);
     }
     return true;
 }
@@ -2163,6 +2253,11 @@ void beginFrame()
         vkResetDescriptorPool(s_vk.device, pool, 0);
     s_vk.descPoolIdx[frameIdx] = 0;
     s_vk.descCaches[frameIdx].clear();
+    if (s_vk.lastDescCacheFrame == frameIdx) // FIX-FG9
+    {
+        s_vk.lastDescCacheSet = VK_NULL_HANDLE;
+        s_vk.lastDescCacheFrame = UINT32_MAX;
+    }
     // FIX-V3G: safe discard unsubmitted batch cmds if frame was aborted
     for (uint32_t i = 0; i < s_vk.frameUploadCmd.size(); ++i)
     {
@@ -2899,10 +2994,12 @@ void drawIndexed(rdgfx::PrimitiveTopology, uint32_t first, uint32_t count, bool 
     const int64_t fg5DrawT0 = fg5On ? probeQpcNow() : 0; // PROBE-FG5
     const uint32_t firstInst = fg6StateCacheEnabled() ? (s_vk.curAtInvert != 0 ? 1u : 0u) : 0u; // FIX-FG8
     vkCmdDrawIndexed(s_vk.cmd, count, 1, first, 0, firstInst); // FIX-FG8
-    if (fg5On) // PROBE-FG5
+    if (fg5On) // PROBE-FG5 / PROBE-FG9
     {
         const int64_t fg5T1 = probeQpcNow();
         ps2xRdDrawProfAddVk(fg5DrawT0 - fg5IbT0, 0, fg5T1 - fg5DrawT0, fg5IbChg, 0, 1);
+        if (fg5DrawT0 > fg5IbT0 || fg5IbChg != 0)
+            ps2xRdDrawProfAddFg9Bind(0, 0, 0, 0, 0, 0, 0, fg5DrawT0 - fg5IbT0, fg5IbChg, 0, 0, 0, 0);
     }
 }
 

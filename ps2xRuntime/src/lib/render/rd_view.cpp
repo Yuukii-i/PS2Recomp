@@ -170,6 +170,19 @@ struct Fg5DrawProfAcc
     int64_t prepTexKeyTicks = 0; // PROBE-FG7
     int64_t prepVertexFixTicks = 0; // PROBE-FG7
     uint64_t fg8PcWordHist[32] = {}; // PROBE-FG8
+    int64_t fg9PipeLookTicks = 0; // PROBE-FG9
+    int64_t fg9BindPipeTicks = 0; // PROBE-FG9
+    int64_t fg9BindDescTicks = 0; // PROBE-FG9
+    int64_t fg9BindVbIbTicks = 0; // PROBE-FG9
+    int64_t fg9DynStateTicks = 0; // PROBE-FG9
+    int64_t fg9PushConstTicks = 0; // PROBE-FG9
+    uint64_t fg9PipeLookCnt = 0; // PROBE-FG9
+    uint64_t fg9PipeMissCnt = 0; // PROBE-FG9
+    uint64_t fg9BindPipeCnt = 0; // PROBE-FG9
+    uint64_t fg9BindDescCnt = 0; // PROBE-FG9
+    uint64_t fg9BindVbIbCnt = 0; // PROBE-FG9
+    uint64_t fg9DynStateCnt = 0; // PROBE-FG9
+    uint64_t fg9PushConstCnt = 0; // PROBE-FG9
     std::chrono::steady_clock::time_point secStart{};
 };
 static Fg5DrawProfAcc g_fg5Prof;
@@ -266,6 +279,27 @@ extern "C" void ps2xRdDrawProfAddFg6(uint64_t skippedState, uint64_t skippedUnif
 {
     g_fg5Prof.skippedState += skippedState;
     g_fg5Prof.skippedUniform += skippedUniform;
+}
+extern "C" void ps2xRdDrawProfAddFg9Bind(int64_t pipeLookTicks, uint64_t pipeLookCnt, uint64_t pipeMissCnt,
+                                         int64_t bindPipeTicks, uint64_t bindPipeCnt,
+                                         int64_t bindDescTicks, uint64_t bindDescCnt,
+                                         int64_t bindVbIbTicks, uint64_t bindVbIbCnt,
+                                         int64_t dynStateTicks, uint64_t dynStateCnt,
+                                         int64_t pushConstTicks, uint64_t pushConstCnt) // PROBE-FG9
+{
+    g_fg5Prof.fg9PipeLookTicks += pipeLookTicks;
+    g_fg5Prof.fg9PipeLookCnt += pipeLookCnt;
+    g_fg5Prof.fg9PipeMissCnt += pipeMissCnt;
+    g_fg5Prof.fg9BindPipeTicks += bindPipeTicks;
+    g_fg5Prof.fg9BindPipeCnt += bindPipeCnt;
+    g_fg5Prof.fg9BindDescTicks += bindDescTicks;
+    g_fg5Prof.fg9BindDescCnt += bindDescCnt;
+    g_fg5Prof.fg9BindVbIbTicks += bindVbIbTicks;
+    g_fg5Prof.fg9BindVbIbCnt += bindVbIbCnt;
+    g_fg5Prof.fg9DynStateTicks += dynStateTicks;
+    g_fg5Prof.fg9DynStateCnt += dynStateCnt;
+    g_fg5Prof.fg9PushConstTicks += pushConstTicks;
+    g_fg5Prof.fg9PushConstCnt += pushConstCnt;
 }
 extern void ps2xRdBt2SetKind(int kind); // PROBE-BT2
 extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD19
@@ -6825,6 +6859,20 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         fg5QpcToMs(g_fg5Prof.prepTexKeyTicks) * invF,
                         fg5QpcToMs(g_fg5Prof.prepVertexFixTicks) * invF,
                         fg5QpcToMs(std::max<int64_t>(0, g_fg5Prof.prepTicks - g_fg5Prof.prepFiltersTicks - g_fg5Prof.prepTexKeyTicks - g_fg5Prof.prepVertexFixTicks)) * invF);
+            ps2xSafeLog("[drawprof-bind] pipeLook=%.2f(%u,miss=%u) bindPipe=%.2f(%u) bindDesc=%.2f(%u) bindVbIb=%.2f(%u) dynState=%.2f(%u) pushConst=%.2f(%u)\n", // PROBE-FG9
+                        fg5QpcToMs(g_fg5Prof.fg9PipeLookTicks) * invF,
+                        static_cast<unsigned int>(g_fg5Prof.fg9PipeLookCnt / f),
+                        static_cast<unsigned int>(g_fg5Prof.fg9PipeMissCnt / f),
+                        fg5QpcToMs(g_fg5Prof.fg9BindPipeTicks) * invF,
+                        static_cast<unsigned int>(g_fg5Prof.fg9BindPipeCnt / f),
+                        fg5QpcToMs(g_fg5Prof.fg9BindDescTicks) * invF,
+                        static_cast<unsigned int>(g_fg5Prof.fg9BindDescCnt / f),
+                        fg5QpcToMs(g_fg5Prof.fg9BindVbIbTicks) * invF,
+                        static_cast<unsigned int>(g_fg5Prof.fg9BindVbIbCnt / f),
+                        fg5QpcToMs(g_fg5Prof.fg9DynStateTicks) * invF,
+                        static_cast<unsigned int>(g_fg5Prof.fg9DynStateCnt / f),
+                        fg5QpcToMs(g_fg5Prof.fg9PushConstTicks) * invF,
+                        static_cast<unsigned int>(g_fg5Prof.fg9PushConstCnt / f));
             ps2xSafeLog("[drawprof-chg] frame:%u clamp:%u tex1:%u texa:%u vpS:%u/%u vpO:%u/%u camHash:%u disc:%u pipe:%u blend:%u depth:%u scis:%u pcUpd:%u pcBytes:%u\n", // PROBE-FG7
                         static_cast<unsigned int>(g_fg5Prof.chgFrame / f),
                         static_cast<unsigned int>(g_fg5Prof.chgClamp / f),
