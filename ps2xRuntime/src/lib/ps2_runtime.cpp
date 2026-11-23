@@ -17,6 +17,7 @@ extern void ps2xRdInterpSetT(float t); // FEAT-FG4
 extern bool ps2xRdInterpCanExtraPresent(const char **reasonOut); // FEAT-FG4
 extern void ps2xRdFg4TakeUploadStats(double *msOut, uint64_t *vertsOut); // FIX-FG4c
 extern bool ps2xRdFg10ReplayAvailable(); // FIX-FG10b
+extern void ps2xRdFg10SetPrevOverrunSkipped(bool skipped); // FIX-FG10c
 extern bool ps2xRdFg10LastExtraReplayed(); // FIX-FG10b
 extern "C" void ps2xRdPace2Take(int64_t *out6); // PROBE-PACE2
 extern "C" __declspec(dllimport) void __stdcall glReadPixels(int, int, int, int, unsigned int, unsigned int, void *); // PROBE-RD35
@@ -7824,6 +7825,7 @@ void PS2Runtime::run()
                                 const char *skipReason = nullptr;
                                 if (!ps2xRdInterpCanExtraPresent(&skipReason))
                                 {
+                                    ps2xRdFg10SetPrevOverrunSkipped(false); // FIX-FG10c
                                     ++s_fg4Skipped;
                                     const uint32_t bit = (skipReason && skipReason[0] == 't') ? 1u : ((skipReason && skipReason[0] == 'n' && skipReason[1] == 'o' && skipReason[2] == 't') ? 2u : 4u);
                                     if ((s_fg4SkipLoggedMask & bit) == 0u)
@@ -7847,6 +7849,7 @@ void PS2Runtime::run()
                                                              : (g_gsFrameKicks.load(std::memory_order_acquire) != currentGsKicks);
                                     };
                                     int64_t nextArrivalQpc = 0; // FIX-FG4b
+                                    bool intervalOverrunSkipped = false; // FIX-FG10c
                                     for (uint32_t k = 1u; k < fg4Rate; ++k)
                                     {
                                         const int64_t targetQpc = tSeen + (dTicks * static_cast<int64_t>(k)) / static_cast<int64_t>(fg4Rate);
@@ -7872,6 +7875,7 @@ void PS2Runtime::run()
                                         {
                                             s_fg4Skipped += (fg4Rate - k);
                                             ++s_fg4Overrun;
+                                            intervalOverrunSkipped = true; // FIX-FG10c
                                             break;
                                         }
                                         int64_t waitTicks = 0; // FIX-FG4c
@@ -7890,6 +7894,7 @@ void PS2Runtime::run()
                                         {
                                             s_fg4Skipped += (fg4Rate - k);
                                             ++s_fg4Overrun;
+                                            intervalOverrunSkipped = true; // FIX-FG10c
                                             break;
                                         }
                                         if (afterWaitQpc > targetQpc + (2 * qpcFreqFg4 / 1000))
@@ -7922,9 +7927,11 @@ void PS2Runtime::run()
                                         {
                                             s_fg4Skipped += (fg4Rate - 1u - k);
                                             ++s_fg4Overrun;
+                                            intervalOverrunSkipped = true; // FIX-FG10c
                                             break;
                                         }
                                     }
+                                    ps2xRdFg10SetPrevOverrunSkipped(intervalOverrunSkipped); // FIX-FG10c
                                 }
                             }
                         }

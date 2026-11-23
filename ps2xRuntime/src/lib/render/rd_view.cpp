@@ -186,6 +186,7 @@ struct Fg5DrawProfAcc
     uint32_t fg10ExtraReplay = 0; // FEAT-FG10
     uint32_t fg10ExtraFull = 0; // FEAT-FG10
     int64_t fg10ReplayTicks = 0; // FEAT-FG10
+    int64_t fg10RecordTicks = 0; // FIX-FG10c
     std::chrono::steady_clock::time_point secStart{};
 };
 static Fg5DrawProfAcc g_fg5Prof;
@@ -910,7 +911,9 @@ struct Fg10DrawCache // FEAT-FG10
     uint64_t slotSeq[kRdSlotCount] = {}; // FIX-FG10b
     std::vector<Fg10DrawRec> draws;
 };
-static Fg10DrawCache s_fg10Cache; // FEAT-FG10
+static Fg10DrawCache s_fg10Caches[2]; // FIX-FG10c
+static uint32_t s_fg10ReadIdx = 0u;   // FIX-FG10c
+static bool s_fg10PrevOverrunSkipped = false; // FIX-FG10c
 static bool s_fg10bLastExtraReplayed = false; // FIX-FG10b
 struct Fg3BatchPos // FEAT-FG3 // FIX-FG3b
 {
@@ -2672,7 +2675,13 @@ bool ps2xRdInterpActive() // FEAT-FG4
 
 bool ps2xRdFg10ReplayAvailable() // FIX-FG10b
 {
-    return s_rdInterpOn && s_fg10Cache.valid && g_rdGpu.hasCompleteComposition && !g_rdGpu.drawBatches.empty();
+    const Fg10DrawCache &readCache = s_fg10Caches[s_fg10ReadIdx]; // FIX-FG10c
+    return s_rdInterpOn && readCache.valid && g_rdGpu.hasCompleteComposition && !g_rdGpu.drawBatches.empty();
+}
+
+void ps2xRdFg10SetPrevOverrunSkipped(bool skipped) // FIX-FG10c
+{
+    s_fg10PrevOverrunSkipped = skipped;
 }
 
 bool ps2xRdFg10LastExtraReplayed() // FIX-FG10b
@@ -3223,8 +3232,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             s_fg4LastGenBatches = 0u; // FEAT-FG4
             s_fg4LastGenTeleportSkipped = 0u; // FEAT-FG4
             s_fg4HasInterpData = false; // FEAT-FG4
-            s_fg10Cache.valid = false; // FEAT-FG10
-            s_fg10Cache.draws.clear(); // FEAT-FG10
+            for (Fg10DrawCache &c : s_fg10Caches) // FIX-FG10c
+            {
+                c.valid = false;
+                c.draws.clear();
+            }
             s_fg10InterpTSet = false; // FEAT-FG10
         }
         for (size_t i = 0; i < kRdSlotCount; ++i)
@@ -3766,27 +3778,30 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     const int vh = static_cast<int>(h * scaleY);
     const bool boxClipped = (vw < rw || vh < rh); // FIX-R7
     const float fg10AspectK = (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f; // FEAT-FG10
+    const Fg10DrawCache &fg10ReadCache = s_fg10Caches[s_fg10ReadIdx]; // FIX-FG10c
+    Fg10DrawCache &fg10RecCache = s_fg10Caches[s_fg10ReadIdx ^ 1u]; // FIX-FG10c
     bool fg10bSlotsMatch = true; // FIX-FG10b
     bool fg10bAnyPending = false; // FIX-FG10b
     for (size_t i = 0; i < kRdSlotCount; ++i) // FIX-FG10b
     {
-        if (s_fg10Cache.slotSeq[i] != g_rdGpu.slots[i].seq)
+        if (fg10ReadCache.slotSeq[i] != g_rdGpu.slots[i].seq)
             fg10bSlotsMatch = false;
         if (pendingUpload[i])
             fg10bAnyPending = true;
     }
-    const bool fg10bNoCache = !s_fg10Cache.valid; // FIX-FG10b
-    const bool fg10bNewGen = !fg10bNoCache && (s_fg10Cache.gen3d != g_rdGpu.last3dSeq); // FIX-FG10b
-    const bool fg10bSeq2d = !fg10bNoCache && (s_fg10Cache.gen2d != g_rdGpu.last2dSeq); // FIX-FG10b
-    const bool fg10bSize = !fg10bNoCache && (s_fg10Cache.rw != rw || s_fg10Cache.rh != rh ||
-        s_fg10Cache.vx != vx || s_fg10Cache.vy != vy || s_fg10Cache.vw != vw || s_fg10Cache.vh != vh); // FIX-FG10b
-    const bool fg10bFlip = !fg10bNoCache && (std::memcmp(s_fg10Cache.flip, g_rdGpu.flip, sizeof(g_rdGpu.flip)) != 0 ||
-        s_fg10Cache.aspectK != fg10AspectK); // FIX-FG10b
+    const bool fg10bNoCache = !fg10ReadCache.valid; // FIX-FG10b
+    const bool fg10bNewGen = !fg10bNoCache && (fg10ReadCache.gen3d != g_rdGpu.last3dSeq); // FIX-FG10b
+    const bool fg10bSeq2d = !fg10bNoCache && (fg10ReadCache.gen2d != g_rdGpu.last2dSeq); // FIX-FG10b
+    const bool fg10bSize = !fg10bNoCache && (fg10ReadCache.rw != rw || fg10ReadCache.rh != rh ||
+        fg10ReadCache.vx != vx || fg10ReadCache.vy != vy || fg10ReadCache.vw != vw || fg10ReadCache.vh != vh); // FIX-FG10b
+    const bool fg10bFlip = !fg10bNoCache && (std::memcmp(fg10ReadCache.flip, g_rdGpu.flip, sizeof(g_rdGpu.flip)) != 0 ||
+        fg10ReadCache.aspectK != fg10AspectK); // FIX-FG10b
     const bool fg10bSlotsChanged = !fg10bNoCache && !fg10bSlotsMatch; // FIX-FG10b
     const bool fg10Replay = fg10ExtraReq && !needRealign && !g_rdGpu.drawBatches.empty() && // FEAT-FG10
         g_rdGpu.hasCompleteComposition && !fg10bNoCache && !fg10bNewGen && !fg10bSeq2d &&
         !fg10bSize && !fg10bFlip && fg10bSlotsMatch && !fg10bAnyPending; // FIX-FG10b
-    const bool fg10Record = s_rdInterpOn && !fg10Replay && !g_rdGpu.drawBatches.empty() && g_rdGpu.hasCompleteComposition; // FEAT-FG10
+    const bool fg10Record = s_rdInterpOn && (s_fg4Rate >= 2u) && !s_fg10PrevOverrunSkipped &&
+        !fg10ExtraReq && !fg10Replay && !g_rdGpu.drawBatches.empty() && g_rdGpu.hasCompleteComposition; // FEAT-FG10 // FIX-FG10c
     if (s_rdInterpOn) // FIX-FG10b
     {
         static uint32_t s_fg10bNoCache = 0u, s_fg10bNewGen = 0u, s_fg10bSeq2d = 0u, s_fg10bSize = 0u;
@@ -5031,9 +5046,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         auto flushPending3d = [&]() { // FEAT-FG6
             if (!pending3d.active)
                 return;
-            if (fg10Record) // FEAT-FG10
+            if (fg10Record) // FEAT-FG10 // FIX-FG10c
             {
-                Fg10DrawRec rec{};
+                const int64_t fg10RecT0 = drawProfOn ? fg5QpcNow() : 0;
+                fg10RecCache.draws.emplace_back();
+                Fg10DrawRec &rec = fg10RecCache.draws.back();
                 rec.kickSerial = pending3d.kickSerial;
                 rec.slotIdx = pending3d.slotIdx;
                 rec.first = pending3d.first;
@@ -5061,7 +5078,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rec.tfxVal = pending3d.tfxVal;
                 rec.tccVal = pending3d.tccVal;
                 std::memcpy(rec.fog, pending3d.fog, sizeof(rec.fog));
-                s_fg10Cache.draws.push_back(rec);
+                if (drawProfOn)
+                    g_fg5Prof.fg10RecordTicks += (fg5QpcNow() - fg10RecT0);
             }
             if (drawProfOn) g_fg5In3d = true;
             rdDrawElems(pending3d.first, pending3d.count);
@@ -5097,7 +5115,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const int64_t fg10RepT0 = drawProfOn ? fg5QpcNow() : 0;
                 float prevVpA[4] = {}, prevVpB[4] = {};
                 bool prevVpValid = false;
-                for (const Fg10DrawRec &rec : s_fg10Cache.draws)
+                for (const Fg10DrawRec &rec : fg10ReadCache.draws)
                 {
                     if (drawProfOn)
                     {
@@ -5239,17 +5257,22 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     }
                     g_fg5In3d = false;
                 }
-                min3dSerial = s_fg10Cache.min3dSerial;
-                max3dSerial = s_fg10Cache.max3dSerial;
+                min3dSerial = fg10ReadCache.min3dSerial;
+                max3dSerial = fg10ReadCache.max3dSerial;
                 if (drawProfOn)
                     g_fg5Prof.fg10ReplayTicks += (fg5QpcNow() - fg10RepT0);
             }
             else
             {
-            if (fg10Record) // FEAT-FG10
+            if (fg10Record) // FEAT-FG10 // FIX-FG10c
             {
-                s_fg10Cache.draws.clear();
-                s_fg10Cache.valid = false;
+                const int64_t fg10RecT0 = drawProfOn ? fg5QpcNow() : 0;
+                if (fg10RecCache.draws.capacity() < 8192u)
+                    fg10RecCache.draws.reserve(std::max<size_t>(8192u, g_rdGpu.drawBatches.size()));
+                fg10RecCache.draws.clear();
+                fg10RecCache.valid = false;
+                if (drawProfOn)
+                    g_fg5Prof.fg10RecordTicks += (fg5QpcNow() - fg10RecT0);
             }
             for (const RdDrawBatch &db : g_rdGpu.drawBatches) // FEAT-RD2 // FEAT-RD14
         {
@@ -5800,9 +5823,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 }
                 if (afail != 0)
                 {
-                    if (fg10Record) // FEAT-FG10
+                    if (fg10Record) // FEAT-FG10 // FIX-FG10c
                     {
-                        Fg10DrawRec rec{};
+                        const int64_t fg10RecT0 = drawProfOn ? fg5QpcNow() : 0;
+                        fg10RecCache.draws.emplace_back();
+                        Fg10DrawRec &rec = fg10RecCache.draws.back();
                         rec.kickSerial = batch.kickSerial;
                         rec.slotIdx = db.slotIdx;
                         rec.first = batch.first;
@@ -5830,7 +5855,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         rec.tfxVal = tfxVal;
                         rec.tccVal = tccVal;
                         std::memcpy(rec.fog, fogCol, sizeof(rec.fog));
-                        s_fg10Cache.draws.push_back(rec);
+                        if (drawProfOn)
+                            g_fg5Prof.fg10RecordTicks += (fg5QpcNow() - fg10RecT0);
                     }
                     const int sMask = g_rdMaskCur;
                     const int sDepth = g_rdc.depthMask;
@@ -5957,37 +5983,43 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             if (drawProfOn) // PROBE-FG5
                 g_fg5Prof.uniformsTicks += (fg5QpcNow() - fg5U2T0);
 
-            Fg10DrawRec fg10Rec{}; // FEAT-FG10
+            Fg10DrawRec *fg10RecPtr = nullptr; // FIX-FG10c
             if (fg10Record)
             {
-                fg10Rec.kickSerial = batch.kickSerial;
-                fg10Rec.slotIdx = db.slotIdx;
-                fg10Rec.first = batch.first;
-                fg10Rec.count = batch.count;
-                fg10Rec.baseVertex = batch.baseVertex;
-                fg10Rec.batchCount = 1u;
-                fg10Rec.depthTest = !(g_rdNoZTest || !zte || ztst == 1u);
-                fg10Rec.depthMask = !((zbuf >> 32) & 1ull);
-                fg10Rec.zBias = (g_rdZBias != 0.0f && rdgfx::hasUniform(rdgfx::Uniform::ZBias)) ? prevZBias : 0.0f;
-                fg10Rec.colorMask = g_rdMaskCur;
-                fg10Rec.blendState = blendState;
-                fg10Rec.atstVal = atstVal;
-                fg10Rec.arefVal = arefVal;
-                fg10Rec.fixAlpha = fixAlpha;
-                fg10Rec.afail = afail;
-                fg10Rec.atst = atst;
-                fg10Rec.zOff = ((zbuf >> 32) & 1ull) == 0ull;
+                const int64_t fg10RecT0 = drawProfOn ? fg5QpcNow() : 0;
+                fg10RecCache.draws.emplace_back();
+                fg10RecPtr = &fg10RecCache.draws.back();
+                fg10RecPtr->kickSerial = batch.kickSerial;
+                fg10RecPtr->slotIdx = db.slotIdx;
+                fg10RecPtr->first = batch.first;
+                fg10RecPtr->count = batch.count;
+                fg10RecPtr->baseVertex = batch.baseVertex;
+                fg10RecPtr->batchCount = 1u;
+                fg10RecPtr->depthTest = !(g_rdNoZTest || !zte || ztst == 1u);
+                fg10RecPtr->depthMask = !((zbuf >> 32) & 1ull);
+                fg10RecPtr->zBias = (g_rdZBias != 0.0f && rdgfx::hasUniform(rdgfx::Uniform::ZBias)) ? prevZBias : 0.0f;
+                fg10RecPtr->colorMask = g_rdMaskCur;
+                fg10RecPtr->blendState = blendState;
+                fg10RecPtr->atstVal = atstVal;
+                fg10RecPtr->arefVal = arefVal;
+                fg10RecPtr->fixAlpha = fixAlpha;
+                fg10RecPtr->afail = afail;
+                fg10RecPtr->atst = atst;
+                fg10RecPtr->zOff = ((zbuf >> 32) & 1ull) == 0ull;
+                if (drawProfOn)
+                    g_fg5Prof.fg10RecordTicks += (fg5QpcNow() - fg10RecT0);
             }
             { // FEAT-RD22
                 const int64_t fg5ScT0 = drawProfOn ? fg5QpcNow() : 0; // PROBE-FG5
                 uint64_t sc = 0ull;
                 const bool scOk = ps2xRdLookupScissor(batch.kickSerial, sc);
-                if (fg10Record) { fg10Rec.scOk = scOk; fg10Rec.scRaw = sc; } // FEAT-FG10
+                if (fg10RecPtr) { fg10RecPtr->scOk = scOk; fg10RecPtr->scRaw = sc; } // FEAT-FG10 // FIX-FG10c
                 const bool scVis = applyScissor(sc, scOk);
                 if (drawProfOn) // PROBE-FG5
                     g_fg5Prof.stateBindTicks += (fg5QpcNow() - fg5ScT0);
                 if (!scVis)
                 {
+                    if (fg10RecPtr) fg10RecCache.draws.pop_back(); // FIX-FG10c
                     if (rdbDump) rdb3d(7); // PROBE-RD29
                     if (reasonDump && reasonPrinted < 30) rdReasonLog(7); // PROBE-RD59
                     ++s_scissorSkipped;
@@ -6045,7 +6077,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const bool vpOk = (batch.vpS[0] != 0.0f && batch.vpS[1] != 0.0f);
                 const float vpA[4] = {batch.vpS[0], batch.vpS[1], batch.vpO[0], batch.vpO[1]};
                 const float vpB[4] = {s_lastOfx, s_lastOfy, (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f, vpOk ? 1.0f : 0.0f};
-                if (fg10Record) { std::memcpy(fg10Rec.vpA, vpA, sizeof(vpA)); std::memcpy(fg10Rec.vpB, vpB, sizeof(vpB)); } // FEAT-FG10
+                if (fg10RecPtr) { std::memcpy(fg10RecPtr->vpA, vpA, sizeof(vpA)); std::memcpy(fg10RecPtr->vpB, vpB, sizeof(vpB)); } // FEAT-FG10 // FIX-FG10c
                 static float s_prevA[4] = {}, s_prevB[4] = {};
                 static bool s_prevValid = false;
                 if (!s_prevValid || std::memcmp(s_prevA, vpA, sizeof(vpA)) != 0 || std::memcmp(s_prevB, vpB, sizeof(vpB)) != 0)
@@ -6085,7 +6117,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     texVal = 1;
                     tfxVal = static_cast<int>((tex0 >> 35) & 3ull);
                     tccVal = static_cast<int>((tex0 >> 34) & 1ull);
-                    if (fg10Record) { fg10Rec.texId = texId; fg10Rec.texParams = texP; fg10Rec.texVal = texVal; fg10Rec.tfxVal = tfxVal; fg10Rec.tccVal = tccVal; } // FEAT-FG10
+                    if (fg10RecPtr) { fg10RecPtr->texId = texId; fg10RecPtr->texParams = texP; fg10RecPtr->texVal = texVal; fg10RecPtr->tfxVal = tfxVal; fg10RecPtr->tccVal = tccVal; } // FEAT-FG10 // FIX-FG10c
                 }
             }
             {
@@ -6206,7 +6238,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const float g = static_cast<float>((batch.fogcol >> 8) & 0xFFu) / 255.0f;
                 const float b = static_cast<float>((batch.fogcol >> 16) & 0xFFu) / 255.0f;
                 rdSetFog(r, g, b, 1.0f);
-                if (fg10Record) { fg10Rec.fog[0] = r; fg10Rec.fog[1] = g; fg10Rec.fog[2] = b; fg10Rec.fog[3] = 1.0f; } // FEAT-FG10
+                if (fg10RecPtr) { fg10RecPtr->fog[0] = r; fg10RecPtr->fog[1] = g; fg10RecPtr->fog[2] = b; fg10RecPtr->fog[3] = 1.0f; } // FEAT-FG10 // FIX-FG10c
             }
             else
             {
@@ -6552,8 +6584,6 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 fg5PrevFog = fg5FogKey;
                 g_fg5In3d = true;
             }
-            if (fg10Record) // FEAT-FG10
-                s_fg10Cache.draws.push_back(fg10Rec);
             if (afail != 0) // FEAT-RD30
             {
                 const int sMask = g_rdMaskCur;
@@ -6591,23 +6621,27 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             g_fg5In3d = false; // PROBE-FG5
             }
             if (stateCacheOn) flushPending3d(); // FEAT-FG6
-            if (fg10Record) // FEAT-FG10
+            if (fg10Record) // FEAT-FG10 // FIX-FG10c
             {
-                s_fg10Cache.gen3d = g_rdGpu.last3dSeq;
-                s_fg10Cache.gen2d = g_rdGpu.last2dSeq;
-                s_fg10Cache.rw = rw;
-                s_fg10Cache.rh = rh;
-                s_fg10Cache.vx = vx;
-                s_fg10Cache.vy = vy;
-                s_fg10Cache.vw = vw;
-                s_fg10Cache.vh = vh;
-                std::memcpy(s_fg10Cache.flip, g_rdGpu.flip, sizeof(g_rdGpu.flip));
-                s_fg10Cache.aspectK = fg10AspectK;
-                s_fg10Cache.min3dSerial = min3dSerial;
-                s_fg10Cache.max3dSerial = max3dSerial;
+                const int64_t fg10RecT0 = drawProfOn ? fg5QpcNow() : 0;
+                fg10RecCache.gen3d = g_rdGpu.last3dSeq;
+                fg10RecCache.gen2d = g_rdGpu.last2dSeq;
+                fg10RecCache.rw = rw;
+                fg10RecCache.rh = rh;
+                fg10RecCache.vx = vx;
+                fg10RecCache.vy = vy;
+                fg10RecCache.vw = vw;
+                fg10RecCache.vh = vh;
+                std::memcpy(fg10RecCache.flip, g_rdGpu.flip, sizeof(g_rdGpu.flip));
+                fg10RecCache.aspectK = fg10AspectK;
+                fg10RecCache.min3dSerial = min3dSerial;
+                fg10RecCache.max3dSerial = max3dSerial;
                 for (size_t i = 0; i < kRdSlotCount; ++i) // FIX-FG10b
-                    s_fg10Cache.slotSeq[i] = g_rdGpu.slots[i].seq;
-                s_fg10Cache.valid = true;
+                    fg10RecCache.slotSeq[i] = g_rdGpu.slots[i].seq;
+                fg10RecCache.valid = true;
+                s_fg10ReadIdx ^= 1u;
+                if (drawProfOn)
+                    g_fg5Prof.fg10RecordTicks += (fg5QpcNow() - fg10RecT0);
             }
             }
         }
@@ -7272,7 +7306,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         {
             const uint32_t f = g_fg5Prof.frames;
             const double invF = 1.0 / static_cast<double>(f);
-            ps2xSafeLog("[drawprof] frames=%u total=%.2f upload=%.2f prep=%.2f texLookup=%.2f stateBind=%.2f uniforms=%.2f drawCalls=%.2f other2D=%.2f submit=%.2f nBatches=%.0f nDraws=%.0f nTexBinds=%.0f nStateChanges=%.0f nUniformUpdates=%.0f chg=tex:%u alpha:%u test:%u prim:%u zbuf:%u fog:%u extraReplay=%u extraFull=%u replayMs=%.2f\n",
+            ps2xSafeLog("[drawprof] frames=%u total=%.2f upload=%.2f prep=%.2f texLookup=%.2f stateBind=%.2f uniforms=%.2f drawCalls=%.2f other2D=%.2f submit=%.2f nBatches=%.0f nDraws=%.0f nTexBinds=%.0f nStateChanges=%.0f nUniformUpdates=%.0f chg=tex:%u alpha:%u test:%u prim:%u zbuf:%u fog:%u extraReplay=%u extraFull=%u replayMs=%.2f recordMs=%.2f\n",
                         f,
                         fg5QpcToMs(g_fg5Prof.totalTicks) * invF,
                         fg5QpcToMs(g_fg5Prof.uploadTicks) * invF,
@@ -7296,7 +7330,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         static_cast<unsigned int>(g_fg5Prof.chgFog / f),
                         g_fg5Prof.fg10ExtraReplay,
                         g_fg5Prof.fg10ExtraFull,
-                        fg5QpcToMs(g_fg5Prof.fg10ReplayTicks) * invF);
+                        fg5QpcToMs(g_fg5Prof.fg10ReplayTicks) * invF,
+                        fg5QpcToMs(g_fg5Prof.fg10RecordTicks) * invF);
             ps2xSafeLog("[drawprof2] skippedState=%u skippedUniform=%u merged=%u prepFilters=%.2f prepTexKey=%.2f prepVertexFix=%.2f prepMisc=%.2f\n", // FEAT-FG6 // PROBE-FG7
                         static_cast<unsigned int>(g_fg5Prof.skippedState / f),
                         static_cast<unsigned int>(g_fg5Prof.skippedUniform / f),
