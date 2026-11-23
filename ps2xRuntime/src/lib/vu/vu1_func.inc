@@ -839,7 +839,7 @@ struct SceneVertex // 80 bytes
 };
 static_assert(sizeof(SceneVertex) == 80u, "SceneVertex size");
 
-struct SceneDraw // 128 bytes
+struct SceneDraw // 144 bytes // FEAT-V2
 {
     uint32_t handlerPc;
     uint32_t mscalIndex;
@@ -852,8 +852,41 @@ struct SceneDraw // 128 bytes
     float objMatrix[16];
     float vpScale[4];
     float vpOffset[4];
+    uint32_t firstLight;   // FEAT-V2
+    uint32_t lightCount;   // FEAT-V2
+    uint32_t globalsIndex; // FEAT-V2
+    uint32_t firstBone;    // FEAT-V2
 };
-static_assert(sizeof(SceneDraw) == 128u, "SceneDraw size");
+static_assert(sizeof(SceneDraw) == 144u, "SceneDraw size"); // FEAT-V2
+
+struct SceneLight // 160 bytes // FEAT-V2
+{
+    uint32_t type;
+    uint32_t pad[3];
+    float dirOrPos[4][4];
+    float colour[4][4];
+    float params[4];
+};
+static_assert(sizeof(SceneLight) == 160u, "SceneLight size"); // FEAT-V2
+
+struct SceneGlobals // 144 bytes // FEAT-V2
+{
+    float viewProj[16];
+    float vpScale[4];
+    float vpOffset[4];
+    float ambient[4];
+    float lightScale[4];
+    float fogParams[4];
+};
+static_assert(sizeof(SceneGlobals) == 144u, "SceneGlobals size"); // FEAT-V2
+
+struct SceneBinSectionHeader // 12 bytes // FEAT-V2
+{
+    uint32_t magic;
+    uint32_t count;
+    uint32_t stride;
+};
+static_assert(sizeof(SceneBinSectionHeader) == 12u, "SceneBinSectionHeader size"); // FEAT-V2
 
 struct SceneBinHeader // 32 bytes
 {
@@ -910,6 +943,8 @@ struct SceneFrame
     std::vector<SceneDraw> draws;
     std::vector<SceneGs> gs; // FEAT-RD2
     std::vector<SceneVertex> vertices;
+    std::vector<SceneLight> lights;     // FEAT-V2
+    std::vector<SceneGlobals> globals;  // FEAT-V2
     std::vector<::RdVert> rdVerts;    // FEAT-RD14
     std::vector<uint32_t> rdIndices;  // FEAT-RD14
     std::vector<::RdBatch> rdBatches; // FEAT-RD14
@@ -930,6 +965,8 @@ struct SceneFrame
         draws.clear();
         gs.clear(); // FEAT-RD2
         vertices.clear();
+        lights.clear();   // FEAT-V2
+        globals.clear();  // FEAT-V2
         rdVerts.clear();   // FEAT-RD14
         rdIndices.clear(); // FEAT-RD14
         rdBatches.clear(); // FEAT-RD14
@@ -969,6 +1006,17 @@ struct SceneState
     uint64_t totalFallbacks = 0; // FEAT-RD2
     uint64_t mismatchByHandler[4] = {}; // 0:1EE0, 1:1EF0, 2:2440, 3:2900
     std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point lastLightLog = std::chrono::steady_clock::now(); // FEAT-V2
+    uint32_t nextDrawLight = 0u;           // FEAT-V2
+    uint32_t mscalGlobalsIdx = UINT32_MAX; // FEAT-V2
+    size_t mscalLight0 = 0;                // FEAT-V2
+    size_t mscalGlob0 = 0;                 // FEAT-V2
+    uint32_t slDraws = 0u;                 // FEAT-V2
+    uint32_t slLights = 0u;                // FEAT-V2
+    uint32_t slMaxLights = 0u;             // FEAT-V2
+    bool slHasFirst = false;               // FEAT-V2
+    float slAmb0[3] = {};                  // FEAT-V2
+    float slScale0[3] = {};                // FEAT-V2
     bool dumped = false;
 };
 
@@ -1106,6 +1154,9 @@ inline void beginMscal(const uint8_t *vu, size_t &d0, size_t &v0)
 {
     const SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     t_scene.curBoneCount = 0;
+    t_scene.mscalGlobalsIdx = UINT32_MAX; // FEAT-V2
+    t_scene.mscalLight0 = f.lights.size(); // FEAT-V2
+    t_scene.mscalGlob0 = f.globals.size(); // FEAT-V2
     if (leanRdOn()) // FEAT-RD14
     {
         d0 = f.rdBatches.size();
@@ -1138,6 +1189,10 @@ inline void commitMscal(uint32_t gifBytes)
 inline void rollbackMscal(size_t d0, size_t v0)
 {
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    f.lights.resize(t_scene.mscalLight0);  // FEAT-V2
+    f.globals.resize(t_scene.mscalGlob0);  // FEAT-V2
+    if (t_scene.nextDrawLight > static_cast<uint32_t>(t_scene.mscalLight0)) // FEAT-V2
+        t_scene.nextDrawLight = static_cast<uint32_t>(t_scene.mscalLight0); // FEAT-V2
     if (leanRdOn()) // FEAT-RD14
     {
         f.rdBatches.resize(d0);
@@ -1547,7 +1602,7 @@ inline void dumpSceneFrame(const SceneFrame &f)
     {
         SceneBinHeader hdr{};
         hdr.magic = 0x314E4353u; // 'SCN1'
-        hdr.version = 1u;
+        hdr.version = 2u; // FEAT-V2
         hdr.frameIndex = static_cast<uint32_t>(f.frameIndex);
         hdr.drawCount = static_cast<uint32_t>(f.draws.size());
         hdr.vertexCount = static_cast<uint32_t>(f.vertices.size());
@@ -1556,6 +1611,14 @@ inline void dumpSceneFrame(const SceneFrame &f)
             std::fwrite(f.draws.data(), sizeof(SceneDraw), f.draws.size(), fb);
         if (!f.vertices.empty())
             std::fwrite(f.vertices.data(), sizeof(SceneVertex), f.vertices.size(), fb);
+        const SceneBinSectionHeader lightSec{0x5448474Cu, static_cast<uint32_t>(f.lights.size()), sizeof(SceneLight)}; // 'LGHT' // FEAT-V2
+        std::fwrite(&lightSec, sizeof(lightSec), 1u, fb); // FEAT-V2
+        if (!f.lights.empty()) // FEAT-V2
+            std::fwrite(f.lights.data(), sizeof(SceneLight), f.lights.size(), fb); // FEAT-V2
+        const SceneBinSectionHeader globSec{0x424F4C47u, static_cast<uint32_t>(f.globals.size()), sizeof(SceneGlobals)}; // 'GLOB' // FEAT-V2
+        std::fwrite(&globSec, sizeof(globSec), 1u, fb); // FEAT-V2
+        if (!f.globals.empty()) // FEAT-V2
+            std::fwrite(f.globals.data(), sizeof(SceneGlobals), f.globals.size(), fb); // FEAT-V2
         std::fclose(fb);
     }
 
@@ -1773,12 +1836,42 @@ inline void onFlush()
         ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws, vpScaleZ, vpOffsetZ); // FEAT-RD11
     }
 
+    t_scene.slDraws += static_cast<uint32_t>(cur.draws.size()); // FEAT-V2
+    t_scene.slLights += static_cast<uint32_t>(cur.lights.size()); // FEAT-V2
+    for (const SceneDraw &d : cur.draws) // FEAT-V2
+    {
+        if (d.lightCount > t_scene.slMaxLights)
+            t_scene.slMaxLights = d.lightCount;
+        if (!t_scene.slHasFirst && d.globalsIndex < cur.globals.size())
+        {
+            const SceneGlobals &g = cur.globals[d.globalsIndex];
+            t_scene.slAmb0[0] = g.ambient[0]; t_scene.slAmb0[1] = g.ambient[1]; t_scene.slAmb0[2] = g.ambient[2];
+            t_scene.slScale0[0] = g.lightScale[0]; t_scene.slScale0[1] = g.lightScale[1]; t_scene.slScale0[2] = g.lightScale[2];
+            t_scene.slHasFirst = true;
+        }
+    }
+
     t_scene.writeIdx ^= 1u;
     t_scene.bufs[t_scene.writeIdx].clear();
+    t_scene.nextDrawLight = 0u; // FEAT-V2
     t_scene.mscalIndex = 0u;
     t_scene.frameGifBytes = 0u;
 
     const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - t_scene.lastLightLog).count() >= 1000) // FEAT-V2
+    {
+        t_scene.lastLightLog = now;
+        ::ps2xSafeLog("[scenelight] draws=%u lights=%u maxLightsPerDraw=%u ambient0=(%f,%f,%f) lightScale0=(%f,%f,%f)\n",
+                      t_scene.slDraws, t_scene.slLights, t_scene.slMaxLights,
+                      t_scene.slAmb0[0], t_scene.slAmb0[1], t_scene.slAmb0[2],
+                      t_scene.slScale0[0], t_scene.slScale0[1], t_scene.slScale0[2]);
+        t_scene.slDraws = 0u;
+        t_scene.slLights = 0u;
+        t_scene.slMaxLights = 0u;
+        t_scene.slHasFirst = false;
+        t_scene.slAmb0[0] = t_scene.slAmb0[1] = t_scene.slAmb0[2] = 0.0f;
+        t_scene.slScale0[0] = t_scene.slScale0[1] = t_scene.slScale0[2] = 0.0f;
+    }
     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - t_scene.lastLog).count() >= 5000)
     {
         t_scene.lastLog = now;
@@ -1797,8 +1890,47 @@ inline void onFlush()
     }
 }
 
-inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t gifLen, uint32_t count, uint32_t boneCount, uint32_t flags, __m128 c1v, __m128 c2v)
+inline void recordLight1(uint32_t pc, __m128 d0, __m128 d1, __m128 c0, __m128 params) // FEAT-V2
 {
+    SceneLight l{};
+    l.type = pc;
+    _mm_storeu_ps(l.dirOrPos[0], d0);
+    _mm_storeu_ps(l.dirOrPos[1], d1);
+    _mm_storeu_ps(l.colour[0], c0);
+    _mm_storeu_ps(l.params, params);
+    t_scene.bufs[t_scene.writeIdx].lights.push_back(l);
+}
+
+inline void recordLight4(uint32_t pc, __m128 d0, __m128 d1, __m128 d2, __m128 c0, __m128 c1, __m128 c2, __m128 c3, __m128 params) // FEAT-V2
+{
+    SceneLight l{};
+    l.type = pc;
+    _mm_storeu_ps(l.dirOrPos[0], d0);
+    _mm_storeu_ps(l.dirOrPos[1], d1);
+    _mm_storeu_ps(l.dirOrPos[2], d2);
+    _mm_storeu_ps(l.colour[0], c0);
+    _mm_storeu_ps(l.colour[1], c1);
+    _mm_storeu_ps(l.colour[2], c2);
+    _mm_storeu_ps(l.colour[3], c3);
+    _mm_storeu_ps(l.params, params);
+    t_scene.bufs[t_scene.writeIdx].lights.push_back(l);
+}
+
+inline SceneDraw &pushDraw(const uint8_t *vu, SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t gifLen, uint32_t count, uint32_t boneCount, uint32_t flags, __m128 c1v, __m128 c2v) // FEAT-V2
+{
+    if (t_scene.mscalGlobalsIdx == UINT32_MAX) // FEAT-V2
+    {
+        SceneGlobals g{};
+        for (uint32_t r = 0u; r < 4u; ++r)
+            _mm_storeu_ps(g.viewProj + r * 4u, ldq(vu, 998u + r));
+        _mm_storeu_ps(g.vpScale, ldq(vu, 1002u));
+        _mm_storeu_ps(g.vpOffset, ldq(vu, 1003u));
+        _mm_storeu_ps(g.ambient, ldq(vu, 1014u));
+        _mm_storeu_ps(g.lightScale, ldq(vu, 1013u));
+        _mm_storeu_ps(g.fogParams, ldq(vu, 1016u));
+        t_scene.mscalGlobalsIdx = static_cast<uint32_t>(f.globals.size());
+        f.globals.push_back(g);
+    }
     SceneDraw d{};
     d.handlerPc = pc;
     d.mscalIndex = t_scene.mscalIndex;
@@ -1811,6 +1943,11 @@ inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t
     std::memcpy(d.objMatrix, t_scene.curObjMatrix, sizeof(d.objMatrix));
     _mm_storeu_ps(d.vpScale, c1v);
     _mm_storeu_ps(d.vpOffset, c2v);
+    d.firstLight = t_scene.nextDrawLight; // FEAT-V2
+    d.lightCount = static_cast<uint32_t>(f.lights.size()) - t_scene.nextDrawLight; // FEAT-V2
+    d.globalsIndex = t_scene.mscalGlobalsIdx; // FEAT-V2
+    d.firstBone = 0u; // FEAT-V2
+    t_scene.nextDrawLight = static_cast<uint32_t>(f.lights.size()); // FEAT-V2
     f.draws.push_back(d);
     const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull); // FEAT-RD2
     SceneGs g{};
@@ -1977,7 +2114,7 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
         pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
         return;
     }
-    const SceneDraw &d = pushDraw(f, 0x2900u, gifOff, gifLen, static_cast<uint32_t>(polyCount), 0u, 4u | (copyS ? 2u : 0u), c1v, c2v);
+    const SceneDraw &d = pushDraw(vu, f, 0x2900u, gifOff, gifLen, static_cast<uint32_t>(polyCount), 0u, 4u | (copyS ? 2u : 0u), c1v, c2v); // FEAT-V2
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(polyCount));
     for (int32_t k = 0; k < polyCount; ++k)
@@ -2038,7 +2175,7 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
         pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
         return;
     }
-    const SceneDraw &d = pushDraw(f, 0x2440u, gifOff, gifLen, static_cast<uint32_t>(N), 0u, copyS ? 2u : 0u, c1v, c2v);
+    const SceneDraw &d = pushDraw(vu, f, 0x2440u, gifOff, gifLen, static_cast<uint32_t>(N), 0u, copyS ? 2u : 0u, c1v, c2v); // FEAT-V2
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(N));
     for (int32_t j = 0; j < N; ++j)
@@ -2120,7 +2257,7 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
         pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
         return;
     }
-    const SceneDraw &d = pushDraw(f, vi10 ? 0x1EF0u : 0x1EE0u, gifOff, gifLen, static_cast<uint32_t>(N), t_scene.curBoneCount, 1u | (vi10 ? 2u : 0u), c1v, c2v);
+    const SceneDraw &d = pushDraw(vu, f, vi10 ? 0x1EF0u : 0x1EE0u, gifOff, gifLen, static_cast<uint32_t>(N), t_scene.curBoneCount, 1u | (vi10 ? 2u : 0u), c1v, c2v); // FEAT-V2
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(N));
     for (int32_t v = 0; v < N; ++v)
@@ -3239,6 +3376,8 @@ static bool handler0840(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v1017 = ldq(vu, 1017);
     const __m128 hOff = fmacV<2>(m991, bc<2>(v1017), fmacV<2>(m990, bc<1>(v1017), fmacV<4>(m989, bc<0>(v1017), zero)));
     const __m128 coeffs = ldq(vu, 1015);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x0840u, cmdPos, zero, cmdCol, coeffs); // FEAT-V2
     logRange(vu, outBase, n);
     for (uint32_t j = 0; j < n; ++j)
     {
@@ -3280,6 +3419,8 @@ static bool handler0CC0(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 cmd2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
     const __m128 cmd3 = ldq(vu, static_cast<uint32_t>(vi13) + 3u);
     vi13 = static_cast<uint16_t>(vi13 + 4u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x0CC0u, cmd0, cmd2, cmd1, cmd3); // FEAT-V2
     const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v985 = ldq(vu, 985), v1010 = ldq(vu, 1010);
     const __m128 vf9 = fmacV<2>(m991, bc<2>(cmd0), fmacV<2>(m990, bc<1>(cmd0), fmacV<4>(m989, bc<0>(cmd0), zero)));
     const __m128 negCmd2 = fmacV<1>(zero, cmd2, zero);
@@ -3342,6 +3483,8 @@ static bool handler1090(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 cmd2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
     const __m128 cmd3 = ldq(vu, static_cast<uint32_t>(vi13) + 3u);
     vi13 = static_cast<uint16_t>(vi13 + 4u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x1090u, cmd0, cmd2, cmd1, cmd3); // FEAT-V2
     const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v985 = ldq(vu, 985), v1017 = ldq(vu, 1017);
     const __m128 L = fmacV<2>(v985, one, fmacV<2>(m991, bc<2>(cmd0), fmacV<2>(m990, bc<1>(cmd0), fmacV<4>(m989, bc<0>(cmd0), zero))));
     const __m128 negCmd2 = fmacV<1>(zero, cmd2, zero);
@@ -3402,6 +3545,8 @@ static bool handler02E0(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 Ly = fmacV<2>(d2, bc<2>(m987), fmacV<2>(d1, bc<1>(m987), fmacV<4>(d0, bc<0>(m987), zero)));
     const __m128 Lz = fmacV<2>(d2, bc<2>(m988), fmacV<2>(d1, bc<1>(m988), fmacV<4>(d0, bc<0>(m988), zero)));
     const __m128 coeffs = ldq(vu, 1015);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight4(0x02E0u, d0, d1, d2, c0, c1, c2, c3, coeffs); // FEAT-V2
     logRange(vu, outBase, n);
     for (uint32_t j = 0; j < n; ++j)
     {
@@ -3448,6 +3593,8 @@ static bool handler0628(Regs &R, uint8_t *vu, uint16_t &vi13, bool prologue) // 
     const __m128 cmd0 = ldq(vu, vi13);
     const __m128 cmd1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
     vi13 = static_cast<uint16_t>(vi13 + 2u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x0628u, cmd0, zero, cmd1, zero); // FEAT-V2
     const __m128 m982 = ldq(vu, 982), m983 = ldq(vu, 983), m984 = ldq(vu, 984), v985 = ldq(vu, 985);
     const __m128 L = fmacV<0>(fmacV<2>(m984, bc<2>(cmd0), fmacV<2>(m983, bc<1>(cmd0), fmacV<4>(m982, bc<0>(cmd0), zero))), v985, zero);
     logRange(vu, outBase, n);
@@ -3487,6 +3634,8 @@ static bool handler1720(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 cmd1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
     const __m128 cmd2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
     vi13 = static_cast<uint16_t>(vi13 + 3u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x1720u, cmd0, zero, cmd1, cmd2); // FEAT-V2
     const __m128 m982 = ldq(vu, 982), m983 = ldq(vu, 983), m984 = ldq(vu, 984), v985 = ldq(vu, 985);
     const __m128 L = fmacV<0>(fmacV<2>(m984, bc<2>(cmd0), fmacV<2>(m983, bc<1>(cmd0), fmacV<4>(m982, bc<0>(cmd0), zero))), v985, zero);
     logRange(vu, outBase, n);
@@ -3572,6 +3721,8 @@ static bool handler0198(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 c2 = ldq(vu, static_cast<uint32_t>(vi13) + 5u);
     const __m128 c3 = ldq(vu, static_cast<uint32_t>(vi13) + 6u);
     vi13 = static_cast<uint16_t>(vi13 + 7u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight4(0x0198u, d0, d1, d2, c0, c1, c2, c3, zero); // FEAT-V2
     const __m128 m986 = ldq(vu, 986), m987 = ldq(vu, 987), m988 = ldq(vu, 988);
     const __m128 Lx = fmacV<2>(d2, bc<2>(m986), fmacV<2>(d1, bc<1>(m986), fmacV<4>(d0, bc<0>(m986), zero)));
     const __m128 Ly = fmacV<2>(d2, bc<2>(m987), fmacV<2>(d1, bc<1>(m987), fmacV<4>(d0, bc<0>(m987), zero)));
