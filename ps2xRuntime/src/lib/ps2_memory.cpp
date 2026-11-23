@@ -3900,10 +3900,93 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     probe_ae::onBhSubmitGifEnd();
 }
 
+static inline bool blurPktProbeOn() // PROBE-E6a
+{ // PROBE-E6a
+    static const bool s_on = []() { // PROBE-E6a
+        const char *e = std::getenv("PS2X_BLURPKT"); // PROBE-E6a
+        return e && e[0] == '1'; // PROBE-E6a
+    }(); // PROBE-E6a
+    return s_on; // PROBE-E6a
+} // PROBE-E6a
+
+static void probeE6aScanGifPacket(uint32_t srcPhysAddr, const uint8_t *data, uint32_t scanQw, uint32_t totalQw) // PROBE-E6a
+{ // PROBE-E6a
+    if (!data || scanQw == 0u) // PROBE-E6a
+        return; // PROBE-E6a
+    int tex0Index = -1; // PROBE-E6a
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6a
+    { // PROBE-E6a
+        uint64_t w0 = 0, w1 = 0; // PROBE-E6a
+        std::memcpy(&w0, data + q * 16u, sizeof(uint64_t)); // PROBE-E6a
+        std::memcpy(&w1, data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6a
+        if (w0 == 0x0000000664020E00ULL || w1 == 0x0000000664020E00ULL) // PROBE-E6a
+        { // PROBE-E6a
+            tex0Index = static_cast<int>(q); // PROBE-E6a
+            break; // PROBE-E6a
+        } // PROBE-E6a
+    } // PROBE-E6a
+    if (tex0Index < 0) // PROBE-E6a
+        return; // PROBE-E6a
+
+    uint32_t fix = 0; // PROBE-E6a
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6a
+    { // PROBE-E6a
+        uint64_t words[2]; // PROBE-E6a
+        std::memcpy(&words[0], data + q * 16u, sizeof(uint64_t)); // PROBE-E6a
+        std::memcpy(&words[1], data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6a
+        bool foundAlpha = false; // PROBE-E6a
+        for (int k = 0; k < 2; ++k) // PROBE-E6a
+        { // PROBE-E6a
+            uint64_t w = words[k]; // PROBE-E6a
+            if ((w & 0xFFULL) == 0x64ULL && ((w >> 8ULL) & 0x00FFFFFFULL) == 0ULL) // PROBE-E6a
+            { // PROBE-E6a
+                fix = static_cast<uint32_t>((w >> 32ULL) & 0xFFULL); // PROBE-E6a
+                foundAlpha = true; // PROBE-E6a
+                break; // PROBE-E6a
+            } // PROBE-E6a
+        } // PROBE-E6a
+        if (foundAlpha) // PROBE-E6a
+            break; // PROBE-E6a
+    } // PROBE-E6a
+
+    static std::atomic<int64_t> s_lastLogUs{0}; // PROBE-E6a
+    const auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>( // PROBE-E6a
+        std::chrono::steady_clock::now().time_since_epoch()).count(); // PROBE-E6a
+    int64_t prevUs = s_lastLogUs.load(std::memory_order_relaxed); // PROBE-E6a
+    if (nowUs - prevUs >= 16666) // at most 60 lines/s // PROBE-E6a
+    { // PROBE-E6a
+        s_lastLogUs.store(nowUs, std::memory_order_relaxed); // PROBE-E6a
+        ps2xSafeLog("[blurpkt] src=0x%08x qw=%u fix=0x%02x pktIndexOfTex0=%u\n", // PROBE-E6a
+                    srcPhysAddr, totalQw, fix, static_cast<uint32_t>(tex0Index)); // PROBE-E6a
+    } // PROBE-E6a
+
+    static std::atomic<uint32_t> s_hexHitCount{0}; // PROBE-E6a
+    const uint32_t hitIdx = s_hexHitCount.fetch_add(1, std::memory_order_relaxed); // PROBE-E6a
+    if (hitIdx < 5u) // PROBE-E6a
+    { // PROBE-E6a
+        const uint32_t dumpQw = std::min(scanQw, 6u); // PROBE-E6a
+        for (uint32_t i = 0; i < dumpQw; ++i) // PROBE-E6a
+        { // PROBE-E6a
+            uint64_t lo = 0, hi = 0; // PROBE-E6a
+            std::memcpy(&lo, data + i * 16u, sizeof(uint64_t)); // PROBE-E6a
+            std::memcpy(&hi, data + i * 16u + 8u, sizeof(uint64_t)); // PROBE-E6a
+            ps2xSafeLog("[blurpkt-hex] hit=%u qw%u: %016llx %016llx\n", // PROBE-E6a
+                        hitIdx, i, static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi)); // PROBE-E6a
+        } // PROBE-E6a
+    } // PROBE-E6a
+} // PROBE-E6a
+
 void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
 {
     if (!m_rdram || qwCount == 0)
         return;
+    if (blurPktProbeOn()) // PROBE-E6a
+    { // PROBE-E6a
+        uint32_t phys = (srcPhysAddr >= PS2_RAM_SIZE) ? (srcPhysAddr & PS2_RAM_MASK) : srcPhysAddr; // PROBE-E6a
+        uint32_t availQw = (phys < PS2_RAM_SIZE) ? ((PS2_RAM_SIZE - phys) / 16u) : 0u; // PROBE-E6a
+        uint32_t scanQw = std::min(qwCount, std::min(4096u, availQw)); // PROBE-E6a
+        probeE6aScanGifPacket(srcPhysAddr, m_rdram + phys, scanQw, qwCount); // PROBE-E6a
+    } // PROBE-E6a
     const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
     uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
     uint32_t bytesLeft = sizeBytes;
@@ -3928,6 +4011,12 @@ void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
 
 void PS2Memory::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    if (blurPktProbeOn() && data && sizeBytes >= 16u) // PROBE-E6a
+    { // PROBE-E6a
+        uint32_t qwCount = sizeBytes / 16u; // PROBE-E6a
+        uint32_t scanQw = std::min(qwCount, 4096u); // PROBE-E6a
+        probeE6aScanGifPacket(0u, data, scanQw, qwCount); // PROBE-E6a
+    } // PROBE-E6a
     if (m_gifArbiter)
         submitGifPacket(GifPathId::Path3, data, sizeBytes);
     else if (m_gifPacketCallback && data && sizeBytes >= 16)
