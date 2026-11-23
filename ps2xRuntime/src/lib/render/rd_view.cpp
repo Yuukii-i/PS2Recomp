@@ -907,9 +907,11 @@ struct Fg10DrawCache // FEAT-FG10
     float aspectK = 1.0f;
     uint32_t min3dSerial = 0xFFFFFFFFu;
     uint32_t max3dSerial = 0u;
+    uint64_t slotSeq[kRdSlotCount] = {}; // FIX-FG10b
     std::vector<Fg10DrawRec> draws;
 };
 static Fg10DrawCache s_fg10Cache; // FEAT-FG10
+static bool s_fg10bLastExtraReplayed = false; // FIX-FG10b
 struct Fg3BatchPos // FEAT-FG3 // FIX-FG3b
 {
     uint64_t k1 = 0;
@@ -2668,6 +2670,16 @@ bool ps2xRdInterpActive() // FEAT-FG4
     return s_rdInterpOn;
 }
 
+bool ps2xRdFg10ReplayAvailable() // FIX-FG10b
+{
+    return s_rdInterpOn && s_fg10Cache.valid && g_rdGpu.hasCompleteComposition && !g_rdGpu.drawBatches.empty();
+}
+
+bool ps2xRdFg10LastExtraReplayed() // FIX-FG10b
+{
+    return s_fg10bLastExtraReplayed;
+}
+
 void ps2xRdFg4TakeUploadStats(double *msOut, uint64_t *vertsOut) // FIX-FG4c
 {
     if (msOut) *msOut = s_fg4ExtraUploadMsSum;
@@ -2738,7 +2750,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             return false;
         }
         evictedMaxSnap = g_rd3dEvictedMaxSerial;
-        if (g_rd3dSeq != g_rdGpu.last3dSeq || g_rd2dSeq != g_rdGpu.last2dSeq) // FEAT-RD13 // FEAT-RD33
+        if ((!fg10ExtraReq || !g_rdGpu.hasCompleteComposition) && (g_rd3dSeq != g_rdGpu.last3dSeq || g_rd2dSeq != g_rdGpu.last2dSeq)) // FEAT-RD13 // FEAT-RD33 // FIX-FG10b
         {
             uint32_t ringMin = 0u;
             uint32_t ringMax = 0u;
@@ -3754,16 +3766,58 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     const int vh = static_cast<int>(h * scaleY);
     const bool boxClipped = (vw < rw || vh < rh); // FIX-R7
     const float fg10AspectK = (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f; // FEAT-FG10
+    bool fg10bSlotsMatch = true; // FIX-FG10b
+    bool fg10bAnyPending = false; // FIX-FG10b
+    for (size_t i = 0; i < kRdSlotCount; ++i) // FIX-FG10b
+    {
+        if (s_fg10Cache.slotSeq[i] != g_rdGpu.slots[i].seq)
+            fg10bSlotsMatch = false;
+        if (pendingUpload[i])
+            fg10bAnyPending = true;
+    }
+    const bool fg10bNoCache = !s_fg10Cache.valid; // FIX-FG10b
+    const bool fg10bNewGen = !fg10bNoCache && (s_fg10Cache.gen3d != g_rdGpu.last3dSeq); // FIX-FG10b
+    const bool fg10bSeq2d = !fg10bNoCache && (s_fg10Cache.gen2d != g_rdGpu.last2dSeq); // FIX-FG10b
+    const bool fg10bSize = !fg10bNoCache && (s_fg10Cache.rw != rw || s_fg10Cache.rh != rh ||
+        s_fg10Cache.vx != vx || s_fg10Cache.vy != vy || s_fg10Cache.vw != vw || s_fg10Cache.vh != vh); // FIX-FG10b
+    const bool fg10bFlip = !fg10bNoCache && (std::memcmp(s_fg10Cache.flip, g_rdGpu.flip, sizeof(g_rdGpu.flip)) != 0 ||
+        s_fg10Cache.aspectK != fg10AspectK); // FIX-FG10b
+    const bool fg10bSlotsChanged = !fg10bNoCache && !fg10bSlotsMatch; // FIX-FG10b
     const bool fg10Replay = fg10ExtraReq && !needRealign && !g_rdGpu.drawBatches.empty() && // FEAT-FG10
-        g_rdGpu.hasCompleteComposition && s_fg10Cache.valid &&
-        s_fg10Cache.gen3d == g_rdGpu.last3dSeq &&
-        s_fg10Cache.gen2d == g_rdGpu.last2dSeq &&
-        s_fg10Cache.rw == rw && s_fg10Cache.rh == rh &&
-        s_fg10Cache.vx == vx && s_fg10Cache.vy == vy &&
-        s_fg10Cache.vw == vw && s_fg10Cache.vh == vh &&
-        std::memcmp(s_fg10Cache.flip, g_rdGpu.flip, sizeof(g_rdGpu.flip)) == 0 &&
-        s_fg10Cache.aspectK == fg10AspectK;
+        g_rdGpu.hasCompleteComposition && !fg10bNoCache && !fg10bNewGen && !fg10bSeq2d &&
+        !fg10bSize && !fg10bFlip && fg10bSlotsMatch && !fg10bAnyPending; // FIX-FG10b
     const bool fg10Record = s_rdInterpOn && !fg10Replay && !g_rdGpu.drawBatches.empty() && g_rdGpu.hasCompleteComposition; // FEAT-FG10
+    if (s_rdInterpOn) // FIX-FG10b
+    {
+        static uint32_t s_fg10bNoCache = 0u, s_fg10bNewGen = 0u, s_fg10bSeq2d = 0u, s_fg10bSize = 0u;
+        static uint32_t s_fg10bFlip = 0u, s_fg10bSlotsChanged = 0u, s_fg10bPending = 0u, s_fg10bOther = 0u, s_fg10bHit = 0u;
+        static std::chrono::steady_clock::time_point s_fg10bSecStart{};
+        if (fg10ExtraReq)
+        {
+            s_fg10bLastExtraReplayed = fg10Replay;
+            if (fg10Replay) ++s_fg10bHit;
+            else if (fg10bNoCache) ++s_fg10bNoCache;
+            else if (fg10bNewGen) ++s_fg10bNewGen;
+            else if (fg10bSeq2d) ++s_fg10bSeq2d;
+            else if (fg10bSize) ++s_fg10bSize;
+            else if (fg10bFlip) ++s_fg10bFlip;
+            else if (fg10bSlotsChanged) ++s_fg10bSlotsChanged;
+            else if (fg10bAnyPending) ++s_fg10bPending;
+            else ++s_fg10bOther;
+        }
+        const auto nowFg10b = std::chrono::steady_clock::now();
+        if (s_fg10bSecStart.time_since_epoch().count() == 0)
+            s_fg10bSecStart = nowFg10b;
+        else if (nowFg10b - s_fg10bSecStart >= std::chrono::seconds(1))
+        {
+            ps2xSafeLog("[fg10b] reject: noCache=%u newGen=%u seq2d=%u size=%u flip=%u slotsChanged=%u pending=%u other=%u hit=%u\n",
+                        s_fg10bNoCache, s_fg10bNewGen, s_fg10bSeq2d, s_fg10bSize, s_fg10bFlip,
+                        s_fg10bSlotsChanged, s_fg10bPending, s_fg10bOther, s_fg10bHit);
+            s_fg10bNoCache = s_fg10bNewGen = s_fg10bSeq2d = s_fg10bSize = s_fg10bFlip = 0u;
+            s_fg10bSlotsChanged = s_fg10bPending = s_fg10bOther = s_fg10bHit = 0u;
+            s_fg10bSecStart = nowFg10b;
+        }
+    }
     if (drawProfOn && fg10ExtraReq) // FEAT-FG10
     {
         if (fg10Replay)
@@ -6551,6 +6605,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 s_fg10Cache.aspectK = fg10AspectK;
                 s_fg10Cache.min3dSerial = min3dSerial;
                 s_fg10Cache.max3dSerial = max3dSerial;
+                for (size_t i = 0; i < kRdSlotCount; ++i) // FIX-FG10b
+                    s_fg10Cache.slotSeq[i] = g_rdGpu.slots[i].seq;
                 s_fg10Cache.valid = true;
             }
             }

@@ -16,6 +16,8 @@ extern bool ps2xRdInterpActive(); // FEAT-FG4
 extern void ps2xRdInterpSetT(float t); // FEAT-FG4
 extern bool ps2xRdInterpCanExtraPresent(const char **reasonOut); // FEAT-FG4
 extern void ps2xRdFg4TakeUploadStats(double *msOut, uint64_t *vertsOut); // FIX-FG4c
+extern bool ps2xRdFg10ReplayAvailable(); // FIX-FG10b
+extern bool ps2xRdFg10LastExtraReplayed(); // FIX-FG10b
 extern "C" void ps2xRdPace2Take(int64_t *out6); // PROBE-PACE2
 extern "C" __declspec(dllimport) void __stdcall glReadPixels(int, int, int, int, unsigned int, unsigned int, void *); // PROBE-RD35
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
@@ -7797,7 +7799,8 @@ void PS2Runtime::run()
                         static uint32_t s_fg4WaitCount = 0u; // FIX-FG4c
                         static double s_fg4ExtraSwapMsSum = 0.0; // FIX-FG4c
                         static uint32_t s_fg4Overrun = 0u; // FIX-FG4c
-                        static int64_t s_fg4EstExtraTicks = 0; // FIX-FG4c
+                        static int64_t s_fg4EstReplayTicks = 0; // FIX-FG10b
+                        static int64_t s_fg4EstFullTicks = 0; // FIX-FG10b
                         static uint32_t s_fg4SkipLoggedMask = 0u;
 
                         const int64_t qpcFreqFg4 = paceQpcFreq();
@@ -7833,6 +7836,11 @@ void PS2Runtime::run()
                                 {
                                     const int64_t dTicks = static_cast<int64_t>(std::llround(s_fg4SmoothedDMs * static_cast<double>(qpcFreqFg4) / 1000.0));
                                     const int64_t estArrivalQpc = tSeen + dTicks; // FIX-FG4c
+                                    const int64_t marginTicks = qpcFreqFg4 / 2000; // FIX-FG10b: 0.5 ms waitMs margin
+                                    const bool replayAvail = ps2xRdFg10ReplayAvailable(); // FIX-FG10b
+                                    const int64_t estExtraTicks = replayAvail
+                                        ? ((s_fg4EstReplayTicks > 0) ? (s_fg4EstReplayTicks + marginTicks) : marginTicks)
+                                        : s_fg4EstFullTicks; // FIX-FG10b
                                     const int64_t earlyMarginTicks = dTicks / 4; // FIX-FG4b: abandon only if next frame arrived > D*0.25 before planned extra time
                                     const auto newFrameArrived = [&]() -> bool { // FIX-FG4b
                                         return vblankLatchOn ? (g_hostPresentSeq.load(std::memory_order_acquire) != currentPresentSeq)
@@ -7860,7 +7868,7 @@ void PS2Runtime::run()
                                                 ++s_fg4BreakEarly; // FIX-FG4b
                                             break;
                                         }
-                                        if (std::max(paceQpcNow(), targetQpc) + s_fg4EstExtraTicks > estArrivalQpc) // FIX-FG4c
+                                        if (std::max(paceQpcNow(), targetQpc) + estExtraTicks > estArrivalQpc) // FIX-FG4c // FIX-FG10b
                                         {
                                             s_fg4Skipped += (fg4Rate - k);
                                             ++s_fg4Overrun;
@@ -7878,7 +7886,7 @@ void PS2Runtime::run()
                                             break;
                                         }
                                         const int64_t afterWaitQpc = paceQpcNow(); // FIX-FG4c
-                                        if (afterWaitQpc + s_fg4EstExtraTicks > estArrivalQpc) // FIX-FG4c
+                                        if (afterWaitQpc + estExtraTicks > estArrivalQpc) // FIX-FG4c // FIX-FG10b
                                         {
                                             s_fg4Skipped += (fg4Rate - k);
                                             ++s_fg4Overrun;
@@ -7905,7 +7913,10 @@ void PS2Runtime::run()
                                         const int64_t extraSwapT1 = paceQpcNow(); // FIX-FG4c
                                         s_fg4ExtraSwapMsSum += static_cast<double>(extraSwapT1 - extraSwapT0) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
                                         const int64_t thisExtraTicks = (extraDrawT1 - extraDrawT0) + (extraSwapT1 - extraSwapT0); // FIX-FG4c
-                                        s_fg4EstExtraTicks = (s_fg4EstExtraTicks == 0) ? thisExtraTicks : ((s_fg4EstExtraTicks * 3 + thisExtraTicks) / 4); // FIX-FG4c
+                                        if (ps2xRdFg10LastExtraReplayed()) // FIX-FG10b
+                                            s_fg4EstReplayTicks = (s_fg4EstReplayTicks == 0) ? thisExtraTicks : ((s_fg4EstReplayTicks * 3 + thisExtraTicks) / 4);
+                                        else
+                                            s_fg4EstFullTicks = (s_fg4EstFullTicks == 0) ? thisExtraTicks : ((s_fg4EstFullTicks * 3 + thisExtraTicks) / 4);
                                         ++s_fg4ExtraPresents;
                                         if (extraSwapT1 > estArrivalQpc && (k + 1u) < fg4Rate) // FIX-FG4c
                                         {
