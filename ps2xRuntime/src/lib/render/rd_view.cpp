@@ -96,6 +96,7 @@ extern uint64_t ps2xRdMainXyoff(); // FEAT-RD23
 extern bool ps2xRdIsFbFeedback(uint32_t serial); // FEAT-RD28b
 extern uint32_t ps2xRdFbPageRanges(uint32_t *first, uint32_t *last); // FIX-RD79
 extern bool ps2xRdGetClutRgba256(uint64_t tex0, uint64_t texa, uint32_t out[256]); // FIX-RD82B
+extern uint64_t g_ps2xGuestFlipSeq; // PROBE-E7b
 static uint32_t s_fbFeedbackSkipped = 0u; // FEAT-RD28b
 static uint32_t s_fbTexUsed = 0u; // FIX-RD79
 static uint32_t s_fbTexCopies = 0u; // FIX-RD79
@@ -104,6 +105,8 @@ static uint32_t s_fbCopySkip = 0u; // FIX-RD87
 static unsigned int s_prevTexId = 0u; // FIX-RD79
 static int s_prevW = 0, s_prevH = 0; // FXC1
 static bool s_prevFilled = false; // FXC1
+static uint64_t s_prevFlipSeq = 0ull; // PROBE-E7b
+static uint64_t s_publishedSinceFill = 0ull; // PROBE-E7b
 static unsigned int s_lastSceneTexId = 0u; // FIX-RD85
 static bool s_lastSceneFilled = false; // FIX-RD85
 static uint32_t s_fbTexLastCopies = 0u; // FIX-RD85
@@ -1188,6 +1191,7 @@ void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indice
     if (g_rd3dCount < kRdSlotCount)
         ++g_rd3dCount;
     g_rdEverPublished = true;
+    ++s_publishedSinceFill; // PROBE-E7b
 }
 
 void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ) // FEAT-RD2 // FEAT-RD11
@@ -1300,6 +1304,7 @@ void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, u
     g_rd2dFrames[0].valid = true;
     ++g_rd2dSeq;
     g_rdEverPublished = true;
+    ++s_publishedSinceFill; // PROBE-E7b
 }
 
 void ps2xRdSetPresentSize(uint32_t w, uint32_t h) // FEAT-RD8
@@ -2559,6 +2564,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     static uint32_t s_fbDrawCall = 0;
     static std::chrono::steady_clock::time_point s_fbSecStart{};
     static uint32_t s_fbLinesSec = 0;
+    static uint32_t s_prevAgeMin = 0u; // PROBE-E7b
+    static uint32_t s_prevAgeMax = 0u; // PROBE-E7b
+    static uint64_t s_prevAgeSum = 0ull; // PROBE-E7b
+    static uint32_t s_prevAgeCount = 0u; // PROBE-E7b
     if (s_fbLog)
     {
         ++s_fbDrawCall;
@@ -2569,6 +2578,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         }
         else if (nowFb - s_fbSecStart >= std::chrono::seconds(1))
         {
+            const double avgAge = (s_prevAgeCount > 0u) ? (static_cast<double>(s_prevAgeSum) / static_cast<double>(s_prevAgeCount)) : 0.0; // PROBE-E7b
+            ps2xSafeLog("[prevage] min=%u avg=%.1f max=%u n=%u\n", // PROBE-E7b
+                        s_prevAgeMin, avgAge, s_prevAgeMax, s_prevAgeCount); // PROBE-E7b
+            s_prevAgeMin = 0u; // PROBE-E7b
+            s_prevAgeMax = 0u; // PROBE-E7b
+            s_prevAgeSum = 0ull; // PROBE-E7b
+            s_prevAgeCount = 0u; // PROBE-E7b
             s_fbSecStart = nowFb;
             s_fbLinesSec = 0;
         }
@@ -2583,18 +2599,15 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             static_cast<float>(g_rdPresentW.load(std::memory_order_relaxed)),
             static_cast<float>(g_rdPresentH.load(std::memory_order_relaxed))
         };
-        auto isFadeCandidate = [&](const Rd2DBatch &b) -> bool // PROBE-E5a
+        auto isFadeCandidate = [&](const Rd2DBatch &b) -> int // PROBE-E5a // PROBE-E7a
         {
             if (b.count == 0u)
-                return false;
+                return 0;
             if (((b.prim >> 4) & 1ull) != 0ull)
-                return false;
-            const uint64_t primType = b.prim & 7ull;
-            if (primType != 6ull && b.count != 6u)
-                return false;
+                return 0;
             const float screenArea = (fbSize[0] > 0.0f && fbSize[1] > 0.0f) ? (fbSize[0] * fbSize[1]) : 0.0f;
-            if (screenArea <= 0.0f)
-                return false;
+            if (screenArea <= 0.0f || fbSize[0] <= 0.0f || fbSize[1] <= 0.0f)
+                return 0;
             float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
             const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size());
             for (size_t vi = b.first; vi < e2; ++vi)
@@ -2604,16 +2617,28 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 y0 = std::min(y0, v.pos[1]); y1 = std::max(y1, v.pos[1]);
             }
             if (x1 < x0 || y1 < y0)
-                return false;
+                return 0;
             const float cx0 = std::max(0.0f, std::min(x0, fbSize[0]));
             const float cx1 = std::max(0.0f, std::min(x1, fbSize[0]));
             const float cy0 = std::max(0.0f, std::min(y0, fbSize[1]));
             const float cy1 = std::max(0.0f, std::min(y1, fbSize[1]));
-            const float clampedArea = (cx1 >= cx0 && cy1 >= cy0) ? ((cx1 - cx0) * (cy1 - cy0)) : 0.0f;
-            return clampedArea >= 0.85f * screenArea;
+            const float clampedW = (cx1 >= cx0) ? (cx1 - cx0) : 0.0f;
+            const float clampedH = (cy1 >= cy0) ? (cy1 - cy0) : 0.0f;
+            const float clampedArea = clampedW * clampedH;
+            const uint64_t primType = b.prim & 7ull;
+            if ((primType == 6ull || b.count == 6u) && clampedArea >= 0.85f * screenArea)
+                return 1;
+            const bool abe = ((b.prim >> 6) & 1ull) != 0ull;
+            const bool coversW = (clampedW >= 0.85f * fbSize[0]) || (fbSize[0] >= 512.0f && clampedW >= 0.85f * 512.0f);
+            const bool coversH = (clampedH >= 0.04f * fbSize[1]) || (fbSize[1] >= 448.0f && clampedH >= 0.04f * 448.0f);
+            if (abe && coversW && coversH)
+                return 2; // PROBE-E7a: cinematic letterbox bars candidate
+            return 0;
         };
-        auto logFadeCandidate = [&](size_t idx, const Rd2DBatch &b) // PROBE-E5a
+        auto logFadeCandidate = [&](size_t idx, const Rd2DBatch &b, int cand = 0) // PROBE-E5a // PROBE-E7a
         {
+            if (cand == 0) // PROBE-E7a
+                cand = isFadeCandidate(b); // PROBE-E7a
             if (s_fadeLinesSec < 120u)
             {
                 ++s_fadeLinesSec;
@@ -2627,13 +2652,26 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                           static_cast<uint32_t>(v0.rgba[0]);
                 }
                 const unsigned int abe = static_cast<unsigned int>((b.prim >> 6) & 1ull);
-                ps2xSafeLog("[fadeq] call=%u i=%zu abe=%u alpha=0x%llx col=0x%08x test=0x%llx zbuf=0x%llx frame=0x%llx fate=?\n",
-                            s_fadeDrawCall, idx, abe,
-                            static_cast<unsigned long long>(b.alpha),
-                            col,
-                            static_cast<unsigned long long>(b.test),
-                            static_cast<unsigned long long>(b.zbuf),
-                            static_cast<unsigned long long>(b.frame));
+                if (cand == 2) // PROBE-E7a
+                {
+                    ps2xSafeLog("[fadeq] call=%u i=%zu abe=%u alpha=0x%llx col=0x%08x test=0x%llx zbuf=0x%llx frame=0x%llx bar=1 fate=?\n",
+                                s_fadeDrawCall, idx, abe,
+                                static_cast<unsigned long long>(b.alpha),
+                                col,
+                                static_cast<unsigned long long>(b.test),
+                                static_cast<unsigned long long>(b.zbuf),
+                                static_cast<unsigned long long>(b.frame));
+                }
+                else
+                {
+                    ps2xSafeLog("[fadeq] call=%u i=%zu abe=%u alpha=0x%llx col=0x%08x test=0x%llx zbuf=0x%llx frame=0x%llx fate=?\n",
+                                s_fadeDrawCall, idx, abe,
+                                static_cast<unsigned long long>(b.alpha),
+                                col,
+                                static_cast<unsigned long long>(b.test),
+                                static_cast<unsigned long long>(b.zbuf),
+                                static_cast<unsigned long long>(b.frame));
+                }
             }
         };
         auto isFbCandidate = [](const Rd2DBatch &b) -> bool // PROBE-E5b
@@ -2647,6 +2685,16 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         };
         auto logFbCandidate = [&](size_t idx, const Rd2DBatch &b) // PROBE-E5b
         {
+            const unsigned int fix = static_cast<unsigned int>((b.alpha >> 32) & 0xFFull);
+            const uint64_t prevAge = g_ps2xGuestFlipSeq - s_prevFlipSeq; // PROBE-E7b
+            if ((b.alpha & 0xFFull) == 0x64ull && fix != 0u) // PROBE-E7b
+            {
+                const uint32_t age = static_cast<uint32_t>(prevAge); // PROBE-E7b
+                if (s_prevAgeCount == 0u || age < s_prevAgeMin) s_prevAgeMin = age; // PROBE-E7b
+                if (s_prevAgeCount == 0u || age > s_prevAgeMax) s_prevAgeMax = age; // PROBE-E7b
+                s_prevAgeSum += age; // PROBE-E7b
+                ++s_prevAgeCount; // PROBE-E7b
+            }
             if (s_fbLinesSec < 100u)
             {
                 ++s_fbLinesSec;
@@ -2671,7 +2719,6 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                            (static_cast<uint32_t>(v0.rgba[1]) << 8) |
                            static_cast<uint32_t>(v0.rgba[0]);
                 }
-                const unsigned int fix = static_cast<unsigned int>((b.alpha >> 32) & 0xFFull);
                 const uint64_t mode = b.alpha & 0xFF000000FFull;
                 const uint32_t psm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full);
                 const uint32_t tw = static_cast<uint32_t>((b.tex0 >> 26) & 0xFull);
@@ -2681,7 +2728,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const int afail = (ate && atst != 1u) ? static_cast<int>((b.test >> 12) & 3ull) : 0;
                 const uint32_t zte = static_cast<uint32_t>((b.test >> 16) & 1ull);
                 const uint32_t ztst = static_cast<uint32_t>((b.test >> 17) & 3ull);
-                ps2xSafeLog("[fbq] call=%u i=%zu cnt=%u alpha=0x%llx FIX=0x%02x mode=0x%llx tex0=0x%llx psm=%u tw=%u th=%u test=0x%llx atst=%u afail=%d zte/ztst=%u/%u frame=0x%llx bbox=%d,%d-%d,%d col0=0x%08x fate=?\n",
+                ps2xSafeLog("[fbq] call=%u i=%zu cnt=%u alpha=0x%llx FIX=0x%02x mode=0x%llx tex0=0x%llx psm=%u tw=%u th=%u test=0x%llx atst=%u afail=%d zte/ztst=%u/%u frame=0x%llx bbox=%d,%d-%d,%d col0=0x%08x prevAge=%llu flip=%llu fate=?\n",
                             s_fbDrawCall, idx, static_cast<unsigned int>(b.count),
                             static_cast<unsigned long long>(b.alpha),
                             fix,
@@ -2692,7 +2739,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             atst, afail, zte, ztst,
                             static_cast<unsigned long long>(b.frame),
                             bx0, by0, bx1, by1,
-                            col0);
+                            col0,
+                            static_cast<unsigned long long>(prevAge), // PROBE-E7b
+                            static_cast<unsigned long long>(g_ps2xGuestFlipSeq)); // PROBE-E7b
             }
         };
         if (rdgfx::hasUniform(rdgfx::Uniform::FbSize)) // RDG1
@@ -3341,16 +3390,17 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             while (i2d < n2d && (drawAll || (g_rdGpu.local2dBatches[i2d].afterSerial & 0x3FFFFFFFu) < maxS))
             {
                 const Rd2DBatch &b0 = g_rdGpu.local2dBatches[i2d];
-                // PROBE-E5a: fade-quad probe
+                // PROBE-E5a: fade-quad probe // PROBE-E7a
                 if (s_fadeLog)
                 {
                     const uint64_t primType = b0.prim & 7ull;
                     if (primType == 6ull)
                         ++s_fadeSpritesSec;
-                    if (isFadeCandidate(b0))
+                    const int cand = isFadeCandidate(b0); // PROBE-E7a
+                    if (cand != 0) // PROBE-E7a
                     {
                         ++s_fadeCandidatesSec;
-                        logFadeCandidate(i2d, b0);
+                        logFadeCandidate(i2d, b0, cand); // PROBE-E7a
                     }
                 }
                 // PROBE-E5b: fb-quad probe
@@ -4552,13 +4602,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             for (size_t k = i2d; k < g_rdGpu.local2dBatches.size(); ++k)
             {
                 const Rd2DBatch &bk = g_rdGpu.local2dBatches[k];
-                if (s_fadeLog && isFadeCandidate(bk)) // PROBE-E5a
+                const int cand = isFadeCandidate(bk); // PROBE-E7a
+                if (s_fadeLog && cand != 0) // PROBE-E5a // PROBE-E7a
                 {
                     const uint64_t ptype = bk.prim & 7ull;
                     if (ptype == 6ull)
                         ++s_fadeSpritesSec;
                     ++s_fadeCandidatesSec;
-                    logFadeCandidate(k, bk);
+                    logFadeCandidate(k, bk, cand); // PROBE-E7a
                 }
                 if (s_fbLog && isFbCandidate(bk)) // PROBE-E5b
                 {
@@ -4767,7 +4818,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdgfx::endBackbufferCopy(copyState); // RDG1
             };
             if (!palDrawnThisFrame) // FIX-RD86
+            {
                 copyToFbTarget(s_prevTexId, s_prevFbo, s_prevW, s_prevH, s_prevFilled, s_fbTexCopies); // FIX-RD85B
+                s_prevFlipSeq = g_ps2xGuestFlipSeq; // PROBE-E7b
+                s_publishedSinceFill = 0ull; // PROBE-E7b
+            }
             else // FIX-RD86
                 ++s_fbTexFrozen; // FIX-RD86
             if (rdFbTexLastOn() && drawn3dThisFrame >= rdFbTexLast3dMin()) // FIX-RD85 // FIX-RD85B

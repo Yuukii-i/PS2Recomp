@@ -1594,6 +1594,7 @@ struct GwScope // PROBE-GW
 };
 } // namespace
 
+uint64_t g_ps2xGuestFlipSeq = 0ull; // PROBE-E7b
 std::atomic<uint64_t> g_hostPresentSeq{0};
 // PROBE-GT: present-path accounting (0=skip_nokick, 1=coalesce_latch, 2=skip_empty, 3=coalesce_main, 4=latched)
 extern "C" bool ps2_gt_enabled();
@@ -3791,6 +3792,7 @@ void GS::latchHostPresentationFrame()
         ps2_gt_count(2, 1); // PROBE-GT: skip_empty
     }
 
+    ++g_ps2xGuestFlipSeq; // PROBE-E7b
     if (s_rdCensusOn) // PROBE-E0
         rdCensusFlip(displayFbp);
 
