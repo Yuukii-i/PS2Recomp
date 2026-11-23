@@ -2215,6 +2215,7 @@ static inline bool blurVifProbeOn() // PROBE-E6c
     return s_on; // PROBE-E6c
 } // PROBE-E6c
  // PROBE-E6c
+extern "C" void ps2_getEeDebugRegs(uint32_t *pc, uint32_t *ra, uint32_t *sp, uint32_t *gp); // PROBE-E8a
 static void probeE6cScanVifBlock(uint32_t tagAddr, uint32_t dataAddr, uint32_t qwc, const uint8_t *data, uint32_t maxAvailQw = 8192u, uint32_t srcPhys = 0u) // PROBE-E6c
 { // PROBE-E6c
     if (!data || qwc == 0u || maxAvailQw == 0u) // PROBE-E6c
@@ -2275,6 +2276,21 @@ static void probeE6cScanVifBlock(uint32_t tagAddr, uint32_t dataAddr, uint32_t q
                     tagAddr, dataPhysAddr, qwc, off, // PROBE-E6c
                     before[0], before[1], before[2], before[3], // PROBE-E6c
                     after[0], after[1], after[2], after[3], after[4], after[5], after[6], after[7]); // PROBE-E6c
+        uint32_t eePc = 0, eeRa = 0, eeSp = 0, eeGp = 0; // PROBE-E8a
+        ps2_getEeDebugRegs(&eePc, &eeRa, &eeSp, &eeGp); // PROBE-E8a
+        const uint8_t fixByte = (off + 0x44u < totalAvailBytes) ? data[off + 0x44u] : 0u; // PROBE-E8a
+        const uint32_t pktAddr = dataPhysAddr + off; // PROBE-E8a
+        ps2xSafeLog("[blurwho] pc=0x%08x ra=0x%08x sp=0x%08x gp=0x%08x fix=0x%02x pktaddr=0x%08x\n", // PROBE-E8a
+                    eePc, eeRa, eeSp, eeGp, static_cast<unsigned int>(fixByte), pktAddr); // PROBE-E8a
+        const uint32_t rawStart = (off >= 0x30u) ? (off - 0x30u) : 0u; // PROBE-E8a
+        char rawHex[208 * 2 + 1]; // PROBE-E8a
+        for (uint32_t i = 0; i < 208u; ++i) // PROBE-E8a
+        { // PROBE-E8a
+            const uint8_t b = (rawStart + i < totalAvailBytes) ? data[rawStart + i] : 0u; // PROBE-E8a
+            std::snprintf(rawHex + i * 2, 3, "%02x", b); // PROBE-E8a
+        } // PROBE-E8a
+        rawHex[208 * 2] = '\0'; // PROBE-E8a
+        ps2xSafeLog("[blurraw] %s\n", rawHex); // PROBE-E8a
     } // PROBE-E6c
 } // PROBE-E6c
 

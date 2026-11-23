@@ -574,6 +574,32 @@ static std::array<uint32_t, 5> g_lastDistinctFns = {};
 extern "C" uint32_t probe_getNewestDistinctFn() {
     return g_lastDistinctFns[0];
 }
+static std::atomic<PS2Runtime*> s_activeRuntime{nullptr}; // PROBE-E8a
+extern "C" void ps2_getEeDebugRegs(uint32_t *pc, uint32_t *ra, uint32_t *sp, uint32_t *gp) // PROBE-E8a
+{ // PROBE-E8a
+    PS2Runtime *rt = s_activeRuntime.load(std::memory_order_relaxed); // PROBE-E8a
+    uint32_t curPc = 0, curRa = 0, curSp = 0, curGp = 0; // PROBE-E8a
+    if (rt) // PROBE-E8a
+    { // PROBE-E8a
+        curPc = rt->m_debugPc.load(std::memory_order_relaxed); // PROBE-E8a
+        curRa = rt->m_debugRa.load(std::memory_order_relaxed); // PROBE-E8a
+        curSp = rt->m_debugSp.load(std::memory_order_relaxed); // PROBE-E8a
+        curGp = rt->m_debugGp.load(std::memory_order_relaxed); // PROBE-E8a
+        const uint32_t liveRa = static_cast<uint32_t>(_mm_extract_epi32(rt->cpu().r[31], 0)); // PROBE-E8a
+        const uint32_t liveSp = static_cast<uint32_t>(_mm_extract_epi32(rt->cpu().r[29], 0)); // PROBE-E8a
+        const uint32_t liveGp = static_cast<uint32_t>(_mm_extract_epi32(rt->cpu().r[28], 0)); // PROBE-E8a
+        if (liveRa) curRa = liveRa; // PROBE-E8a
+        if (liveSp) curSp = liveSp; // PROBE-E8a
+        if (liveGp) curGp = liveGp; // PROBE-E8a
+    } // PROBE-E8a
+    const uint32_t fn = probe_getNewestDistinctFn(); // PROBE-E8a
+    if (fn != 0u) // PROBE-E8a
+        curPc = fn; // PROBE-E8a
+    if (pc) *pc = curPc; // PROBE-E8a
+    if (ra) *ra = curRa; // PROBE-E8a
+    if (sp) *sp = curSp; // PROBE-E8a
+    if (gp) *gp = curGp; // PROBE-E8a
+} // PROBE-E8a
 static std::atomic<bool> g_mpegFunctionCalled{false};
 std::atomic<uint32_t> g_trackedCurScene{0};
 std::atomic<uint32_t> g_trackedCurVtable{0};
@@ -1728,6 +1754,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
 extern void ps2xLoadConfig(); // FEAT-CFG
 PS2Runtime::PS2Runtime()
 {
+    s_activeRuntime.store(this, std::memory_order_release); // PROBE-E8a
     ps2xLoadConfig(); // FEAT-CFG
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
@@ -1842,6 +1869,7 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
 
 PS2Runtime::~PS2Runtime()
 {
+    s_activeRuntime.store(nullptr, std::memory_order_release); // PROBE-E8a
     try
     {
         requestStop();
