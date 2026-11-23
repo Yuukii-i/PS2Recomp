@@ -2759,6 +2759,27 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             s_fbLinesSec = 0;
         }
     }
+    // PROBE-E9a: hub panorama batch probe
+    static const bool s_panoLog = []{
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_PANOLOG");
+        return e && e[0] == '1';
+    }();
+    static std::chrono::steady_clock::time_point s_panoSecStart{}; // PROBE-E9a
+    static uint32_t s_panoLinesSec = 0; // PROBE-E9a
+    static std::vector<std::tuple<uint32_t, uint64_t, uint64_t, uint32_t>> s_panoSeenThisSec; // PROBE-E9a
+    if (s_panoLog) // PROBE-E9a
+    {
+        static bool s_panoShaderLogged = false;
+        if (!s_panoShaderLogged)
+        {
+            s_panoShaderLogged = true;
+            ps2xSafeLog("[pano-shader] if (!pass) discard;\n");
+            ps2xSafeLog("[pano-shader] a_ps2 = (uTcc != 0) ? (t_a_ps2 * vc_a / 128.0) : vc_a;\n");
+            ps2xSafeLog("[pano-shader] finalColor = vec4(rgb, (uFixAlpha >= 0.0) ? min(uFixAlpha, 1.0) : min(a_ps2 / 128.0, 1.0));\n");
+        }
+    }
     if ((!g_rdGpu.drawBatches.empty() || g_rdGpu.gpu2dVertCount > 0) && g_rdGpu.shaderReady) // FEAT-RD8 // FEAT-RD14 // RDG1
     {
         rdgfx::enableShader(); // RDG1
@@ -4429,6 +4450,132 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 ++s_texDrawn3dSec;
             if (batch.kickSerial < min3dSerial) min3dSerial = batch.kickSerial; // PROBE-RD62
             if (batch.kickSerial > max3dSerial) max3dSerial = batch.kickSerial; // PROBE-RD62
+            auto probeE9aLog = [&]() { // PROBE-E9a
+                if (!s_panoLog)
+                    return;
+                const uint32_t curTbp = static_cast<uint32_t>(tex0 & 0x3FFFull);
+                const uint32_t bTbp = static_cast<uint32_t>(batch.tex0 & 0x3FFFull);
+                const uint32_t curTexW = 1u << ((tex0 >> 26) & 0xFull);
+                const uint32_t bTexW = 1u << ((batch.tex0 >> 26) & 0xFull);
+                const bool isTbpMatch = (curTbp == 0x3300u || bTbp == 0x3300u);
+                const bool isAlphaMatch = (((alpha & 0xFFull) == 0x44ull || (batch.alpha & 0xFFull) == 0x44ull) &&
+                                           (curTexW == 256u || bTexW == 256u) && atst == 0u && ate == 1u);
+                if (!isTbpMatch && !isAlphaMatch)
+                    return;
+
+                const auto now = std::chrono::steady_clock::now();
+                if (s_panoSecStart.time_since_epoch().count() == 0)
+                {
+                    s_panoSecStart = now;
+                }
+                else if (now - s_panoSecStart >= std::chrono::seconds(1))
+                {
+                    s_panoSecStart = now;
+                    s_panoLinesSec = 0;
+                    s_panoSeenThisSec.clear();
+                }
+                if (s_panoLinesSec >= 40u)
+                    return;
+
+                const auto key = std::make_tuple(curTbp, test, alpha, batch.count);
+                for (const auto &k : s_panoSeenThisSec)
+                {
+                    if (k == key)
+                        return;
+                }
+                s_panoSeenThisSec.push_back(key);
+                ++s_panoLinesSec;
+
+                int sk = -1, dk = -1, eq = -1;
+                if (blendState > 0)
+                {
+                    const int code = blendState - 1;
+                    sk = code / 128;
+                    dk = (code / 16) & 7;
+                    eq = code & 3;
+                }
+
+                const std::vector<RdVert> &pv = !g_rd24Verts[db.slotIdx].empty() ? g_rd24Verts[db.slotIdx] : g_rdGpu.pendingVerts[db.slotIdx];
+                const std::vector<uint16_t> &pi = g_rd24Idx[db.slotIdx];
+                const std::vector<uint32_t> &pind = g_rdGpu.pendingIndices[db.slotIdx];
+                uint32_t vi0 = 0, vi1 = 0;
+                bool haveV0 = false, haveV1 = false;
+                if (!pi.empty())
+                {
+                    if (batch.first < pi.size())
+                    {
+                        vi0 = static_cast<uint32_t>(pi[batch.first]) + batch.baseVertex;
+                        haveV0 = (vi0 < pv.size());
+                    }
+                    if (batch.first + 1 < pi.size())
+                    {
+                        vi1 = static_cast<uint32_t>(pi[batch.first + 1]) + batch.baseVertex;
+                        haveV1 = (vi1 < pv.size());
+                    }
+                }
+                else if (!pind.empty())
+                {
+                    if (batch.first < pind.size())
+                    {
+                        vi0 = pind[batch.first] + batch.baseVertex;
+                        haveV0 = (vi0 < pv.size());
+                    }
+                    if (batch.first + 1 < pind.size())
+                    {
+                        vi1 = pind[batch.first + 1] + batch.baseVertex;
+                        haveV1 = (vi1 < pv.size());
+                    }
+                }
+                else
+                {
+                    if (batch.first < pv.size())
+                    {
+                        vi0 = batch.first;
+                        haveV0 = true;
+                    }
+                    if (batch.first + 1 < pv.size())
+                    {
+                        vi1 = batch.first + 1;
+                        haveV1 = true;
+                    }
+                }
+
+                auto getFogU8 = [](float f) -> uint32_t {
+                    if (f <= 0.0f) return 0u;
+                    if (f <= 1.0f) return static_cast<uint32_t>(f * 255.0f + 0.5f);
+                    return static_cast<uint32_t>(f + 0.5f);
+                };
+                const uint32_t F0 = haveV0 ? getFogU8(pv[vi0].fog) : 0u;
+                const uint32_t F1 = haveV1 ? getFogU8(pv[vi1].fog) : 0u;
+                const uint8_t r0 = haveV0 ? pv[vi0].rgba[0] : 0;
+                const uint8_t g0 = haveV0 ? pv[vi0].rgba[1] : 0;
+                const uint8_t b0 = haveV0 ? pv[vi0].rgba[2] : 0;
+                const uint8_t a0 = haveV0 ? pv[vi0].rgba[3] : 0;
+                const int fogOn = (haveV0 && F0 < 255u) || (haveV1 && F1 < 255u) ? 1 : 0;
+
+                ps2xSafeLog("[pano] tbp=%x test=%llx atst=%u afail=%u ate=%u blendState=%d sk=%d dk=%d eq=%d fixAlpha=%f maskPacked=%x depthMask=%d fogOn=%d fogcol=%x fogNearFar=none verts=%u F0=%u F1=%u texAlphaMode=tcc%d_tfx%d uAtst=%d uAref=%d uAfail=%u uFixAlpha=%f uTex=%d uTfx=%d uTcc=%d rgba0=%02x%02x%02x%02x\n",
+                            curTbp,
+                            static_cast<unsigned long long>(test),
+                            atst,
+                            static_cast<unsigned int>(afail),
+                            ate,
+                            blendState,
+                            sk, dk, eq,
+                            fixAlpha,
+                            static_cast<unsigned int>(g_rdMaskCur),
+                            g_rdc.depthMask,
+                            fogOn,
+                            static_cast<unsigned int>(batch.fogcol),
+                            batch.count,
+                            F0, F1,
+                            tccVal, tfxVal,
+                            atstVal, arefVal,
+                            static_cast<unsigned int>(afail),
+                            fixAlpha,
+                            texVal, tfxVal, tccVal,
+                            r0, g0, b0, a0);
+            };
+
             if (afail != 0) // FEAT-RD30
             {
                 const int sMask = g_rdMaskCur;
@@ -4438,15 +4585,18 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (atst == 0u)
                 {
                     rdApplyAfailWrites(afail, zOff, sMask);
+                    probeE9aLog(); // PROBE-E9a
                     rdDrawElems(batch.first, batch.count); // FIX-RD90
                     ++g_rdAfailNever;
                 }
                 else
                 {
+                    probeE9aLog(); // PROBE-E9a
                     rdDrawElems(batch.first, batch.count); // FIX-RD90
                     if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) // RDG1
                         rdSetUniformInt(rdgfx::Uniform::AtInvert, one); // RDG1
                     rdApplyAfailWrites(afail, zOff, sMask);
+                    probeE9aLog(); // PROBE-E9a
                     rdDrawElems(batch.first, batch.count); // FIX-RD90
                     if (rdgfx::hasUniform(rdgfx::Uniform::AtInvert)) // RDG1
                         rdSetUniformInt(rdgfx::Uniform::AtInvert, zero); // RDG1
@@ -4456,7 +4606,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdDepthMask(sDepth != 0);
             }
             else
+            {
+                probeE9aLog(); // PROBE-E9a
                 rdDrawElems(batch.first, batch.count); // FEAT-RD14 // FIX-RD90
+            }
             }
         }
         if (pace2On) // PROBE-PACE2
