@@ -562,6 +562,117 @@ struct RdGpuState
 };
 RdGpuState g_rdGpu;
 
+struct Fg2bKeys // PROBE-FG2b // FEAT-FG3
+{
+    uint64_t k[3];
+};
+
+static inline void rdFnvMixBytes(uint64_t &h, const void *data, size_t len) // PROBE-FG2b // FEAT-FG3
+{
+    const uint8_t *p = static_cast<const uint8_t *>(data);
+    for (size_t i = 0; i < len; ++i)
+    {
+        h ^= static_cast<uint64_t>(p[i]);
+        h *= 1099511628211ull;
+    }
+}
+
+static inline Fg2bKeys rdComputeBatchKeys(const RdBatch &b, const std::vector<RdVert> &vList, const std::vector<uint32_t> &iList) // PROBE-FG2b // FEAT-FG3
+{
+    Fg2bKeys out{};
+    uint64_t h3 = 14695981039346656037ull;
+    rdFnvMixBytes(h3, &b.tex0, sizeof(b.tex0));
+    rdFnvMixBytes(h3, &b.prim, sizeof(b.prim));
+    rdFnvMixBytes(h3, &b.count, sizeof(b.count));
+    out.k[2] = h3;
+
+    uint64_t hBase = h3;
+    rdFnvMixBytes(hBase, &b.alpha, sizeof(b.alpha));
+    rdFnvMixBytes(hBase, &b.test, sizeof(b.test));
+    uint64_t h1 = hBase;
+    uint64_t h2 = hBase;
+    if (b.count > 0u)
+    {
+        const bool useIdx = !iList.empty() && static_cast<size_t>(b.first) + b.count <= iList.size();
+        const uint32_t viFirst = (useIdx ? iList[b.first] : b.first) + b.baseVertex;
+        const uint32_t viLast = (useIdx ? iList[b.first + b.count - 1u] : (b.first + b.count - 1u)) + b.baseVertex;
+        if (viFirst < vList.size())
+        {
+            rdFnvMixBytes(h1, vList[viFirst].rgba, sizeof(vList[viFirst].rgba));
+            rdFnvMixBytes(h1, vList[viFirst].uv, sizeof(vList[viFirst].uv));
+            rdFnvMixBytes(h2, vList[viFirst].uv, sizeof(vList[viFirst].uv));
+        }
+        if (viLast < vList.size())
+        {
+            rdFnvMixBytes(h1, vList[viLast].rgba, sizeof(vList[viLast].rgba));
+            rdFnvMixBytes(h1, vList[viLast].uv, sizeof(vList[viLast].uv));
+            rdFnvMixBytes(h2, vList[viLast].uv, sizeof(vList[viLast].uv));
+        }
+    }
+    out.k[0] = h1;
+    out.k[1] = h2;
+    return out;
+}
+
+static const bool s_rdInterpOn = []() { // FEAT-FG3
+    const char *e = std::getenv("PS2X_RD_INTERP");
+    return e && e[0] == '1';
+}();
+static float s_fg3T = []() { // FEAT-FG3
+    const char *e = std::getenv("PS2X_RD_INTERP_T");
+    return (e && *e) ? static_cast<float>(std::atof(e)) : 0.5f;
+}();
+struct Fg3BatchPos // FEAT-FG3 // FIX-FG3b
+{
+    uint64_t k1 = 0;
+    uint64_t k2 = 0;
+    uint32_t vertCount = 0;
+    uint32_t xyzOffset = 0; // FIX-FG3b: offset into flat s_fg3PrevGenXyz
+};
+static std::vector<Fg3BatchPos> s_fg3PrevGen; // FEAT-FG3
+static std::vector<float> s_fg3PrevGenXyz; // FIX-FG3b
+static std::vector<RdVert> s_fg3BaseVerts[kRdSlotCount]; // FEAT-FG3
+static std::vector<float> s_fg3PrevPos[kRdSlotCount]; // FEAT-FG3
+static std::vector<uint8_t> s_fg3VertMatched[kRdSlotCount]; // FIX-FG3b
+static double s_fg3LastApplyUs = 0.0; // FEAT-FG3
+static std::chrono::steady_clock::time_point s_fg3SecStart{}; // FEAT-FG3
+static uint32_t s_fg3Slots = 0u; // FEAT-FG3
+static uint32_t s_fg3Batches = 0u; // FEAT-FG3
+static uint32_t s_fg3Matched = 0u; // FEAT-FG3
+static uint32_t s_fg3TeleportSkipped = 0u; // FEAT-FG3
+static uint32_t s_fg3InterpVerts = 0u; // FEAT-FG3
+static uint32_t s_fg3TotalVerts = 0u; // FEAT-FG3
+
+static void rdInterpApply(float t, const bool uploadedThisGen[kRdSlotCount]) // FEAT-FG3 // FIX-FG3b
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    if (t != 1.0f) // FIX-FG3b: t==1.0f leaves pendingVerts bit-identical to non-interp
+    {
+        for (size_t idx = 0; idx < kRdSlotCount; ++idx)
+        {
+            if (!uploadedThisGen[idx])
+                continue;
+            const size_t n = s_fg3BaseVerts[idx].size();
+            if (n == 0u || s_fg3PrevPos[idx].size() != n * 3u || g_rdGpu.pendingVerts[idx].size() != n)
+                continue;
+            RdVert * __restrict dst = g_rdGpu.pendingVerts[idx].data();
+            const RdVert * __restrict base = s_fg3BaseVerts[idx].data();
+            const float * __restrict prev = s_fg3PrevPos[idx].data();
+            for (size_t vi = 0; vi < n; ++vi)
+            {
+                const float px = prev[vi * 3u + 0u];
+                const float py = prev[vi * 3u + 1u];
+                const float pz = prev[vi * 3u + 2u];
+                dst[vi].pos[0] = px + (base[vi].pos[0] - px) * t;
+                dst[vi].pos[1] = py + (base[vi].pos[1] - py) * t;
+                dst[vi].pos[2] = pz + (base[vi].pos[2] - pz) * t;
+            }
+        }
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    s_fg3LastApplyUs = static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()) * 0.001;
+}
+
 // FEAT-RD8: Shared RD7 blend state decoder for 3D and 2D batches.
 int computeRdBlend(uint64_t prim, uint64_t alpha, uint64_t &unsupBlend, uint64_t &approxAd, float &fixAlpha)
 {
@@ -1105,6 +1216,17 @@ void ps2xRdResetState() // FEAT-RD49
         g_rd3dRing[i].verts.clear();
         g_rd3dRing[i].indices.clear();
         g_rd3dRing[i].batches.clear();
+        if (s_rdInterpOn) // FIX-FG3b
+        {
+            s_fg3BaseVerts[i].clear();
+            s_fg3PrevPos[i].clear();
+            s_fg3VertMatched[i].clear();
+        }
+    }
+    if (s_rdInterpOn) // FIX-FG3b
+    {
+        s_fg3PrevGen.clear();
+        s_fg3PrevGenXyz.clear();
     }
     g_rd3dEvictedMaxSerial = 0u;
     g_rd3dWriteIdx = 0u;
@@ -1159,6 +1281,18 @@ void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indice
     }
 
     std::lock_guard<std::mutex> lock(g_rdMutex);
+    static const bool s_fg1Stats = []() { // PROBE-FG1
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_INTERP_STATS");
+        return e && e[0] == '1';
+    }(); // PROBE-FG1
+    static const bool s_fg2Stats = []() { // PROBE-FG2
+        extern void ps2xLoadConfig();
+        ps2xLoadConfig();
+        const char *e = std::getenv("PS2X_RD_INTERP_STATS2");
+        return e && e[0] == '1';
+    }(); // PROBE-FG2
     if (vpScaleZ != 0.0f) // FEAT-RD11
     {
         g_rdLastVpScaleZ = vpScaleZ;
@@ -1191,6 +1325,334 @@ void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indice
     Rd3DFrame &slot = g_rd3dRing[chosen]; // FEAT-RD13 // FEAT-RD34
     if (slot.seq != 0u && slot.sMax > g_rd3dEvictedMaxSerial)
         g_rd3dEvictedMaxSerial = slot.sMax;
+    if (s_fg1Stats) // PROBE-FG1
+    {
+        static Rd3DFrame s_fg1Prev;
+        static bool s_fg1HasPrev = false;
+        static std::chrono::steady_clock::time_point s_fg1SecStart{};
+        static uint32_t s_fg1Frames = 0u;
+        static uint32_t s_fg1Batches = 0u;
+        static uint32_t s_fg1PosMatch = 0u;
+        static uint32_t s_fg1GreedyMatch = 0u;
+        static uint32_t s_fg1Unmatched = 0u;
+        static uint32_t s_fg1Verts = 0u;
+        static double s_fg1SumD = 0.0;
+        static float s_fg1MaxD = 0.0f;
+        static uint32_t s_fg1TeleportBatches = 0u;
+        static uint32_t s_fg1CamHashChanged = 0u;
+        static std::vector<float> s_fg1Deltas;
+
+        // RdVert.pos[0..1] are homogeneous clip-space (x_ndc * w, y_ndc * w), neither pixels nor GS 12.4.
+        // Dividing by pos[3] and applying RdBatch.vpS/vpO converts to screen pixels (xyoffset cancels in |x1 - x0|).
+        auto toScreenPx = [](const RdVert &v, const RdBatch &b, float &ox, float &oy) {
+            if (b.vpS[0] != 0.0f && b.vpS[1] != 0.0f && std::fabs(v.pos[3]) > 1e-6f)
+            {
+                const float invW = 1.0f / v.pos[3];
+                ox = v.pos[0] * invW * b.vpS[0] + b.vpO[0];
+                oy = v.pos[1] * invW * b.vpS[1] + b.vpO[1];
+            }
+            else
+            {
+                ox = v.pos[0];
+                oy = v.pos[1];
+            }
+        };
+
+        ++s_fg1Frames;
+        s_fg1Batches += static_cast<uint32_t>(batches.size());
+        if (s_fg1HasPrev)
+        {
+            const size_t nNew = batches.size();
+            const size_t nPrev = s_fg1Prev.batches.size();
+            for (size_t i = 0; i < nNew; ++i)
+            {
+                const RdBatch &bNew = batches[i];
+                size_t matchIdx = nPrev;
+                if (i < nPrev)
+                {
+                    const RdBatch &bPrev = s_fg1Prev.batches[i];
+                    if (bNew.count == bPrev.count && bNew.prim == bPrev.prim && bNew.tex0 == bPrev.tex0 &&
+                        bNew.alpha == bPrev.alpha && bNew.test == bPrev.test)
+                    {
+                        matchIdx = i;
+                        ++s_fg1PosMatch;
+                    }
+                }
+                if (matchIdx == nPrev)
+                {
+                    const size_t winEnd = std::min(nPrev, i + 16u);
+                    for (size_t j = i; j < winEnd; ++j)
+                    {
+                        const RdBatch &bPrev = s_fg1Prev.batches[j];
+                        if (bNew.count == bPrev.count && bNew.prim == bPrev.prim && bNew.tex0 == bPrev.tex0)
+                        {
+                            matchIdx = j;
+                            ++s_fg1GreedyMatch;
+                            break;
+                        }
+                    }
+                }
+                if (matchIdx == nPrev)
+                {
+                    ++s_fg1Unmatched;
+                    continue;
+                }
+                const RdBatch &bPrev = s_fg1Prev.batches[matchIdx];
+                if (bNew.camHash != bPrev.camHash)
+                    ++s_fg1CamHashChanged;
+
+                float batchMaxD = 0.0f;
+                const bool useNewIdx = !indices.empty() && static_cast<size_t>(bNew.first) + bNew.count <= indices.size();
+                const bool usePrevIdx = !s_fg1Prev.indices.empty() && static_cast<size_t>(bPrev.first) + bPrev.count <= s_fg1Prev.indices.size();
+                for (uint32_t k = 0; k < bNew.count; ++k)
+                {
+                    const uint32_t vi1 = (useNewIdx ? indices[bNew.first + k] : (bNew.first + k)) + bNew.baseVertex;
+                    const uint32_t vi0 = (usePrevIdx ? s_fg1Prev.indices[bPrev.first + k] : (bPrev.first + k)) + bPrev.baseVertex;
+                    if (vi1 >= verts.size() || vi0 >= s_fg1Prev.verts.size())
+                        continue;
+                    float x1 = 0.0f, y1 = 0.0f, x0 = 0.0f, y0 = 0.0f;
+                    toScreenPx(verts[vi1], bNew, x1, y1);
+                    toScreenPx(s_fg1Prev.verts[vi0], bPrev, x0, y0);
+                    const float d = std::max(std::fabs(x1 - x0), std::fabs(y1 - y0));
+                    s_fg1SumD += static_cast<double>(d);
+                    if (d > s_fg1MaxD)
+                        s_fg1MaxD = d;
+                    if (d > batchMaxD)
+                        batchMaxD = d;
+                    s_fg1Deltas.push_back(d);
+                    ++s_fg1Verts;
+                }
+                if (batchMaxD > 64.0f)
+                    ++s_fg1TeleportBatches;
+            }
+        }
+        s_fg1Prev.verts = verts;
+        s_fg1Prev.indices = indices;
+        s_fg1Prev.batches = batches;
+        s_fg1HasPrev = true;
+
+        const auto nowFg1 = std::chrono::steady_clock::now();
+        if (s_fg1SecStart.time_since_epoch().count() == 0)
+        {
+            s_fg1SecStart = nowFg1;
+        }
+        else if (nowFg1 - s_fg1SecStart >= std::chrono::seconds(1))
+        {
+            const double meanD = (s_fg1Verts > 0u) ? (s_fg1SumD / static_cast<double>(s_fg1Verts)) : 0.0;
+            float p95D = 0.0f;
+            if (!s_fg1Deltas.empty())
+            {
+                const size_t p95Idx = std::min(s_fg1Deltas.size() - 1u, static_cast<size_t>(0.95 * static_cast<double>(s_fg1Deltas.size() - 1u)));
+                std::nth_element(s_fg1Deltas.begin(), s_fg1Deltas.begin() + p95Idx, s_fg1Deltas.end());
+                p95D = s_fg1Deltas[p95Idx];
+            }
+            ps2xSafeLog("[fg1] frames=%u batches=%u posMatch=%u greedyMatch=%u unmatched=%u verts=%u meanD=%.2f p95D=%.2f maxD=%.1f teleportBatches=%u camHashChanged=%u\n",
+                        s_fg1Frames, s_fg1Batches, s_fg1PosMatch, s_fg1GreedyMatch, s_fg1Unmatched,
+                        s_fg1Verts, meanD, static_cast<double>(p95D), static_cast<double>(s_fg1MaxD),
+                        s_fg1TeleportBatches, s_fg1CamHashChanged);
+            s_fg1Frames = 0u;
+            s_fg1Batches = 0u;
+            s_fg1PosMatch = 0u;
+            s_fg1GreedyMatch = 0u;
+            s_fg1Unmatched = 0u;
+            s_fg1Verts = 0u;
+            s_fg1SumD = 0.0;
+            s_fg1MaxD = 0.0f;
+            s_fg1TeleportBatches = 0u;
+            s_fg1CamHashChanged = 0u;
+            s_fg1Deltas.clear();
+            s_fg1SecStart = nowFg1;
+        }
+    } // PROBE-FG1
+    if (s_fg2Stats) // PROBE-FG2b
+    {
+        static Rd3DFrame s_fg2Prev;
+        static bool s_fg2HasPrev = false;
+        static std::vector<Fg2bKeys> s_fg2PrevKeys;
+        static std::chrono::steady_clock::time_point s_fg2SecStart{};
+        static uint32_t s_fg2Frames = 0u;
+        static uint32_t s_fg2CheckedFrames = 0u;
+        static uint32_t s_fg2StillFrames = 0u;
+        static uint32_t s_fg2Hist = 0u;
+        static uint32_t s_fg2T1 = 0u;
+        static uint32_t s_fg2T2 = 0u;
+        static uint32_t s_fg2T3 = 0u;
+        static uint32_t s_fg2Unmatched = 0u;
+        static uint64_t s_fg2TotalBatchVerts = 0u;
+        static uint64_t s_fg2UnmatchedVerts = 0u;
+        static uint32_t s_fg2Verts = 0u;
+        static double s_fg2SumD = 0.0;
+        static float s_fg2MaxD = 0.0f;
+        static uint32_t s_fg2TeleportBatches = 0u;
+        static std::vector<float> s_fg2Deltas;
+
+        auto toScreenPx = [](const RdVert &v, const RdBatch &b, float &ox, float &oy) {
+            if (b.vpS[0] != 0.0f && b.vpS[1] != 0.0f && std::fabs(v.pos[3]) > 1e-6f)
+            {
+                const float invW = 1.0f / v.pos[3];
+                ox = v.pos[0] * invW * b.vpS[0] + b.vpO[0];
+                oy = v.pos[1] * invW * b.vpS[1] + b.vpO[1];
+            }
+            else
+            {
+                ox = v.pos[0];
+                oy = v.pos[1];
+            }
+        };
+
+        const auto nowFg2 = std::chrono::steady_clock::now();
+        ++s_fg2Frames;
+        const size_t nNew = batches.size();
+        std::vector<Fg2bKeys> newKeys(nNew);
+        for (size_t i = 0; i < nNew; ++i)
+            newKeys[i] = rdComputeBatchKeys(batches[i], verts, indices);
+
+        if (s_fg2HasPrev)
+        {
+            const size_t nPrev = s_fg2Prev.batches.size();
+            std::vector<uint8_t> newMatched(nNew, 0u);
+            std::vector<uint8_t> prevMatched(nPrev, 0u);
+            std::vector<size_t> matchPrevIdx(nNew, 0u);
+            std::vector<uint8_t> matchTier(nNew, 0u);
+
+            for (size_t tier = 0; tier < 3; ++tier)
+            {
+                std::unordered_map<uint64_t, std::vector<size_t>> prevMap;
+                prevMap.reserve(nPrev);
+                for (size_t j = 0; j < nPrev; ++j)
+                {
+                    if (!prevMatched[j])
+                        prevMap[s_fg2PrevKeys[j].k[tier]].push_back(j);
+                }
+                std::unordered_map<uint64_t, size_t> seenCount;
+                seenCount.reserve(nNew);
+                for (size_t i = 0; i < nNew; ++i)
+                {
+                    if (newMatched[i])
+                        continue;
+                    const uint64_t key = newKeys[i].k[tier];
+                    const size_t occ = seenCount[key]++;
+                    const auto it = prevMap.find(key);
+                    if (it != prevMap.end() && occ < it->second.size())
+                    {
+                        const size_t j = it->second[occ];
+                        newMatched[i] = 1u;
+                        prevMatched[j] = 1u;
+                        matchPrevIdx[i] = j;
+                        matchTier[i] = static_cast<uint8_t>(tier + 1u);
+                    }
+                }
+            }
+
+            uint32_t movers = 0u;
+            for (size_t i = 0; i < nNew; ++i)
+            {
+                const RdBatch &bNew = batches[i];
+                s_fg2TotalBatchVerts += static_cast<uint64_t>(bNew.count);
+                if (!newMatched[i])
+                {
+                    ++s_fg2Unmatched;
+                    s_fg2UnmatchedVerts += static_cast<uint64_t>(bNew.count);
+                    continue;
+                }
+                if (matchTier[i] == 1u)
+                    ++s_fg2T1;
+                else if (matchTier[i] == 2u)
+                    ++s_fg2T2;
+                else
+                {
+                    ++s_fg2T3;
+                    continue;
+                }
+
+                const RdBatch &bPrev = s_fg2Prev.batches[matchPrevIdx[i]];
+                float batchMaxD = 0.0f;
+                const bool useNewIdx = !indices.empty() && static_cast<size_t>(bNew.first) + bNew.count <= indices.size();
+                const bool usePrevIdx = !s_fg2Prev.indices.empty() && static_cast<size_t>(bPrev.first) + bPrev.count <= s_fg2Prev.indices.size();
+                const uint32_t vCount = std::min(bNew.count, bPrev.count);
+                for (uint32_t k = 0; k < vCount; ++k)
+                {
+                    const uint32_t vi1 = (useNewIdx ? indices[bNew.first + k] : (bNew.first + k)) + bNew.baseVertex;
+                    const uint32_t vi0 = (usePrevIdx ? s_fg2Prev.indices[bPrev.first + k] : (bPrev.first + k)) + bPrev.baseVertex;
+                    if (vi1 >= verts.size() || vi0 >= s_fg2Prev.verts.size())
+                        continue;
+                    float x1 = 0.0f, y1 = 0.0f, x0 = 0.0f, y0 = 0.0f;
+                    toScreenPx(verts[vi1], bNew, x1, y1);
+                    toScreenPx(s_fg2Prev.verts[vi0], bPrev, x0, y0);
+                    const float d = std::max(std::fabs(x1 - x0), std::fabs(y1 - y0));
+                    s_fg2SumD += static_cast<double>(d);
+                    if (d > s_fg2MaxD)
+                        s_fg2MaxD = d;
+                    if (d > batchMaxD)
+                        batchMaxD = d;
+                    if (d >= 0.05f)
+                        ++movers;
+                    s_fg2Deltas.push_back(d);
+                    ++s_fg2Verts;
+                }
+                if (batchMaxD > 64.0f)
+                    ++s_fg2TeleportBatches;
+            }
+
+            const bool isStill = (movers == 0u);
+            s_fg2Hist = (s_fg2Hist << 1) | (isStill ? 1u : 0u);
+            ++s_fg2CheckedFrames;
+            if (isStill)
+                ++s_fg2StillFrames;
+        }
+        s_fg2Prev.verts = verts;
+        s_fg2Prev.indices = indices;
+        s_fg2Prev.batches = batches;
+        s_fg2PrevKeys.swap(newKeys);
+        s_fg2HasPrev = true;
+
+        if (s_fg2SecStart.time_since_epoch().count() == 0)
+        {
+            s_fg2SecStart = nowFg2;
+        }
+        else if (nowFg2 - s_fg2SecStart >= std::chrono::seconds(1))
+        {
+            const uint32_t totalMatched = s_fg2T1 + s_fg2T2 + s_fg2T3;
+            const uint32_t totalChecked = totalMatched + s_fg2Unmatched;
+            const double matchedPct = (totalChecked > 0u) ? (100.0 * static_cast<double>(totalMatched) / static_cast<double>(totalChecked)) : 0.0;
+            const double unmatchedVertPct = (s_fg2TotalBatchVerts > 0u) ? (100.0 * static_cast<double>(s_fg2UnmatchedVerts) / static_cast<double>(s_fg2TotalBatchVerts)) : 0.0;
+            const double meanD = (s_fg2Verts > 0u) ? (s_fg2SumD / static_cast<double>(s_fg2Verts)) : 0.0;
+            float p95D = 0.0f;
+            if (!s_fg2Deltas.empty())
+            {
+                const size_t p95Idx = std::min(s_fg2Deltas.size() - 1u, static_cast<size_t>(0.95 * static_cast<double>(s_fg2Deltas.size() - 1u)));
+                std::nth_element(s_fg2Deltas.begin(), s_fg2Deltas.begin() + p95Idx, s_fg2Deltas.end());
+                p95D = s_fg2Deltas[p95Idx];
+            }
+            const double stillPct = (s_fg2CheckedFrames > 0u) ? (100.0 * static_cast<double>(s_fg2StillFrames) / static_cast<double>(s_fg2CheckedFrames)) : 0.0;
+            char histStr[33];
+            for (int b = 0; b < 32; ++b)
+            {
+                const uint32_t bit = (s_fg2Hist >> (31 - b)) & 1u;
+                histStr[b] = bit ? 'S' : 'M';
+            }
+            histStr[32] = '\0';
+            ps2xSafeLog("[fg2b] frames=%u matchedPct=%.1f t1=%u t2=%u t3=%u unmatched=%u unmatchedVertPct=%.1f meanD=%.3f p95D=%.2f maxD=%.1f teleport=%u stillPct=%.0f hist=%s\n",
+                        s_fg2Frames, matchedPct, s_fg2T1, s_fg2T2, s_fg2T3, s_fg2Unmatched,
+                        unmatchedVertPct, meanD, static_cast<double>(p95D), static_cast<double>(s_fg2MaxD),
+                        s_fg2TeleportBatches, stillPct, histStr);
+            s_fg2Frames = 0u;
+            s_fg2CheckedFrames = 0u;
+            s_fg2StillFrames = 0u;
+            s_fg2T1 = 0u;
+            s_fg2T2 = 0u;
+            s_fg2T3 = 0u;
+            s_fg2Unmatched = 0u;
+            s_fg2TotalBatchVerts = 0u;
+            s_fg2UnmatchedVerts = 0u;
+            s_fg2Verts = 0u;
+            s_fg2SumD = 0.0;
+            s_fg2MaxD = 0.0f;
+            s_fg2TeleportBatches = 0u;
+            s_fg2Deltas.clear();
+            s_fg2SecStart = nowFg2;
+        }
+    } // PROBE-FG2b
     slot.verts.swap(verts);
     slot.indices.swap(indices);
     slot.batches.swap(batches);
@@ -1853,6 +2315,11 @@ static const bool s_pairLag = []{
     return e && e[0] == '1';
 }(); // FIX-V3S
 
+void ps2xRdInterpSetT(float t) // FEAT-FG3
+{
+    s_fg3T = t;
+}
+
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
     rdSetFog(0.0f, 0.0f, 0.0f, 0.0f); // FIX-E1c
@@ -2005,6 +2472,19 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         ++orderCount;
                     }
                     g_rdGpu.ring3dCount = orderCount;
+                    struct Fg3CurRef // FEAT-FG3
+                    {
+                        size_t slotIdx;
+                        size_t batchIdx;
+                        uint64_t k1;
+                        uint64_t k2;
+                    };
+                    static std::vector<Fg3CurRef> fg3CurRefs; // FEAT-FG3 // FIX-FG3b: reuse static buffers
+                    static std::vector<Fg3BatchPos> fg3NextGen; // FEAT-FG3 // FIX-FG3b
+                    static std::vector<float> fg3NextGenXyz; // FIX-FG3b
+                    fg3CurRefs.clear();
+                    fg3NextGen.clear();
+                    fg3NextGenXyz.clear();
                     for (size_t i = 0; i < orderCount; ++i)
                     {
                         const size_t idx = g_rdGpu.activeOrder[i];
@@ -2012,6 +2492,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                         RdGpuSlot &gs = g_rdGpu.slots[idx];
                         if (!g_rdPinnedSlots[idx] && rf.seq != 0u && rf.seq != gs.seq) // FEAT-RD34
                         {
+                            if (s_rdInterpOn) // FEAT-FG3
+                                s_fg3BaseVerts[idx].assign(rf.verts.begin(), rf.verts.end()); // FIX-FG3b
                             g_rdGpu.pendingVerts[idx].swap(rf.verts);
                             g_rdGpu.pendingIndices[idx].swap(rf.indices);
                             gs.batches = rf.batches;
@@ -2023,6 +2505,176 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             gs.sMin = rf.sMin;
                             gs.sMax = rf.sMax;
                             pendingUpload[idx] = true;
+                            if (s_rdInterpOn) // FEAT-FG3
+                            {
+                                const std::vector<RdVert> &bv = s_fg3BaseVerts[idx];
+                                const std::vector<uint32_t> &biList = g_rdGpu.pendingIndices[idx];
+                                const size_t bvSize = bv.size();
+                                s_fg3PrevPos[idx].resize(bvSize * 3u);
+                                s_fg3VertMatched[idx].assign(bvSize, 0u); // FIX-FG3b
+                                float * __restrict pp = s_fg3PrevPos[idx].data();
+                                const RdVert * __restrict bvp = bv.data();
+                                for (size_t vi = 0; vi < bvSize; ++vi)
+                                {
+                                    pp[vi * 3u + 0u] = bvp[vi].pos[0];
+                                    pp[vi * 3u + 1u] = bvp[vi].pos[1];
+                                    pp[vi * 3u + 2u] = bvp[vi].pos[2];
+                                }
+                                ++s_fg3Slots;
+                                s_fg3TotalVerts += static_cast<uint32_t>(bvSize);
+                                for (size_t bi = 0; bi < gs.batches.size(); ++bi)
+                                {
+                                    const RdBatch &b = gs.batches[bi];
+                                    const Fg2bKeys keys = rdComputeBatchKeys(b, bv, biList);
+                                    fg3CurRefs.push_back(Fg3CurRef{idx, bi, keys.k[0], keys.k[1]});
+                                    Fg3BatchPos bp;
+                                    bp.k1 = keys.k[0];
+                                    bp.k2 = keys.k[1];
+                                    bp.vertCount = b.count;
+                                    bp.xyzOffset = static_cast<uint32_t>(fg3NextGenXyz.size());
+                                    fg3NextGenXyz.resize(fg3NextGenXyz.size() + static_cast<size_t>(b.count) * 3u, 0.0f);
+                                    float * __restrict dstXyz = fg3NextGenXyz.data() + bp.xyzOffset;
+                                    const bool useIdx = !biList.empty() && static_cast<size_t>(b.first) + b.count <= biList.size();
+                                    for (uint32_t k = 0; k < b.count; ++k)
+                                    {
+                                        const uint32_t vi = (useIdx ? biList[b.first + k] : (b.first + k)) + b.baseVertex;
+                                        if (vi < bvSize)
+                                        {
+                                            dstXyz[static_cast<size_t>(k) * 3u + 0u] = bvp[vi].pos[0];
+                                            dstXyz[static_cast<size_t>(k) * 3u + 1u] = bvp[vi].pos[1];
+                                            dstXyz[static_cast<size_t>(k) * 3u + 2u] = bvp[vi].pos[2];
+                                        }
+                                    }
+                                    fg3NextGen.push_back(bp);
+                                }
+                            }
+                        }
+                    }
+                    if (s_rdInterpOn && !fg3CurRefs.empty()) // FEAT-FG3
+                    {
+                        const size_t nCur = fg3CurRefs.size();
+                        const size_t nPrev = s_fg3PrevGen.size();
+                        s_fg3Batches += static_cast<uint32_t>(nCur);
+                        if (nPrev > 0u)
+                        {
+                            static std::vector<uint8_t> curMatched; // FIX-FG3b: reuse static buffers
+                            static std::vector<uint8_t> prevMatched; // FIX-FG3b
+                            static std::vector<size_t> matchPrevIdx; // FIX-FG3b
+                            static std::unordered_map<uint64_t, std::vector<size_t>> prevMap; // FIX-FG3b
+                            static std::unordered_map<uint64_t, size_t> seenCount; // FIX-FG3b
+                            curMatched.assign(nCur, 0u);
+                            prevMatched.assign(nPrev, 0u);
+                            matchPrevIdx.assign(nCur, 0u);
+                            for (int tier = 0; tier < 2; ++tier)
+                            {
+                                prevMap.clear();
+                                prevMap.reserve(nPrev);
+                                for (size_t j = 0; j < nPrev; ++j)
+                                {
+                                    if (!prevMatched[j])
+                                        prevMap[tier == 0 ? s_fg3PrevGen[j].k1 : s_fg3PrevGen[j].k2].push_back(j);
+                                }
+                                seenCount.clear();
+                                seenCount.reserve(nCur);
+                                for (size_t i = 0; i < nCur; ++i)
+                                {
+                                    if (curMatched[i])
+                                        continue;
+                                    const uint64_t key = (tier == 0) ? fg3CurRefs[i].k1 : fg3CurRefs[i].k2;
+                                    const size_t occ = seenCount[key]++;
+                                    const auto it = prevMap.find(key);
+                                    if (it != prevMap.end() && occ < it->second.size())
+                                    {
+                                        const size_t j = it->second[occ];
+                                        curMatched[i] = 1u;
+                                        prevMatched[j] = 1u;
+                                        matchPrevIdx[i] = j;
+                                    }
+                                }
+                            }
+                            for (size_t i = 0; i < nCur; ++i)
+                            {
+                                if (!curMatched[i])
+                                    continue;
+                                const Fg3CurRef &cr = fg3CurRefs[i];
+                                const Fg3BatchPos &pr = s_fg3PrevGen[matchPrevIdx[i]];
+                                const RdBatch &bNew = g_rdGpu.slots[cr.slotIdx].batches[cr.batchIdx];
+                                if (bNew.count != pr.vertCount || static_cast<size_t>(pr.xyzOffset) + static_cast<size_t>(bNew.count) * 3u > s_fg3PrevGenXyz.size())
+                                    continue;
+                                ++s_fg3Matched;
+                                const std::vector<RdVert> &bv = s_fg3BaseVerts[cr.slotIdx];
+                                const std::vector<uint32_t> &biList = g_rdGpu.pendingIndices[cr.slotIdx];
+                                const float * __restrict prXyz = s_fg3PrevGenXyz.data() + pr.xyzOffset;
+                                const bool useIdx = !biList.empty() && static_cast<size_t>(bNew.first) + bNew.count <= biList.size();
+                                const bool useVp = (bNew.vpS[0] != 0.0f && bNew.vpS[1] != 0.0f);
+                                bool teleport = false;
+                                for (uint32_t k = 0; k < bNew.count; ++k)
+                                {
+                                    const uint32_t vi = (useIdx ? biList[bNew.first + k] : (bNew.first + k)) + bNew.baseVertex;
+                                    if (vi >= bv.size())
+                                        continue;
+                                    const float px = prXyz[static_cast<size_t>(k) * 3u + 0u];
+                                    const float py = prXyz[static_cast<size_t>(k) * 3u + 1u];
+                                    const float pz = prXyz[static_cast<size_t>(k) * 3u + 2u];
+                                    float dx = std::fabs(bv[vi].pos[0] - px);
+                                    float dy = std::fabs(bv[vi].pos[1] - py);
+                                    if (useVp && std::fabs(bv[vi].pos[3]) > 1e-6f)
+                                    {
+                                        const float invW = 1.0f / bv[vi].pos[3];
+                                        dx *= std::fabs(invW * bNew.vpS[0]);
+                                        dy *= std::fabs(invW * bNew.vpS[1]);
+                                    }
+                                    const float dz = std::fabs(bv[vi].pos[2] - pz);
+                                    if (dx > 64.0f || dy > 64.0f || dz > 1e5f)
+                                    {
+                                        teleport = true;
+                                        break;
+                                    }
+                                }
+                                if (teleport)
+                                {
+                                    ++s_fg3TeleportSkipped;
+                                    continue;
+                                }
+                                float * __restrict pp = s_fg3PrevPos[cr.slotIdx].data();
+                                uint8_t * __restrict vm = s_fg3VertMatched[cr.slotIdx].data();
+                                const size_t bvSize = bv.size();
+                                for (uint32_t k = 0; k < bNew.count; ++k)
+                                {
+                                    const uint32_t vi = (useIdx ? biList[bNew.first + k] : (bNew.first + k)) + bNew.baseVertex;
+                                    if (vi >= bvSize)
+                                        continue;
+                                    pp[static_cast<size_t>(vi) * 3u + 0u] = prXyz[static_cast<size_t>(k) * 3u + 0u];
+                                    pp[static_cast<size_t>(vi) * 3u + 1u] = prXyz[static_cast<size_t>(k) * 3u + 1u];
+                                    pp[static_cast<size_t>(vi) * 3u + 2u] = prXyz[static_cast<size_t>(k) * 3u + 2u];
+                                    if (vm[vi] == 0u) // FIX-FG3b: count unique interpolated vertices
+                                    {
+                                        vm[vi] = 1u;
+                                        ++s_fg3InterpVerts;
+                                    }
+                                }
+                            }
+                        }
+                        s_fg3PrevGen.swap(fg3NextGen);
+                        s_fg3PrevGenXyz.swap(fg3NextGenXyz);
+                        rdInterpApply(s_fg3T, pendingUpload); // FIX-FG3b
+                        const auto nowFg3 = std::chrono::steady_clock::now();
+                        if (s_fg3SecStart.time_since_epoch().count() == 0)
+                        {
+                            s_fg3SecStart = nowFg3;
+                        }
+                        else if (nowFg3 - s_fg3SecStart >= std::chrono::seconds(1))
+                        {
+                            ps2xSafeLog("[fg3] on=1 t=%.2f slots=%u batches=%u matched=%u teleportSkipped=%u interpVerts=%u totalVerts=%u applyUs=%.0f\n",
+                                        static_cast<double>(s_fg3T), s_fg3Slots, s_fg3Batches, s_fg3Matched,
+                                        s_fg3TeleportSkipped, s_fg3InterpVerts, s_fg3TotalVerts, s_fg3LastApplyUs);
+                            s_fg3Slots = 0u;
+                            s_fg3Batches = 0u;
+                            s_fg3Matched = 0u;
+                            s_fg3TeleportSkipped = 0u;
+                            s_fg3InterpVerts = 0u;
+                            s_fg3TotalVerts = 0u;
+                            s_fg3SecStart = nowFg3;
                         }
                     }
                     g_rdGpu.last3dSeq = g_rd3dSeq;
@@ -2115,12 +2767,23 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         g_rdGpu.local2dBatches.clear();
         g_rdGpu.frames2d[0] = Rd2DFrame{};
         g_rdGpu.frames2d[1] = Rd2DFrame{};
+        if (s_rdInterpOn) // FEAT-FG3
+        {
+            s_fg3PrevGen.clear();
+            s_fg3PrevGenXyz.clear(); // FIX-FG3b
+        }
         for (size_t i = 0; i < kRdSlotCount; ++i)
         {
             g_rdGpu.slots[i].seq = 0u;
             g_rdGpu.slots[i].batches.clear();
             g_rdGpu.pendingVerts[i].clear();
             g_rdGpu.pendingIndices[i].clear();
+            if (s_rdInterpOn) // FEAT-FG3
+            {
+                s_fg3BaseVerts[i].clear();
+                s_fg3PrevPos[i].clear();
+                s_fg3VertMatched[i].clear(); // FIX-FG3b
+            }
         }
     }
     if (needRealign && chosen2dIdx >= 0) // FEAT-RD13 // FEAT-RD14 // FEAT-RD33
@@ -3778,7 +4441,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         }
         float prevZBias = 0.0f; // PROBE-RD59
         const int64_t pace2B4Before3d = pace2On ? g_pace2Rd.b4 : 0; // PROBE-PACE2
-        { // PROBE-PACE2
+
+    { // PROBE-PACE2
             Pace2Scope pace2B3Scope(g_pace2Rd.b3, pace2On); // PROBE-PACE2
             for (const RdDrawBatch &db : g_rdGpu.drawBatches) // FEAT-RD2 // FEAT-RD14
         {
