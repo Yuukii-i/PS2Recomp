@@ -2717,6 +2717,76 @@ bool ps2xRdInterpCanExtraPresent(const char **reasonOut) // FEAT-FG4
     return true;
 }
 
+static inline bool t1TransLogOn() // PROBE-T1
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_RD_TRANSLOG");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+
+static void t1CountUsedFades(const std::vector<Rd2DBatch> &batches, const std::vector<RdVert> &verts, uint32_t &outCount, uint32_t &outAlphaMax) // PROBE-T1
+{
+    outCount = 0u;
+    outAlphaMax = 0u;
+    for (const Rd2DBatch &b : batches)
+    {
+        if (b.count == 0u || (b.prim & 7ull) != 6ull || ((b.prim >> 4) & 1ull) != 0ull || ((b.prim >> 6) & 1ull) == 0ull)
+            continue;
+        const size_t endV = std::min<size_t>(verts.size(), static_cast<size_t>(b.first) + b.count);
+        if (b.first >= endV)
+            continue;
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        uint32_t maxA = 0u;
+        for (size_t vi = b.first; vi < endV; ++vi)
+        {
+            const float px = verts[vi].pos[0];
+            const float py = verts[vi].pos[1];
+            if (px < x0) x0 = px;
+            if (py < y0) y0 = py;
+            if (px > x1) x1 = px;
+            if (py > y1) y1 = py;
+            if (verts[vi].rgba[3] > maxA) maxA = verts[vi].rgba[3];
+        }
+        if ((x1 - x0) >= 512.0f * 0.95f && (y1 - y0) >= 448.0f * 0.95f)
+        {
+            ++outCount;
+            if (maxA > outAlphaMax) outAlphaMax = maxA;
+        }
+    }
+}
+
+static void t1LogCompAndHold(uint32_t present, bool new3d, bool new2d, int chosen2d, uint32_t coverFail, bool reuse, uint64_t g2dSeq, uint64_t used2dSeq, uint32_t used2dN, uint32_t usedFades, uint32_t usedFadeAlpha, uint32_t age2d) // PROBE-T1
+{
+    static auto s_lastCompSec = std::chrono::steady_clock::now();
+    static auto s_lastHoldSec = std::chrono::steady_clock::now();
+    static uint32_t s_holdPresents = 0u;
+    static int s_holdLastChosen2d = -1;
+    if (!new3d && !new2d)
+    {
+        ++s_holdPresents;
+        s_holdLastChosen2d = chosen2d;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const bool secComp = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastCompSec).count() >= 1000;
+    if (usedFades > 0u || usedFadeAlpha > 0u || secComp)
+    {
+        if (secComp) s_lastCompSec = now;
+        ps2xSafeLog("[t1-comp] present=%u new3d=%d new2d=%d chosen2d=%d coverFail=%u reuse=%d g2dSeq=%llu used2dSeq=%llu used2dN=%u usedFades=%u usedFadeAlpha=%u age2d=%u\n",
+                    present, new3d ? 1 : 0, new2d ? 1 : 0, chosen2d, coverFail, reuse ? 1 : 0,
+                    static_cast<unsigned long long>(g2dSeq),
+                    static_cast<unsigned long long>(used2dSeq),
+                    used2dN, usedFades, usedFadeAlpha, age2d);
+    }
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastHoldSec).count() >= 1000)
+    {
+        s_lastHoldSec = now;
+        ps2xSafeLog("[t1-hold] presentsNoNew=%u drawn2dIdx=%d\n", s_holdPresents, s_holdLastChosen2d);
+        s_holdPresents = 0u;
+    }
+}
+
 bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 {
     const bool fg10ExtraReq = s_rdInterpOn && s_fg10InterpTSet; // FEAT-FG10
@@ -2742,9 +2812,20 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     uint32_t evictedMaxSnap = 0u; // FEAT-RD34
     bool v3nNew3d = false; // PROBE-V3N
     bool v3nNew2d = false; // PROBE-V3N
+    static uint32_t s_t1Present = 0u; // PROBE-T1
+    const uint32_t t1Present = ++s_t1Present; // PROBE-T1
+    static uint64_t s_t1LastG2dSeq = 0ull; // PROBE-T1
+    static uint32_t s_t1G2dPubPresent = 0u; // PROBE-T1
+    static uint32_t s_t1Used2dPubPresent = 0u; // PROBE-T1
+    static int s_t1LastChosen2d = -1; // PROBE-T1
     {
         Pace2Scope pace2B1Scope(g_pace2Rd.b1, pace2On); // PROBE-PACE2
         std::lock_guard<std::mutex> lock(g_rdMutex);
+        if (g_rd2dSeq != s_t1LastG2dSeq) // PROBE-T1
+        {
+            s_t1LastG2dSeq = g_rd2dSeq;
+            s_t1G2dPubPresent = t1Present;
+        }
         if (!g_rdEverPublished && !g_rdGpu.everUploaded)
         {
             ++g_rdGpu.drawsEmpty;
@@ -2754,6 +2835,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             s_v3nLastFlags = (1u << 2);         // PROBE-V3N
             s_v3oLastChosen2d = -1;             // PROBE-V3O
             s_v3oLastCoverFail = 0;             // PROBE-V3O
+            if (t1TransLogOn()) // PROBE-T1
+                t1LogCompAndHold(t1Present, false, false, -1, 0u, false, g_rd2dSeq, g_rdGpu.last2dSeq, 0u, 0u, 0u, 0u);
             if (ps2xRdTakeoverOn()) // FEAT-RD12: clear to black instead of drawing stale GS texture
                 return true;
             return false;
@@ -3114,6 +3197,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 s_v3nLastFlags = (1u << 2);         // PROBE-V3N
                 s_v3oLastChosen2d = chosen2dIdx;    // PROBE-V3O
                 s_v3oLastCoverFail = coverFail;     // PROBE-V3O
+                if (t1TransLogOn()) // PROBE-T1
+                    t1LogCompAndHold(t1Present, v3nNew3d, v3nNew2d, chosen2dIdx, coverFail, false, g_rd2dSeq, g_rdGpu.last2dSeq, 0u, 0u, 0u, 0u);
                 return ps2xRdTakeoverOn();
             }
         }
@@ -3428,6 +3513,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             s_consecPartial = 0u; // FEAT-RD37
 
             usedNewComposition = true;
+            s_t1Used2dPubPresent = s_t1G2dPubPresent; // PROBE-T1
+            s_t1LastChosen2d = chosen2dIdx; // PROBE-T1
             g_rdGpu.lastEmptyReason = candEmptyReason;
             g_rdGpu.local2dScratch = chosen2d.verts;
             g_rdGpu.local2dBatches = chosen2d.batches;
@@ -3760,6 +3847,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         s_v3nLastFlags = (1u << 2);         // PROBE-V3N
         s_v3oLastChosen2d = chosen2dIdx;    // PROBE-V3O
         s_v3oLastCoverFail = coverFail;     // PROBE-V3O
+        if (t1TransLogOn()) // PROBE-T1
+        {
+            uint32_t uf = 0u, ua = 0u;
+            t1CountUsedFades(g_rdGpu.local2dBatches, g_rdGpu.local2dScratch, uf, ua);
+            const uint32_t age2d = (s_t1Used2dPubPresent > 0u && t1Present >= s_t1Used2dPubPresent) ? (t1Present - s_t1Used2dPubPresent) : 0u;
+            t1LogCompAndHold(t1Present, v3nNew3d, v3nNew2d, chosen2dIdx >= 0 ? chosen2dIdx : s_t1LastChosen2d, coverFail, !usedNewComposition && g_rdGpu.hasCompleteComposition, g_rd2dSeq, g_rdGpu.last2dSeq, static_cast<uint32_t>(g_rdGpu.local2dBatches.size()), uf, ua, age2d);
+        }
         return ps2xRdTakeoverOn();
     }
 
@@ -7566,6 +7660,13 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     s_v3nLastFlags = v3nFlags;       // PROBE-V3N
     s_v3oLastChosen2d = chosen2dIdx; // PROBE-V3O
     s_v3oLastCoverFail = coverFail;  // PROBE-V3O
+    if (t1TransLogOn()) // PROBE-T1
+    {
+        uint32_t uf = 0u, ua = 0u;
+        t1CountUsedFades(g_rdGpu.local2dBatches, g_rdGpu.local2dScratch, uf, ua);
+        const uint32_t age2d = (s_t1Used2dPubPresent > 0u && t1Present >= s_t1Used2dPubPresent) ? (t1Present - s_t1Used2dPubPresent) : 0u;
+        t1LogCompAndHold(t1Present, v3nNew3d, v3nNew2d, chosen2dIdx >= 0 ? chosen2dIdx : s_t1LastChosen2d, coverFail, !usedNewComposition && g_rdGpu.hasCompleteComposition, g_rd2dSeq, g_rdGpu.last2dSeq, static_cast<uint32_t>(g_rdGpu.local2dBatches.size()), uf, ua, age2d);
+    }
     return true;
 }
 

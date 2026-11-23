@@ -453,6 +453,111 @@ struct Rd2DBatch // FEAT-RD8
 
 extern void ps2xRdPublish2D(const RdVert *v, size_t n, const Rd2DBatch *b, size_t nb, uint32_t rtSkipped, uint32_t pointLineSkipped, uint32_t gMin, uint32_t gMax, const uint32_t *mainRangePairs, size_t numMainRanges); // FEAT-RD8 // FEAT-RD13 // FEAT-RD33
 
+static inline bool t1TransLogOn() // PROBE-T1
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_RD_TRANSLOG");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+
+static bool t1IsFadeBatch(const Rd2DBatch &b, const std::vector<RdVert> &verts, uint32_t &outMaxA, int &x0i, int &y0i, int &x1i, int &y1i) // PROBE-T1
+{
+    outMaxA = 0u;
+    x0i = y0i = x1i = y1i = 0;
+    if (b.count == 0u || b.first >= verts.size())
+        return false;
+    const size_t endV = std::min<size_t>(verts.size(), static_cast<size_t>(b.first) + b.count);
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (size_t vi = b.first; vi < endV; ++vi)
+    {
+        const float px = verts[vi].pos[0];
+        const float py = verts[vi].pos[1];
+        if (px < x0) x0 = px;
+        if (py < y0) y0 = py;
+        if (px > x1) x1 = px;
+        if (py > y1) y1 = py;
+        if (verts[vi].rgba[3] > outMaxA) outMaxA = verts[vi].rgba[3];
+    }
+    x0i = static_cast<int>(x0);
+    y0i = static_cast<int>(y0);
+    x1i = static_cast<int>(x1);
+    y1i = static_cast<int>(y1);
+    const bool untexSpriteAbe = ((b.prim & 7ull) == 6ull) && (((b.prim >> 4) & 1ull) == 0ull) && (((b.prim >> 6) & 1ull) != 0ull);
+    return untexSpriteAbe && (x1 - x0) >= 512.0f * 0.95f && (y1 - y0) >= 448.0f * 0.95f;
+}
+
+static void t1LogDropCounts(const char *reason, uint32_t n2d, uint32_t fades) // PROBE-T1
+{
+    if (!t1TransLogOn() || n2d == 0u)
+        return;
+    static auto s_lastDropSec = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const bool sec = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastDropSec).count() >= 1000;
+    if (fades > 0u || sec)
+    {
+        if (sec) s_lastDropSec = now;
+        ps2xSafeLog("[t1-drop] reason=%s n2d=%u fades=%u\n", reason, n2d, fades);
+    }
+}
+
+static void t1LogDropVec(const char *reason, const std::vector<Rd2DBatch> &batches, const std::vector<RdVert> &verts) // PROBE-T1
+{
+    if (!t1TransLogOn() || batches.empty())
+        return;
+    uint32_t fades = 0u;
+    for (const Rd2DBatch &b : batches)
+    {
+        uint32_t maxA = 0u; int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        if (t1IsFadeBatch(b, verts, maxA, x0, y0, x1, y1))
+            ++fades;
+    }
+    t1LogDropCounts(reason, static_cast<uint32_t>(batches.size()), fades);
+}
+
+static void t1LogPub(uint64_t seq2d, const std::vector<Rd2DBatch> &batches, const std::vector<RdVert> &verts, const char *cutReason) // PROBE-T1
+{
+    if (!t1TransLogOn())
+        return;
+    uint32_t fadeCount = 0u, fadeAlphaMax = 0u;
+    for (const Rd2DBatch &b : batches)
+    {
+        uint32_t maxA = 0u; int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        if (t1IsFadeBatch(b, verts, maxA, x0, y0, x1, y1))
+        {
+            ++fadeCount;
+            if (maxA > fadeAlphaMax) fadeAlphaMax = maxA;
+        }
+    }
+    static auto s_lastPubSec = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const bool sec = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastPubSec).count() >= 1000;
+    if (fadeCount == 0u && fadeAlphaMax == 0u && !sec)
+        return;
+    if (sec) s_lastPubSec = now;
+    uint64_t lPrim = 0ull, lAlpha = 0ull, lTest = 0ull;
+    int lTex = 0, lx0 = 0, ly0 = 0, lx1 = 0, ly1 = 0;
+    uint32_t lRgba0 = 0u;
+    if (!batches.empty())
+    {
+        const Rd2DBatch &lb = batches.back();
+        lPrim = lb.prim; lAlpha = lb.alpha; lTest = lb.test;
+        lTex = ((lb.prim >> 4) & 1ull) ? 1 : 0;
+        uint32_t dummyA = 0u;
+        t1IsFadeBatch(lb, verts, dummyA, lx0, ly0, lx1, ly1);
+        if (lb.count > 0u && lb.first < verts.size())
+        {
+            const uint8_t *c = verts[lb.first].rgba;
+            lRgba0 = (static_cast<uint32_t>(c[0]) << 24) | (static_cast<uint32_t>(c[1]) << 16) | (static_cast<uint32_t>(c[2]) << 8) | static_cast<uint32_t>(c[3]);
+        }
+    }
+    ps2xSafeLog("[t1-pub] seq2d=%llu n2d=%u lastBatch{prim=%llx alpha=%llx test=%llx tex=%d bbox=%d,%d-%d,%d rgba0=%08x} fullscreenFadeCount=%u fadeAlphaMax=%u cutReason=%s\n",
+                static_cast<unsigned long long>(seq2d), static_cast<unsigned>(batches.size()),
+                static_cast<unsigned long long>(lPrim), static_cast<unsigned long long>(lAlpha), static_cast<unsigned long long>(lTest),
+                lTex, lx0, ly0, lx1, ly1, lRgba0, fadeCount, fadeAlphaMax, cutReason);
+}
+
 struct RdKickRec // FEAT-RD33
 {
     uint32_t serial;
@@ -2661,6 +2766,7 @@ void GS::latchHostPresentationFrame()
             s_rdResetCooldown = 120u;
             {
                 std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+                t1LogDropVec("force-classic-off", s_rd2dBatches, s_rd2dVerts); // PROBE-T1
                 s_rd2dVerts.clear();
                 s_rd2dBatches.clear();
                 s_rd2dFba.clear(); // PROBE-RD78D
@@ -2728,6 +2834,7 @@ void GS::latchHostPresentationFrame()
             s_rdForceWarmup = 1u; // FEAT-RD48: wait 1 latch for in-flight kicks to finish full raster
             {
                 std::lock_guard<std::mutex> capLock(s_rd2dCapMutex); // FEAT-RD49
+                t1LogDropVec("force-classic-on", s_rd2dBatches, s_rd2dVerts); // PROBE-T1
                 s_rd2dVerts.clear();
                 s_rd2dBatches.clear();
                 s_rd2dFba.clear(); // PROBE-RD78D
@@ -2907,6 +3014,7 @@ void GS::latchHostPresentationFrame()
             uint32_t rtSk = 0u, plSk = 0u;
             uint32_t gMin = 0u, gMax = 0u; // FEAT-RD13
             bool skipPublishHold = false; // FEAT-RD54
+            const char *t1CutReason = "no-framecut"; // PROBE-T1
             uint32_t logBoundariesTotal = 0u; // FEAT-RD54
             double logEmaSpacing = 1500.0; // FEAT-RD54
             {
@@ -2975,9 +3083,11 @@ void GS::latchHostPresentationFrame()
                             ++s_rdCutHold;
                             if (s_rdRejSinceLastPub > 0u) ++s_rdHoldRej; else ++s_rdHoldNoClear; // PROBE-CUT1
                             skipPublishHold = true;
+                            t1LogDropVec("hold-no-cut", s_rd2dBatches, s_rd2dVerts); // PROBE-T1
                         }
                         else
                         {
+                            t1CutReason = "nocut-flush"; // PROBE-T1
                             ++s_rdCutFlush;
                             s_rdCutHoldStreak = 0u;
                             s_rdRejSinceLastPub = 0u; // PROBE-CUT1
@@ -3001,6 +3111,7 @@ void GS::latchHostPresentationFrame()
                     }
                     else
                     {
+                        t1CutReason = "boundary-cut"; // PROBE-T1
                         const uint32_t kb = s_rdBoundaries.back().first;
                         const uint32_t sb = s_rdBoundaries.back().second;
                         s_rdCutHoldStreak = 0u;
@@ -3796,14 +3907,23 @@ void GS::latchHostPresentationFrame()
             }
             s_pubVerts.resize(keptVerts);
             s_pubBatches.resize(keptBatches);
+            if (droppedAtFlip > 0u && t1TransLogOn()) // PROBE-T1
+                t1LogDropCounts("fbp-filter", droppedAtFlip, 0u);
             if (rd80FbTexOn()) // FIX-RD80
                 ps2xRdSetDisplayBlend(rd80DisplayBlend);
+            static uint64_t s_t1PubSeq2d = 0ull; // PROBE-T1
+            t1LogPub(++s_t1PubSeq2d, s_pubBatches, s_pubVerts, t1CutReason); // PROBE-T1
             ps2xRdPublish2D(s_pubVerts.data(), s_pubVerts.size(), s_pubBatches.data(), s_pubBatches.size(), rtSk, plSk, gMin, gMax, s_pubRanges.data(), s_pubRanges.size() / 2u); // FEAT-RD13 // FEAT-RD33
             s_pubVerts.clear();
             s_pubBatches.clear();
             s_pubFba.clear(); // PROBE-RD78D
             s_pubRanges.clear();
             } // FEAT-RD54: end if (!skipPublishHold)
+            else if (t1TransLogOn() && !skipPublishHold) // PROBE-T1
+            {
+                std::lock_guard<std::mutex> capLock(s_rd2dCapMutex);
+                t1LogDropVec("not-published", s_rd2dBatches, s_rd2dVerts);
+            }
 
             static uint32_t s_rdClassicFrames = 0u;
             static uint32_t s_rdRdFrames = 0u;
