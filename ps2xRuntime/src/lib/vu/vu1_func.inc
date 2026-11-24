@@ -8,6 +8,7 @@
 // whenever a lane of the result or of the product leaves the exponent window [2,253]. (vu1_hot_ops.h itself cannot be included in this TU: its fmacR
 // touches private VU1Interpreter members and needs `#define private public`.)
 #include <cfloat>
+#include <cstdarg> // PROBE-M9
 #include <cmath> // FEAT-RD40
 #include <cstdlib> // PERF-V1G
 #include <filesystem> // PERF-SA
@@ -1666,6 +1667,127 @@ inline void m8AccumVert(__m128 vp, bool &first, float &minW, float &maxW, float 
     if (ax > maxAbsXY) maxAbsXY = ax;
     if (ay > maxAbsXY) maxAbsXY = ay;
 }
+
+struct M9PlaneTrace // PROBE-M9
+{
+    int planeIdx = 0;
+    int32_t vin = 0;
+    int32_t vout = 0;
+    char sides[20] = {};
+    char tList[128] = {};
+};
+
+struct M9State // PROBE-M9
+{
+    std::mutex mtx;
+    uint32_t printedLines = 0u;
+    uint32_t clipCalls = 0u;
+    uint32_t badCalls = 0u;
+    uint32_t byForm[4] = {};
+    bool init = false;
+    std::chrono::steady_clock::time_point lastSum{};
+};
+
+inline M9State &m9State() // PROBE-M9
+{
+    static M9State s_m9;
+    return s_m9;
+}
+
+inline const char *m9FormName(uint32_t clipMode, bool copyS) // PROBE-M9
+{
+    static constexpr const char *kForms[4] = {
+        "m0_c0_-Z+Z-X+X-Y+Y",
+        "m0_c1_-Z+Z-X+X-Y+Y",
+        "m1_c0_-Z+Z-X+X-Y+Y",
+        "m1_c1_-Z+Z-X+X-Y+Y",
+    };
+    return kForms[((clipMode & 1u) << 1) | (copyS ? 1u : 0u)];
+}
+
+inline void m9RecordAndMaybeSummary(uint32_t clipMode, bool copyS, bool isBad) // PROBE-M9
+{
+    M9State &st = m9State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    ++st.clipCalls;
+    if (isBad)
+    {
+        ++st.badCalls;
+        ++st.byForm[((clipMode & 1u) << 1) | (copyS ? 1u : 0u)];
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!st.init)
+    {
+        st.init = true;
+        st.lastSum = now;
+        return;
+    }
+    if (std::chrono::duration<double>(now - st.lastSum).count() < 5.0)
+        return;
+    char formBuf[256];
+    int pos = 0;
+    formBuf[0] = '\0';
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        if (st.byForm[i] == 0u)
+            continue;
+        pos += std::snprintf(formBuf + pos, sizeof(formBuf) - static_cast<size_t>(pos),
+                             "%s%s=%u", pos ? " " : "", m9FormName(i >> 1, (i & 1u) != 0u), st.byForm[i]);
+    }
+    if (pos == 0)
+        std::snprintf(formBuf, sizeof(formBuf), "none=0");
+    ::ps2xSafeLog("[clipbad-sum] clipCalls=%u badCalls=%u byForm: %s\n", st.clipCalls, st.badCalls, formBuf);
+    st.lastSum = now;
+}
+
+inline void m9DumpBad(uint32_t serial, uint16_t mscal, uint32_t clipMode, bool copyS, int32_t vi7, int32_t vout, // PROBE-M9
+                      const __m128 inPos[3], const __m128 inCol[3], const __m128 inTex[3], const uint32_t inFlags[3], const float inFog[3],
+                      const __m128 outPos[16], const __m128 outCol[16], const __m128 outTex[16], const float outFog[16],
+                      const char outSrc[16][64], int32_t unsetSlot, const M9PlaneTrace planes[6], int nPlanes)
+{
+    static constexpr const char *kPlaneNames[6] = {"-Z", "+Z", "-X", "+X", "-Y", "+Y"};
+    M9State &st = m9State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    auto emit = [&](const char *fmt, ...) {
+        if (st.printedLines >= 40u)
+            return;
+        ++st.printedLines;
+        char buf[512];
+        va_list ap;
+        va_start(ap, fmt);
+        std::vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        ::ps2xSafeLog("%s\n", buf);
+    };
+    emit("[clipbad] serial=%u mscal=0x%04x form=%s vin=3 vout=%u",
+         serial, static_cast<unsigned>(mscal), m9FormName(clipMode, copyS), static_cast<unsigned>(vout));
+    for (int i = 0; i < 3; ++i)
+    {
+        alignas(16) float p[4], c[4], t[4];
+        _mm_store_ps(p, inPos[i]);
+        _mm_store_ps(c, inCol[i]);
+        _mm_store_ps(t, inTex[i]);
+        const int adc = (i == 2) ? ((vi7 >> 15) & 1) : 0;
+        emit("  in[%d] pos=(%g,%g,%g,%g) clipflags=0x%x adc=%d tex=(%g,%g,%g) col=(%g,%g,%g,%g) fog=%g",
+             i, p[0], p[1], p[2], p[3], inFlags[i], adc, t[0], t[1], t[2], c[0], c[1], c[2], c[3], inFog[i]);
+    }
+    for (int32_t j = 0; j < vout && j < 16; ++j)
+    {
+        alignas(16) float p[4], c[4], t[4];
+        _mm_store_ps(p, outPos[j]);
+        _mm_store_ps(c, outCol[j]);
+        _mm_store_ps(t, outTex[j]);
+        emit("  out[%d] pos=(%g,%g,%g,%g) tex=(%g,%g,%g) col=(%g,%g,%g,%g) fog=%g src=%s",
+             j, p[0], p[1], p[2], p[3], t[0], t[1], t[2], c[0], c[1], c[2], c[3], outFog[j], outSrc[j]);
+    }
+    for (int p = 0; p < nPlanes; ++p)
+    {
+        emit("  plane[%d](%s): vin=%d vout=%d sides=%s t=[%s]",
+             planes[p].planeIdx, kPlaneNames[planes[p].planeIdx], planes[p].vin, planes[p].vout, planes[p].sides, planes[p].tList);
+    }
+    if (unsetSlot >= 0)
+        emit("  note: unset-output-slot=%d", unsetSlot);
+}
 } // namespace watch
 
 // Handler 00A8: matrix setup (00A8..0150) + table transform loop (0158..0180), docs/VU1_HANDLER_FORMS.md sections 1, 2 (verified bit-exact there).
@@ -2751,6 +2873,21 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
 }
 } // namespace scene
 
+static inline __m128 vuSat4(__m128 v) // FIX-M10
+{
+    const __m128 maxV = _mm_set1_ps(FLT_MAX);
+    const __m128 minV = _mm_set1_ps(-FLT_MAX);
+    const __m128 signBit = _mm_and_ps(v, _mm_castsi128_ps(_mm_set1_epi32(static_cast<int>(0x80000000u))));
+    const __m128 isNan = _mm_cmpunord_ps(v, v);
+    const __m128 clamped = _mm_min_ps(_mm_max_ps(v, minV), maxV);
+    return _mm_blendv_ps(clamped, signBit, isNan);
+}
+
+static inline float vuSat(float v) // FIX-M10
+{
+    return _mm_cvtss_f32(vuSat4(_mm_set_ss(v)));
+}
+
 // Task F4: Sutherland-Hodgman 6-plane frustum clipper (2900..2F68), called from rigid2440 when no trivial-reject FCOR mask matches.
 // Reproduces every context/spill/buffer/GIF store to VU memory (1020..1022, 918..959, 876..) and kicks 1023 + 876; returns to 24F8/2720 via JR vi12.
 static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, int32_t vi7, int32_t vi8, int32_t vi9, int32_t vi10, bool copyS,
@@ -2812,6 +2949,29 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
 
     int32_t polyCount = 3;
     __m128 vf19_last = zero;
+    const bool m9On = watch::spikeOn(); // PROBE-M9
+    __m128 m9InPos[3]{}, m9InCol[3]{}, m9InTex[3]{}; // PROBE-M9
+    uint32_t m9InFlags[3]{}; // PROBE-M9
+    float m9InFog[3]{}; // PROBE-M9
+    char m9SrcA[16][64]{}, m9SrcB[16][64]{}; // PROBE-M9
+    watch::M9PlaneTrace m9Planes[6]{}; // PROBE-M9
+    int m9NPlanes = 0; // PROBE-M9
+    int32_t m9UnsetSlot = -1; // PROBE-M9
+    if (m9On) // PROBE-M9
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            m9InPos[i] = ldq(vu, 918u + static_cast<uint32_t>(i) * 3u);
+            m9InCol[i] = ldq(vu, 919u + static_cast<uint32_t>(i) * 3u);
+            m9InTex[i] = ldq(vu, 920u + static_cast<uint32_t>(i) * 3u);
+            m9InFlags[i] = clipBitsV(m9InPos[i]);
+            const __m128 tv = fmacV<2>(c2v, bc<3>(m9InPos[i]), fmacV<4>(c1v, m9InPos[i], zero));
+            const float iq = divQ2(1.0f, _mm_cvtss_f32(bc<3>(tv)));
+            const __m128 fw = miniV(maxV(fmacV<2>(bc<3>(c5v), _mm_set1_ps(iq), fmacV<4>(vf0, bc<2>(c5v), zero)), zero), _mm_set1_ps(255.0f));
+            m9InFog[i] = _mm_cvtss_f32(bc<3>(fw));
+            std::snprintf(m9SrcA[i], sizeof(m9SrcA[i]), "copy of in[%d]", i);
+        }
+    }
     for (int p = 0; p < 6; ++p)
     {
         const PlaneSpec &pl = kPlanes[p];
@@ -2824,6 +2984,17 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
         __m128 vf22 = ldq(vu, inPtr++);
         uint32_t outPtr = pl.outBase;
         int32_t outCount = 0;
+        bool m9OutWritten[16]{}; // PROBE-M9
+        int m9TPos = 0; // PROBE-M9
+        if (m9On) // PROBE-M9
+        {
+            m9Planes[p].planeIdx = p;
+            m9Planes[p].vin = polyCount;
+            m9Planes[p].sides[0] = '\0';
+            m9Planes[p].tList[0] = '\0';
+            for (int32_t i = 0; i < 16; ++i)
+                std::snprintf(m9SrcB[i], sizeof(m9SrcB[i]), "UNSET");
+        }
 
         for (int32_t e = 0; e < polyCount; ++e)
         {
@@ -2833,9 +3004,19 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
             const __m128 vf25w = fmacV<4>(vf17, sgnV, zero);
             const __m128 vf26w = fmacV<4>(vf21, sgnV, zero);
             vf23 = ldq(vu, inPtr++);
+            if (m9On && e < 18) // PROBE-M9
+            {
+                m9Planes[p].sides[e] = out0 ? '1' : '0';
+                m9Planes[p].sides[e + 1] = '\0';
+            }
 
             if (!out0)
             {
+                if (m9On && outCount < 16) // PROBE-M9
+                {
+                    m9OutWritten[outCount] = true;
+                    std::snprintf(m9SrcB[outCount], sizeof(m9SrcB[outCount]), "%s", m9SrcA[e < 16 ? e : 15]);
+                }
                 stqRaw(vu, outPtr++, vf17);
                 stqRaw(vu, outPtr++, vf18);
                 stqRaw(vu, outPtr++, vf19);
@@ -2851,20 +3032,39 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
                     d0v = mr32(d0v);
                     d1v = mr32(d1v);
                 }
-                const __m128 d1n = fmacV<0>(zero, d1v, zero); // 2F00 ADDx.y vf24, vf0, vf26
-                const float den = _mm_cvtss_f32(fmacV<1>(d1v, d0v, zero));
-                const float q = divQ2(1.0f, den);
-                const float absD0 = _mm_cvtss_f32(absV(d0v));
-                const float absD1 = _mm_cvtss_f32(absV(d1n));
-                const float absQ = _mm_cvtss_f32(absV(_mm_set1_ps(normRes(q))));
-                const __m128 bD0 = _mm_set1_ps(absD0), bD1 = _mm_set1_ps(absD1), bQ = _mm_set1_ps(absQ);
+                const float d0 = _mm_cvtss_f32(d0v); // FIX-M10
+                const float d1 = _mm_cvtss_f32(d1v); // FIX-M10
+                const float den = vuSat(d0 - d1); // FIX-M10
+                float t; // FIX-M10
+                if (den == 0.0f) // FIX-M10
+                    t = (d0 == 0.0f) ? 0.0f : ((std::signbit(d0) != std::signbit(den)) ? -FLT_MAX : FLT_MAX); // FIX-M10
+                else // FIX-M10
+                    t = vuSat(d0 / den); // FIX-M10
+                const __m128 tv = _mm_set1_ps(t); // FIX-M10
 
-                const __m128 pos = fmacV<4>(fmacV<2>(vf21, bD0, fmacV<4>(vf17, bD1, zero)), bQ, zero);
-                const __m128 col = fmacV<0>(fmacV<4>(fmacV<2>(vf22, bD0, fmacV<4>(vf18, bD1, zero)), bQ, zero), _mm_set1_ps(0.001f), zero);
-                const __m128 st = fmacV<4>(fmacV<2>(vf23, bD0, fmacV<4>(vf19, bD1, zero)), bQ, zero);
+                const __m128 posDiff = vuSat4(_mm_sub_ps(vf21, vf17)); // FIX-M10
+                const __m128 pos = vuSat4(_mm_add_ps(vf17, vuSat4(_mm_mul_ps(tv, posDiff)))); // FIX-M10
+                const __m128 colDiff = vuSat4(_mm_sub_ps(vf22, vf18)); // FIX-M10
+                const __m128 colLerp = vuSat4(_mm_add_ps(vf18, vuSat4(_mm_mul_ps(tv, colDiff)))); // FIX-M10
+                const __m128 col = vuSat4(_mm_add_ps(colLerp, _mm_set1_ps(0.001f))); // FIX-M10
+                const __m128 stDiff = vuSat4(_mm_sub_ps(vf23, vf19)); // FIX-M10
+                const __m128 st = vuSat4(_mm_add_ps(vf19, vuSat4(_mm_mul_ps(tv, stDiff)))); // FIX-M10
                 const __m128 m1012 = ldq(vu, 1012u); // 2F18 + 2F40: SQ.yzw m1012, 876(vi0)
                 stqRaw(vu, 876u, _mm_blend_ps(ldq(vu, 876u), m1012, 0xE));
 
+                if (m9On) // PROBE-M9
+                {
+                    const float tVal = t; // FIX-M10
+                    m9TPos += std::snprintf(m9Planes[p].tList + m9TPos,
+                                            sizeof(m9Planes[p].tList) - static_cast<size_t>(m9TPos),
+                                            "%s%.5g", m9TPos ? "," : "", tVal);
+                    if (outCount < 16)
+                    {
+                        m9OutWritten[outCount] = true;
+                        std::snprintf(m9SrcB[outCount], sizeof(m9SrcB[outCount]),
+                                      "p%d:e%d(%d->%d,t=%.5g)", p, e, e, (e + 1) % polyCount, tVal);
+                    }
+                }
                 stqRaw(vu, outPtr++, pos);
                 stqRaw(vu, outPtr++, col);
                 stqRaw(vu, outPtr++, st);
@@ -2877,8 +3077,23 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
                 vf22 = ldq(vu, inPtr++);
         }
 
+        if (m9On) // PROBE-M9
+        {
+            m9Planes[p].vout = outCount;
+            m9NPlanes = p + 1;
+            for (int32_t j = 0; j < outCount && j < 16; ++j)
+            {
+                if (!m9OutWritten[j] && m9UnsetSlot < 0)
+                    m9UnsetSlot = j;
+                std::snprintf(m9SrcA[j], sizeof(m9SrcA[j]), "%s", m9SrcB[j]);
+            }
+        }
         if (outCount == 0)
+        {
+            if (m9On) // PROBE-M9
+                watch::m9RecordAndMaybeSummary(clipMode, copyS, false);
             return true; // 2E88 -> 2D50..2DA8: completely clipped out
+        }
 
         // 2E90..2EC0: wrap-around copy of vertex 0 + screen-space transform of v0 on last plane
         const __m128 w0 = ldq(vu, pl.outBase + 0u);
@@ -2933,10 +3148,37 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
     {
         float minW = 0.0f, maxW = 0.0f, maxAbsXY = 0.0f;
         bool first = true;
+        bool m9Bad = (m9UnsetSlot >= 0); // PROBE-M9
+        __m128 m9OutPos[16]{}, m9OutCol[16]{}, m9OutTex[16]{}; // PROBE-M9
+        float m9OutFog[16]{}; // PROBE-M9
         for (int32_t k = 0; k < polyCount; ++k)
-            watch::m8AccumVert(ldq(vu, 918u + 3u * static_cast<uint32_t>(k)), first, minW, maxW, maxAbsXY);
-        watch::m8EnrichDraw(scene::t_scene.curKickSerial & 0x3FFFFFFFu, 0x2900u, 1u, 3u,
+        {
+            const __m128 vp = ldq(vu, 918u + 3u * static_cast<uint32_t>(k));
+            watch::m8AccumVert(vp, first, minW, maxW, maxAbsXY);
+            if (k < 16) // PROBE-M9
+            {
+                m9OutPos[k] = vp;
+                m9OutCol[k] = ldq(vu, 919u + 3u * static_cast<uint32_t>(k));
+                m9OutTex[k] = ldq(vu, 920u + 3u * static_cast<uint32_t>(k));
+                const __m128 tv = fmacV<2>(c2v, bc<3>(vp), fmacV<4>(c1v, vp, zero));
+                const float oq = divQ2(1.0f, _mm_cvtss_f32(bc<3>(tv)));
+                const __m128 fw = miniV(maxV(fmacV<2>(bc<3>(c5v), _mm_set1_ps(oq), fmacV<4>(vf0, bc<2>(c5v), zero)), zero), _mm_set1_ps(255.0f));
+                m9OutFog[k] = _mm_cvtss_f32(bc<3>(fw));
+                alignas(16) float p[4];
+                _mm_store_ps(p, vp);
+                if (p[3] == 0.0f || (p[0] == 0.0f && p[1] == 0.0f && p[2] == 0.0f && p[3] == 0.0f))
+                    m9Bad = true;
+            }
+        }
+        const uint32_t serial30 = scene::t_scene.curKickSerial & 0x3FFFFFFFu;
+        watch::m8EnrichDraw(serial30, 0x2900u, 1u, 3u,
                             static_cast<uint32_t>(polyCount), minW, maxW, maxAbsXY);
+        watch::m9RecordAndMaybeSummary(clipMode, copyS, m9Bad); // PROBE-M9
+        if (m9Bad) // PROBE-M9
+            watch::m9DumpBad(serial30, watch::t_m8Mscal, clipMode, copyS, vi7, polyCount,
+                             m9InPos, m9InCol, m9InTex, m9InFlags, m9InFog,
+                             m9OutPos, m9OutCol, m9OutTex, m9OutFog,
+                             m9SrcA, m9UnsetSlot, m9Planes, m9NPlanes);
     }
     if (scene::on()) // PERF-SA
         scene::recordClipPolygon(vu, polyCount, copyS, c1v, c2v, kicks.back().first, kicks.back().second, gif);
