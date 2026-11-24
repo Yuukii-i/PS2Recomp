@@ -745,6 +745,45 @@ inline bool leanKickOn() // FEAT-RD42
     }();
     return v && ::ps2xRdActive(); // FEAT-RD48 // FEAT-RD49
 }
+inline bool rdWrapOn() // FIX-M11 // FIX-M12
+{
+    static const bool v = []() {
+        const char *e = std::getenv("PS2X_RD_WRAP");
+        return (e && e[0] == '1');
+    }();
+    return v;
+}
+inline std::atomic<uint32_t> g_rdWrapCount{0u}; // FIX-M11
+inline float wrapRdCoord(float x) // FIX-M11
+{
+    if (std::isnan(x))
+        return 0.0f;
+    const float xi = x * 16.0f;
+    if (xi >= 2147483648.0f)
+        return 4095.9375f;
+    if (xi <= -2147483648.0f)
+        return 0.0f;
+    return x - 4096.0f * std::floor(x / 4096.0f);
+}
+inline __m128 wrapRdPos(__m128 pos) // FIX-M11
+{
+    if (!rdWrapOn())
+        return pos;
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 v4096 = _mm_set1_ps(4096.0f);
+    const __m128 inRange = _mm_and_ps(_mm_cmpge_ps(pos, zero), _mm_cmplt_ps(pos, v4096));
+    const int mask = _mm_movemask_ps(inRange);
+    if ((mask & 0x3) == 0x3)
+        return pos;
+    alignas(16) float p[4];
+    _mm_store_ps(p, pos);
+    if (!(mask & 0x1))
+        p[0] = wrapRdCoord(p[0]);
+    if (!(mask & 0x2))
+        p[1] = wrapRdCoord(p[1]);
+    g_rdWrapCount.fetch_add(1u, std::memory_order_relaxed);
+    return _mm_load_ps(p);
+}
 inline void leanSkinNoteDraw(bool isLean, bool mismatch, bool isLeanKick = false) // FEAT-RD40 // FEAT-RD42
 {
     struct Stat
@@ -2346,10 +2385,7 @@ inline void onFlush()
         float vpOffsetZ = 0.0f;   // FEAT-RD11
         const auto toRdVert = [](const SceneVertex &sv) -> ::RdVert {
             ::RdVert rv;
-            rv.pos[0] = sv.pos[0];
-            rv.pos[1] = sv.pos[1];
-            rv.pos[2] = sv.pos[2];
-            rv.pos[3] = sv.pos[3];
+            _mm_storeu_ps(rv.pos, wrapRdPos(_mm_loadu_ps(sv.pos))); // FIX-M11
             for (int c = 0; c < 4; ++c)
                 rv.rgba[c] = static_cast<uint8_t>(std::min<uint32_t>(sv.rgba[c], 255u));
             const float q = sv.stq[2]; // FEAT-RD3
@@ -2463,6 +2499,7 @@ inline void onFlush()
         t_scene.slHasFirst = false;
         t_scene.slAmb0[0] = t_scene.slAmb0[1] = t_scene.slAmb0[2] = 0.0f;
         t_scene.slScale0[0] = t_scene.slScale0[1] = t_scene.slScale0[2] = 0.0f;
+        ::ps2xSafeLog("[rdwrap] wrapped=%u/s\n", g_rdWrapCount.exchange(0u, std::memory_order_relaxed)); // FIX-M11
     }
     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - t_scene.lastLog).count() >= 5000)
     {
@@ -2576,7 +2613,7 @@ inline void markGeometryKick(std::vector<uint8_t> &gif, uint32_t gifOff) // FEAT
 inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba, float fog = 1.0f) // FEAT-RD14 // FIX-E1b
 {
     ::RdVert rv;
-    _mm_storeu_ps(rv.pos, pos);
+    _mm_storeu_ps(rv.pos, wrapRdPos(pos)); // FIX-M11
     const __m128i clamped = _mm_min_epu32(rgba, _mm_set1_epi32(255));
     const __m128i p16 = _mm_packus_epi32(clamped, clamped);
     const __m128i p8 = _mm_packus_epi16(p16, p16);
@@ -3361,6 +3398,14 @@ static void buildLeanSkinVertsImpl(const uint8_t *vu, int32_t N, uint32_t s2base
             gS2[j] = VI10 ? ldq(vu, static_cast<uint32_t>(796 + idx)) : ldq(vu, s2base + static_cast<uint32_t>(s));
         }
         Fv8V A = fv8FromRows(gA), B = fv8FromRows(gB), S3 = fv8FromRows(gS3), S2 = fv8FromRows(gS2); // FIX-E10a
+        bool needWrap = false; // FIX-M11
+        if (scene::rdWrapOn()) // FIX-M11
+        {
+            const __m256 v4096_8 = _mm256_set1_ps(4096.0f);
+            const __m256 inX8 = _mm256_and_ps(_mm256_cmp_ps(A.c[0], z8v, _CMP_GE_OQ), _mm256_cmp_ps(A.c[0], v4096_8, _CMP_LT_OQ));
+            const __m256 inY8 = _mm256_and_ps(_mm256_cmp_ps(A.c[1], z8v, _CMP_GE_OQ), _mm256_cmp_ps(A.c[1], v4096_8, _CMP_LT_OQ));
+            needWrap = (_mm256_movemask_ps(_mm256_and_ps(inX8, inY8)) != 0xFF);
+        }
         for (int c = 0; c < 4; ++c)
         {
             A.c[c] = fv8N(A.c[c]); // FIX-E10a
@@ -3429,6 +3474,11 @@ static void buildLeanSkinVertsImpl(const uint8_t *vu, int32_t N, uint32_t s2base
                     wArr[j] = 255 << 4;
                 }
             }
+        }
+        if (needWrap) // FIX-M11
+        {
+            for (int j = 0; j < n; ++j)
+                gA[j] = scene::wrapRdPos(gA[j]);
         }
         for (int j = 0; j < n; ++j)
         {
