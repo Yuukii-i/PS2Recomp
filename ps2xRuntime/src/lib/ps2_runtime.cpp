@@ -4652,6 +4652,8 @@ struct EeProfilerScope {
 // EeScheduler::accountCycles merges g_acctPending into every other caller's count (so checkpoint/preemption, syscalls always see exact time);
 // the slow Load/Store paths flush before any IO-region access (timers, INTC, DMAC...).
 thread_local uint32_t g_acctPending = 0;
+bool g_fnReplayActive = false; // PROBE-FR1d
+bool g_fnReplaySuppressDcall = false; // PROBE-FR2
 static EeScheduler *g_acctSched = nullptr;
 static inline bool acctBatchEnabled()
 {
@@ -4666,6 +4668,10 @@ static inline bool acctBatchEnabled()
 }
 static inline void acctDispatch(EeScheduler *s)
 {
+    if (g_fnReplayActive) // PROBE-FR1d
+    {
+        return;
+    }
     if (acctBatchEnabled())
     {
         g_acctSched = s;
@@ -4684,6 +4690,11 @@ static inline void acctDispatch(EeScheduler *s)
 }
 static inline void acctFlushForIo(uint32_t vaddr)
 {
+    if (g_fnReplayActive) // PROBE-FR1d
+    {
+        g_acctPending = 0u;
+        return;
+    }
     if (g_acctPending != 0u && (vaddr & 0x1FFFFFFFu) >= 0x10000000u && g_acctSched)
     {
         const uint32_t p = g_acctPending;
@@ -4890,6 +4901,17 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         ++g_pcDispatch[static_cast<int>(kind) % 5];
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+    if (g_fnReplayActive && !g_fnReplaySuppressDcall && isCall) [[unlikely]] // PROBE-FR1e // PROBE-FR2
+    {
+        static uint32_t s_fnReplayDcallCount = 0u;
+        if (s_fnReplayDcallCount < 400u)
+        {
+            ++s_fnReplayDcallCount;
+            const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
+            ps2xSafeLog("[fnreplay] dcall target=0x%08x ret=0x%08x sp=0x%08x\n",
+                        targetPc, fallthroughPc, sp);
+        }
+    }
 
     if (dispatchAnyProbeEnabled()) [[unlikely]] // PERF-EX2
         dispatchGuestBranchProbes(rdram, ctx, targetPc, sourcePc, isCall);
@@ -5791,6 +5813,10 @@ extern std::vector<uint32_t> consumeCompletedIntcCauses();
 
 void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
 {
+    if (g_fnReplayActive) // PROBE-FR1d
+    {
+        return;
+    }
     for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
     {
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
@@ -6871,6 +6897,10 @@ thread_local uint64_t g_ps2xCheckpointYields = 0;   // DECOMP-CT
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
+    if (g_fnReplayActive) [[unlikely]] // PROBE-FR1d
+    {
+        return false;
+    }
     if (g_ps2xSuppressCheckpoint) [[unlikely]] // DECOMP-CM // PERF-EX3
     {
         return false;
@@ -7265,8 +7295,475 @@ namespace
     }
 } // PROBE-RW1
 
+// PROBE-FR1: single-function replay harness (PS2X_FNREPLAY=<spec_path>)
+static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, const char *specPath)
+{
+    FILE *sf = std::fopen(specPath, "r");
+    if (!sf)
+    {
+        ps2xSafeLog("[fnreplay] ERROR: failed to open spec '%s'\n", specPath);
+        std::quick_exit(2);
+    }
+
+    std::memset(ctx, 0, sizeof(*ctx));
+
+    std::string ramPath;
+    std::string outRamPath;
+    std::string outRegsPath;
+    uint32_t pc = 0;
+    uint32_t ra = 0;
+    bool hasPc = false;
+
+    auto parseHex32 = [](const char *s) -> uint32_t {
+        return static_cast<uint32_t>(std::strtoul(s, nullptr, 16));
+    };
+
+    char line[1024];
+    while (std::fgets(line, sizeof(line), sf))
+    {
+        size_t len = std::strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+        if (len == 0 || line[0] == '#')
+            continue;
+
+        char *saveptr = nullptr;
+#ifdef _WIN32
+        char *cmd = strtok_s(line, " \t", &saveptr);
+#else
+        char *cmd = strtok_r(line, " \t", &saveptr);
+#endif
+        if (!cmd)
+            continue;
+
+        auto nextTok = [&]() -> char * {
+#ifdef _WIN32
+            return strtok_s(nullptr, " \t", &saveptr);
+#else
+            return strtok_r(nullptr, " \t", &saveptr);
+#endif
+        };
+
+        if (std::strcmp(cmd, "ram") == 0)
+        {
+            if (char *p = nextTok())
+                ramPath = p;
+        }
+        else if (std::strcmp(cmd, "out_ram") == 0)
+        {
+            if (char *p = nextTok())
+                outRamPath = p;
+        }
+        else if (std::strcmp(cmd, "out_regs") == 0)
+        {
+            if (char *p = nextTok())
+                outRegsPath = p;
+        }
+        else if (std::strcmp(cmd, "pc") == 0)
+        {
+            if (char *p = nextTok())
+            {
+                pc = parseHex32(p);
+                hasPc = true;
+            }
+        }
+        else if (std::strcmp(cmd, "ra") == 0)
+        {
+            if (char *p = nextTok())
+            {
+                ra = parseHex32(p);
+                ctx->r[31] = _mm_set_epi32(0, 0, 0, static_cast<int32_t>(ra));
+            }
+        }
+        else if (std::strcmp(cmd, "gpr") == 0)
+        {
+            char *ti = nextTok();
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (ti && t3 && t2 && t1 && t0)
+            {
+                int idx = std::atoi(ti);
+                if (idx >= 0 && idx < 32)
+                {
+                    ctx->r[idx] = _mm_set_epi32(
+                        static_cast<int32_t>(parseHex32(t3)),
+                        static_cast<int32_t>(parseHex32(t2)),
+                        static_cast<int32_t>(parseHex32(t1)),
+                        static_cast<int32_t>(parseHex32(t0)));
+                }
+            }
+        }
+        else if (std::strcmp(cmd, "hi") == 0)
+        {
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (t3 && t2 && t1 && t0)
+            {
+                ctx->hi = (static_cast<uint64_t>(parseHex32(t1)) << 32) | static_cast<uint64_t>(parseHex32(t0));
+                ctx->hi1 = (static_cast<uint64_t>(parseHex32(t3)) << 32) | static_cast<uint64_t>(parseHex32(t2));
+            }
+        }
+        else if (std::strcmp(cmd, "lo") == 0)
+        {
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (t3 && t2 && t1 && t0)
+            {
+                ctx->lo = (static_cast<uint64_t>(parseHex32(t1)) << 32) | static_cast<uint64_t>(parseHex32(t0));
+                ctx->lo1 = (static_cast<uint64_t>(parseHex32(t3)) << 32) | static_cast<uint64_t>(parseHex32(t2));
+            }
+        }
+        else if (std::strcmp(cmd, "fcr31") == 0)
+        {
+            if (char *p = nextTok())
+                ctx->fcr31 = parseHex32(p);
+        }
+        else if (std::strcmp(cmd, "fpr") == 0)
+        {
+            char *ti = nextTok();
+            char *tv = nextTok();
+            if (ti && tv)
+            {
+                int idx = std::atoi(ti);
+                if (idx >= 0 && idx < 32)
+                {
+                    uint32_t bits = parseHex32(tv);
+                    std::memcpy(&ctx->f[idx], &bits, sizeof(float));
+                }
+            }
+        }
+        else if (std::strcmp(cmd, "vf") == 0)
+        {
+            char *ti = nextTok();
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (ti && t3 && t2 && t1 && t0)
+            {
+                int idx = std::atoi(ti);
+                if (idx >= 0 && idx < 32)
+                {
+                    __m128i iv = _mm_set_epi32(
+                        static_cast<int32_t>(parseHex32(t3)),
+                        static_cast<int32_t>(parseHex32(t2)),
+                        static_cast<int32_t>(parseHex32(t1)),
+                        static_cast<int32_t>(parseHex32(t0)));
+                    ctx->vu0_vf[idx] = _mm_castsi128_ps(iv);
+                }
+            }
+        }
+        else if (std::strcmp(cmd, "acc") == 0)
+        {
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (t3 && t2 && t1 && t0)
+            {
+                __m128i iv = _mm_set_epi32(
+                    static_cast<int32_t>(parseHex32(t3)),
+                    static_cast<int32_t>(parseHex32(t2)),
+                    static_cast<int32_t>(parseHex32(t1)),
+                    static_cast<int32_t>(parseHex32(t0)));
+                ctx->vu0_acc = _mm_castsi128_ps(iv);
+            }
+        }
+    }
+    std::fclose(sf);
+
+    if (!hasPc || ramPath.empty())
+    {
+        ps2xSafeLog("[fnreplay] ERROR: spec missing pc or ram path\n");
+        std::quick_exit(2);
+    }
+
+    constexpr size_t kRamBytes = PS2_RAM_SIZE;
+    FILE *rf = std::fopen(ramPath.c_str(), "rb");
+    if (!rf)
+    {
+        ps2xSafeLog("[fnreplay] ERROR: failed to open ram '%s'\n", ramPath.c_str());
+        std::quick_exit(2);
+    }
+    size_t nread = std::fread(rdram, 1, kRamBytes, rf);
+    std::fclose(rf);
+    if (nread != kRamBytes)
+    {
+        ps2xSafeLog("[fnreplay] ERROR: short ram read %zu/%zu from '%s'\n", nread, kRamBytes, ramPath.c_str());
+        std::quick_exit(2);
+    }
+    ps2xSafeLog("[fnreplay] loaded ram=%s (%zu bytes) pc=0x%08x ra=0x%08x\n", ramPath.c_str(), nread, pc, ra);
+
+    ctx->pc = pc;
+    const R5900Context initialCtx = *ctx; // PROBE-FR2
+    PS2Runtime::RecompiledFunction fn = rt->lookupFunction(pc);
+    if (!fn)
+    {
+        ps2xSafeLog("[fnreplay] ERROR: lookupFunction(0x%08x) returned null\n", pc);
+        std::fprintf(stderr, "[fnreplay] ERROR: lookupFunction(0x%08x) returned null\n", pc);
+        std::quick_exit(2);
+    }
+
+    // PROBE-FR2: repeat count and watch address list
+    uint32_t repeatCount = 1u;
+    if (const char *repEnv = std::getenv("PS2X_FNREPLAY_REPEAT"))
+    {
+        long v = std::strtol(repEnv, nullptr, 10);
+        if (v < 1L)
+            v = 1L;
+        else if (v > 100000L)
+            v = 100000L;
+        repeatCount = static_cast<uint32_t>(v);
+    }
+    std::vector<uint32_t> watchAddrs;
+    if (const char *watchEnv = std::getenv("PS2X_FNREPLAY_WATCH"))
+    {
+        const char *p = watchEnv;
+        while (*p && watchAddrs.size() < 16u)
+        {
+            while (*p == ' ' || *p == '\t' || *p == ',')
+                ++p;
+            if (!*p)
+                break;
+            char *end = nullptr;
+            uint32_t addr = static_cast<uint32_t>(std::strtoul(p, &end, 16));
+            if (end == p)
+                break;
+            watchAddrs.push_back(addr);
+            p = end;
+        }
+    }
+
+    // Replicate GameThread MXCSR round-toward-zero setup (C310/C316) before running guest code
+    {
+        const char *rtz = std::getenv("PS2X_EE_RTZ");
+        if (!(rtz && rtz[0] == '0'))
+            _mm_setcsr(_mm_getcsr() | 0x6000u);
+    }
+
+    g_acctPending = 0u; // PROBE-FR1d
+    g_fnReplayActive = true; // PROBE-FR1d
+    const uint32_t entrySp = static_cast<uint32_t>(_mm_extract_epi32(initialCtx.r[29], 0)); // PROBE-FR1f // PROBE-FR2
+
+    for (uint32_t iter = 0u; iter < repeatCount; ++iter) // PROBE-FR2
+    {
+        *ctx = initialCtx;
+        const bool logIterDetails = (iter == 0u);
+        g_fnReplaySuppressDcall = !logIterDetails;
+
+        if (logIterDetails)
+            ps2xSafeLog("[fnreplay] calling fn=0x%08x\n", pc);
+        fn(rdram, ctx, rt);
+        if (logIterDetails)
+            ps2xSafeLog("[fnreplay] returned from fn=0x%08x pc=0x%08x\n", pc, ctx->pc);
+
+        // PROBE-FR1b: emulate the runtime dispatch loop until ra, pc==0, or step cap
+        // PROBE-FR1c: trace steps (first 300 + final), log stop reason + last 8 dispatch PCs
+        uint32_t steps = 1u;
+        constexpr uint32_t kMaxSteps = 5000000u;
+        constexpr uint32_t kHangRepeatCap = 50000u; // PROBE-FR1f
+        uint32_t prevHangPc = 0u, prevHangSp = 0u, samePcSpCount = 0u; // PROBE-FR1f
+        uint32_t lastStepNum = 0u;
+        uint32_t lastPrePc = 0u, lastPreSp = 0u, lastPreRa = 0u, lastPostPc = 0u, lastPostSp = 0u;
+        auto logRecentDispatch8 = [&]() {
+            const DispatchHistory &h = g_dispatchHistory;
+            const uint32_t total = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
+            const uint32_t count = (total < 8u) ? total : 8u;
+            char buf[128] = {};
+            size_t pos = 0;
+            for (uint32_t i = 0u; i < count && pos + 12 < sizeof(buf); ++i)
+            {
+                const uint32_t idx = (h.next + static_cast<uint32_t>(h.pcs.size()) - count + i) % static_cast<uint32_t>(h.pcs.size());
+                int n = std::snprintf(buf + pos, sizeof(buf) - pos, "%s0x%08x", (i ? " -> " : ""), h.pcs[idx]);
+                if (n > 0)
+                    pos += static_cast<size_t>(n);
+            }
+            ps2xSafeLog("[fnreplay] recent8(%u): %s\n", count, count ? buf : "(empty)");
+        };
+        while (!(ctx->pc == ra && static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) == entrySp) && ctx->pc != 0u && !rt->isStopRequested()) // PROBE-FR1f
+        {
+            if (steps > kMaxSteps) // PROBE-FR1f
+            {
+                ps2xSafeLog("[fnreplay] step cap hit pc=0x%08x\n", ctx->pc);
+                break;
+            }
+            const uint32_t nextPc = ctx->pc;
+            uint32_t s = 0u;
+            if (!generatedFunctionTableSlot(nextPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
+            {
+                ps2xSafeLog("[fnreplay] stop: no generated function at pc=0x%08x (slot_ok=%d)\n",
+                            nextPc, generatedFunctionTableSlot(nextPc, s) ? 1 : 0);
+                logRecentDispatch8();
+                break;
+            }
+            const uint32_t preSp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+            if (nextPc == prevHangPc && preSp == prevHangSp) // PROBE-FR1f
+            {
+                if (++samePcSpCount >= kHangRepeatCap)
+                {
+                    ps2xSafeLog("[fnreplay] hang at pc=0x%08x sp=0x%08x\n", nextPc, preSp);
+                    logRecentDispatch8();
+                    break;
+                }
+            }
+            else
+            {
+                prevHangPc = nextPc;
+                prevHangSp = preSp;
+                samePcSpCount = 1u;
+            }
+            const uint32_t preRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+            if (logIterDetails && steps <= 300u)
+                ps2xSafeLog("[fnreplay] step %u pc=0x%08x sp=0x%08x ra=0x%08x\n", steps, nextPc, preSp, preRa);
+            pushDispatchPc(nextPc);
+            g_ps2RecompiledFunctionTable[s](rdram, ctx, rt);
+            const uint32_t postSp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+            if (logIterDetails && steps <= 300u)
+                ps2xSafeLog("[fnreplay]   -> pc=0x%08x sp=0x%08x\n", ctx->pc, postSp);
+            lastStepNum = steps;
+            lastPrePc = nextPc;
+            lastPreSp = preSp;
+            lastPreRa = preRa;
+            lastPostPc = ctx->pc;
+            lastPostSp = postSp;
+            ++steps;
+        }
+        if (logIterDetails && lastStepNum > 300u)
+        {
+            ps2xSafeLog("[fnreplay] step %u pc=0x%08x sp=0x%08x ra=0x%08x\n", lastStepNum, lastPrePc, lastPreSp, lastPreRa);
+            ps2xSafeLog("[fnreplay]   -> pc=0x%08x sp=0x%08x\n", lastPostPc, lastPostSp);
+        }
+        const uint32_t finalSp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+        if (logIterDetails)
+        {
+            ps2xSafeLog("[fnreplay] finished pc=0x%08x sp=0x%08x steps=%u\n", ctx->pc, finalSp, steps); // PROBE-FR1c
+            const DispatchHistory &h = g_dispatchHistory; // PROBE-FR1e
+            const uint32_t cap = static_cast<uint32_t>(h.pcs.size());
+            const uint32_t start = h.wrapped ? h.next : 0u;
+            for (uint32_t i = 0u; i < cap; ++i)
+            {
+                const uint32_t idx = (start + i) % cap;
+                ps2xSafeLog("[fnreplay] hist i=%u pc=0x%08x\n", i, h.pcs[idx]);
+            }
+        }
+
+        if (!watchAddrs.empty()) // PROBE-FR2
+        {
+            char wbuf[1024];
+            int pos = std::snprintf(wbuf, sizeof(wbuf), "[fnreplay] iter %u w", iter);
+            for (size_t wi = 0; wi < watchAddrs.size() && pos > 0 && static_cast<size_t>(pos) < sizeof(wbuf); ++wi)
+            {
+                const uint32_t addr = watchAddrs[wi];
+                const uint32_t phys = addr & 0x1FFFFFFFu;
+                uint32_t raw = 0u;
+                float fval = 0.0f;
+                if (phys + sizeof(uint32_t) <= kRamBytes)
+                {
+                    std::memcpy(&raw, rdram + phys, sizeof(raw));
+                    std::memcpy(&fval, &raw, sizeof(fval));
+                }
+                int n = std::snprintf(wbuf + pos, sizeof(wbuf) - static_cast<size_t>(pos),
+                                      " 0x%x=%g(0x%08x)", addr, static_cast<double>(fval), raw);
+                if (n > 0)
+                    pos += n;
+            }
+            ps2xSafeLog("%s\n", wbuf);
+        }
+
+        if (!(ctx->pc == ra && finalSp == entrySp)) // PROBE-FR2
+        {
+            ps2xSafeLog("[fnreplay] iter %u INCOMPLETE pc=0x%08x sp=0x%08x\n", iter, ctx->pc, finalSp);
+            break;
+        }
+    }
+    g_fnReplaySuppressDcall = false; // PROBE-FR2
+    g_fnReplayActive = false; // PROBE-FR2
+
+    if (!outRamPath.empty())
+    {
+        FILE *orf = std::fopen(outRamPath.c_str(), "wb");
+        if (!orf)
+        {
+            ps2xSafeLog("[fnreplay] ERROR: failed to open out_ram '%s'\n", outRamPath.c_str());
+            std::quick_exit(2);
+        }
+        size_t nwritten = std::fwrite(rdram, 1, kRamBytes, orf);
+        std::fclose(orf);
+        if (nwritten != kRamBytes)
+        {
+            ps2xSafeLog("[fnreplay] ERROR: short out_ram write %zu/%zu\n", nwritten, kRamBytes);
+            std::quick_exit(2);
+        }
+    }
+
+    if (!outRegsPath.empty())
+    {
+        FILE *ogf = std::fopen(outRegsPath.c_str(), "w");
+        if (!ogf)
+        {
+            ps2xSafeLog("[fnreplay] ERROR: failed to open out_regs '%s'\n", outRegsPath.c_str());
+            std::quick_exit(2);
+        }
+        std::fprintf(ogf, "pc 0x%08X\n", ctx->pc);
+        for (int i = 0; i < 32; ++i)
+        {
+            std::fprintf(ogf, "gpr %d %08X %08X %08X %08X\n", i,
+                         static_cast<uint32_t>(_mm_extract_epi32(ctx->r[i], 3)),
+                         static_cast<uint32_t>(_mm_extract_epi32(ctx->r[i], 2)),
+                         static_cast<uint32_t>(_mm_extract_epi32(ctx->r[i], 1)),
+                         static_cast<uint32_t>(_mm_extract_epi32(ctx->r[i], 0)));
+        }
+        std::fprintf(ogf, "hi 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                     static_cast<uint32_t>(ctx->hi1 >> 32), static_cast<uint32_t>(ctx->hi1),
+                     static_cast<uint32_t>(ctx->hi >> 32), static_cast<uint32_t>(ctx->hi));
+        std::fprintf(ogf, "lo 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                     static_cast<uint32_t>(ctx->lo1 >> 32), static_cast<uint32_t>(ctx->lo1),
+                     static_cast<uint32_t>(ctx->lo >> 32), static_cast<uint32_t>(ctx->lo));
+        std::fprintf(ogf, "fcr31 0x%08X\n", ctx->fcr31);
+        for (int i = 0; i < 32; ++i)
+        {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &ctx->f[i], sizeof(bits));
+            std::fprintf(ogf, "fpr %d 0x%08x\n", i, bits);
+        }
+        for (int i = 0; i < 32; ++i)
+        {
+            __m128i iv = _mm_castps_si128(ctx->vu0_vf[i]);
+            std::fprintf(ogf, "vf %d %08X %08X %08X %08X\n", i,
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 3)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 2)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 1)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 0)));
+        }
+        {
+            __m128i iv = _mm_castps_si128(ctx->vu0_acc);
+            std::fprintf(ogf, "acc %08X %08X %08X %08X\n",
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 3)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 2)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 1)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 0)));
+        }
+        std::fprintf(ogf, "done pc=0x%08x\n", ctx->pc);
+        std::fclose(ogf);
+    }
+
+    ps2xSafeLog("[fnreplay] wrote outputs out_ram=%s out_regs=%s\n", outRamPath.c_str(), outRegsPath.c_str());
+    std::fflush(nullptr);
+} // PROBE-FR1
+
 void PS2Runtime::run()
 {
+    if (const char *spec = std::getenv("PS2X_FNREPLAY")) // PROBE-FR1
+    {
+        ps2xFnReplay(m_memory.getRDRAM(), &m_cpuContext, this, spec);
+        std::quick_exit(0);
+    } // PROBE-FR1
     m_stopRequested.store(false, std::memory_order_relaxed);
     ps2_stubs::resetSifState();
     resetIop();
@@ -8986,29 +9483,16 @@ void PS2Runtime::run()
 
 // PROBE-M14
 #ifdef _WIN32
+#include <intrin.h> // PROBE-WW1
 extern "C" __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
 extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *hModule, char *lpFilename, unsigned long nSize);
 extern "C" __declspec(dllimport) int __stdcall SymInitialize(void *hProcess, const char *UserSearchPath, int fInvadeProcess);
 extern "C" __declspec(dllimport) int __stdcall SymFromAddr(void *hProcess, uint64_t Address, uint64_t *Displacement, void *Symbol);
-#endif
 
-static std::mutex g_fpuProbeMtx;
-static std::unordered_map<void *, std::array<uint64_t, 3>> g_fpuProbeCounts;
-static std::chrono::steady_clock::time_point g_fpuProbeLastDump;
-static bool g_fpuProbeRegistered = false;
-
-static void ps2xFpuProbeDumpLocked()
+static void *ps2xDbgHelpProc() // PROBE-WW1
 {
-    if (g_fpuProbeCounts.empty())
-        return;
-
-#ifdef _WIN32
-    static bool s_symInit = false;
-    static void *s_proc = nullptr;
-    if (!s_symInit)
-    {
-        s_symInit = true;
-        s_proc = GetCurrentProcess();
+    static void *s_proc = []() {
+        void *proc = GetCurrentProcess();
         char exePath[1024]{};
         unsigned long len = GetModuleFileNameA(nullptr, exePath, sizeof(exePath) - 1);
         for (unsigned long i = len; i > 0; --i)
@@ -9019,9 +9503,14 @@ static void ps2xFpuProbeDumpLocked()
                 break;
             }
         }
-        SymInitialize(s_proc, len > 0 ? exePath : nullptr, 1);
-    }
+        SymInitialize(proc, len > 0 ? exePath : nullptr, 1);
+        return proc;
+    }();
+    return s_proc;
+}
 
+static const char *ps2xResolveHostSym(void *addr, char *outName, size_t outNameSz, unsigned int &outOff) // PROBE-WW1
+{
     struct Ps2xSymbolInfo
     {
         uint32_t SizeOfStruct;
@@ -9042,7 +9531,32 @@ static void ps2xFpuProbeDumpLocked()
     };
     static_assert(sizeof(Ps2xSymbolInfo) == 88);
     static_assert(offsetof(Ps2xSymbolInfo, Name) == 84);
+
+    outOff = 0;
+    alignas(8) char buf[sizeof(Ps2xSymbolInfo) + 256]{};
+    auto *sym = reinterpret_cast<Ps2xSymbolInfo *>(buf);
+    sym->SizeOfStruct = sizeof(Ps2xSymbolInfo);
+    sym->MaxNameLen = 256;
+    uint64_t disp = 0;
+    if (SymFromAddr(ps2xDbgHelpProc(), reinterpret_cast<uint64_t>(addr), &disp, sym))
+    {
+        std::snprintf(outName, outNameSz, "%s", sym->Name);
+        outOff = static_cast<unsigned int>(disp);
+        return outName;
+    }
+    return "?";
+}
 #endif
+
+static std::mutex g_fpuProbeMtx;
+static std::unordered_map<void *, std::array<uint64_t, 3>> g_fpuProbeCounts;
+static std::chrono::steady_clock::time_point g_fpuProbeLastDump;
+static bool g_fpuProbeRegistered = false;
+
+static void ps2xFpuProbeDumpLocked()
+{
+    if (g_fpuProbeCounts.empty())
+        return;
 
     struct Entry
     {
@@ -9067,16 +9581,8 @@ static void ps2xFpuProbeDumpLocked()
         const char *symName = "?";
         unsigned int symOff = 0;
 #ifdef _WIN32
-        alignas(8) char buf[sizeof(Ps2xSymbolInfo) + 256]{};
-        auto *sym = reinterpret_cast<Ps2xSymbolInfo *>(buf);
-        sym->SizeOfStruct = sizeof(Ps2xSymbolInfo);
-        sym->MaxNameLen = 256;
-        uint64_t disp = 0;
-        if (SymFromAddr(s_proc, reinterpret_cast<uint64_t>(e.ra), &disp, sym))
-        {
-            symName = sym->Name;
-            symOff = static_cast<unsigned int>(disp);
-        }
+        char nameBuf[256]{};
+        symName = ps2xResolveHostSym(e.ra, nameBuf, sizeof(nameBuf), symOff);
 #endif
         std::fprintf(stderr, "[fpuprobe] n=%llu div0=%llu rsqrt0=%llu sat=%llu ra=%p sym=%s+0x%x\n",
                      static_cast<unsigned long long>(e.total),
@@ -9122,4 +9628,158 @@ void ps2xFpuProbe(void *ra, int kind)
         ps2xFpuProbeDumpLocked();
     }
 } // PROBE-M14
+
+void ps2xDumpEeRam() // PROBE-DR1
+{
+    PS2Runtime *rt = s_activeRuntime.load(std::memory_order_acquire);
+    const uint8_t *rdram = rt ? rt->memory().getRDRAM() : nullptr;
+    if (!rdram)
+        return;
+
+    static std::atomic<uint32_t> s_counter{0};
+    const uint32_t n = s_counter.fetch_add(1, std::memory_order_relaxed) + 1u;
+
+    std::error_code ec;
+    std::filesystem::create_directories("logs", ec);
+
+    char path[64];
+    std::snprintf(path, sizeof(path), "logs/ramdump_%u.bin", n);
+    if (FILE *f = std::fopen(path, "wb"))
+    {
+        std::fwrite(rdram, 1, PS2_RAM_SIZE, f);
+        std::fclose(f);
+        ps2xSafeLog("[ramdump] wrote %s\n", path);
+    }
+} // PROBE-DR1
+
+// PROBE-WW1
+uint32_t g_ps2wwBase = 0u;
+uint32_t g_ps2wwLen = 0u;
+
+static const bool g_ps2wwInit = []() {
+    const char *env = std::getenv("PS2X_WWATCH");
+    if (!env || !env[0])
+        return false;
+    char *end = nullptr;
+    unsigned long base = std::strtoul(env, &end, 0);
+    if (end == env || !end || *end != ':')
+        return false;
+    char *lenEnd = nullptr;
+    unsigned long len = std::strtoul(end + 1, &lenEnd, 0);
+    if (lenEnd == end + 1 || len == 0)
+        return false;
+    constexpr unsigned long kMaxLen = 0x100000ul;
+    if (len > kMaxLen)
+        len = kMaxLen;
+    g_ps2wwBase = static_cast<uint32_t>(base) & 0x01FFFFFFu;
+    g_ps2wwLen = static_cast<uint32_t>(len);
+    return true;
+}();
+
+static std::mutex g_wwMtx;
+static uint32_t g_wwHits = 0u;
+static uint32_t g_wwLogged = 0u;
+static std::unordered_map<std::string, uint32_t> g_wwSymHits;
+static std::chrono::steady_clock::time_point g_wwLastSummary;
+static bool g_wwAtExitRegistered = false;
+
+// PROBE-WW2
+static const uint32_t g_wwAfter = []() {
+    const char *env = std::getenv("PS2X_WWATCH_AFTER");
+    if (!env || !env[0])
+        return 0u;
+    char *end = nullptr;
+    unsigned long v = std::strtoul(env, &end, 0);
+    return (end != env) ? static_cast<uint32_t>(v) : 0u;
+}();
+
+static const uint32_t g_wwMax = []() {
+    const char *env = std::getenv("PS2X_WWATCH_MAX");
+    if (!env || !env[0])
+        return 400u;
+    char *end = nullptr;
+    unsigned long v = std::strtoul(env, &end, 0);
+    if (end == env)
+        return 400u;
+    if (v < 1ul)
+        v = 1ul;
+    if (v > 200000ul)
+        v = 200000ul;
+    return static_cast<uint32_t>(v);
+}();
+
+static const bool g_wwSize4 = []() {
+    const char *env = std::getenv("PS2X_WWATCH_SIZE4");
+    return env && std::strcmp(env, "1") == 0;
+}(); // PROBE-WW2
+
+static void ps2xWwatchDumpSummaryLocked()
+{
+    for (const auto &kv : g_wwSymHits)
+    {
+        ps2xSafeLog("[wwatch] summary sym=%s hits=%u\n", kv.first.c_str(), kv.second);
+    }
+}
+
+static void ps2xWwatchAtExit()
+{
+    std::lock_guard<std::mutex> lk(g_wwMtx);
+    ps2xWwatchDumpSummaryLocked();
+}
+
+#ifdef _MSC_VER
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+void ps2xGuestWriteHit(uint32_t addr, uint32_t size, uint64_t val)
+{
+    if (g_wwSize4 && size != 4u) // PROBE-WW2
+        return;
+
+    PS2Runtime *rt = s_activeRuntime.load(std::memory_order_acquire); // PROBE-WW2
+    const uint32_t vbl = rt ? static_cast<uint32_t>(rt->eeScheduler().currentVSyncTick()) : 0u;
+    if (vbl < g_wwAfter) // PROBE-WW2
+        return;
+
+#ifdef _MSC_VER
+    void *ra = _ReturnAddress();
+#else
+    void *ra = __builtin_return_address(0);
+#endif
+    char nameBuf[256]{};
+    unsigned int symOff = 0u;
+#ifdef _WIN32
+    const char *symName = ps2xResolveHostSym(ra, nameBuf, sizeof(nameBuf), symOff);
+#else
+    const char *symName = "?";
+#endif
+
+    float fval = 0.0f;
+    const uint32_t u32 = static_cast<uint32_t>(val);
+    std::memcpy(&fval, &u32, sizeof(fval));
+
+    std::lock_guard<std::mutex> lk(g_wwMtx);
+    if (!g_wwAtExitRegistered)
+    {
+        g_wwAtExitRegistered = true;
+        g_wwLastSummary = std::chrono::steady_clock::now();
+        std::atexit(ps2xWwatchAtExit);
+    }
+    const uint32_t hitIdx = ++g_wwHits;
+    const uint32_t symHitIdx = ++g_wwSymHits[symName]; // PROBE-WW2
+    if (g_wwLogged < g_wwMax) // PROBE-WW2
+    {
+        ++g_wwLogged;
+        ps2xSafeLog("[wwatch] #%u addr=0x%08x size=%u val=0x%llx float=%g sym=%s+0x%x hostra=%p vbl=%u n=%u\n", // PROBE-WW2
+                    hitIdx, addr, size, static_cast<unsigned long long>(val),
+                    static_cast<double>(fval), symName, symOff, ra, vbl, symHitIdx);
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_wwLastSummary >= std::chrono::seconds(10))
+    {
+        g_wwLastSummary = now;
+        ps2xWwatchDumpSummaryLocked();
+    }
+} // PROBE-WW1
 

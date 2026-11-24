@@ -63,6 +63,7 @@ int  ps2xSdlGetPresentMode(); // FIX-P2
 void ps2xSdlSetPresentMode(int mode); // FIX-P2
 bool ps2xSdlPresentModeSupported(int mode); // FIX-P2
 void ps2xSdlGetWindowPixelSize(int *w, int *h); // FIX-P2
+extern void ps2xDumpEeRam(); // PROBE-DR1
 
 namespace
 {
@@ -1169,6 +1170,10 @@ namespace // FIX-RDG4Q
                 {
                     g_sdl.keys[ev.key.scancode].store(ev.type == SDL_EVENT_KEY_DOWN, std::memory_order_relaxed);
                 }
+                if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.scancode == SDL_SCANCODE_F10 && !ev.key.repeat) // PROBE-DR1
+                {
+                    ps2xDumpEeRam(); // PROBE-DR1
+                } // PROBE-DR1
                 break;
             case SDL_EVENT_GAMEPAD_ADDED:
                 if (!g_sdl.gamepad)

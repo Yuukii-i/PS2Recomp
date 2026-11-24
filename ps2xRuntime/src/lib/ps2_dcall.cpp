@@ -10,6 +10,7 @@ static_assert(kPs2DcallDispatchCycles == EeScheduler::kGuestDispatchCycles,
               "kPs2DcallDispatchCycles must match EeScheduler::kGuestDispatchCycles");
 
 extern const bool g_profCounts;
+extern bool g_fnReplayActive; // PROBE-FR1d
 
 extern const bool g_ps2DcallSlowMode = []() {
     const char *dcall = std::getenv("PS2X_DCALL");
@@ -40,11 +41,20 @@ extern const bool g_ps2DcallSlowMode = []() {
     {
         return true;
     }
+    if (std::getenv("PS2X_FNREPLAY") != nullptr) // PROBE-FR1e
+    {
+        return true;
+    }
     return false;
 }();
 
 void ps2DcallFlushAcct(PS2Runtime *runtime)
 {
+    if (g_fnReplayActive) // PROBE-FR1d
+    {
+        g_acctPending = 0;
+        return;
+    }
     const uint32_t p = g_acctPending;
     g_acctPending = 0;
     runtime->eeScheduler().accountCycles(p);
