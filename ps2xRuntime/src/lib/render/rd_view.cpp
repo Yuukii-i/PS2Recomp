@@ -1611,6 +1611,320 @@ bool ps2xRdTakeoverOn() // FEAT-RD12
     return v && ps2xRdActive(); // FEAT-RD49: takeover implies active
 }
 
+static inline bool rdSpikeWatchOn() // PROBE-M7
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_SPIKE_WATCH");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+
+extern bool ps2xVu1SpikeLookupDraw(uint32_t serial, uint16_t &handlerPc, uint16_t &mscal,
+                                   uint8_t &clipRan, uint32_t &nVertsIn, uint32_t &nVertsOut,
+                                   float &minW, float &maxW, float &maxAbsXY); // PROBE-M8
+extern bool ps2xVu1SpikeLookupGif16(uint32_t serial, uint32_t vertIdx, int32_t &outXpx, int32_t &outYpx); // PROBE-M8
+
+namespace // PROBE-M7
+{
+struct SpikeVu1BadEntry
+{
+    uint32_t serial = 0u;
+    uint32_t nVerts = 0u;
+};
+
+struct SpikeTopEntry
+{
+    uint64_t tex0 = 0ull;
+    uint32_t n = 0u;
+    uint32_t serial = 0u;
+};
+
+struct SpikeHandlerEntry // PROBE-M8
+{
+    uint16_t handlerPc = 0u;
+    uint32_t n = 0u;
+};
+
+static std::mutex s_spikeMtx;
+static uint64_t s_spikeVbl = 0ull;
+static uint32_t s_spikePrinted = 0u;
+static uint32_t s_spikeLinkPrinted = 0u;
+static uint32_t s_spikeSumBatches = 0u;
+static uint32_t s_spikeSumSpikeBatches = 0u;
+static uint32_t s_spikeSumSpikeTris = 0u;
+static constexpr size_t kSpikeMaxTop = 64u;
+static SpikeTopEntry s_spikeTop[kSpikeMaxTop] = {};
+static size_t s_spikeTopCount = 0u;
+static constexpr size_t kSpikeMaxHandlers = 32u; // PROBE-M8
+static SpikeHandlerEntry s_spikeHandlers[kSpikeMaxHandlers] = {}; // PROBE-M8
+static size_t s_spikeHandlerCount = 0u; // PROBE-M8
+static std::vector<SpikeVu1BadEntry> s_spikeVu1Bad;
+static std::chrono::steady_clock::time_point s_spikeLastSum = std::chrono::steady_clock::now();
+
+static void rdSpikeCheckFrame(const std::vector<RdVert> &verts, const std::vector<uint32_t> &indices,
+                              const std::vector<RdBatch> &batches, uint32_t sMin, uint32_t sMax)
+{
+    (void)sMin;
+    std::lock_guard<std::mutex> lk(s_spikeMtx);
+    ++s_spikeVbl;
+    const uint64_t vbl = s_spikeVbl;
+    s_spikeSumBatches += static_cast<uint32_t>(batches.size());
+
+    auto toScreenPx = [](const RdVert &v, const RdBatch &b, float &ox, float &oy) -> bool {
+        // PROBE-M7: RdVert.pos[0..3] are homogeneous clip-space (x*w, y*w, z*w, w);
+        // dividing by pos[3] and applying RdBatch.vpS/vpO converts to screen pixels.
+        for (int c = 0; c < 4; ++c)
+        {
+            if (!std::isfinite(v.pos[c]))
+                return false;
+        }
+        if (b.vpS[0] != 0.0f && b.vpS[1] != 0.0f && std::fabs(v.pos[3]) > 1e-6f)
+        {
+            const float invW = 1.0f / v.pos[3];
+            ox = v.pos[0] * invW * b.vpS[0] + b.vpO[0];
+            oy = v.pos[1] * invW * b.vpS[1] + b.vpO[1];
+        }
+        else
+        {
+            ox = v.pos[0];
+            oy = v.pos[1];
+        }
+        return std::isfinite(ox) && std::isfinite(oy);
+    };
+
+    constexpr float kMaxCoord = 6000.0f;
+    constexpr float kMaxArea = 20.0f * 640.0f * 448.0f;
+
+    for (const RdBatch &batch : batches)
+    {
+        const uint32_t tris = batch.count / 3u;
+        uint32_t spikeTris = 0u;
+        RdVert sv0{}, sv1{}, sv2{};
+        uint32_t spikeVertRelIdx = 0u; // PROBE-M8
+        float spikeRendX = 0.0f, spikeRendY = 0.0f; // PROBE-M8
+        const uint32_t batchV0 = (batch.count > 0u && batch.first < indices.size())
+                                     ? (batch.baseVertex + indices[batch.first])
+                                     : 0u; // PROBE-M8
+
+        for (uint32_t t = 0u; t < tris; ++t)
+        {
+            const size_t ii = static_cast<size_t>(batch.first) + static_cast<size_t>(t) * 3u;
+            if (ii + 2u >= indices.size())
+                break;
+            const uint32_t i0 = batch.baseVertex + indices[ii];
+            const uint32_t i1 = batch.baseVertex + indices[ii + 1u];
+            const uint32_t i2 = batch.baseVertex + indices[ii + 2u];
+            if (i0 >= verts.size() || i1 >= verts.size() || i2 >= verts.size())
+                continue;
+
+            const RdVert &v0 = verts[i0];
+            const RdVert &v1 = verts[i1];
+            const RdVert &v2 = verts[i2];
+
+            float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f, x2 = 0.0f, y2 = 0.0f;
+            const bool ok0 = toScreenPx(v0, batch, x0, y0);
+            const bool ok1 = toScreenPx(v1, batch, x1, y1);
+            const bool ok2 = toScreenPx(v2, batch, x2, y2);
+            bool isSpike = !ok0 || !ok1 || !ok2;
+            uint32_t badGlobalIdx = !ok0 ? i0 : (!ok1 ? i1 : i2); // PROBE-M8
+            float badRx = !ok0 ? x0 : (!ok1 ? x1 : x2); // PROBE-M8
+            float badRy = !ok0 ? y0 : (!ok1 ? y1 : y2); // PROBE-M8
+            if (!isSpike)
+            {
+                if (std::fabs(x0) > kMaxCoord || std::fabs(y0) > kMaxCoord)
+                {
+                    isSpike = true; badGlobalIdx = i0; badRx = x0; badRy = y0;
+                }
+                else if (std::fabs(x1) > kMaxCoord || std::fabs(y1) > kMaxCoord)
+                {
+                    isSpike = true; badGlobalIdx = i1; badRx = x1; badRy = y1;
+                }
+                else if (std::fabs(x2) > kMaxCoord || std::fabs(y2) > kMaxCoord)
+                {
+                    isSpike = true; badGlobalIdx = i2; badRx = x2; badRy = y2;
+                }
+                else
+                {
+                    const float minX = std::min(x0, std::min(x1, x2));
+                    const float maxX = std::max(x0, std::max(x1, x2));
+                    const float minY = std::min(y0, std::min(y1, y2));
+                    const float maxY = std::max(y0, std::max(y1, y2));
+                    const float area = (maxX - minX) * (maxY - minY);
+                    if (!std::isfinite(area) || area > kMaxArea)
+                    {
+                        isSpike = true; badGlobalIdx = i0; badRx = x0; badRy = y0;
+                    }
+                }
+            }
+            if (isSpike)
+            {
+                if (spikeTris == 0u)
+                {
+                    sv0 = v0;
+                    sv1 = v1;
+                    sv2 = v2;
+                    spikeVertRelIdx = (badGlobalIdx >= batchV0) ? (badGlobalIdx - batchV0) : 0u; // PROBE-M8
+                    spikeRendX = badRx; // PROBE-M8
+                    spikeRendY = badRy; // PROBE-M8
+                }
+                ++spikeTris;
+            }
+        }
+
+        if (spikeTris > 0u)
+        {
+            const uint32_t batchSerial = batch.kickSerial & 0x3FFFFFFFu;
+            ++s_spikeSumSpikeBatches;
+            s_spikeSumSpikeTris += spikeTris;
+
+            uint16_t m8Handler = 0u, m8Mscal = 0u; // PROBE-M8
+            uint8_t m8ClipRan = 0u; // PROBE-M8
+            uint32_t m8Vin = 0u, m8Vout = 0u; // PROBE-M8
+            float m8MinW = 0.0f, m8MaxW = 0.0f, m8MaxAbsXY = 0.0f; // PROBE-M8
+            (void)ps2xVu1SpikeLookupDraw(batchSerial, m8Handler, m8Mscal, m8ClipRan,
+                                         m8Vin, m8Vout, m8MinW, m8MaxW, m8MaxAbsXY); // PROBE-M8
+
+            bool foundH = false; // PROBE-M8
+            for (size_t k = 0u; k < s_spikeHandlerCount; ++k)
+            {
+                if (s_spikeHandlers[k].handlerPc == m8Handler)
+                {
+                    ++s_spikeHandlers[k].n;
+                    foundH = true;
+                    break;
+                }
+            }
+            if (!foundH && s_spikeHandlerCount < kSpikeMaxHandlers)
+                s_spikeHandlers[s_spikeHandlerCount++] = SpikeHandlerEntry{m8Handler, 1u};
+
+            bool foundTop = false;
+            for (size_t k = 0u; k < s_spikeTopCount; ++k)
+            {
+                if (s_spikeTop[k].tex0 == batch.tex0)
+                {
+                    ++s_spikeTop[k].n;
+                    foundTop = true;
+                    break;
+                }
+            }
+            if (!foundTop && s_spikeTopCount < kSpikeMaxTop)
+                s_spikeTop[s_spikeTopCount++] = SpikeTopEntry{batch.tex0, 1u, batchSerial};
+
+            if (s_spikePrinted < 150u)
+            {
+                ++s_spikePrinted;
+                int32_t gifXpx = 0, gifYpx = 0; // PROBE-M8
+                (void)ps2xVu1SpikeLookupGif16(batchSerial, spikeVertRelIdx, gifXpx, gifYpx); // PROBE-M8
+                ps2xSafeLog("[spike] batchSerial=%u prim=%llx tex0=%llx tris=%u spikeTris=%u "
+                            "v0=(%g,%g,%g,%g) v1=(%g,%g,%g,%g) v2=(%g,%g,%g,%g) vbl=%llu "
+                            "gif16=(%d,%d)px renderer=(%g,%g) "
+                            "handler=0x%04x mscal=0x%04x clipRan=%d vin=%u vout=%u minW=%g maxW=%g\n",
+                            batchSerial,
+                            static_cast<unsigned long long>(batch.prim),
+                            static_cast<unsigned long long>(batch.tex0),
+                            tris, spikeTris,
+                            sv0.pos[0], sv0.pos[1], sv0.pos[2], sv0.pos[3],
+                            sv1.pos[0], sv1.pos[1], sv1.pos[2], sv1.pos[3],
+                            sv2.pos[0], sv2.pos[1], sv2.pos[2], sv2.pos[3],
+                            static_cast<unsigned long long>(vbl),
+                            gifXpx, gifYpx, spikeRendX, spikeRendY,
+                            m8Handler, m8Mscal, static_cast<int>(m8ClipRan),
+                            m8Vin, m8Vout, m8MinW, m8MaxW);
+            }
+        }
+    }
+
+    if (!s_spikeVu1Bad.empty())
+    {
+        size_t keep = 0u;
+        for (size_t i = 0u; i < s_spikeVu1Bad.size(); ++i)
+        {
+            const SpikeVu1BadEntry &e = s_spikeVu1Bad[i];
+            bool inRenderer = false;
+            for (const RdBatch &b : batches)
+            {
+                if ((b.kickSerial & 0x3FFFFFFFu) == e.serial)
+                {
+                    inRenderer = true;
+                    break;
+                }
+            }
+            const bool resolved = inRenderer || (sMax != 0u && e.serial <= sMax);
+            if (resolved)
+            {
+                if (s_spikeLinkPrinted < 100u)
+                {
+                    ++s_spikeLinkPrinted;
+                    ps2xSafeLog("[spike-link] serial=%u vu1bad=1 inRenderer=%d\n",
+                                e.serial, inRenderer ? 1 : 0);
+                }
+            }
+            else
+            {
+                s_spikeVu1Bad[keep++] = e;
+            }
+        }
+        s_spikeVu1Bad.resize(keep);
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration<double>(now - s_spikeLastSum).count() >= 5.0)
+    {
+        char topBuf[512];
+        int pos = 0;
+        bool used[kSpikeMaxTop] = {};
+        for (int t = 0; t < 6; ++t)
+        {
+            size_t best = kSpikeMaxTop;
+            for (size_t i = 0u; i < s_spikeTopCount; ++i)
+            {
+                if (!used[i] && (best == kSpikeMaxTop || s_spikeTop[i].n > s_spikeTop[best].n))
+                    best = i;
+            }
+            if (best == kSpikeMaxTop)
+                break;
+            used[best] = true;
+            pos += std::snprintf(topBuf + pos, sizeof(topBuf) - static_cast<size_t>(pos),
+                                 "%stex0=%llx n=%u serial=%u",
+                                 t == 0 ? "" : " ; ",
+                                 static_cast<unsigned long long>(s_spikeTop[best].tex0),
+                                 s_spikeTop[best].n, s_spikeTop[best].serial);
+        }
+        if (pos == 0)
+            std::snprintf(topBuf, sizeof(topBuf), "none");
+        ps2xSafeLog("[spike-sum] batches=%u spikeBatches=%u spikeTris=%u top: %s\n",
+                    s_spikeSumBatches, s_spikeSumSpikeBatches, s_spikeSumSpikeTris, topBuf);
+        char hBuf[512]; // PROBE-M8
+        int hPos = 0;
+        for (size_t i = 0u; i < s_spikeHandlerCount; ++i)
+        {
+            hPos += std::snprintf(hBuf + hPos, sizeof(hBuf) - static_cast<size_t>(hPos),
+                                  "%s0x%04x->%u", i == 0u ? "" : " ",
+                                  s_spikeHandlers[i].handlerPc, s_spikeHandlers[i].n);
+        }
+        if (hPos == 0)
+            std::snprintf(hBuf, sizeof(hBuf), "none");
+        ps2xSafeLog("[spike-h] %s\n", hBuf); // PROBE-M8
+        s_spikeSumBatches = 0u;
+        s_spikeSumSpikeBatches = 0u;
+        s_spikeSumSpikeTris = 0u;
+        s_spikeTopCount = 0u;
+        s_spikeHandlerCount = 0u; // PROBE-M8
+        s_spikeLastSum = now;
+    }
+}
+} // namespace
+
+void ps2xRdSpikeNoteVu1Bad(uint32_t kickSerial, uint32_t nVerts) // PROBE-M7
+{
+    if (!rdSpikeWatchOn() || kickSerial == 0u)
+        return;
+    std::lock_guard<std::mutex> lk(s_spikeMtx);
+    if (s_spikeVu1Bad.size() < 1024u)
+        s_spikeVu1Bad.push_back(SpikeVu1BadEntry{kickSerial & 0x3FFFFFFFu, nVerts});
+}
+
 void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ) // FEAT-RD14
 {
     uint32_t sMin = 0u; // FEAT-RD13
@@ -1626,6 +1940,8 @@ void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indice
                 sMax = ms;
         }
     }
+    if (rdSpikeWatchOn()) // PROBE-M7
+        rdSpikeCheckFrame(verts, indices, batches, sMin, sMax);
 
     std::lock_guard<std::mutex> lock(g_rdMutex);
     static const bool s_fg1Stats = []() { // PROBE-FG1

@@ -5148,6 +5148,14 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     uint8_t *const vu0Data = m_memory.getVU0Data();
     const uint32_t startPC = address & ~0x7u;
 
+    // PROBE-M4: VU0 microprogram tracer + end-of-run register scan (PS2X_VU0_PROG=1)
+    static const bool s_vu0Prog = []() {
+        const char *e = std::getenv("PS2X_VU0_PROG");
+        return e && e[0] == '1';
+    }();
+    const char *m4Engine = "interp";
+    int32_t m4SizeEst = -1;
+
     const bool probeOn = isVu3dProbeEnabled();
     uint32_t vu0NonzeroWords = 0;
     uint32_t vu0TotalWords = PS2_VU0_CODE_SIZE / 4u;
@@ -5239,6 +5247,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 
         if (funcCheckOn && funcHandler) // PERF-V0G
         {
+            if (s_vu0Prog) m4Engine = "func"; // PROBE-M4
             R5900Context funcCtx = *ctx;
             funcHandler(&funcCtx);
 
@@ -5262,6 +5271,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         }
         else if (funcOn && funcHandler) // PERF-V0G
         {
+            if (s_vu0Prog) m4Engine = "func"; // PROBE-M4
             extern bool ps2xV0ProfOn();
             extern void ps2xV0ProfRecordFunc(uint32_t, uint64_t);
             const bool v0pFunc = ps2xV0ProfOn();
@@ -5271,6 +5281,11 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         }
         else if (checkOn && fastProg)
         {
+            if (s_vu0Prog) // PROBE-M4
+            {
+                m4Engine = "fast";
+                m4SizeEst = static_cast<int32_t>(fastProg->numResolvedPairs ? fastProg->numResolvedPairs : fastProg->numOps);
+            }
             R5900Context fastCtx = *ctx;
             vu0fast::executeFast(*fastProg, &fastCtx);
 
@@ -5287,6 +5302,11 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         }
         else if (fastOn && fastProg)
         {
+            if (s_vu0Prog) // PROBE-M4
+            {
+                m4Engine = "fast";
+                m4SizeEst = static_cast<int32_t>(fastProg->numResolvedPairs ? fastProg->numResolvedPairs : fastProg->numOps);
+            }
             extern bool ps2xV0ProfOn();                                      // PROBE-V0P
             extern void ps2xV0ProfRecordFast(uint32_t, uint64_t);            // PROBE-V0P
             const bool v0pFast = ps2xV0ProfOn();                             // PROBE-V0P
@@ -5447,6 +5467,241 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                             (unsigned long long)s_ewIdleCalls.load(std::memory_order_relaxed));
                 std::fflush(stdout);
             }
+        }
+    }
+
+    // PROBE-M4: VU0 microprogram tracer + end-of-run register scan (PS2X_VU0_PROG=1)
+    if (s_vu0Prog)
+    {
+        struct M4CallEntry
+        {
+            uint32_t pc = 0;
+            uint32_t calls = 0;
+            bool used = false;
+            bool seenMap = false;
+        };
+        struct M4BadEntry
+        {
+            uint32_t pc = 0;
+            uint32_t count = 0;
+            int regIdx = 0;
+            int lane = 0;
+            float val = 0.0f;
+            float first[4]{};
+        };
+        static std::mutex s_m4Mutex;
+        static M4CallEntry s_m4Calls[256]{};
+        static M4BadEntry s_m4Bad[256]{};
+        static uint32_t s_m4TotalCalls = 0;
+        static uint32_t s_m4TotalBad = 0;
+        static uint32_t s_m4BadEvtPrinted = 0;
+        static auto s_m4LastPrint = std::chrono::steady_clock::now();
+        static const auto s_m4Start = s_m4LastPrint;
+
+        auto fmtRegName = [](int regIdx, char *buf, size_t sz) {
+            if (regIdx < 32)
+                std::snprintf(buf, sz, "vf%d", regIdx);
+            else if (regIdx == 32)
+                std::snprintf(buf, sz, "acc");
+            else if (regIdx == 33)
+                std::snprintf(buf, sz, "I");
+            else if (regIdx == 34)
+                std::snprintf(buf, sz, "Q");
+            else
+                std::snprintf(buf, sz, "P");
+        };
+
+        std::lock_guard<std::mutex> m4Lock(s_m4Mutex);
+        ++s_m4TotalCalls;
+
+        const uint32_t callHash = ((startPC >> 3) * 2654435761u) & 255u;
+        for (uint32_t p = 0; p < 256u; ++p)
+        {
+            M4CallEntry &ce = s_m4Calls[(callHash + p) & 255u];
+            if (!ce.used || ce.pc == startPC)
+            {
+                if (!ce.used)
+                {
+                    ce.used = true;
+                    ce.pc = startPC;
+                    ce.calls = 0;
+                    ce.seenMap = false;
+                }
+                ++ce.calls;
+                if (!ce.seenMap)
+                {
+                    ce.seenMap = true;
+                    char sizeBuf[24];
+                    if (m4SizeEst >= 0)
+                        std::snprintf(sizeBuf, sizeof(sizeBuf), "%d", m4SizeEst);
+                    else
+                        std::snprintf(sizeBuf, sizeof(sizeBuf), "?");
+                    std::fprintf(stderr, "[vu0prog-map] pc=0x%04x engine=%s size_estimate=%s\n",
+                                 startPC, m4Engine, sizeBuf);
+                }
+                break;
+            }
+        }
+
+        if (ctx)
+        {
+            auto isBadLane = [](float v) { return !std::isfinite(v) || std::fabs(v) > 1.0e7f; };
+            bool foundBad = false;
+            int badReg = 0;
+            int badLane = 0;
+            float badVal = 0.0f;
+            alignas(16) float badVec[4]{};
+
+            for (int r = 0; r < 32 && !foundBad; ++r)
+            {
+                alignas(16) float v[4];
+                _mm_storeu_ps(v, ctx->vu0_vf[r]);
+                for (int l = 0; l < 4; ++l)
+                {
+                    if (isBadLane(v[l]))
+                    {
+                        foundBad = true;
+                        badReg = r;
+                        badLane = l;
+                        badVal = v[l];
+                        std::memcpy(badVec, v, sizeof(badVec));
+                        break;
+                    }
+                }
+            }
+            if (!foundBad)
+            {
+                alignas(16) float v[4];
+                _mm_storeu_ps(v, ctx->vu0_acc);
+                for (int l = 0; l < 4; ++l)
+                {
+                    if (isBadLane(v[l]))
+                    {
+                        foundBad = true;
+                        badReg = 32;
+                        badLane = l;
+                        badVal = v[l];
+                        std::memcpy(badVec, v, sizeof(badVec));
+                        break;
+                    }
+                }
+            }
+            if (!foundBad)
+            {
+                const float scalars[3] = {ctx->vu0_i, ctx->vu0_q, ctx->vu0_p};
+                for (int s = 0; s < 3; ++s)
+                {
+                    if (isBadLane(scalars[s]))
+                    {
+                        foundBad = true;
+                        badReg = 33 + s;
+                        badLane = 0;
+                        badVal = scalars[s];
+                        badVec[0] = scalars[s];
+                        badVec[1] = 0.0f;
+                        badVec[2] = 0.0f;
+                        badVec[3] = 0.0f;
+                        break;
+                    }
+                }
+            }
+
+            if (foundBad)
+            {
+                ++s_m4TotalBad;
+                for (uint32_t p = 0; p < 256u; ++p)
+                {
+                    M4BadEntry &be = s_m4Bad[(callHash + p) & 255u];
+                    if (be.count == 0u)
+                    {
+                        be.pc = startPC;
+                        be.count = 1u;
+                        be.regIdx = badReg;
+                        be.lane = badLane;
+                        be.val = badVal;
+                        std::memcpy(be.first, badVec, sizeof(be.first));
+                        break;
+                    }
+                    if (be.pc == startPC)
+                    {
+                        ++be.count;
+                        break;
+                    }
+                }
+
+                if (s_m4BadEvtPrinted < 100u)
+                {
+                    ++s_m4BadEvtPrinted;
+                    char regBuf[16];
+                    fmtRegName(badReg, regBuf, sizeof(regBuf));
+                    const uint64_t vbl = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - s_m4Start).count());
+                    std::fprintf(stderr, "[vu0prog-bad-evt] startPc=0x%04x reg=%s (%g,%g,%g,%g) vbl=%llu\n",
+                                 startPC, regBuf, badVec[0], badVec[1], badVec[2], badVec[3],
+                                 static_cast<unsigned long long>(vbl));
+                }
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_m4LastPrint).count() >= 5)
+        {
+            s_m4LastPrint = now;
+
+            M4CallEntry topCalls[256];
+            uint32_t nCalls = 0;
+            for (const auto &ce : s_m4Calls)
+            {
+                if (ce.used && ce.calls > 0u)
+                    topCalls[nCalls++] = ce;
+            }
+            std::sort(topCalls, topCalls + nCalls,
+                      [](const M4CallEntry &a, const M4CallEntry &b) { return a.calls > b.calls; });
+
+            std::fprintf(stderr, "[vu0prog] n=%u top:", s_m4TotalCalls);
+            const uint32_t showCalls = nCalls < 8u ? nCalls : 8u;
+            for (uint32_t i = 0; i < showCalls; ++i)
+            {
+                std::fprintf(stderr, "%s pc=0x%04x calls=%u",
+                             (i == 0u) ? "" : " ;", topCalls[i].pc, topCalls[i].calls);
+            }
+            std::fprintf(stderr, "\n");
+
+            M4BadEntry topBad[256];
+            uint32_t nBad = 0;
+            for (const auto &be : s_m4Bad)
+            {
+                if (be.count > 0u)
+                    topBad[nBad++] = be;
+            }
+            std::sort(topBad, topBad + nBad,
+                      [](const M4BadEntry &a, const M4BadEntry &b) { return a.count > b.count; });
+
+            std::fprintf(stderr, "[vu0prog-bad] total=%u", s_m4TotalBad);
+            if (nBad > 0u)
+            {
+                std::fprintf(stderr, " top:");
+                const uint32_t showBad = nBad < 8u ? nBad : 8u;
+                for (uint32_t i = 0; i < showBad; ++i)
+                {
+                    char regBuf[16];
+                    fmtRegName(topBad[i].regIdx, regBuf, sizeof(regBuf));
+                    std::fprintf(stderr, "%s pc=0x%04x n=%u reg=%s lane=%d val=%g (vf=%g,%g,%g,%g)",
+                                 (i == 0u) ? "" : " ;",
+                                 topBad[i].pc, topBad[i].count, regBuf, topBad[i].lane, topBad[i].val,
+                                 topBad[i].first[0], topBad[i].first[1], topBad[i].first[2], topBad[i].first[3]);
+                }
+            }
+            std::fprintf(stderr, "\n");
+            std::fflush(stderr);
+
+            s_m4TotalCalls = 0;
+            for (auto &ce : s_m4Calls)
+                ce.calls = 0;
+            s_m4TotalBad = 0;
+            for (auto &be : s_m4Bad)
+                be = M4BadEntry{};
         }
     }
 }
@@ -6215,6 +6470,151 @@ extern "C" void ps2x_vu0_flags(R5900Context *ctx, __m128 res, int laneMask)
     ctx->vu0_mac_flags = (static_cast<uint32_t>(rv(sg)) << 4) | static_cast<uint32_t>(rv(zr));
     const uint32_t now = (zr ? 1u : 0u) | (sg ? 2u : 0u); // Z, S (U/O not modelled)
     ctx->vu0_status = static_cast<uint16_t>((ctx->vu0_status & ~0xFu) | now | (now << 6) | (ctx->vu0_status & 0xFC0u));
+
+    // PROBE-M3: VU0 result watchdog (PS2X_VU0_WATCH=1)
+    static const bool s_vu0Watch = []() {
+        const char *e = std::getenv("PS2X_VU0_WATCH");
+        return e && e[0] == '1';
+    }();
+    if (s_vu0Watch)
+    {
+        alignas(16) float v[4];
+        _mm_store_ps(v, res);
+        bool bad = false;
+        float maxAbs = 0.0f;
+        for (int i = 0; i < 4; ++i)
+        {
+            if ((laneMask & (1 << i)) == 0)
+                continue;
+            const float af = std::fabs(v[i]);
+            if (!std::isfinite(v[i]) || af > 1.0e7f)
+            {
+                bad = true;
+                if (!(af <= maxAbs))
+                    maxAbs = af;
+            }
+        }
+
+        static std::atomic<uint32_t> s_watchTicks{0};
+        const bool checkTimer = bad || ((s_watchTicks.fetch_add(1, std::memory_order_relaxed) & 0x3FFFu) == 0u);
+        if (checkTimer)
+        {
+            struct Vu0BadEntry
+            {
+                uint32_t pc;
+                uint32_t count;
+                float first[4];
+                float maxAbs;
+            };
+            static std::mutex s_watchMutex;
+            static Vu0BadEntry s_table[256]{};
+            static uint32_t s_totalBad = 0;
+            static uint32_t s_printedEvents = 0;
+            static uint32_t s_seenPcs[512]{};
+            static bool s_seenUsed[512]{};
+            static uint32_t s_newPrinted = 0;
+            static auto s_lastSumTime = std::chrono::steady_clock::now();
+            static const auto s_watchStart = s_lastSumTime;
+
+            std::lock_guard<std::mutex> lock(s_watchMutex);
+            if (bad)
+            {
+                const uint32_t pc = ctx->pc;
+                ++s_totalBad;
+
+                const uint32_t startIdx = ((pc >> 2) * 2654435761u) & 255u;
+                for (uint32_t probe = 0; probe < 256u; ++probe)
+                {
+                    Vu0BadEntry &e = s_table[(startIdx + probe) & 255u];
+                    if (e.count == 0)
+                    {
+                        e.pc = pc;
+                        e.count = 1;
+                        e.first[0] = v[0];
+                        e.first[1] = v[1];
+                        e.first[2] = v[2];
+                        e.first[3] = v[3];
+                        e.maxAbs = maxAbs;
+                        break;
+                    }
+                    if (e.pc == pc)
+                    {
+                        ++e.count;
+                        if (!(maxAbs <= e.maxAbs))
+                            e.maxAbs = maxAbs;
+                        break;
+                    }
+                }
+
+                const uint64_t vbl = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - s_watchStart).count());
+                if (s_printedEvents < 100u)
+                {
+                    ++s_printedEvents;
+                    std::fprintf(stderr, "[vu0bad] pc=0x%08x res=(%g,%g,%g,%g) mask=%d vbl=%llu\n",
+                                 pc, v[0], v[1], v[2], v[3], laneMask, static_cast<unsigned long long>(vbl));
+                }
+
+                if (s_newPrinted < 200u)
+                {
+                    const uint32_t seenStart = ((pc >> 2) * 2654435761u) & 511u;
+                    bool isNew = false;
+                    for (uint32_t probe = 0; probe < 512u; ++probe)
+                    {
+                        const uint32_t slot = (seenStart + probe) & 511u;
+                        if (!s_seenUsed[slot])
+                        {
+                            s_seenUsed[slot] = true;
+                            s_seenPcs[slot] = pc;
+                            isNew = true;
+                            break;
+                        }
+                        if (s_seenPcs[slot] == pc)
+                            break;
+                    }
+                    if (isNew)
+                    {
+                        ++s_newPrinted;
+                        std::fprintf(stderr, "[vu0bad-new] pc=0x%08x res=(%g,%g,%g,%g) mask=%d vbl=%llu\n",
+                                     pc, v[0], v[1], v[2], v[3], laneMask, static_cast<unsigned long long>(vbl));
+                    }
+                }
+            }
+
+            const auto nowTp = std::chrono::steady_clock::now();
+            if (nowTp - s_lastSumTime >= std::chrono::seconds(5))
+            {
+                s_lastSumTime = nowTp;
+                if (s_totalBad > 0)
+                {
+                    Vu0BadEntry entries[256];
+                    uint32_t nEntries = 0;
+                    for (const Vu0BadEntry &e : s_table)
+                    {
+                        if (e.count > 0)
+                            entries[nEntries++] = e;
+                    }
+                    std::sort(entries, entries + nEntries, [](const Vu0BadEntry &a, const Vu0BadEntry &b) {
+                        return a.count > b.count;
+                    });
+                    const uint32_t topN = std::min(nEntries, 8u);
+                    std::fprintf(stderr, "[vu0bad-sum] top pcs:");
+                    for (uint32_t i = 0; i < topN; ++i)
+                    {
+                        const Vu0BadEntry &e = entries[i];
+                        std::fprintf(stderr, "%s pc=0x%08x n=%u first=(%g,%g,%g,%g) max=%g",
+                                     (i == 0 ? "" : " ;"), e.pc, e.count,
+                                     e.first[0], e.first[1], e.first[2], e.first[3], e.maxAbs);
+                    }
+                    std::fprintf(stderr, "\n");
+                }
+                std::fprintf(stderr, "[vu0bad-sum] total=%u\n", s_totalBad);
+                std::memset(s_table, 0, sizeof(s_table));
+                s_totalBad = 0;
+            }
+        }
+    }
 }
 
 // C317: VU0 macro-mode Q operations with hardware semantics (PCSX2 _vuDIV/_vuSQRT/_vuRSQRT):

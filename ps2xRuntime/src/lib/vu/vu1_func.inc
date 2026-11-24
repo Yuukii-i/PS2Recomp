@@ -18,6 +18,7 @@
 
 extern void ps2xSafeLog(const char *fmt, ...);
 #include <atomic>
+#include <mutex> // PROBE-M5
 extern std::atomic<uint64_t> g_hostPresentSeq; // PERF-SA: per presented frame (gs_frontend.cpp)
 
 struct RdVert // FEAT-RD1
@@ -62,6 +63,7 @@ extern bool ps2xRdFastGeomOn(); // FEAT-RD40
 extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD40
 extern bool ps2xRdHasDisplayFbp(); // FEAT-RD40
 extern bool ps2xRdForceClassic(); // FEAT-RD48
+extern void ps2xRdSpikeNoteVu1Bad(uint32_t kickSerial, uint32_t nVerts); // PROBE-M7
 
 static inline bool rdSerialsCanMerge(uint32_t s0, uint32_t s1) // FEAT-RD17
 {
@@ -1206,6 +1208,466 @@ inline void rollbackMscal(size_t d0, size_t v0)
 }
 } // namespace scene
 
+namespace watch // PROBE-M5
+{
+inline bool spikeOn() // PROBE-M7
+{
+    static const bool s_spikeOn = []() {
+        const char *e = std::getenv("PS2X_SPIKE_WATCH");
+        return e && e[0] == '1';
+    }();
+    return s_spikeOn;
+}
+
+inline bool on()
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_VU1_WATCH");
+        return e && e[0] == '1';
+    }();
+    return s_on || spikeOn(); // PROBE-M7
+}
+
+static std::atomic<uint64_t> s_vbl{0}; // local host counter, no externs that may not link
+
+struct BoneTrace
+{
+    static constexpr int kMaxBones = 64;
+    static constexpr int kMaxVerts = 512;
+    int boneCount = 0;
+    float bones[kMaxBones][16];
+    int16_t vertBone[kMaxVerts];
+    void reset()
+    {
+        boneCount = 0;
+        std::memset(vertBone, -1, sizeof(vertBone));
+    }
+};
+static thread_local BoneTrace t_bones;
+
+inline void recordBone(const uint8_t *vu, uint16_t vi3, uint16_t vi2)
+{
+    const int bi = t_bones.boneCount;
+    if (bi < BoneTrace::kMaxBones)
+    {
+        for (int r = 0; r < 4; ++r)
+            _mm_storeu_ps(t_bones.bones[bi] + r * 4, ldq(vu, 978u + static_cast<uint32_t>(r)));
+        ++t_bones.boneCount;
+    }
+    const int16_t tag = (bi < BoneTrace::kMaxBones) ? static_cast<int16_t>(bi) : static_cast<int16_t>(-1);
+    for (uint16_t k = 0; k < vi2; ++k)
+    {
+        const uint32_t idx = static_cast<uint32_t>(vi3) + k;
+        if (idx < BoneTrace::kMaxVerts)
+            t_bones.vertBone[idx] = tag;
+    }
+}
+
+struct SumKey
+{
+    uint16_t handler = 0;
+    uint16_t mscal = 0;
+    uint32_t badDraws = 0;
+};
+
+struct RingEntry
+{
+    uint16_t handler = 0;
+    uint16_t mscal = 0;
+    uint32_t gifOffset = 0;
+    uint32_t nVerts = 0;
+    uint32_t badVerts = 0;
+    float maxVal = 0.0f;
+    uint32_t firstBadIdx = 0;
+    bool used = false;
+};
+
+struct WatchState
+{
+    std::mutex mtx;
+    uint32_t printedLines = 0;
+    uint32_t totalBadDraws = 0;
+    bool printedRing100 = false;
+    uint32_t draws = 0;
+    uint32_t badDraws = 0;
+    uint32_t badVerts = 0;
+    static constexpr size_t kMaxKeys = 64;
+    SumKey keys[kMaxKeys] = {};
+    size_t numKeys = 0;
+    static constexpr size_t kRingSize = 8;
+    RingEntry ring[kRingSize] = {};
+    size_t ringHead = 0;
+    std::chrono::steady_clock::time_point lastSum = std::chrono::steady_clock::now();
+};
+static WatchState s_ws;
+
+inline void checkDraw(const uint8_t *vu, uint16_t handler, uint16_t mscal, uint32_t gifOffset,
+                      uint32_t nVerts, bool skinned, uint32_t s2base, uint32_t s3base,
+                      const int32_t *idxs, const __m128 *rigidPs, const int32_t *rigidWd)
+{
+    // Unit: clip-space homogeneous XYZ(W) in VU memory (636+idx) before perspective divide (1/w) and before viewport scaling (1002/1003).
+    uint32_t bad = 0;
+    uint32_t firstBad = 0;
+    float maxAbs = 0.0f;
+    bool hasNonFinite = false;
+    float firstPos[4] = {};
+
+    for (uint32_t v = 0; v < nVerts; ++v)
+    {
+        __m128 vp;
+        if (skinned)
+            vp = ldq(vu, static_cast<uint32_t>(636 + idxs[v]) & 0x3FFu);
+        else
+            vp = rigidPs[v];
+        alignas(16) float p[4];
+        _mm_store_ps(p, vp);
+
+        bool vBad = false;
+        for (int c = 0; c < 4; ++c)
+        {
+            if (!std::isfinite(p[c]))
+            {
+                vBad = true;
+                hasNonFinite = true;
+            }
+            else
+            {
+                const float av = std::fabs(p[c]);
+                if (av > maxAbs)
+                    maxAbs = av;
+                if (c < 3 && av > 1.0e5f)
+                    vBad = true;
+            }
+        }
+        if (vBad)
+        {
+            if (bad == 0)
+            {
+                firstBad = v;
+                std::memcpy(firstPos, p, sizeof(firstPos));
+            }
+            ++bad;
+        }
+    }
+
+    const float reportMax = hasNonFinite ? INFINITY : maxAbs;
+    const auto now = std::chrono::steady_clock::now();
+
+    std::lock_guard<std::mutex> lk(s_ws.mtx);
+    ++s_ws.draws;
+
+    if (bad > 0)
+    {
+        if (spikeOn()) // PROBE-M7
+        {
+            const uint32_t ks = scene::t_scene.curKickSerial & 0x3FFFFFFFu;
+            if (ks != 0u)
+                ::ps2xRdSpikeNoteVu1Bad(ks, nVerts);
+        }
+        ++s_ws.badDraws;
+        s_ws.badVerts += bad;
+        ++s_ws.totalBadDraws;
+
+        bool foundKey = false;
+        for (size_t i = 0; i < s_ws.numKeys; ++i)
+        {
+            if (s_ws.keys[i].handler == handler && s_ws.keys[i].mscal == mscal)
+            {
+                ++s_ws.keys[i].badDraws;
+                foundKey = true;
+                break;
+            }
+        }
+        if (!foundKey && s_ws.numKeys < WatchState::kMaxKeys)
+            s_ws.keys[s_ws.numKeys++] = SumKey{handler, mscal, 1u};
+
+        bool distinctInRing = true;
+        for (size_t i = 0; i < WatchState::kRingSize; ++i)
+        {
+            if (s_ws.ring[i].used && s_ws.ring[i].handler == handler &&
+                s_ws.ring[i].mscal == mscal && s_ws.ring[i].gifOffset == gifOffset)
+            {
+                distinctInRing = false;
+                break;
+            }
+        }
+        if (distinctInRing)
+        {
+            s_ws.ring[s_ws.ringHead] = RingEntry{handler, mscal, gifOffset, nVerts, bad, reportMax, firstBad, true};
+            s_ws.ringHead = (s_ws.ringHead + 1u) % WatchState::kRingSize;
+        }
+
+        if (s_ws.printedLines < 200u)
+        {
+            ++s_ws.printedLines;
+            alignas(16) float obj[16];
+            for (int r = 0; r < 4; ++r)
+                _mm_store_ps(obj + r * 4, ldq(vu, 978u + static_cast<uint32_t>(r)));
+
+            int boneIdx = -1;
+            if (skinned)
+            {
+                const int32_t vIdx = idxs[firstBad];
+                if (vIdx >= 0 && vIdx < BoneTrace::kMaxVerts)
+                    boneIdx = t_bones.vertBone[vIdx];
+            }
+
+            char boneStr[256];
+            if (skinned && boneIdx >= 0 && boneIdx < t_bones.boneCount)
+            {
+                const float *bm = t_bones.bones[boneIdx];
+                std::snprintf(boneStr, sizeof(boneStr),
+                              "%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g",
+                              bm[0], bm[1], bm[2], bm[3], bm[4], bm[5],
+                              bm[6], bm[7], bm[8], bm[9], bm[10], bm[11]);
+            }
+            else
+            {
+                std::snprintf(boneStr, sizeof(boneStr), "-");
+            }
+
+            const uint64_t vbl = s_vbl.load(std::memory_order_relaxed);
+            const uint32_t kickSerial = scene::t_scene.curKickSerial & 0x3FFFFFFFu; // PROBE-M7: common 30-bit serial matching RdBatch.kickSerial
+            ::ps2xSafeLog("[vu1bad] handler=0x%04x mscal=0x%04x gifOffset=%u n=%u bad=%u max=%g firstBadIdx=%u pos=(%g,%g,%g,%g) "
+                          "obj=[%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g] bone0=[%s] boneIdx=%d vbl=%llu kickSerial=%u\n",
+                          handler, mscal, gifOffset, nVerts, bad, reportMax, firstBad,
+                          firstPos[0], firstPos[1], firstPos[2], firstPos[3],
+                          obj[0], obj[1], obj[2], obj[3], obj[4], obj[5], obj[6], obj[7],
+                          obj[8], obj[9], obj[10], obj[11], obj[12], obj[13], obj[14], obj[15],
+                          boneStr, boneIdx, static_cast<unsigned long long>(vbl), kickSerial);
+
+            if (skinned)
+            {
+                const int32_t idx = idxs[firstBad];
+                alignas(16) float q636[4], q716[4], q796[4], q556[4], qs2[4], qs3[4];
+                _mm_store_ps(q636, ldq(vu, static_cast<uint32_t>(636 + idx) & 0x3FFu));
+                _mm_store_ps(q716, ldq(vu, static_cast<uint32_t>(716 + idx) & 0x3FFu));
+                _mm_store_ps(q796, ldq(vu, static_cast<uint32_t>(796 + idx) & 0x3FFu));
+                _mm_store_ps(q556, ldq(vu, static_cast<uint32_t>(556 + idx) & 0x3FFu));
+                _mm_store_ps(qs2, ldq(vu, (s2base + firstBad) & 0x3FFu));
+                _mm_store_ps(qs3, ldq(vu, (s3base + firstBad) & 0x3FFu));
+                ::ps2xSafeLog("[vu1bad-skin] idx=%d 636=(%g,%g,%g,%g) 716=(%g,%g,%g,%g) 796=(%g,%g,%g,%g) 556=(%g,%g,%g,%g) s2=(%g,%g,%g,%g) s3=(%g,%g,%g,%g)\n",
+                              idx,
+                              q636[0], q636[1], q636[2], q636[3],
+                              q716[0], q716[1], q716[2], q716[3],
+                              q796[0], q796[1], q796[2], q796[3],
+                              q556[0], q556[1], q556[2], q556[3],
+                              qs2[0], qs2[1], qs2[2], qs2[3],
+                              qs3[0], qs3[1], qs3[2], qs3[3]);
+                if (boneIdx >= 0 && boneIdx < t_bones.boneCount)
+                {
+                    const float *bm = t_bones.bones[boneIdx];
+                    ::ps2xSafeLog("[vu1bad-bone] boneIdx=%d r0=(%g,%g,%g,%g) r1=(%g,%g,%g,%g) r2=(%g,%g,%g,%g) r3=(%g,%g,%g,%g)\n",
+                                  boneIdx,
+                                  bm[0], bm[1], bm[2], bm[3], bm[4], bm[5], bm[6], bm[7],
+                                  bm[8], bm[9], bm[10], bm[11], bm[12], bm[13], bm[14], bm[15]);
+                }
+            }
+            (void)rigidWd;
+        }
+
+        if (!s_ws.printedRing100 && s_ws.totalBadDraws >= 100u)
+        {
+            s_ws.printedRing100 = true;
+            ::ps2xSafeLog("[vu1bad-ring100] last 8 distinct bad draws:\n");
+            for (size_t k = 0; k < WatchState::kRingSize; ++k)
+            {
+                const RingEntry &e = s_ws.ring[(s_ws.ringHead + k) % WatchState::kRingSize];
+                if (!e.used)
+                    continue;
+                ::ps2xSafeLog("  [%zu] handler=0x%04x mscal=0x%04x gifOffset=%u n=%u bad=%u max=%g firstBadIdx=%u\n",
+                              k, e.handler, e.mscal, e.gifOffset, e.nVerts, e.badVerts, e.maxVal, e.firstBadIdx);
+            }
+        }
+    }
+
+    if (std::chrono::duration<double>(now - s_ws.lastSum).count() >= 5.0)
+    {
+        char topBuf[512];
+        int pos = 0;
+        bool used[WatchState::kMaxKeys] = {};
+        for (int t = 0; t < 6; ++t)
+        {
+            size_t best = WatchState::kMaxKeys;
+            for (size_t i = 0; i < s_ws.numKeys; ++i)
+            {
+                if (!used[i] && (best == WatchState::kMaxKeys || s_ws.keys[i].badDraws > s_ws.keys[best].badDraws))
+                    best = i;
+            }
+            if (best == WatchState::kMaxKeys)
+                break;
+            used[best] = true;
+            pos += std::snprintf(topBuf + pos, sizeof(topBuf) - static_cast<size_t>(pos),
+                                 "%shandler=0x%04x mscal=0x%04x n=%u",
+                                 t == 0 ? "" : " ; ",
+                                 s_ws.keys[best].handler, s_ws.keys[best].mscal, s_ws.keys[best].badDraws);
+        }
+        if (pos == 0)
+            std::snprintf(topBuf, sizeof(topBuf), "none");
+        ::ps2xSafeLog("[vu1bad-sum] draws=%u badDraws=%u badVerts=%u top: %s\n",
+                      s_ws.draws, s_ws.badDraws, s_ws.badVerts, topBuf);
+        s_ws.draws = 0;
+        s_ws.badDraws = 0;
+        s_ws.badVerts = 0;
+        s_ws.numKeys = 0;
+        s_ws.lastSum = now;
+    }
+}
+
+struct M8DrawEntry // PROBE-M8
+{
+    uint32_t serial = 0u;
+    uint16_t handlerPc = 0u;
+    uint16_t mscal = 0u;
+    uint32_t gifOffset = 0u;
+    uint8_t clipRan = 0u;
+    uint32_t nVertsIn = 0u;
+    uint32_t nVertsOut = 0u;
+    float minW = 0.0f;
+    float maxW = 0.0f;
+    float maxAbsXY = 0.0f;
+    static constexpr uint32_t kMaxGifVerts = 256u;
+    uint32_t nGifVerts = 0u;
+    int16_t gifX[kMaxGifVerts] = {};
+    int16_t gifY[kMaxGifVerts] = {};
+};
+
+static constexpr size_t kM8RingSize = 4096u; // PROBE-M8
+static M8DrawEntry s_m8Ring[kM8RingSize] = {}; // PROBE-M8
+static std::mutex s_m8Mtx; // PROBE-M8
+static thread_local uint16_t t_m8Mscal = 0u; // PROBE-M8
+static thread_local uint16_t t_m8Handler = 0u; // PROBE-M8
+
+inline void m8ParseGifXyz(const uint8_t *gifData, uint32_t gifBytes, M8DrawEntry &e) // PROBE-M8
+{
+    e.nGifVerts = 0u;
+    if (!gifData || gifBytes < 16u)
+        return;
+    uint32_t off = 0u;
+    while (off + 16u <= gifBytes)
+    {
+        uint64_t tagLo = 0ull, tagHi = 0ull;
+        std::memcpy(&tagLo, gifData + off, 8);
+        std::memcpy(&tagHi, gifData + off + 8u, 8);
+        off += 16u;
+        const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFull);
+        const bool eop = ((tagLo >> 15) & 1ull) != 0ull;
+        const uint32_t flg = static_cast<uint32_t>((tagLo >> 58) & 3ull);
+        uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFull);
+        if (nreg == 0u)
+            nreg = 16u;
+        if (flg == 0u) // PACKED
+        {
+            for (uint32_t l = 0u; l < nloop; ++l)
+            {
+                for (uint32_t r = 0u; r < nreg; ++r)
+                {
+                    if (off + 16u > gifBytes)
+                        return;
+                    const uint8_t reg = static_cast<uint8_t>((tagHi >> (r * 4u)) & 0xFu);
+                    if ((reg == 0x04u || reg == 0x05u) && e.nGifVerts < M8DrawEntry::kMaxGifVerts)
+                    {
+                        uint32_t xw = 0u, yw = 0u;
+                        std::memcpy(&xw, gifData + off + 0u, 4);
+                        std::memcpy(&yw, gifData + off + 4u, 4);
+                        e.gifX[e.nGifVerts] = static_cast<int16_t>(xw & 0xFFFFu);
+                        e.gifY[e.nGifVerts] = static_cast<int16_t>(yw & 0xFFFFu);
+                        ++e.nGifVerts;
+                    }
+                    off += 16u;
+                }
+            }
+        }
+        else if (flg == 1u) // REGLIST
+        {
+            for (uint32_t l = 0u; l < nloop; ++l)
+            {
+                for (uint32_t r = 0u; r < nreg; ++r)
+                {
+                    if (off + 8u > gifBytes)
+                        return;
+                    const uint8_t reg = static_cast<uint8_t>((tagHi >> (r * 4u)) & 0xFu);
+                    if ((reg == 0x04u || reg == 0x05u) && e.nGifVerts < M8DrawEntry::kMaxGifVerts)
+                    {
+                        uint64_t qw = 0ull;
+                        std::memcpy(&qw, gifData + off, 8);
+                        e.gifX[e.nGifVerts] = static_cast<int16_t>(qw & 0xFFFFull);
+                        e.gifY[e.nGifVerts] = static_cast<int16_t>((qw >> 16) & 0xFFFFull);
+                        ++e.nGifVerts;
+                    }
+                    off += 8u;
+                }
+            }
+            if ((nloop * nreg) & 1u)
+                off += 8u;
+        }
+        else if (flg == 2u) // IMAGE
+        {
+            off += nloop * 16u;
+        }
+        else
+        {
+            break;
+        }
+        if (eop)
+            break;
+    }
+}
+
+inline void m8RecordKick(uint32_t serial, uint16_t handlerPc, uint16_t mscal, uint32_t gifOffset,
+                         const uint8_t *gifData, uint32_t gifBytes) // PROBE-M8
+{
+    if (!spikeOn() || serial == 0u)
+        return;
+    M8DrawEntry e{};
+    e.serial = serial;
+    e.handlerPc = handlerPc;
+    e.mscal = mscal;
+    e.gifOffset = gifOffset;
+    m8ParseGifXyz(gifData, gifBytes, e);
+    std::lock_guard<std::mutex> lk(s_m8Mtx);
+    s_m8Ring[serial & (kM8RingSize - 1u)] = e;
+}
+
+inline void m8EnrichDraw(uint32_t serial, uint16_t handlerPc, uint8_t clipRan, uint32_t nVertsIn,
+                         uint32_t nVertsOut, float minW, float maxW, float maxAbsXY) // PROBE-M8
+{
+    if (!spikeOn() || serial == 0u)
+        return;
+    std::lock_guard<std::mutex> lk(s_m8Mtx);
+    M8DrawEntry &e = s_m8Ring[serial & (kM8RingSize - 1u)];
+    if (e.serial != serial)
+        return;
+    e.handlerPc = handlerPc;
+    e.clipRan = clipRan;
+    e.nVertsIn = nVertsIn;
+    e.nVertsOut = nVertsOut;
+    e.minW = minW;
+    e.maxW = maxW;
+    e.maxAbsXY = maxAbsXY;
+}
+
+inline void m8AccumVert(__m128 vp, bool &first, float &minW, float &maxW, float &maxAbsXY) // PROBE-M8
+{
+    alignas(16) float p[4];
+    _mm_store_ps(p, vp);
+    if (first)
+    {
+        minW = maxW = p[3];
+        first = false;
+    }
+    else
+    {
+        if (p[3] < minW) minW = p[3];
+        if (p[3] > maxW) maxW = p[3];
+    }
+    const float ax = std::fabs(p[0]);
+    const float ay = std::fabs(p[1]);
+    if (ax > maxAbsXY) maxAbsXY = ax;
+    if (ay > maxAbsXY) maxAbsXY = ay;
+}
+} // namespace watch
+
 // Handler 00A8: matrix setup (00A8..0150) + table transform loop (0158..0180), docs/VU1_HANDLER_FORMS.md sections 1, 2 (verified bit-exact there).
 // Loop memory order inside one pass: SQI vf31 (0158), LQ.xy (0160), SQI vf6 (0168), LQI.zw (0170); the vf5 that pass k multiplies holds the xy/zw
 // loaded by pass k-1 (pass 1: the LQI of 0138), and the vf6 stored by pass k is the MADDw result of pass k-1 (pass 1: the prologue MADDw at 0150).
@@ -1232,6 +1694,8 @@ static bool handler00A8(Regs &R, uint8_t *vu)
     vf1 = fmacV<2>(vf7, bc<2>(vf8), acc); // R0
     if (scene::on()) // PERF-SA
         scene::setObjMatrix(vf1, vf2, vf3, vf4);
+    if (watch::on()) // PROBE-M5
+        watch::recordBone(vu, vi3, vi2);
     uint16_t vi5 = static_cast<uint16_t>(vi3 + 636u), vi1 = static_cast<uint16_t>(vi3 + 476u);
     const __m128 vf25 = ldq(vu, vi1++);
     vf5 = ldq(vu, vi1++);
@@ -1428,6 +1892,12 @@ static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_
             std::memcpy(gif.data() + start + i * 16u, vu + (((q0 + i) & 0x3FFu) << 4), 16);
     }
     kicks.emplace_back(start, total);
+    if (watch::spikeOn() && scene::on() && ::ps2xRdActive()) // PROBE-M8
+    {
+        const uint32_t ks = scene::t_scene.curKickSerial & 0x3FFFFFFFu;
+        watch::m8RecordKick(ks, watch::t_m8Handler, watch::t_m8Mscal, start,
+                            leanTag ? nullptr : (gif.data() + start), leanTag ? 0u : total);
+    }
     if (scene::on()) // FEAT-RD2
     {
         scene::RecScope rs(scene::kRpParse); // FEAT-RD32
@@ -2459,6 +2929,15 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
     }
     if (!kick(vu, 876u, kicks, gif))
         return false;
+    if (watch::spikeOn()) // PROBE-M8
+    {
+        float minW = 0.0f, maxW = 0.0f, maxAbsXY = 0.0f;
+        bool first = true;
+        for (int32_t k = 0; k < polyCount; ++k)
+            watch::m8AccumVert(ldq(vu, 918u + 3u * static_cast<uint32_t>(k)), first, minW, maxW, maxAbsXY);
+        watch::m8EnrichDraw(scene::t_scene.curKickSerial & 0x3FFFFFFFu, 0x2900u, 1u, 3u,
+                            static_cast<uint32_t>(polyCount), minW, maxW, maxAbsXY);
+    }
     if (scene::on()) // PERF-SA
         scene::recordClipPolygon(vu, polyCount, copyS, c1v, c2v, kicks.back().first, kicks.back().second, gif);
     return true;
@@ -2594,6 +3073,17 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(e6), 2), static_cast<int>(e7), 3));
     if (!kick(vu, e7, kicks, gif))
         return fb1EE0(kFbRigidKick);
+    if (watch::spikeOn()) // PROBE-M8
+    {
+        float minW = 0.0f, maxW = 0.0f, maxAbsXY = 0.0f;
+        bool first = true;
+        for (int32_t j = 0; j < N; ++j)
+            watch::m8AccumVert(Ps[j], first, minW, maxW, maxAbsXY);
+        watch::m8EnrichDraw(scene::t_scene.curKickSerial & 0x3FFFFFFFu, 0x2440u, 0u,
+                            static_cast<uint32_t>(N), static_cast<uint32_t>(N), minW, maxW, maxAbsXY);
+    }
+    if (watch::on()) // PROBE-M5
+        watch::checkDraw(vu, 0x2440u, top, kicks.back().first, static_cast<uint32_t>(N), false, 0u, 0u, nullptr, Ps, Wd);
     if (scene::on()) // PERF-SA
         scene::recordRigid(vu, N, copyS, c1v, c2v, Ps, Wd, e7, kicks.back().first, kicks.back().second, gif);
     R.vi[12] = top; // XTOP vi12
@@ -2865,6 +3355,15 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
         const bool useLeanKick = scene::leanKickOn(); // FEAT-RD42
         if (!kick(vu, ubase, kicks, gif, useLeanKick))
             return fb1EE0(kFbSkinKick);
+        if (watch::spikeOn()) // PROBE-M8
+        {
+            float minW = 0.0f, maxW = 0.0f, maxAbsXY = 0.0f;
+            bool first = true;
+            for (int32_t v = 0; v < N; ++v)
+                watch::m8AccumVert(ldq(vu, static_cast<uint32_t>(636 + idxs[v]) & 0x3FFu), first, minW, maxW, maxAbsXY);
+            watch::m8EnrichDraw(scene::t_scene.curKickSerial & 0x3FFFFFFFu, vi10 ? 0x1EF0u : 0x1EE0u, 0u,
+                                static_cast<uint32_t>(N), static_cast<uint32_t>(N), minW, maxW, maxAbsXY);
+        }
         const uint64_t t2 = hp ? __rdtsc() : 0ull; // PROBE-RD41
         uint64_t vertsT = 0; // PROBE-RD41
         { scene::RecScope rm(scene::kRpMarker); scene::markGeometryKick(gif, kicks.back().first); }
@@ -2891,6 +3390,8 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
             }
         }
         const uint64_t t3 = hp ? __rdtsc() : 0ull; // PROBE-RD41
+        if (watch::on()) // PROBE-M5
+            watch::checkDraw(vu, vi10 ? 0x1EF0u : 0x1EE0u, top, kicks.back().first, static_cast<uint32_t>(N), true, s2base, s3base, idxs, nullptr, nullptr);
         scene::leanSkinNoteDraw(true, false, useLeanKick); // FEAT-RD42
         R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0));
         if (hp) // PROBE-RD41
@@ -3020,6 +3521,17 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
     const uint64_t tKick0 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
         return fb1EE0(kFbSkinKick);
+    if (watch::spikeOn()) // PROBE-M8
+    {
+        float minW = 0.0f, maxW = 0.0f, maxAbsXY = 0.0f;
+        bool first = true;
+        for (int32_t v = 0; v < N; ++v)
+            watch::m8AccumVert(ldq(vu, static_cast<uint32_t>(636 + idxs[v]) & 0x3FFu), first, minW, maxW, maxAbsXY);
+        watch::m8EnrichDraw(scene::t_scene.curKickSerial & 0x3FFFFFFFu, vi10 ? 0x1EF0u : 0x1EE0u, 0u,
+                            static_cast<uint32_t>(N), static_cast<uint32_t>(N), minW, maxW, maxAbsXY);
+    }
+    if (watch::on()) // PROBE-M5
+        watch::checkDraw(vu, vi10 ? 0x1EF0u : 0x1EE0u, top, kicks.back().first, static_cast<uint32_t>(N), true, s2base, s3base, idxs, nullptr, nullptr);
     const uint64_t tKick1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     if (scene::on()) // PERF-SA
     {
@@ -4081,6 +4593,8 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
     static const bool funcNewOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_NEW"); return !(e && e[0] == '0'); }(); // PERF-V1M: default ON (PERF-VNC); PS2X_VU1_FUNC_NEW=0 disables
     t_newN = 0; // PERF-VNC
     t_seqN = 0; // PROBE-BG
+    if (watch::on()) // PROBE-M5
+        watch::t_bones.reset();
     Regs R; // PERF-V1G: skip 560-byte memset; vfValid/viValid track exact live-in registers across handlers
     R.vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
     R.vi[0] = 0u;
@@ -4094,6 +4608,9 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
     vx::HScope vxHs; // PROBE-VX
     hprof::HScope hpHs; // PROBE-RD39
     const bool hpOn = hprof::on(); // PROBE-RD39
+    watch::t_m8Mscal = static_cast<uint16_t>(top); // PROBE-M8
+    watch::t_m8Handler = 0u; // PROBE-M8
+    uint16_t m8LastWork = 0u; // PROBE-M8
     for (uint32_t step = 0; step < 100000u; ++step)
     {
         vi13 = static_cast<uint16_t>(vi13 + 1u);                      // 0028 IADDIU vi13, vi13, 1
@@ -4111,6 +4628,14 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
         if (vxA) { if (h) vxHs.begin(vx::slotOf(h, vu), __rdtsc()); else vxHs.end(__rdtsc()); } // PROBE-VX
         if (hpOn) { if (h) { uint16_t hpc = static_cast<uint16_t>(h); if ((h == 0x1EE0u || h == 0x1EF0u) && static_cast<int16_t>(ilw(vu, 1011, 1)) < 0) hpc = 0x2440u; hpHs.begin(hpc); } else hpHs.end(); } // PROBE-RD39
         if (t_seqN < 64u) t_seq[t_seqN++] = static_cast<uint16_t>(h); // PROBE-BG
+        if (watch::spikeOn()) // PROBE-M8
+        {
+            if (h != 0u && h != 0x0050u && h != 0x0060u && h != 0x0070u && h != 0x0088u)
+                m8LastWork = static_cast<uint16_t>(h);
+            watch::t_m8Handler = (h == 0x0050u || h == 0x0088u)
+                                     ? (m8LastWork ? m8LastWork : static_cast<uint16_t>(h))
+                                     : static_cast<uint16_t>(h);
+        }
         switch (h)
         {
         case 0x0000u: // program end (E bit)
@@ -5269,6 +5794,8 @@ void ps2xVu1FlushPath1() // PERF-V1I
         vu1func::scene::onFlush();
     if (vu1func::hprof::on()) // PROBE-RD39
         ++vu1func::hprof::g_st.frames; // PROBE-RD39
+    if (vu1func::watch::on()) // PROBE-M5
+        vu1func::watch::s_vbl.fetch_add(1u, std::memory_order_relaxed);
 }
 
 // PROBE-VX: entry points used by vpExecThreadFunc (ps2_vif1_interpreter.cpp, declared extern there)
@@ -5323,4 +5850,39 @@ void ps2xVxEv(uint32_t kind, uint64_t ticks) // PROBE-VX
     fresh.t0 = now;
     fresh.tsc0 = tn;
     s = fresh;
+}
+
+// PROBE-M8: global-scope lookup entry points used by rd_view.cpp (declared extern there)
+bool ps2xVu1SpikeLookupDraw(uint32_t serial, uint16_t &handlerPc, uint16_t &mscal,
+                            uint8_t &clipRan, uint32_t &nVertsIn, uint32_t &nVertsOut,
+                            float &minW, float &maxW, float &maxAbsXY) // PROBE-M8
+{
+    if (!vu1func::watch::spikeOn() || serial == 0u)
+        return false;
+    std::lock_guard<std::mutex> lk(vu1func::watch::s_m8Mtx);
+    const vu1func::watch::M8DrawEntry &e = vu1func::watch::s_m8Ring[serial & (vu1func::watch::kM8RingSize - 1u)];
+    if (e.serial != serial)
+        return false;
+    handlerPc = e.handlerPc;
+    mscal = e.mscal;
+    clipRan = e.clipRan;
+    nVertsIn = e.nVertsIn;
+    nVertsOut = e.nVertsOut;
+    minW = e.minW;
+    maxW = e.maxW;
+    maxAbsXY = e.maxAbsXY;
+    return true;
+}
+
+bool ps2xVu1SpikeLookupGif16(uint32_t serial, uint32_t vertIdx, int32_t &outXpx, int32_t &outYpx) // PROBE-M8
+{
+    if (!vu1func::watch::spikeOn() || serial == 0u)
+        return false;
+    std::lock_guard<std::mutex> lk(vu1func::watch::s_m8Mtx);
+    const vu1func::watch::M8DrawEntry &e = vu1func::watch::s_m8Ring[serial & (vu1func::watch::kM8RingSize - 1u)];
+    if (e.serial != serial || vertIdx >= e.nGifVerts)
+        return false;
+    outXpx = static_cast<int32_t>(e.gifX[vertIdx]) / 16;
+    outYpx = static_cast<int32_t>(e.gifY[vertIdx]) / 16;
+    return true;
 }
