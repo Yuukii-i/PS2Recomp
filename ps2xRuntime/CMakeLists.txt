@@ -563,6 +563,9 @@ if(PS2X_ENABLE_SDL3 AND PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2
     target_compile_definitions(ps2_runtime PRIVATE PS2X_HAS_IMGUI=1) # DBG1
 endif() # DBG1
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
+if(WIN32) # PROBE-M14
+    target_link_libraries(ps2_runtime PRIVATE dbghelp) # PROBE-M14
+endif() # PROBE-M14
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime

@@ -1510,6 +1510,25 @@ static void rdCensusFlip(uint32_t displayFbp) // PROBE-E0
 static std::vector<RdVert> s_rd2dVerts; // FEAT-RD8
 static std::vector<Rd2DBatch> s_rd2dBatches; // FEAT-RD8
 static std::vector<uint8_t> s_rd2dFba; // PROBE-RD78D
+static const int s_rdCutLogMode = []() -> int { // PROBE-PA1c
+    const char *v = std::getenv("PS2X_RD_CUTLOG");
+    if (!v) return 0;
+    if (v[0] == '2') return 2;
+    if (v[0] == '1') return 1;
+    return 0;
+}();
+struct RdCutSeqRec // PROBE-PA1c
+{
+    bool wantClear = false;
+    bool clr = false;
+    bool fade = false;
+    bool wantCopy = false;
+    bool copy = false;
+    bool full = false;
+    bool dispFbp = false;
+    bool noColour = false;
+};
+static std::vector<RdCutSeqRec> s_rdCutSeqRecs; // PROBE-PA1c
 static uint32_t s_rd2dRtSkipped = 0u; // FEAT-RD8
 static uint32_t s_rd2dPointLineSkipped = 0u; // FEAT-RD8
 static uint32_t s_rd2dGMin = 0u; // FEAT-RD13
@@ -1538,6 +1557,7 @@ static uint32_t s_rdRejRingHead = 0u; // FIX-CUT1
 static uint32_t s_rdRejRingCnt = 0u; // FIX-CUT1
 static const bool s_rdCutAdapt = []() { const char *e = std::getenv("PS2X_RD_CUT_ADAPT"); return e && e[0] == '1'; }(); // FIX-CUT1
 static const bool s_rdCutCopy = []() { const char *e = std::getenv("PS2X_RD_CUT_COPY"); return e && e[0] == '1'; }(); // FIX-CUT2
+static const bool s_rdPauseFixOn = []() { const char *e = std::getenv("PS2X_RD_PAUSEFIX"); return !e || !*e || e[0] != '0'; }(); // FIX-PA1
 static uint32_t s_rdCopyB = 0u; // FIX-CUT2 // FIX-CUT3: copies seen
 static uint32_t s_rdCopyRej = 0u; // FIX-CUT2D
 static uint32_t s_rdLastCopyBIdx = 0xFFFFFFFFu; // FIX-CUT2E
@@ -1545,6 +1565,46 @@ static uint32_t s_rdFlipsSinceCopy = 0u; // FIX-CUT2
 static bool s_rdCopyArmed = false; // FIX-CUT3
 static uint32_t s_rdArmedAcc = 0u; // FIX-CUT3
 static uint32_t s_rdClearIgnored = 0u; // FIX-CUT3
+static uint32_t s_rdNoCutStreak = 0u; // FIX-PA1b
+static uint32_t s_rdHighGapStreak = 0u; // FIX-PA1d
+static uint32_t s_rdAccGapRing[8] = {}; // FIX-PA1b
+static uint32_t s_rdAccGapHead = 0u; // FIX-PA1b
+static uint32_t s_rdAccGapCnt = 0u; // FIX-PA1b
+static const char *s_rdCutWhyReason = "no-clear"; // FIX-PA1b
+static uint32_t s_rdCutWhyGap = 0u; // FIX-PA1b
+static uint32_t s_rdCutWhyMinGap = 0u; // FIX-PA1b
+static void rdRecordAcceptedGapLocked(uint32_t gap) // FIX-PA1b
+{
+    if (s_rdPauseFixOn && static_cast<double>(gap) > 2.0 * s_rdBoundaryEma) // FIX-PA1d
+    {
+        ++s_rdHighGapStreak;
+        if (s_rdHighGapStreak >= 3u)
+        {
+            s_rdBoundaryEma = 0.5 * s_rdBoundaryEma + 0.5 * static_cast<double>(gap);
+            s_rdAccGapRing[s_rdAccGapHead] = gap;
+            s_rdAccGapHead = (s_rdAccGapHead + 1u) & 7u;
+            if (s_rdAccGapCnt < 8u) ++s_rdAccGapCnt;
+            s_rdHighGapStreak = 0u;
+            return;
+        }
+    }
+    else
+    {
+        s_rdHighGapStreak = 0u;
+    }
+    const double clamped = std::clamp(static_cast<double>(gap), 0.5 * s_rdBoundaryEma, 2.0 * s_rdBoundaryEma);
+    s_rdBoundaryEma = 0.8 * s_rdBoundaryEma + 0.2 * clamped;
+    s_rdAccGapRing[s_rdAccGapHead] = static_cast<uint32_t>(clamped);
+    s_rdAccGapHead = (s_rdAccGapHead + 1u) & 7u;
+    if (s_rdAccGapCnt < 8u) ++s_rdAccGapCnt;
+}
+static void rdResetEmaToMeanLocked() // FIX-PA1b
+{
+    if (s_rdAccGapCnt == 0u) { s_rdBoundaryEma = 1500.0; return; }
+    uint64_t sum = 0ull;
+    for (uint32_t i = 0u; i < s_rdAccGapCnt; ++i) sum += s_rdAccGapRing[i];
+    s_rdBoundaryEma = std::max(300.0, static_cast<double>(sum) / static_cast<double>(s_rdAccGapCnt));
+}
 static uint32_t s_rdCg0 = 0u, s_rdCg1 = 0u, s_rdCg2 = 0u, s_rdCg3 = 0u, s_rdCg4 = 0u, s_rdCg5 = 0u; // PROBE-CUT2B
 static uint32_t s_rdCgLastFbp = 0u, s_rdCgLastPsm = 0u; // PROBE-CUT2B
 static uint32_t s_rdCgLastScX0 = 0u, s_rdCgLastScX1 = 0u, s_rdCgLastScY0 = 0u, s_rdCgLastScY1 = 0u; // PROBE-CUT2B
@@ -1583,6 +1643,11 @@ static void rdResetBoundariesLocked() // FEAT-RD54
     s_rdRejRingHead = 0u; // FIX-CUT1
     s_rdRejRingCnt = 0u; // FIX-CUT1
     s_rdFlipsSinceCopy = 0u; // FIX-CUT2
+    s_rdNoCutStreak = 0u; // FIX-PA1b
+    s_rdHighGapStreak = 0u; // FIX-PA1d
+    s_rdCutWhyReason = "no-clear"; // FIX-PA1b
+    s_rdCutWhyGap = 0u; // FIX-PA1b
+    s_rdCutWhyMinGap = 0u; // FIX-PA1b
 }
 static bool rdNoteKickBookkeeping(const GSContext &ctx, const GSPrimReg &prim, const GSTexaReg &texa, const uint8_t *localMem); // FEAT-RD42
 
@@ -2770,6 +2835,7 @@ void GS::latchHostPresentationFrame()
                 s_rd2dVerts.clear();
                 s_rd2dBatches.clear();
                 s_rd2dFba.clear(); // PROBE-RD78D
+                s_rdCutSeqRecs.clear(); // PROBE-PA1c
                 s_rdKickRecs.clear();
                 s_rdLastKickRecSerial = 0u;
                 s_rdCurSerial = 0u;
@@ -2838,6 +2904,7 @@ void GS::latchHostPresentationFrame()
                 s_rd2dVerts.clear();
                 s_rd2dBatches.clear();
                 s_rd2dFba.clear(); // PROBE-RD78D
+                s_rdCutSeqRecs.clear(); // PROBE-PA1c
                 s_rdKickRecs.clear();
                 s_rdLastKickRecSerial = 0u;
                 s_rdCurSerial = 0u;
@@ -3008,6 +3075,7 @@ void GS::latchHostPresentationFrame()
             static std::vector<RdVert> s_pubVerts;
             static std::vector<Rd2DBatch> s_pubBatches;
             static std::vector<uint8_t> s_pubFba; // PROBE-RD78D
+            static std::vector<RdCutSeqRec> s_pubCutSeqRecs; // PROBE-PA1c
             static std::vector<RdKickRec> s_pubKickRecs; // FEAT-RD33
             static std::vector<uint32_t> s_pubSerials;   // FEAT-RD33
             static std::vector<uint32_t> s_pubRanges;    // FEAT-RD33
@@ -3027,11 +3095,7 @@ void GS::latchHostPresentationFrame()
                     const bool noCut = s_rdBoundaries.empty() ||
                                        (s_rdBoundaries.back().first == 0u && s_rdBoundaries.size() == 1u);
                     // PROBE-V3P: cutlog probe in frame-cut publisher
-                    static const bool s_rdCutLogOn = []() {
-                        const char *v = std::getenv("PS2X_RD_CUTLOG");
-                        return v && v[0] == '1';
-                    }();
-                    if (s_rdCutLogOn)
+                    if (s_rdCutLogMode >= 1) // PROBE-PA1c
                     {
                         static uint32_t s_cutLogFlip = 0u;
                         static uint32_t s_cutLogLines = 0u;
@@ -3042,23 +3106,25 @@ void GS::latchHostPresentationFrame()
                         s_cutLogLastKicks = curKicks;
                         const uint32_t flip = ++s_cutLogFlip;
                         const uint32_t streak = noCut ? (s_rdCutHoldStreak + 1u) : 0u;
-                        if (s_cutLogLines < 4000u)
+                        bool hasE0 = false; // PROBE-PA1c
+                        char drawFbpsBuf[64] = "";
+                        uint32_t distinctFbps[6];
+                        size_t numDistinct = 0u;
+                        for (const Rd2DBatch &b : s_rd2dBatches)
+                        {
+                            const uint32_t bfbp = static_cast<uint32_t>(b.frame & 0x1FFu);
+                            if (bfbp == 0xE0u) hasE0 = true; // PROBE-PA1c
+                            bool found = false;
+                            for (size_t di = 0u; di < numDistinct; ++di)
+                            {
+                                if (distinctFbps[di] == bfbp) { found = true; break; }
+                            }
+                            if (!found && numDistinct < 6u)
+                                distinctFbps[numDistinct++] = bfbp;
+                        }
+                        if (s_cutLogLines < 30000u) // FIX-PA1b
                         {
                             ++s_cutLogLines;
-                            char drawFbpsBuf[64] = "";
-                            uint32_t distinctFbps[6];
-                            size_t numDistinct = 0u;
-                            for (const Rd2DBatch &b : s_rd2dBatches)
-                            {
-                                const uint32_t bfbp = static_cast<uint32_t>(b.frame & 0x1FFu);
-                                bool found = false;
-                                for (size_t di = 0u; di < numDistinct; ++di)
-                                {
-                                    if (distinctFbps[di] == bfbp) { found = true; break; }
-                                }
-                                if (!found && numDistinct < 6u)
-                                    distinctFbps[numDistinct++] = bfbp;
-                            }
                             int pos = 0;
                             for (size_t di = 0u; di < numDistinct; ++di)
                             {
@@ -3073,10 +3139,92 @@ void GS::latchHostPresentationFrame()
                                         flip, noCut ? 1 : 0, streak,
                                         s_rd2dBatches.size(), s_rd2dVerts.size(), s_rdBoundaries.size(),
                                         displayFbp, drawFbpsBuf, drawFbpFirst, drawFbpLast, kicksSinceLast);
+                            if (noCut && s_cutLogLines < 30000u) // FIX-PA1b
+                            {
+                                ++s_cutLogLines;
+                                ps2xSafeLog("[cutwhy] flip=%u rejected: reason=%s gap=%u minGap=%u ema=%.0f armed=%d copyIdx=%u\n",
+                                            flip, s_rdCutWhyReason, s_rdCutWhyGap, s_rdCutWhyMinGap,
+                                            s_rdBoundaryEma, s_rdCopyArmed ? 1 : 0, s_rdLastCopyBIdx);
+                            }
+                        }
+                        if (s_rdCutLogMode == 2) // PROBE-PA1c
+                        {
+                            static uint32_t s_cutSeqFlips = 0u;
+                            static uint32_t s_cutSeqNoCut1 = 0u;
+                            static uint32_t s_cutSeqNoCut0 = 0u;
+                            bool dumpSeq = false;
+                            if (s_cutSeqFlips < 12u)
+                            {
+                                if (hasE0)
+                                    dumpSeq = true;
+                                else if (noCut && s_cutSeqNoCut1 < 6u)
+                                {
+                                    dumpSeq = true;
+                                    ++s_cutSeqNoCut1;
+                                }
+                                else if (!noCut && s_cutSeqNoCut0 < 3u)
+                                {
+                                    dumpSeq = true;
+                                    ++s_cutSeqNoCut0;
+                                }
+                            }
+                            if (dumpSeq)
+                            {
+                                ++s_cutSeqFlips;
+                                const uint32_t drawFbpCopy = s_rd2dBatches.empty() ? 0xFFFFFFFFu : static_cast<uint32_t>(s_rd2dBatches.back().frame & 0x1FFu);
+                                ps2xSafeLog("[cutseq] flip=%u noCut=%d nB=%zu batches=%zu disp=%x geom=%x drawFbp=%x dispCopyFbp=%x armed=%d lastCopyIdx=%u ema=%.1f adapt=%d\n",
+                                            flip, noCut ? 1 : 0, s_rdBoundaries.size(), s_rd2dBatches.size(),
+                                            displayFbp, frameGeomFbp, drawFbpCopy, s_rdFxDispCopyFbp,
+                                            s_rdCopyArmed ? 1 : 0, s_rdLastCopyBIdx, s_rdBoundaryEma, s_rdCutAdapt ? 1 : 0);
+                                const size_t maxBatches = std::min<size_t>(s_rd2dBatches.size(), 80u);
+                                for (size_t i = 0u; i < maxBatches; ++i)
+                                {
+                                    const Rd2DBatch &b = s_rd2dBatches[i];
+                                    const RdCutSeqRec rec = (i < s_rdCutSeqRecs.size()) ? s_rdCutSeqRecs[i] : RdCutSeqRec{};
+                                    const int tme = ((b.prim & (1ull << 4)) != 0ull) ? 1 : 0;
+                                    const int abe = ((b.prim & (1ull << 6)) != 0ull) ? 1 : 0;
+                                    const uint32_t bfbp = static_cast<uint32_t>(b.frame & 0x1FFull);
+                                    const uint32_t bfbmsk = static_cast<uint32_t>((b.frame >> 32) & 0xFFFFFFFFull);
+                                    const uint32_t btbp = static_cast<uint32_t>(b.tex0 & 0x3FFFull);
+                                    const uint32_t bpsm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full);
+                                    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+                                    if (b.count > 0u && static_cast<size_t>(b.first) + b.count <= s_rd2dVerts.size())
+                                    {
+                                        float fminX = s_rd2dVerts[b.first].pos[0], fmaxX = fminX;
+                                        float fminY = s_rd2dVerts[b.first].pos[1], fmaxY = fminY;
+                                        for (uint32_t k = 1u; k < b.count; ++k)
+                                        {
+                                            const float px = s_rd2dVerts[b.first + k].pos[0];
+                                            const float py = s_rd2dVerts[b.first + k].pos[1];
+                                            fminX = std::min(fminX, px); fmaxX = std::max(fmaxX, px);
+                                            fminY = std::min(fminY, py); fmaxY = std::max(fmaxY, py);
+                                        }
+                                        x0 = static_cast<int>(fminX); y0 = static_cast<int>(fminY);
+                                        x1 = static_cast<int>(fmaxX); y1 = static_cast<int>(fmaxY);
+                                    }
+                                    ps2xSafeLog("[cutseq] flip=%u i=%zu prim=0x%llx tme=%d abe=%d alpha=0x%llx test=0x%llx fbp=0x%x fbmsk=0x%08x tex=0x%x/%u zbuf=0x%llx bbox=(%d,%d,%d,%d) count=%u afterSerial=%u wantClear=%d clr=%d fade=%d wantCopy=%d copy=%d full=%d dispFbp=%d noColour=%d\n",
+                                                flip, i, static_cast<unsigned long long>(b.prim), tme, abe,
+                                                static_cast<unsigned long long>(b.alpha), static_cast<unsigned long long>(b.test),
+                                                bfbp, bfbmsk, btbp, bpsm, static_cast<unsigned long long>(b.zbuf),
+                                                x0, y0, x1, y1, b.count, b.afterSerial,
+                                                rec.wantClear ? 1 : 0, rec.clr ? 1 : 0, rec.fade ? 1 : 0,
+                                                rec.wantCopy ? 1 : 0, rec.copy ? 1 : 0, rec.full ? 1 : 0,
+                                                rec.dispFbp ? 1 : 0, rec.noColour ? 1 : 0);
+                                }
+                            }
                         }
                     }
+                    s_rdCutWhyReason = "no-clear"; // FIX-PA1b
+                    s_rdCutWhyGap = 0u; // FIX-PA1b
+                    s_rdCutWhyMinGap = 0u; // FIX-PA1b
                     if (noCut)
                     {
+                        ++s_rdNoCutStreak; // FIX-PA1b
+                        if (!s_rdPauseFixOn && s_rdNoCutStreak > 8u) // FIX-PA1b // FIX-PA1d
+                        {
+                            rdResetEmaToMeanLocked();
+                            s_rdNoCutStreak = 0u;
+                        }
                         ++s_rdCutHoldStreak;
                         if (s_rdCutHoldStreak < 4u)
                         {
@@ -3097,6 +3245,7 @@ void GS::latchHostPresentationFrame()
                             s_pubVerts.swap(s_rd2dVerts);
                             s_pubBatches.swap(s_rd2dBatches);
                             s_pubFba.swap(s_rd2dFba); // PROBE-RD78D
+                            s_pubCutSeqRecs.swap(s_rdCutSeqRecs); // PROBE-PA1c
                             s_pubKickRecs.swap(s_rdKickRecs);
                             s_rdLastKickRecSerial = 0u;
                             rtSk = s_rd2dRtSkipped;
@@ -3111,6 +3260,7 @@ void GS::latchHostPresentationFrame()
                     }
                     else
                     {
+                        s_rdNoCutStreak = 0u; // FIX-PA1b
                         t1CutReason = "boundary-cut"; // PROBE-T1
                         const uint32_t kb = s_rdBoundaries.back().first;
                         const uint32_t sb = s_rdBoundaries.back().second;
@@ -3151,6 +3301,16 @@ void GS::latchHostPresentationFrame()
                         else
                             s_rd2dFba.clear();
                         if (s_pubFba.size() > kb) s_pubFba.resize(kb); // PROBE-RD78D
+                        s_pubCutSeqRecs.swap(s_rdCutSeqRecs); // PROBE-PA1c
+                        if (keptBatchCnt > 0u && s_pubCutSeqRecs.size() >= kb + keptBatchCnt)
+                        {
+                            s_rdCutSeqRecs.resize(keptBatchCnt);
+                            for (size_t i = 0u; i < keptBatchCnt; ++i)
+                                s_rdCutSeqRecs[i] = s_pubCutSeqRecs[kb + i];
+                        }
+                        else
+                            s_rdCutSeqRecs.clear();
+                        if (s_pubCutSeqRecs.size() > kb) s_pubCutSeqRecs.resize(kb);
 
                         s_pubKickRecs.swap(s_rdKickRecs);
                         s_rdKickRecs.clear();
@@ -3195,6 +3355,7 @@ void GS::latchHostPresentationFrame()
                     s_pubVerts.swap(s_rd2dVerts);
                     s_pubBatches.swap(s_rd2dBatches);
                     s_pubFba.swap(s_rd2dFba); // PROBE-RD78D
+                    s_pubCutSeqRecs.swap(s_rdCutSeqRecs); // PROBE-PA1c
                     s_pubKickRecs.swap(s_rdKickRecs); // FEAT-RD33
                     s_rdLastKickRecSerial = 0u;       // FEAT-RD33
                     rtSk = s_rd2dRtSkipped;
@@ -4019,6 +4180,8 @@ void GS::latchHostPresentationFrame()
     }
 
     ++g_ps2xGuestFlipSeq; // PROBE-E7b
+    if (displayFbp != 0xFFFFFFFFu) // FIX-PA1e
+        s_censusDisplayFbp.store(displayFbp, std::memory_order_relaxed);
     if (s_rdCensusOn) // PROBE-E0
         rdCensusFlip(displayFbp);
 
@@ -6268,16 +6431,40 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
 
             bool isFullScreenClear = false;
             bool isCopyBoundary = false; // FIX-CUT2
+            bool isSwapCopyArm = false; // FIX-PA1d
             bool isFxCandidate = false; // FIX-FX1
             const bool isFadeQuad = prim.abe && ((ctx.test & 1ull) != 0ull) &&
                                     (((ctx.test >> 1u) & 7ull) == 6ull) &&
                                     (((ctx.test >> 4u) & 0xFFull) == 0ull); // FIX-E5c
+            const bool noColour = writesNoColour(ctx.test, ctx.frame.fbmsk); // PROBE-PA1c
             const bool wantClearCheck = rdFrameCutOn() && !prim.tme && addCount > 0u && !isFadeQuad && // FEAT-RD55: O(1) early-out when FRAMECUT=0, TME=1, or count==0 // FIX-E5c
                                         (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
                                         ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull &&
-                                        !writesNoColour(ctx.test, ctx.frame.fbmsk); // FIX-E8b
-            const bool wantCopyCheck = rdFrameCutOn() && s_rdCutCopy && prim.tme && addCount == 6u && // FIX-CUT2 // FIX-CUT2C
-                                       ctx.frame.fbp != 0u && ctx.frame.psm == 0u; // FIX-CUT2C
+                                        !noColour; // FIX-E8b
+            // FIX-PA1: Why no boundary is recorded in paused frames:
+            //   1) Draw #0 (swap copy fb0 -> display fbp 0x70) has prim.tme=1 so wantClearCheck skips it,
+            //      and wantCopyCheck was gated on PS2X_RD_CUT_COPY=1 (default OFF) and did not restrict
+            //      destination FBP to the display FBP (so draws to other non-zero PSM0 FBPs could touch copy state).
+            //   2) Draw #1 (full-screen clear fb=0) passes wantClearCheck, but with no 3D scene redrawn while
+            //      paused (~300 draws vs s_rdBoundaryEma ~1500), gap < minGap rejects it in EMA hysteresis and
+            //      FIX-CUT4 never fires because s_rdCopyArmed is false.
+            // With s_rdPauseFixOn (default ON, PS2X_RD_PAUSEFIX=0 restores old behaviour), wantCopyCheck arms
+            // s_rdCopyArmed on swap copies into the display FBP (excluding self-copies and non-display FBPs like 0xe0).
+            // Normal frames still accept #1 via gap >= minGap identically; paused frames accept #1 via FIX-CUT4.
+            const uint32_t copySrcFbp = (static_cast<uint32_t>(ctx.tex0.tbp0) & 0x3FFFu) >> 5; // FIX-PA1b
+            const uint32_t flipDispFbp = s_censusDisplayFbp.load(std::memory_order_relaxed); // FIX-PA1e
+            const bool hasFlipDisp = s_rdPauseFixOn && (flipDispFbp != 0xFFFFFFFFu); // FIX-PA1e
+            const bool copyCand = rdFrameCutOn() && (s_rdCutCopy || s_rdPauseFixOn) && prim.tme && addCount == 6u && // FIX-PA1b
+                                  ctx.frame.fbp != 0u && ctx.frame.psm == 0u;
+            const bool copyDstIsDisp = hasFlipDisp ? (static_cast<uint32_t>(ctx.frame.fbp) == flipDispFbp) : (!ps2xRdHasDisplayFbp() || ps2xRdIsDisplayFbp(ctx.frame.fbp)); // FIX-PA1b // FIX-PA1e
+            const bool copySrcNotDisp = hasFlipDisp ? (copySrcFbp != flipDispFbp) : (!ps2xRdHasDisplayFbp() || !ps2xRdIsDisplayFbp(copySrcFbp)); // FIX-PA1b // FIX-PA1e
+            const bool wantCopyCheck = copyCand && (!s_rdPauseFixOn || (copyDstIsDisp && copySrcNotDisp && copySrcFbp != static_cast<uint32_t>(ctx.frame.fbp))); // FIX-CUT2 // FIX-CUT2C // FIX-PA1 // FIX-PA1b
+            const bool wantSwapArmCheck = rdFrameCutOn() && s_rdPauseFixOn && prim.tme && addCount > 0u && !isFadeQuad && // FIX-PA1d
+                                          (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
+                                          ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull &&
+                                          ((b2d.frame >> 32) & 0xFF000000ull) == 0xFF000000ull &&
+                                          !noColour && (hasFlipDisp ? copyDstIsDisp : (ps2xRdHasDisplayFbp() && ps2xRdIsDisplayFbp(ctx.frame.fbp))) && // FIX-PA1e
+                                          copySrcNotDisp && copySrcFbp != static_cast<uint32_t>(ctx.frame.fbp);
             const bool fxActive = s_rdFxOn && ps2xRdTakeoverOn(); // FIX-FX4
             const bool wantFxCheck = fxActive && prim.tme && addCount == 6u; // FIX-FX1 // FIX-FX4
             const bool cg0 = rdFrameCutOn() && prim.tme && addCount > 0u; // PROBE-CUT2B
@@ -6288,13 +6475,14 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             bool cg5 = false; // PROBE-CUT2B
             uint32_t cgScW = 0u, cgScH = 0u; // PROBE-CUT2B
             float cgBbW = 0.0f, cgBbH = 0.0f; // PROBE-CUT2B
-            if (wantClearCheck || wantCopyCheck || cg1 || wantFxCheck) // PROBE-CUT2B // FIX-FX1
+            bool fullScreenProbe = false; // PROBE-PA1c
+            if (s_rdCutLogMode == 2 || wantClearCheck || wantCopyCheck || wantSwapArmCheck || cg1 || wantFxCheck) // PROBE-CUT2B // FIX-FX1 // PROBE-PA1c // FIX-PA1d
             {
                 const uint32_t scW = (ctx.scissor.x1 >= ctx.scissor.x0) ? (static_cast<uint32_t>(ctx.scissor.x1) + 1u - ctx.scissor.x0) : 0u; // FEAT-RD54
                 const uint32_t scH = (ctx.scissor.y1 >= ctx.scissor.y0) ? (static_cast<uint32_t>(ctx.scissor.y1) + 1u - ctx.scissor.y0) : 0u;
                 const bool scissorOk = rdScissorQualifies(scW, scH); // FEAT-RD55: scissor test before bbox // PROBE-CUT2B
                 if (cg1) { cgScW = scW; cgScH = scH; cg4 = cg3 && scissorOk; } // PROBE-CUT2B
-                if (scissorOk || cg1 || wantFxCheck) // PROBE-CUT2B // FIX-FX1
+                if (s_rdCutLogMode == 2 || scissorOk || cg1 || wantFxCheck) // PROBE-CUT2B // FIX-FX1 // PROBE-PA1c
                 {
                     float minX = triVerts[0].pos[0], maxX = triVerts[0].pos[0];
                     float minY = triVerts[0].pos[1], maxY = triVerts[0].pos[1];
@@ -6311,12 +6499,14 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                     const float cMaxY = std::min(maxY, static_cast<float>(ctx.scissor.y1 + 1u));
                     const float bboxArea = (cMaxX > cMinX && cMaxY > cMinY) ? ((cMaxX - cMinX) * (cMaxY - cMinY)) : 0.0f;
                     const float scArea = static_cast<float>(scW) * static_cast<float>(scH);
-                    const bool fullScreen = (bboxArea >= 0.9f * scArea);
+                    const bool fullScreen = (scArea > 0.0f) && (bboxArea >= 0.9f * scArea);
+                    fullScreenProbe = fullScreen; // PROBE-PA1c
                     if (cg1) { cgBbW = cMaxX - cMinX; cgBbH = cMaxY - cMinY; cg5 = cg4 && fullScreen; } // PROBE-CUT2B
                     if (scissorOk) // PROBE-CUT2B
                     {
                         if (wantClearCheck) isFullScreenClear = fullScreen;
                         if (wantCopyCheck && scW >= 480u && scH >= 400u) isCopyBoundary = fullScreen; // FIX-CUT2 // FIX-CUT2C
+                        if (wantSwapArmCheck) isSwapCopyArm = fullScreen; // FIX-PA1d
                     }
                     if (wantFxCheck && scW >= 480u && scH >= 400u) isFxCandidate = fullScreen; // FIX-FX1
                 }
@@ -6402,19 +6592,58 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             }
             b2d.first = static_cast<uint32_t>(s_rd2dVerts.size());
             b2d.count = addCount;
-            if (isCopyBoundary) // FIX-CUT2 // FIX-CUT3: arm cut at next full-screen clear instead of pushing copy as boundary
+            if (copyCand && !wantCopyCheck && std::strcmp(s_rdCutWhyReason, "no-clear") == 0) // FIX-PA1b
+            {
+                if (!copyDstIsDisp) s_rdCutWhyReason = "not-display";
+                else if (copySrcFbp == static_cast<uint32_t>(ctx.frame.fbp)) s_rdCutWhyReason = "self-copy";
+                else if (!copySrcNotDisp) s_rdCutWhyReason = "feedback";
+            }
+            if (isCopyBoundary) // FIX-CUT2 // FIX-CUT3 // FIX-PA1b
             {
                 const uint32_t bIdx = static_cast<uint32_t>(s_rd2dBatches.size());
                 if (bIdx != s_rdLastCopyBIdx) // FIX-CUT2E
                 {
                     s_rdLastCopyBIdx = bIdx; // FIX-CUT2E
                     ++s_rdCopyB;
-                    s_rdCopyArmed = true; // FIX-CUT3
                     s_rdFlipsSinceCopy = 0u;
+                    if (s_rdPauseFixOn) // FIX-PA1b: swap copy into display FBP is an exact frame boundary regardless of gap/EMA
+                    {
+                        const uint32_t bSerial = b2d.afterSerial & 0x3FFFFFFFu;
+                        if (s_rdHasLastBoundary && bSerial >= s_rdLastBoundarySerial)
+                            rdRecordAcceptedGapLocked(bSerial - s_rdLastBoundarySerial);
+                        s_rdLastBoundarySerial = bSerial;
+                        s_rdHasLastBoundary = true;
+                        s_rdCopyArmed = false;
+                        s_rdRejRingHead = 0u;
+                        s_rdRejRingCnt = 0u;
+                        if (bIdx > 0u || s_rdBoundaries.empty())
+                        {
+                            s_rdBoundaries.push_back({bIdx, bSerial});
+                            ++s_rdBoundariesTotal;
+                        }
+                    }
+                    else
+                    {
+                        s_rdCopyArmed = true; // FIX-CUT3
+                    }
                 }
                 else // FIX-CUT2E
                 {
                     ++s_rdCopyRej; // FIX-CUT2E
+                    if (std::strcmp(s_rdCutWhyReason, "no-clear") == 0)
+                        s_rdCutWhyReason = "dup-copy"; // FIX-PA1b
+                }
+            }
+            if (isSwapCopyArm && !isCopyBoundary) // FIX-PA1d
+                s_rdCopyArmed = true;
+            if (hasFlipDisp && (isCopyBoundary || isSwapCopyArm) && s_rdCutLogMode >= 1) // FIX-PA1e
+            {
+                static uint32_t s_pa1eLogFlips = 0u;
+                ++s_pa1eLogFlips;
+                if ((s_pa1eLogFlips % 200u) == 1u)
+                {
+                    ps2xSafeLog("[cutfix] PA1e copy recognised disp=%x flips=%u\n",
+                                flipDispFbp, s_pa1eLogFlips);
                 }
             }
             if (isFullScreenClear) // FEAT-RD54 // FEAT-RD55: record frame boundary with stricter hysteresis
@@ -6431,17 +6660,37 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                         s_rdHasLastBoundary = true;
                         s_rdLastBoundarySerial = bSerial;
                     }
+                    else
+                    {
+                        s_rdCutWhyReason = "not-opaque"; // FIX-PA1b
+                        s_rdCutWhyGap = 0u;
+                        s_rdCutWhyMinGap = 0u;
+                    }
                 }
                 else if (bSerial >= s_rdLastBoundarySerial)
                 {
                     const uint32_t gap = bSerial - s_rdLastBoundarySerial;
-                    const double minFloor = s_rdCutAdapt ? 40.0 : 300.0; // FIX-CUT1
+                    const double minFloor = s_rdCutAdapt ? 40.0 : (s_rdPauseFixOn ? 64.0 : 300.0); // FIX-CUT1 // FIX-PA1d
                     const double minGap = std::max(minFloor, (isOpaque ? 0.75 : 0.9) * s_rdBoundaryEma); // FEAT-RD55 // FIX-CUT1
                     if (static_cast<double>(gap) >= minGap)
                     {
                         acceptBoundary = true;
-                        s_rdBoundaryEma = 0.8 * s_rdBoundaryEma + 0.2 * static_cast<double>(gap);
+                        rdRecordAcceptedGapLocked(gap); // FIX-PA1b
                         s_rdLastBoundarySerial = bSerial;
+                    }
+                    else if (s_rdPauseFixOn && s_rdNoCutStreak >= 3u) // FIX-PA1d
+                    {
+                        const uint32_t streak = s_rdNoCutStreak;
+                        acceptBoundary = true;
+                        s_rdBoundaryEma = static_cast<double>(std::max(gap, 64u));
+                        s_rdLastBoundarySerial = bSerial;
+                        s_rdNoCutStreak = 0u;
+                        s_rdHighGapStreak = 0u;
+                        if (s_rdCutLogMode >= 1)
+                        {
+                            ps2xSafeLog("[cutfix] breaker fired streak=%u gap=%u newEma=%.0f\n",
+                                        streak, gap, s_rdBoundaryEma);
+                        }
                     }
                     else
                     {
@@ -6466,6 +6715,12 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                                 s_rdLastBoundarySerial = bSerial;
                             }
                         }
+                        if (!acceptBoundary) // FIX-PA1b
+                        {
+                            s_rdCutWhyReason = "gap<minGap";
+                            s_rdCutWhyGap = gap;
+                            s_rdCutWhyMinGap = static_cast<uint32_t>(minGap);
+                        }
                     }
                 }
                 else
@@ -6475,8 +6730,14 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                         acceptBoundary = true;
                         s_rdLastBoundarySerial = bSerial;
                     }
+                    else
+                    {
+                        s_rdCutWhyReason = "not-opaque"; // FIX-PA1b
+                        s_rdCutWhyGap = 0u;
+                        s_rdCutWhyMinGap = 0u;
+                    }
                 }
-                if (!acceptBoundary && s_rdCutCopy && s_rdCopyArmed) // FIX-CUT4
+                if (!acceptBoundary && (s_rdCutCopy || s_rdPauseFixOn) && s_rdCopyArmed) // FIX-CUT4 // FIX-PA1
                 {
                     acceptBoundary = true;
                     s_rdLastBoundarySerial = bSerial;
@@ -6495,6 +6756,19 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             s_rd2dVerts.insert(s_rd2dVerts.end(), triVerts, triVerts + addCount);
             s_rd2dBatches.push_back(b2d);
             if (s_rd78TrLogMode == 2) s_rd2dFba.push_back(static_cast<uint8_t>(ctx.fba & 1ull)); // PROBE-RD78D
+            if (s_rdCutLogMode == 2) // PROBE-PA1c
+            {
+                RdCutSeqRec rec{};
+                rec.wantClear = wantClearCheck;
+                rec.clr = isFullScreenClear;
+                rec.fade = isFadeQuad;
+                rec.wantCopy = wantCopyCheck;
+                rec.copy = isCopyBoundary;
+                rec.full = fullScreenProbe;
+                rec.dispFbp = ps2xRdIsDisplayFbp(ctx.frame.fbp);
+                rec.noColour = noColour;
+                s_rdCutSeqRecs.push_back(rec);
+            }
         }
     }
     if (g_rdpOn) { ++s_rdpQueueDraws; if ((s_rdpQueueDraws & 1023u) == 0u) rdpMaybeReport(); } // PROBE-RDP

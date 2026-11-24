@@ -939,6 +939,71 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
                            1u << batch.state.context.tex0.tw, 1u << batch.state.context.tex0.th);
 }
 
+// PROBE-TN1: ring buffer of last 8 CLUT load attempts (including skipped)
+namespace
+{
+struct Tn1ClutLoadRec
+{
+    uint64_t seq = 0;
+    uint32_t cld = 0;
+    uint32_t cbp = 0;
+    uint32_t cpsm = 0;
+    uint32_t csm = 0;
+    uint32_t csa = 0;
+    uint32_t psm = 0;
+    uint32_t entryCount = 0;
+    uint32_t firstEntryWritten = 0;
+    uint32_t firstEntryColor = 0;
+    char status[40] = {};
+};
+static std::mutex s_tn1ClutHistMutex;
+static Tn1ClutLoadRec s_tn1ClutHist[8];
+static uint64_t s_tn1ClutSeq = 0;
+
+static void tn1RecordClutLoad(uint32_t cld, uint32_t cbp, uint32_t cpsm, uint32_t csm,
+                              uint32_t csa, uint32_t psm, uint32_t entryCount,
+                              uint32_t firstEntryWritten, uint32_t firstEntryColor,
+                              const char *status)
+{
+    std::lock_guard<std::mutex> lk(s_tn1ClutHistMutex);
+    const uint64_t seq = ++s_tn1ClutSeq;
+    Tn1ClutLoadRec &r = s_tn1ClutHist[(seq - 1u) & 7u];
+    r.seq = seq;
+    r.cld = cld;
+    r.cbp = cbp;
+    r.cpsm = cpsm;
+    r.csm = csm;
+    r.csa = csa;
+    r.psm = psm;
+    r.entryCount = entryCount;
+    r.firstEntryWritten = firstEntryWritten;
+    r.firstEntryColor = firstEntryColor;
+    std::snprintf(r.status, sizeof(r.status), "%s", status ? status : "ok");
+}
+} // namespace
+
+void ps2xTn1DumpClutHistory() // PROBE-TN1
+{
+    extern void ps2xSafeLog(const char *fmt, ...);
+    Tn1ClutLoadRec copy[8];
+    uint64_t total = 0;
+    {
+        std::lock_guard<std::mutex> lk(s_tn1ClutHistMutex);
+        total = s_tn1ClutSeq;
+        const uint64_t start = (total > 8u) ? (total - 8u) : 0u;
+        for (uint64_t i = start; i < total; ++i)
+            copy[i - start] = s_tn1ClutHist[i & 7u];
+    }
+    const uint64_t count = (total > 8u) ? 8u : total;
+    for (uint64_t i = 0; i < count; ++i)
+    {
+        const auto &r = copy[i];
+        ps2xSafeLog("[clutload] seq=%llu cld=%u cbp=0x%04x cpsm=0x%x csm=%u csa=%u psm=0x%02x entryCount=%u firstEntryWritten=%u firstEntryColor=0x%08x %s\n",
+                    static_cast<unsigned long long>(r.seq), r.cld, r.cbp, r.cpsm, r.csm, r.csa,
+                    r.psm, r.entryCount, r.firstEntryWritten, r.firstEntryColor, r.status);
+    }
+}
+
 void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -951,7 +1016,12 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
     case 0u:
     case 6u:
     case 7u:
+    {
+        char msg[32];
+        std::snprintf(msg, sizeof(msg), "skipped(cld=%u)", static_cast<unsigned>(tex0.cld)); // PROBE-TN1
+        tn1RecordClutLoad(tex0.cld, tex0.cbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, msg); // PROBE-TN1
         return;
+    }
     case 1u:
         break;
     case 2u:
@@ -962,12 +1032,18 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
         break;
     case 4u:
         if (m_clutCbp[0] == tex0.cbp)
+        {
+            tn1RecordClutLoad(tex0.cld, tex0.cbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, "skipped(cld=4,cbp same)"); // PROBE-TN1
             return;
+        }
         m_clutCbp[0] = tex0.cbp;
         break;
     case 5u:
         if (m_clutCbp[1] == tex0.cbp)
+        {
+            tn1RecordClutLoad(tex0.cld, tex0.cbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, "skipped(cld=5,cbp same)"); // PROBE-TN1
             return;
+        }
         m_clutCbp[1] = tex0.cbp;
         break;
     default:
@@ -981,13 +1057,19 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
 {
     const uint32_t effectiveCbp = (tex0.cbp != 0u) ? tex0.cbp : m_clutCbp[0];
     if (effectiveCbp == 0u)
+    {
+        tn1RecordClutLoad(tex0.cld, tex0.cbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, "skipped(effectiveCbp==0)"); // PROBE-TN1
         return;
+    }
 
     const bool fourBit = isFourBitIndexedPsm(tex0.psm);
     const bool sixteenBit = tex0.cpsm == GS_PSM_CT16 || tex0.cpsm == GS_PSM_CT16S;
     const bool thirtyTwoBit = tex0.cpsm == GS_PSM_CT32 || tex0.cpsm == GS_PSM_CT24;
     if (!sixteenBit && !thirtyTwoBit)
+    {
+        tn1RecordClutLoad(tex0.cld, effectiveCbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, "skipped(unsupported_cpsm)"); // PROBE-TN1
         return;
+    }
 
     const uint32_t entryCount = fourBit ? 16u : 256u;
     const uint32_t csaMask = sixteenBit ? 0x1Fu : 0x0Fu;
@@ -1062,6 +1144,18 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
     std::memcpy(s_savedClut, m_clut.data(), sizeof(s_savedClut));
     s_savedClutCbp[0] = m_clutCbp[0];
     s_savedClutCbp[1] = m_clutCbp[1];
+    { // PROBE-TN1
+        const uint32_t writtenCount = (firstEntry < entryCount) ? (entryCount - firstEntry) : 0u;
+        const uint32_t firstWritten = (writtenCount > 0u)
+            ? ((loadCsm1Suffix ? firstEntry : destinationBase + firstEntry) & (sixteenBit ? 0x1FFu : 0x0FFu))
+            : 0u;
+        const uint32_t firstColor = (writtenCount > 0u)
+            ? (sixteenBit ? static_cast<uint32_t>(m_clut[firstWritten])
+                          : (static_cast<uint32_t>(m_clut[firstWritten]) | (static_cast<uint32_t>(m_clut[firstWritten + 256u]) << 16u)))
+            : 0u;
+        tn1RecordClutLoad(tex0.cld, effectiveCbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm,
+                          writtenCount, firstWritten, firstColor, "ok");
+    }
 }
 
 void GSCpuBackend::Flush()

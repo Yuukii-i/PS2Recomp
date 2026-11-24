@@ -68,6 +68,8 @@ void ps2xRdMarkVramWrite(uint32_t firstByte, uint32_t byteCount) // FEAT-RD5b
         ++g_rdPageGen[p];
 }
 
+void ps2xTn1DumpClutHistory(); // PROBE-TN1
+
 namespace
 {
 std::atomic<const uint8_t *> g_rdVram{nullptr}; // FEAT-RD3
@@ -1038,6 +1040,100 @@ static std::vector<Ip2TexSaveTarget> s_ip2TexTargets = []() { // PROBE-IP2
 }();
 
 static const bool s_ip2TexSaveOn = !s_ip2TexTargets.empty(); // PROBE-IP2
+static const bool s_tn1ClutLog = []() { // PROBE-TN1
+    const char *e = std::getenv("PS2X_RD_CLUTLOG");
+    return e && e[0] == '1';
+}();
+static std::mutex s_tn1ClutLogMutex; // PROBE-TN1
+static std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> s_tn1LastLogByTbp; // PROBE-TN1
+
+static bool ip2MatchesTbp(uint32_t tbp0); // PROBE-TN1
+
+static void tn1MaybeLog4BitClut(uint64_t tex0, uint64_t texa, const uint8_t *vram, const uint16_t *clut512,
+                                uint32_t tbp0, uint8_t psm, uint32_t cbp, uint8_t cpsm, uint8_t csm, uint8_t csa) // PROBE-TN1
+{
+    if (!isFourBitPsm(psm))
+        return;
+    if (!s_tn1ClutLog && !(s_ip2TexSaveOn && ip2MatchesTbp(tbp0)))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lk(s_tn1ClutLogMutex);
+        const auto now = std::chrono::steady_clock::now();
+        auto &last = s_tn1LastLogByTbp[tbp0];
+        if (last != std::chrono::steady_clock::time_point{} &&
+            std::chrono::duration_cast<std::chrono::seconds>(now - last).count() < 1)
+        {
+            return;
+        }
+        last = now;
+    }
+
+    const uint8_t cld = static_cast<uint8_t>((tex0 >> 61) & 0x7ull);
+    uint32_t clut[256] = {};
+    const char *activeClutSrc = "none";
+    if (clut512)
+    {
+        buildClutFrom512(texa, cpsm, csa, true, clut512, clut);
+        activeClutSrc = "GS-CPU m_clut";
+    }
+    else if (vram)
+    {
+        GSMem::TexturePageCache pageCache;
+        const bool sixteenBit = (cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S);
+        for (uint32_t i = 0; i < 16u; ++i)
+        {
+            const uint32_t raw = GSMem::ReadTexture(pageCache, vram, cpsm, cbp, 1u, i & 0x0Fu, i >> 4u);
+            if (sixteenBit)
+                clut[i] = applyTexa(texa, cpsm, rgba5551ToRgba8888(static_cast<uint16_t>(raw)));
+            else if (cpsm == GS_PSM_CT24)
+                clut[i] = applyTexa(texa, cpsm, raw & 0xFFFFFFu);
+            else
+                clut[i] = raw;
+        }
+        activeClutSrc = "rd_texture vram(cbp)";
+    }
+
+    char hexBuf[256] = {};
+    int pos = 0;
+    for (int i = 0; i < 16; ++i)
+    {
+        pos += std::snprintf(hexBuf + pos, sizeof(hexBuf) - pos, "%s%08x", (i > 0 ? " " : ""), clut[i]);
+    }
+
+    ps2xSafeLog("[clutlog] tbp=0x%04x psm=0x%02x cbp=0x%04x cpsm=0x%x csm=%d csa=%d cld=%d | activeClutSrc=%s | e0..e15 = %s\n",
+                tbp0, static_cast<unsigned>(psm), cbp, static_cast<unsigned>(cpsm),
+                static_cast<int>(csm), static_cast<int>(csa), static_cast<int>(cld),
+                activeClutSrc, hexBuf);
+
+    if (clut512)
+    {
+        uint32_t full256[256] = {};
+        buildClutFrom512(texa, cpsm, 0u, false, clut512, full256);
+        const bool sixteen = (cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S);
+        const uint32_t csaMask = sixteen ? 0x1Fu : 0x0Fu;
+        const uint32_t off = ((static_cast<uint32_t>(csa) & csaMask) << 4u) & 0xFFu;
+        bool diff = false;
+        for (uint32_t i = 0; i < 16u; ++i)
+        {
+            if (full256[(off + i) & 0xFFu] != clut[i])
+            {
+                diff = true;
+                break;
+            }
+        }
+        if (diff)
+        {
+            char csaBuf[256] = {};
+            int cpos = 0;
+            for (uint32_t i = 0; i < 16u; ++i)
+                cpos += std::snprintf(csaBuf + cpos, sizeof(csaBuf) - cpos, "%s%08x", (i > 0 ? " " : ""), full256[(off + i) & 0xFFu]);
+            ps2xSafeLog("[clutlog] csa*16(256-entry) e0..e15 = %s\n", csaBuf);
+        }
+    }
+
+    ps2xTn1DumpClutHistory();
+}
 static std::mutex s_ip2TexMutex;                             // PROBE-IP2
 static const std::chrono::steady_clock::time_point s_ip2TexStart = std::chrono::steady_clock::now(); // PROBE-IP2b
 
@@ -1687,6 +1783,8 @@ void ps2xRdNoteDraw(uint32_t serial, uint64_t tex0, uint64_t texa, const uint8_t
 
     if (!isSupportedTex(psm, cpsm, csm))
         return;
+
+    tn1MaybeLog4BitClut(tex0, texa, vram, clut512, tbp0, psm, cbp, cpsm, csm, csa); // PROBE-TN1
 
     const uint32_t w = 1u << std::min<uint32_t>(tw, 10u);
     const uint32_t h = 1u << std::min<uint32_t>(th, 10u);

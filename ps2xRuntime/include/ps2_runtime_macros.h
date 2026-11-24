@@ -206,13 +206,28 @@ inline float ps2_from_double(double d)
     return static_cast<float>(d);
 }
 
+// PROBE-M14
+bool ps2xFpuProbeEnabled();
+void ps2xFpuProbe(void *ra, int kind);
+#if defined(_MSC_VER)
+#define PS2_FPU_RA() _ReturnAddress()
+#else
+#define PS2_FPU_RA() __builtin_return_address(0)
+#endif
+
 PS2_FLOAT_NOINLINE inline float ps2_fadd_slow(float a, float b)
 {
     // Zero operands and results end up here too; the host result is right for them.
     const float r = a + b;
     if (!(ps2_fspecial(a) | ps2_fspecial(b) | ps2_fspecial(r)))
         return r;
-    return ps2_from_double(ps2_to_double(a) + ps2_to_double(b));
+    const float res = ps2_from_double(ps2_to_double(a) + ps2_to_double(b));
+    static const bool on = ps2xFpuProbeEnabled(); // PROBE-M14
+    if (on && (std::bit_cast<uint32_t>(res) & PS2_FLOAT_MAX_BITS) == PS2_FLOAT_MAX_BITS &&
+        (std::bit_cast<uint32_t>(a) & PS2_FLOAT_MAX_BITS) != PS2_FLOAT_MAX_BITS &&
+        (std::bit_cast<uint32_t>(b) & PS2_FLOAT_MAX_BITS) != PS2_FLOAT_MAX_BITS)
+        ps2xFpuProbe(PS2_FPU_RA(), 2);
+    return res;
 }
 
 PS2_FLOAT_NOINLINE inline float ps2_fsub_slow(float a, float b)
@@ -221,7 +236,13 @@ PS2_FLOAT_NOINLINE inline float ps2_fsub_slow(float a, float b)
     const float r = a - b;
     if (!(ps2_fspecial(a) | ps2_fspecial(b) | ps2_fspecial(r)))
         return r;
-    return ps2_from_double(ps2_to_double(a) - ps2_to_double(b));
+    const float res = ps2_from_double(ps2_to_double(a) - ps2_to_double(b));
+    static const bool on = ps2xFpuProbeEnabled(); // PROBE-M14
+    if (on && (std::bit_cast<uint32_t>(res) & PS2_FLOAT_MAX_BITS) == PS2_FLOAT_MAX_BITS &&
+        (std::bit_cast<uint32_t>(a) & PS2_FLOAT_MAX_BITS) != PS2_FLOAT_MAX_BITS &&
+        (std::bit_cast<uint32_t>(b) & PS2_FLOAT_MAX_BITS) != PS2_FLOAT_MAX_BITS)
+        ps2xFpuProbe(PS2_FPU_RA(), 2);
+    return res;
 }
 
 PS2_FLOAT_NOINLINE inline float ps2_fmul_slow(float a, float b)
@@ -230,7 +251,13 @@ PS2_FLOAT_NOINLINE inline float ps2_fmul_slow(float a, float b)
     const float r = a * b;
     if (!(ps2_fspecial(a) | ps2_fspecial(b) | ps2_fspecial(r)))
         return r;
-    return ps2_from_double(ps2_to_double(a) * ps2_to_double(b));
+    const float res = ps2_from_double(ps2_to_double(a) * ps2_to_double(b));
+    static const bool on = ps2xFpuProbeEnabled(); // PROBE-M14
+    if (on && (std::bit_cast<uint32_t>(res) & PS2_FLOAT_MAX_BITS) == PS2_FLOAT_MAX_BITS &&
+        (std::bit_cast<uint32_t>(a) & PS2_FLOAT_MAX_BITS) != PS2_FLOAT_MAX_BITS &&
+        (std::bit_cast<uint32_t>(b) & PS2_FLOAT_MAX_BITS) != PS2_FLOAT_MAX_BITS)
+        ps2xFpuProbe(PS2_FPU_RA(), 2);
+    return res;
 }
 
 // A zero divisor gives +-max with the sign of fs xor ft.
@@ -239,11 +266,21 @@ PS2_FLOAT_NOINLINE inline float ps2_fdiv_slow(float a, float b)
     const uint32_t ua = std::bit_cast<uint32_t>(a);
     const uint32_t ub = std::bit_cast<uint32_t>(b);
     if ((ub & PS2_FLOAT_EXP_MASK) == 0u)
+    {
+        static const bool on = ps2xFpuProbeEnabled(); // PROBE-M14
+        if (on) ps2xFpuProbe(PS2_FPU_RA(), 0); // PROBE-M14
         return std::bit_cast<float>(((ua ^ ub) & PS2_FLOAT_SIGN_MASK) | PS2_FLOAT_MAX_BITS);
+    }
     const float r = a / b;
     if (!(ps2_fspecial(a) | ps2_fspecial(b) | ps2_fspecial(r)))
         return r;
-    return ps2_from_double(ps2_to_double(a) / ps2_to_double(b));
+    const float res = ps2_from_double(ps2_to_double(a) / ps2_to_double(b));
+    static const bool on = ps2xFpuProbeEnabled(); // PROBE-M14
+    if (on && (std::bit_cast<uint32_t>(res) & PS2_FLOAT_MAX_BITS) == PS2_FLOAT_MAX_BITS &&
+        (ua & PS2_FLOAT_MAX_BITS) != PS2_FLOAT_MAX_BITS &&
+        (ub & PS2_FLOAT_MAX_BITS) != PS2_FLOAT_MAX_BITS)
+        ps2xFpuProbe(PS2_FPU_RA(), 2);
+    return res;
 }
 
 // sqrt(|ft|); the result is never negative, sqrt(-0) is +0.
@@ -258,7 +295,11 @@ PS2_FLOAT_NOINLINE inline float ps2_fsqrt_slow(float a)
 PS2_FLOAT_NOINLINE inline float ps2_frsqrt_slow(float a, float b)
 {
     if ((std::bit_cast<uint32_t>(b) & PS2_FLOAT_EXP_MASK) == 0u)
+    {
+        static const bool on = ps2xFpuProbeEnabled(); // PROBE-M14
+        if (on) ps2xFpuProbe(PS2_FPU_RA(), 1); // PROBE-M14
         return std::bit_cast<float>((std::bit_cast<uint32_t>(a) & PS2_FLOAT_SIGN_MASK) | PS2_FLOAT_MAX_BITS);
+    }
     // The root is rounded to a float before the division, as on the hardware.
     const float root = ps2_from_double(std::sqrt(std::fabs(ps2_to_double(b))));
     return ps2_from_double(ps2_to_double(a) / static_cast<double>(root));

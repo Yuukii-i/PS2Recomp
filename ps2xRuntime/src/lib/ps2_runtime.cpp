@@ -7013,6 +7013,258 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
     raiseCop0Exception(ctx, EXCEPTION_INTEGER_OVERFLOW);
 }
 
+// PROBE-RW1: generic EE-RAM range printer & wildcard scanner
+namespace
+{
+    struct Rw1Range
+    {
+        uint32_t addr = 0;
+        uint32_t len = 0;
+    };
+
+    struct Rw1ScanPat
+    {
+        std::array<uint8_t, 128> bytes{};
+        std::array<bool, 128> exact{};
+        size_t len = 0;
+        size_t firstConcrete = 0;
+        bool valid = false;
+    };
+
+    struct Rw1Config
+    {
+        std::array<Rw1Range, 8> ranges{};
+        size_t rangeCount = 0;
+        Rw1ScanPat scan{};
+        bool enabled = false;
+    };
+
+    int rw1HexVal(char c)
+    {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    }
+
+    Rw1Config parseRw1Config()
+    {
+        Rw1Config cfg;
+        constexpr uint32_t kEeRamSize = 32u * 1024u * 1024u;
+        constexpr uint32_t kMaxRangeLen = 1024u * 1024u;
+
+        if (const char *env = std::getenv("PS2X_RAMWATCH"); env && env[0] != '\0')
+        {
+            const char *p = env;
+            while (*p && cfg.rangeCount < cfg.ranges.size())
+            {
+                while (*p == ',' || *p == ' ' || *p == '\t')
+                    ++p;
+                if (!*p)
+                    break;
+                char *endAddr = nullptr;
+                unsigned long rawAddr = std::strtoul(p, &endAddr, 0);
+                if (endAddr == p || *endAddr != ':')
+                {
+                    while (*p && *p != ',')
+                        ++p;
+                    continue;
+                }
+                char *endLen = nullptr;
+                unsigned long rawLen = std::strtoul(endAddr + 1, &endLen, 0);
+                p = endLen;
+                if (endLen == endAddr + 1)
+                    continue;
+
+                uint32_t addr = static_cast<uint32_t>(rawAddr) & 0x1FFFFFFFu;
+                if (addr >= kEeRamSize || rawLen == 0)
+                    continue;
+                uint32_t len = (rawLen > kMaxRangeLen) ? kMaxRangeLen : static_cast<uint32_t>(rawLen);
+                if (len > kEeRamSize - addr)
+                    len = kEeRamSize - addr;
+                if (len > 0)
+                    cfg.ranges[cfg.rangeCount++] = {addr, len};
+            }
+        }
+
+        if (const char *scanEnv = std::getenv("PS2X_RAMWATCH_SCAN"); scanEnv && scanEnv[0] != '\0')
+        {
+            const char *p = scanEnv;
+            while (*p && cfg.scan.len < cfg.scan.bytes.size())
+            {
+                if (*p == ' ' || *p == '\t' || *p == ',')
+                {
+                    ++p;
+                    continue;
+                }
+                if (p[0] == '?')
+                {
+                    cfg.scan.bytes[cfg.scan.len] = 0;
+                    cfg.scan.exact[cfg.scan.len] = false;
+                    ++cfg.scan.len;
+                    p += (p[1] == '?') ? 2 : 1;
+                    continue;
+                }
+                int hi = rw1HexVal(p[0]);
+                int lo = p[1] ? rw1HexVal(p[1]) : -1;
+                if (hi < 0 || lo < 0)
+                {
+                    cfg.scan.len = 0;
+                    break;
+                }
+                cfg.scan.bytes[cfg.scan.len] = static_cast<uint8_t>((hi << 4) | lo);
+                cfg.scan.exact[cfg.scan.len] = true;
+                ++cfg.scan.len;
+                p += 2;
+            }
+            for (size_t i = 0; i < cfg.scan.len; ++i)
+            {
+                if (cfg.scan.exact[i])
+                {
+                    cfg.scan.firstConcrete = i;
+                    cfg.scan.valid = true;
+                    break;
+                }
+            }
+        }
+
+        cfg.enabled = (cfg.rangeCount > 0) || cfg.scan.valid;
+        return cfg;
+    }
+
+    void rw1Tick(const uint8_t *rdram, std::chrono::steady_clock::time_point now)
+    {
+        static const Rw1Config s_cfg = parseRw1Config();
+        if (!s_cfg.enabled || !rdram)
+            return;
+
+        static const auto s_t0 = now;
+        const unsigned long long tMs = static_cast<unsigned long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - s_t0).count());
+
+        for (size_t r = 0; r < s_cfg.rangeCount; ++r)
+        {
+            const uint32_t addr = s_cfg.ranges[r].addr;
+            const uint32_t len = s_cfg.ranges[r].len;
+            const uint8_t *ptr = rdram + addr;
+
+            uint32_t nonzero = 0;
+            uint32_t sum = 0;
+            uint8_t minB = 0xFFu;
+            uint8_t maxB = 0x00u;
+            for (uint32_t i = 0; i < len; ++i)
+            {
+                const uint8_t b = ptr[i];
+                if (b != 0)
+                    ++nonzero;
+                sum += b;
+                if (b < minB) minB = b;
+                if (b > maxB) maxB = b;
+            }
+
+            char hexBuf[32 * 3 + 4]{};
+            size_t pos = 0;
+            const uint32_t preview = (len < 32u) ? len : 32u;
+            for (uint32_t i = 0; i < preview; ++i)
+            {
+                int n = std::snprintf(hexBuf + pos, sizeof(hexBuf) - pos, i ? " %02x" : "%02x", ptr[i]);
+                if (n > 0)
+                    pos += static_cast<size_t>(n);
+            }
+
+            if (len > 32u)
+            {
+                ps2xSafeLog("[ramwatch] t=%llums addr=0x%08x len=%u nonzero=%u sum=0x%08x first32=%s min=0x%02x max=0x%02x\n",
+                            tMs, addr, len, nonzero, sum, hexBuf, minB, maxB);
+            }
+            else
+            {
+                ps2xSafeLog("[ramwatch] t=%llums addr=0x%08x len=%u nonzero=%u sum=0x%08x first32=%s\n",
+                            tMs, addr, len, nonzero, sum, hexBuf);
+            }
+        }
+
+        if (s_cfg.scan.valid)
+        {
+            static uint32_t s_scanDiv = 0;
+            if ((s_scanDiv++ & 1u) == 0u)
+            {
+                constexpr uint32_t kScanStart = 0x100000u;
+                constexpr uint32_t kScanEnd = 0x2000000u;
+                const size_t patLen = s_cfg.scan.len;
+                const size_t fc = s_cfg.scan.firstConcrete;
+                const uint8_t firstByte = s_cfg.scan.bytes[fc];
+
+                uint32_t hits = 0;
+                std::array<uint32_t, 8> hitAddrs{};
+                size_t hitShown = 0;
+
+                if (kScanEnd - kScanStart >= patLen)
+                {
+                    const auto scanT0 = std::chrono::steady_clock::now();
+                    uint32_t cur = kScanStart + static_cast<uint32_t>(fc);
+                    const uint32_t limit = kScanEnd - static_cast<uint32_t>(patLen - 1u - fc);
+                    uint32_t checks = 0;
+
+                    while (cur < limit)
+                    {
+                        const uint32_t chunkEnd = (limit - cur > 65536u) ? (cur + 65536u) : limit;
+                        const void *found = std::memchr(rdram + cur, firstByte, chunkEnd - cur);
+                        if (!found)
+                        {
+                            cur = chunkEnd;
+                            if (std::chrono::steady_clock::now() - scanT0 >= std::chrono::milliseconds(4))
+                                break;
+                            continue;
+                        }
+
+                        const uint32_t pos = static_cast<uint32_t>(static_cast<const uint8_t *>(found) - rdram);
+                        const uint32_t cand = pos - static_cast<uint32_t>(fc);
+                        bool match = true;
+                        for (size_t k = 0; k < patLen; ++k)
+                        {
+                            if (s_cfg.scan.exact[k] && rdram[cand + k] != s_cfg.scan.bytes[k])
+                            {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if (match)
+                        {
+                            ++hits;
+                            if (hitShown < hitAddrs.size())
+                                hitAddrs[hitShown++] = cand;
+                        }
+                        cur = pos + 1u;
+                        if ((++checks & 255u) == 0u &&
+                            std::chrono::steady_clock::now() - scanT0 >= std::chrono::milliseconds(4))
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                char hitBuf[128]{};
+                if (hitShown == 0)
+                {
+                    std::snprintf(hitBuf, sizeof(hitBuf), "none");
+                }
+                else
+                {
+                    size_t hp = 0;
+                    for (size_t i = 0; i < hitShown; ++i)
+                    {
+                        int n = std::snprintf(hitBuf + hp, sizeof(hitBuf) - hp, i ? ",0x%08x" : "0x%08x", hitAddrs[i]);
+                        if (n > 0)
+                            hp += static_cast<size_t>(n);
+                    }
+                }
+                ps2xSafeLog("[ramscan] hits=%u first=%s\n", hits, hitBuf);
+            }
+        }
+    }
+} // PROBE-RW1
+
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
@@ -8601,6 +8853,7 @@ void PS2Runtime::run()
 
             probe_ae::onBqTickSec(m_memory.getRDRAM(), ee_ms);
             probe_ae::bhTickCheckPerSec(m_memory.getRDRAM());
+            rw1Tick(m_memory.getRDRAM(), now); // PROBE-RW1
 
             if (g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u)
             {
@@ -8730,4 +8983,143 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("[run] exiting loop");
 }
+
+// PROBE-M14
+#ifdef _WIN32
+extern "C" __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *hModule, char *lpFilename, unsigned long nSize);
+extern "C" __declspec(dllimport) int __stdcall SymInitialize(void *hProcess, const char *UserSearchPath, int fInvadeProcess);
+extern "C" __declspec(dllimport) int __stdcall SymFromAddr(void *hProcess, uint64_t Address, uint64_t *Displacement, void *Symbol);
+#endif
+
+static std::mutex g_fpuProbeMtx;
+static std::unordered_map<void *, std::array<uint64_t, 3>> g_fpuProbeCounts;
+static std::chrono::steady_clock::time_point g_fpuProbeLastDump;
+static bool g_fpuProbeRegistered = false;
+
+static void ps2xFpuProbeDumpLocked()
+{
+    if (g_fpuProbeCounts.empty())
+        return;
+
+#ifdef _WIN32
+    static bool s_symInit = false;
+    static void *s_proc = nullptr;
+    if (!s_symInit)
+    {
+        s_symInit = true;
+        s_proc = GetCurrentProcess();
+        char exePath[1024]{};
+        unsigned long len = GetModuleFileNameA(nullptr, exePath, sizeof(exePath) - 1);
+        for (unsigned long i = len; i > 0; --i)
+        {
+            if (exePath[i - 1] == '\\' || exePath[i - 1] == '/')
+            {
+                exePath[i - 1] = '\0';
+                break;
+            }
+        }
+        SymInitialize(s_proc, len > 0 ? exePath : nullptr, 1);
+    }
+
+    struct Ps2xSymbolInfo
+    {
+        uint32_t SizeOfStruct;
+        uint32_t TypeIndex;
+        uint64_t Reserved[2];
+        uint32_t Index;
+        uint32_t Size;
+        uint64_t ModBase;
+        uint32_t Flags;
+        uint64_t Value;
+        uint64_t Address;
+        uint32_t Register;
+        uint32_t Scope;
+        uint32_t Tag;
+        uint32_t NameLen;
+        uint32_t MaxNameLen;
+        char Name[1];
+    };
+    static_assert(sizeof(Ps2xSymbolInfo) == 88);
+    static_assert(offsetof(Ps2xSymbolInfo, Name) == 84);
+#endif
+
+    struct Entry
+    {
+        void *ra;
+        uint64_t total;
+        std::array<uint64_t, 3> c;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(g_fpuProbeCounts.size());
+    for (const auto &kv : g_fpuProbeCounts)
+    {
+        uint64_t tot = kv.second[0] + kv.second[1] + kv.second[2];
+        entries.push_back({kv.first, tot, kv.second});
+    }
+    const size_t n = std::min<size_t>(20, entries.size());
+    std::partial_sort(entries.begin(), entries.begin() + n, entries.end(),
+                      [](const Entry &a, const Entry &b) { return a.total > b.total; });
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const Entry &e = entries[i];
+        const char *symName = "?";
+        unsigned int symOff = 0;
+#ifdef _WIN32
+        alignas(8) char buf[sizeof(Ps2xSymbolInfo) + 256]{};
+        auto *sym = reinterpret_cast<Ps2xSymbolInfo *>(buf);
+        sym->SizeOfStruct = sizeof(Ps2xSymbolInfo);
+        sym->MaxNameLen = 256;
+        uint64_t disp = 0;
+        if (SymFromAddr(s_proc, reinterpret_cast<uint64_t>(e.ra), &disp, sym))
+        {
+            symName = sym->Name;
+            symOff = static_cast<unsigned int>(disp);
+        }
+#endif
+        std::fprintf(stderr, "[fpuprobe] n=%llu div0=%llu rsqrt0=%llu sat=%llu ra=%p sym=%s+0x%x\n",
+                     static_cast<unsigned long long>(e.total),
+                     static_cast<unsigned long long>(e.c[0]),
+                     static_cast<unsigned long long>(e.c[1]),
+                     static_cast<unsigned long long>(e.c[2]),
+                     e.ra, symName, symOff);
+    }
+    std::fflush(stderr);
+}
+
+static void ps2xFpuProbeAtExit()
+{
+    std::lock_guard<std::mutex> lk(g_fpuProbeMtx);
+    ps2xFpuProbeDumpLocked();
+}
+
+bool ps2xFpuProbeEnabled()
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_FPU_PROBE");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    return s_on;
+}
+
+void ps2xFpuProbe(void *ra, int kind)
+{
+    if (kind < 0 || kind > 2)
+        return;
+    std::lock_guard<std::mutex> lk(g_fpuProbeMtx);
+    if (!g_fpuProbeRegistered)
+    {
+        g_fpuProbeRegistered = true;
+        g_fpuProbeLastDump = std::chrono::steady_clock::now();
+        std::atexit(ps2xFpuProbeAtExit);
+    }
+    g_fpuProbeCounts[ra][static_cast<size_t>(kind)]++;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_fpuProbeLastDump >= std::chrono::seconds(5))
+    {
+        g_fpuProbeLastDump = now;
+        ps2xFpuProbeDumpLocked();
+    }
+} // PROBE-M14
 
