@@ -324,16 +324,44 @@ inline bool ps2_fnormal(float r)
     return (std::bit_cast<uint32_t>(r) * 2u + 0x01000000u) >= 0x02000000u;
 }
 
+// FIX-FC2: 2^(E-127-23) as double for a normal float s (1 <= E <= 254).
+inline double ps2_ulp_of(float s)
+{
+    const uint32_t e = (std::bit_cast<uint32_t>(s) >> 23) & 0xFFu;
+    return std::bit_cast<double>(static_cast<uint64_t>(e + 873u) << 52);
+}
+
+// FIX-FC2: round RTZ normal result r to nearest (ties to even) using exact remainder rem.
+inline float ps2_round_nearest_from_rtz(float r, double rem)
+{
+    const double two_rem = 2.0 * std::fabs(rem);
+    const double u = ps2_ulp_of(r);
+    const uint32_t ur = std::bit_cast<uint32_t>(r);
+    if (two_rem > u || (two_rem == u && (ur & 1u)))
+        return std::bit_cast<float>(ur + 1u);
+    return r;
+}
+
 inline float ps2_fadd(float a, float b)
 {
     const float r = a + b;
-    return ps2_fnormal(r) ? r : ps2_fadd_slow(a, b);
+    if (!ps2_fnormal(r)) [[unlikely]]
+        return ps2_fadd_slow(a, b);
+    // FIX-FC2: effective subtraction rounds to nearest (ties to even); effective addition stays truncated.
+    if (((std::bit_cast<uint32_t>(a) ^ std::bit_cast<uint32_t>(b)) & PS2_FLOAT_SIGN_MASK) != 0u)
+        return ps2_round_nearest_from_rtz(r, (static_cast<double>(a) + static_cast<double>(b)) - static_cast<double>(r));
+    return r;
 }
 
 inline float ps2_fsub(float a, float b)
 {
     const float r = a - b;
-    return ps2_fnormal(r) ? r : ps2_fsub_slow(a, b);
+    if (!ps2_fnormal(r)) [[unlikely]]
+        return ps2_fsub_slow(a, b);
+    // FIX-FC2: effective subtraction (same signs of a and b) rounds to nearest (ties to even); effective addition stays truncated.
+    if (((std::bit_cast<uint32_t>(a) ^ std::bit_cast<uint32_t>(b)) & PS2_FLOAT_SIGN_MASK) == 0u)
+        return ps2_round_nearest_from_rtz(r, (static_cast<double>(a) - static_cast<double>(b)) - static_cast<double>(r));
+    return r;
 }
 
 inline float ps2_fmul(float a, float b)
@@ -345,13 +373,36 @@ inline float ps2_fmul(float a, float b)
 inline float ps2_fdiv(float a, float b)
 {
     const float r = a / b;
-    return ps2_fall_normal(a, b, r) ? r : ps2_fdiv_slow(a, b);
+    if (!ps2_fall_normal(a, b, r)) [[unlikely]]
+        return ps2_fdiv_slow(a, b);
+    // FIX-FC2: DIV.S rounds exact quotient to nearest (ties to even).
+    const double abs_a = static_cast<double>(std::fabs(a));
+    const double abs_b = static_cast<double>(std::fabs(b));
+    const double abs_q = static_cast<double>(std::fabs(r));
+    const double rem = std::fma(-abs_q, abs_b, abs_a);
+    const double two_rem = 2.0 * std::fabs(rem);
+    const double u_b = ps2_ulp_of(r) * abs_b;
+    const uint32_t ur = std::bit_cast<uint32_t>(r);
+    if (two_rem > u_b || (two_rem == u_b && (ur & 1u)))
+        return std::bit_cast<float>(ur + 1u);
+    return r;
 }
 
 inline float ps2_fsqrt(float a)
 {
-    const float r = std::sqrt(a);
-    return ps2_fall_normal(a, a, r) ? r : ps2_fsqrt_slow(a);
+    // FIX-FC2b: SQRT.S ignores operand sign (sqrt(-x) = sqrt(|x|)).
+    const float aa = std::fabs(a);
+    const float r = std::sqrt(aa);
+    if (!ps2_fall_normal(aa, aa, r)) [[unlikely]]
+        return ps2_fsqrt_slow(a);
+    // FIX-FC2: SQRT.S rounds exact root to nearest.
+    const double ds = static_cast<double>(r);
+    const double lhs = static_cast<double>(aa) - ds * ds;
+    const double u = ps2_ulp_of(r);
+    const double rhs = ds * u + u * u * 0.25;
+    if (lhs >= rhs)
+        return std::bit_cast<float>(std::bit_cast<uint32_t>(r) + 1u);
+    return r;
 }
 
 inline float ps2_frsqrt(float a, float b)

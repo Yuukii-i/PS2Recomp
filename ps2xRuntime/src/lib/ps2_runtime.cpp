@@ -9770,6 +9770,7 @@ static std::mutex g_wwMtx;
 static uint32_t g_wwHits = 0u;
 static uint32_t g_wwLogged = 0u;
 static std::unordered_map<std::string, uint32_t> g_wwSymHits;
+static std::unordered_map<uint32_t, uint32_t> g_wwFn0Hits; // PROBE-WW3
 static std::chrono::steady_clock::time_point g_wwLastSummary;
 static bool g_wwAtExitRegistered = false;
 
@@ -9808,6 +9809,10 @@ static void ps2xWwatchDumpSummaryLocked()
     for (const auto &kv : g_wwSymHits)
     {
         ps2xSafeLog("[wwatch] summary sym=%s hits=%u\n", kv.first.c_str(), kv.second);
+    }
+    for (const auto &kv : g_wwFn0Hits) // PROBE-WW3
+    {
+        ps2xSafeLog("[wwatch] summary fn0=0x%08x hits=%u\n", kv.first, kv.second);
     }
 }
 
@@ -9849,6 +9854,24 @@ void ps2xGuestWriteHit(uint32_t addr, uint32_t size, uint64_t val)
     const uint32_t u32 = static_cast<uint32_t>(val);
     std::memcpy(&fval, &u32, sizeof(fval));
 
+    // PROBE-WW3: 3 most recent entries of thread_local g_dispatchHistory (newest first) + guest sp/ra
+    const DispatchHistory &dh = g_dispatchHistory;
+    const uint32_t dhCap = static_cast<uint32_t>(dh.pcs.size());
+    const uint32_t dhCount = dh.wrapped ? dhCap : dh.next;
+    auto recentFn = [&](uint32_t ago) -> uint32_t {
+        return (ago < dhCount) ? dh.pcs[(dh.next + dhCap - 1u - ago) % dhCap] : 0u;
+    };
+    const uint32_t fn0 = recentFn(0u);
+    const uint32_t fn1 = recentFn(1u);
+    const uint32_t fn2 = recentFn(2u);
+    uint32_t guestSp = 0u;
+    uint32_t guestRa = 0u;
+    if (R5900Context *ctx = rt ? rt->eeScheduler().currentContext() : nullptr)
+    {
+        guestSp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+        guestRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+    }
+
     std::lock_guard<std::mutex> lk(g_wwMtx);
     if (!g_wwAtExitRegistered)
     {
@@ -9858,12 +9881,14 @@ void ps2xGuestWriteHit(uint32_t addr, uint32_t size, uint64_t val)
     }
     const uint32_t hitIdx = ++g_wwHits;
     const uint32_t symHitIdx = ++g_wwSymHits[symName]; // PROBE-WW2
+    ++g_wwFn0Hits[fn0]; // PROBE-WW3
     if (g_wwLogged < g_wwMax) // PROBE-WW2
     {
         ++g_wwLogged;
-        ps2xSafeLog("[wwatch] #%u addr=0x%08x size=%u val=0x%llx float=%g sym=%s+0x%x hostra=%p vbl=%u n=%u\n", // PROBE-WW2
+        ps2xSafeLog("[wwatch] #%u addr=0x%08x size=%u val=0x%llx float=%g sym=%s+0x%x hostra=%p vbl=%u n=%u fn0=0x%08x fn1=0x%08x fn2=0x%08x sp=0x%08x ra=0x%08x\n", // PROBE-WW2 // PROBE-WW3
                     hitIdx, addr, size, static_cast<unsigned long long>(val),
-                    static_cast<double>(fval), symName, symOff, ra, vbl, symHitIdx);
+                    static_cast<double>(fval), symName, symOff, ra, vbl, symHitIdx,
+                    fn0, fn1, fn2, guestSp, guestRa);
     }
     const auto now = std::chrono::steady_clock::now();
     if (now - g_wwLastSummary >= std::chrono::seconds(10))
