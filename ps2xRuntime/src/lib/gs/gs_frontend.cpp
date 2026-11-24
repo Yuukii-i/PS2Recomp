@@ -6556,6 +6556,15 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
         flushPendingDraws();
 }
 
+static inline bool rt2DrawLogOn() // PROBE-RT2
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_RTDRAW_LOG");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+
 void GS::flushPendingDraws() const
 {
     if (m_runPrims.empty())
@@ -6571,6 +6580,39 @@ void GS::flushPendingDraws() const
         m_backend->SubmitRun(m_runState, m_runPrims.data(), m_runPrims.size());
         g_gqSubmit.fetch_add(__rdtsc() - gqS0, std::memory_order_relaxed);
         g_gqDraws.fetch_add(m_runPrims.size(), std::memory_order_relaxed);
+    }
+    else if (rt2DrawLogOn() && !ps2xRdIsDisplayFbp(m_runState.context.frame.fbp)) // PROBE-RT2
+    {
+        static uint32_t s_feSeq = 0u;
+        const uint32_t seq = ++s_feSeq;
+        if (seq <= 400u)
+        {
+            const GSContext &ctx = m_runState.context;
+            const int ofx = ctx.xyoffset.ofx >> 4;
+            const int ofy = ctx.xyoffset.ofy >> 4;
+            double minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+            for (const auto &rp : m_runPrims)
+            {
+                for (uint8_t vi = 0; vi < rp.vertexCount; ++vi)
+                {
+                    const double vx = static_cast<double>(rp.vertices[vi].x) - ofx;
+                    const double vy = static_cast<double>(rp.vertices[vi].y) - ofy;
+                    if (vx < minX) minX = vx;
+                    if (vx > maxX) maxX = vx;
+                    if (vy < minY) minY = vy;
+                    if (vy > maxY) maxY = vy;
+                }
+            }
+            ps2xSafeLog("[rtdraw] seq=%u fbp=0x%x fbw=%u psm=0x%x fbmsk=0x%08x prim=0x%x nv=%u tme=%d tex0{tbp=0x%x psm=0x%x %ux%u cbp=0x%x} alpha=0x%llx test=0x%llx zbuf{zbp=0x%x zmsk=%d} scissor=(%d,%d,%d,%d) bbox=(%g,%g,%g,%g) backend=skipped why=no-backend isGeom=%d\n",
+                        seq, ctx.frame.fbp, ctx.frame.fbw, ctx.frame.psm, ctx.frame.fbmsk,
+                        static_cast<unsigned>(m_runState.prim.type), static_cast<unsigned>(m_runPrims.size()),
+                        m_runState.prim.tme ? 1 : 0, ctx.tex0.tbp0, ctx.tex0.psm,
+                        m_runState.textureWidth, m_runState.textureHeight, ctx.tex0.cbp,
+                        static_cast<unsigned long long>(ctx.alpha), static_cast<unsigned long long>(ctx.test),
+                        ctx.zbuf.zbp, ctx.zbuf.zmask ? 1 : 0,
+                        ctx.scissor.x0, ctx.scissor.y0, ctx.scissor.x1, ctx.scissor.y1,
+                        minX, minY, maxX, maxY, 0);
+        }
     }
     m_runPrims.clear();
 }

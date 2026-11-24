@@ -24,6 +24,7 @@ namespace probe_ae {
 
 #include <chrono>
 #include <intrin.h>
+#include <unordered_map> // PROBE-IP2b
 
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
 namespace GSMem // FIX-RD74
@@ -4351,6 +4352,174 @@ static void flushCurrentUploadDump()
     s_currentUploadPayload.clear();
 }
 
+// PROBE-IP2 / PROBE-IP2b: HOST->LOCAL upload log (PS2X_UPLOAD_LOG=1|2)
+static const int s_ip2UploadLog = []() {
+    const char *e = std::getenv("PS2X_UPLOAD_LOG");
+    if (!e)
+        return 0;
+    if (e[0] == '2')
+        return 2;
+    if (e[0] == '1')
+        return 1;
+    return 0;
+}();
+
+struct Ip2UploadState
+{
+    bool active = false;
+    GSTransferCommand cmd{};
+    uint32_t bytes = 0u;
+    uint32_t sum = 0u;
+    bool nonzero = false;
+};
+
+struct Ip2UploadClassKey // PROBE-IP2b
+{
+    uint32_t dbp = 0u;
+    uint8_t psm = 0u;
+    uint32_t w = 0u;
+    uint32_t h = 0u;
+    bool operator==(const Ip2UploadClassKey &o) const
+    {
+        return dbp == o.dbp && psm == o.psm && w == o.w && h == o.h;
+    }
+};
+
+struct Ip2UploadClassHash // PROBE-IP2b
+{
+    size_t operator()(const Ip2UploadClassKey &k) const
+    {
+        size_t h = std::hash<uint32_t>{}(k.dbp);
+        h ^= std::hash<uint8_t>{}(k.psm) + 0x9e3779b9u + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(k.w) + 0x9e3779b9u + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(k.h) + 0x9e3779b9u + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+static Ip2UploadState s_ip2Cur{};
+static uint32_t s_ip2Seq = 0u;
+static uint32_t s_ip2Lines = 0u;
+static uint64_t s_ip2TotalBytes = 0ull;
+static uint32_t s_ip2ZeroUploads = 0u;
+static const std::chrono::steady_clock::time_point s_ip2ProcStart = std::chrono::steady_clock::now(); // PROBE-IP2b
+static std::chrono::steady_clock::time_point s_ip2LastSum = s_ip2ProcStart;
+static std::unordered_map<Ip2UploadClassKey, uint32_t, Ip2UploadClassHash> s_ip2SkippedClasses; // PROBE-IP2b
+static uint32_t s_ip2SkippedTotal = 0u; // PROBE-IP2b
+
+static void ip2Accumulate(const uint8_t *data, uint32_t len)
+{
+    for (uint32_t i = 0u; i < len; ++i)
+    {
+        const uint8_t b = data[i];
+        s_ip2Cur.sum = (s_ip2Cur.sum + b) ^ (static_cast<uint32_t>(b) << (((s_ip2Cur.bytes + i) & 3u) * 8u));
+        if (b != 0u)
+            s_ip2Cur.nonzero = true;
+    }
+    s_ip2Cur.bytes += len;
+}
+
+static void ip2FinishUpload()
+{
+    const uint32_t seq = ++s_ip2Seq;
+    const uint32_t dbp = s_ip2Cur.cmd.bitbltbuf.dbp;
+    const uint8_t dpsm = s_ip2Cur.cmd.bitbltbuf.dpsm;
+    const uint32_t rrw = s_ip2Cur.cmd.trxreg.rrw;
+    const uint32_t rrh = s_ip2Cur.cmd.trxreg.rrh;
+    const uint32_t bytes = s_ip2Cur.bytes;
+    s_ip2TotalBytes += bytes;
+    if (!s_ip2Cur.nonzero)
+        ++s_ip2ZeroUploads;
+
+    const uint32_t startTbp = dbp;
+    const uint32_t endTbp = dbp + (bytes > 0u ? ((bytes - 1u) >> 8) : 0u);
+    const bool preview = (startTbp <= 0x3040u && endTbp >= 0x2e40u) ||
+                         (startTbp <= 0x3440u && endTbp >= 0x3240u) ||
+                         (startTbp <= 0x3740u && endTbp >= 0x3640u);
+
+    const auto now = std::chrono::steady_clock::now();
+    const long long hostMs = static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - s_ip2ProcStart).count()); // PROBE-IP2b
+
+    if (s_ip2UploadLog == 2) // PROBE-IP2b
+    {
+        const bool smallBlock = (rrw == 16u && rrh == 16u) || (rrw == 8u && rrh == 2u);
+        const bool large = (rrw >= 128u && rrh >= 128u);
+        const bool shouldPrint = preview || (!smallBlock && large);
+        if (shouldPrint && s_ip2Lines < 3000u)
+        {
+            ++s_ip2Lines;
+            ps2xSafeLog("ms=%lld [upload] seq=%u dbp=0x%04x dpsm=0x%02x dbw=%u pos=(%u,%u) size=%ux%u bytes=%u sum=0x%08x nonzero=%d%s\n",
+                        hostMs, seq, dbp, static_cast<unsigned>(dpsm), s_ip2Cur.cmd.bitbltbuf.dbw,
+                        s_ip2Cur.cmd.trxpos.dsax, s_ip2Cur.cmd.trxpos.dsay,
+                        rrw, rrh,
+                        bytes, s_ip2Cur.sum, s_ip2Cur.nonzero ? 1 : 0,
+                        preview ? " *** PREVIEW-RANGE" : "");
+        }
+        else
+        {
+            ++s_ip2SkippedClasses[Ip2UploadClassKey{dbp, dpsm, rrw, rrh}];
+            ++s_ip2SkippedTotal;
+        }
+    }
+    else if (s_ip2Lines < 800u)
+    {
+        ++s_ip2Lines;
+        ps2xSafeLog("[upload] seq=%u dbp=0x%04x dpsm=0x%02x dbw=%u pos=(%u,%u) size=%ux%u bytes=%u sum=0x%08x nonzero=%d%s\n",
+                    seq, dbp, static_cast<unsigned>(dpsm), s_ip2Cur.cmd.bitbltbuf.dbw,
+                    s_ip2Cur.cmd.trxpos.dsax, s_ip2Cur.cmd.trxpos.dsay,
+                    rrw, rrh,
+                    bytes, s_ip2Cur.sum, s_ip2Cur.nonzero ? 1 : 0,
+                    preview ? " *** PREVIEW-RANGE" : "");
+    }
+
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_ip2LastSum).count() >= 2000)
+    {
+        s_ip2LastSum = now;
+        if (s_ip2UploadLog == 2) // PROBE-IP2b
+        {
+            std::vector<std::pair<Ip2UploadClassKey, uint32_t>> items(
+                s_ip2SkippedClasses.begin(), s_ip2SkippedClasses.end());
+            std::sort(items.begin(), items.end(), [](const auto &a, const auto &b) {
+                return a.second > b.second;
+            });
+            char buf[960];
+            int pos = std::snprintf(buf, sizeof(buf),
+                                    "ms=%lld [upload-sum2] n=%u bytes=%llu zeroUploads=%u skipped=%u",
+                                    hostMs, s_ip2Seq, static_cast<unsigned long long>(s_ip2TotalBytes),
+                                    s_ip2ZeroUploads, s_ip2SkippedTotal);
+            size_t shown = 0u;
+            for (const auto &it : items)
+            {
+                if (pos < 0 || static_cast<size_t>(pos) + 48u >= sizeof(buf))
+                    break;
+                const int w = std::snprintf(buf + pos, sizeof(buf) - static_cast<size_t>(pos),
+                                            " 0x%04x/%02x/%ux%u=%u",
+                                            it.first.dbp, static_cast<unsigned>(it.first.psm),
+                                            it.first.w, it.first.h, it.second);
+                if (w < 0)
+                    break;
+                pos += w;
+                ++shown;
+            }
+            if (shown < items.size() && pos > 0 && static_cast<size_t>(pos) + 24u < sizeof(buf))
+            {
+                std::snprintf(buf + pos, sizeof(buf) - static_cast<size_t>(pos),
+                              " (+%zu)", items.size() - shown);
+            }
+            ps2xSafeLog("%s\n", buf);
+            s_ip2SkippedClasses.clear();
+            s_ip2SkippedTotal = 0u;
+        }
+        else
+        {
+            ps2xSafeLog("[upload-sum] n=%u bytes=%llu zeroUploads=%u\n",
+                        s_ip2Seq, static_cast<unsigned long long>(s_ip2TotalBytes), s_ip2ZeroUploads);
+        }
+    }
+    s_ip2Cur.active = false;
+}
+
 void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 {
     if (s_uploadDump == -1)
@@ -4376,6 +4545,18 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
     m_transferState.copiedPixels = 0u;
     m_transferState.direction = command.direction;
     m_transferState.localToHostPendingBytes = 0u;
+
+    if (s_ip2UploadLog) // PROBE-IP2
+    {
+        if (s_ip2Cur.active && s_ip2Cur.bytes > 0u)
+            ip2FinishUpload();
+        s_ip2Cur = {};
+        if (command.direction == 0u)
+        {
+            s_ip2Cur.active = true;
+            s_ip2Cur.cmd = command;
+        }
+    }
 
     if (command.direction == 2u)
         PerformLocalToLocalTransfer();
@@ -4466,6 +4647,13 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
         if (s_uploadDump == 1 && s_inUpload && m_transferState.direction == 3u)
         {
             flushCurrentUploadDump();
+        }
+        if (s_ip2UploadLog && s_ip2Cur.active) // PROBE-IP2
+        {
+            if (offset > 0u)
+                ip2Accumulate(data, offset);
+            if (m_transferState.direction == 3u)
+                ip2FinishUpload();
         }
     };
 

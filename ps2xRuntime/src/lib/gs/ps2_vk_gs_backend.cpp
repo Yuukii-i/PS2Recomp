@@ -769,10 +769,152 @@ namespace
             }
         }
 
-        void submitRunPerPrim(const GSDrawState &state, const GSRunPrim *prims, size_t count) // PERF-GA
+        static inline bool rt2LogOn() // PROBE-RT2
+        {
+            static const bool s_on = []() {
+                const char *e = std::getenv("PS2X_RTDRAW_LOG");
+                return e && e[0] == '1';
+            }();
+            return s_on;
+        }
+
+        static const char *rt2WhyStr(int reason) // PROBE-RT2
+        {
+            switch (reason)
+            {
+            case 1: return "unsupported-prim";
+            case 2: return "unsupported-psm";
+            case 3: return "unsupported-zpsm";
+            case 4: return "unsupported-texpsm";
+            case 5: return "texture-miss";
+            case 6: return "scissor";
+            case 7: return "max-prims";
+            case 8: return "error";
+            default: return "unknown";
+            }
+        }
+
+        void rt2RecordDraw(const GSDrawState &state, const GSRunPrim *prims, size_t count,
+                           const char *backendStr, const char *whyStr, bool ranVk) // PROBE-RT2
+        {
+            extern bool ps2xRdIsDisplayFbp(uint32_t fbp);
+            extern void ps2xSafeLog(const char *fmt, ...);
+            const GSContext &ctx = state.context;
+            const uint32_t fbp = ctx.frame.fbp;
+            if (ps2xRdIsDisplayFbp(fbp))
+                return;
+
+            static uint32_t s_seq = 0u;
+            static uint32_t s_lines = 0u;
+            static uint32_t s_sumN = 0u, s_sumRan = 0u, s_sumSkip = 0u;
+            static uint32_t s_fbp172 = 0u, s_fbp192 = 0u, s_fbp70 = 0u, s_fbpE0 = 0u, s_fbpOther = 0u;
+            static std::unordered_map<std::string, uint32_t> s_byWhy;
+            static std::chrono::steady_clock::time_point s_sumLast = std::chrono::steady_clock::now();
+            static std::chrono::steady_clock::time_point s_sampleLast{};
+            static bool s_sampleInit = false;
+
+            const uint32_t seq = ++s_seq;
+            ++s_sumN;
+            if (std::strcmp(whyStr, "ran") == 0) ++s_sumRan;
+            else ++s_sumSkip;
+            if (fbp == 0x172u) ++s_fbp172;
+            else if (fbp == 0x192u) ++s_fbp192;
+            else if (fbp == 0x70u) ++s_fbp70;
+            else if (fbp == 0xe0u) ++s_fbpE0;
+            else ++s_fbpOther;
+            ++s_byWhy[whyStr];
+
+            if (s_lines < 400u)
+            {
+                ++s_lines;
+                const int ofx = ctx.xyoffset.ofx >> 4;
+                const int ofy = ctx.xyoffset.ofy >> 4;
+                double minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+                uint32_t nv = 0u;
+                for (size_t i = 0; i < count; ++i)
+                {
+                    nv += prims[i].vertexCount;
+                    for (uint8_t vi = 0; vi < prims[i].vertexCount; ++vi)
+                    {
+                        const double vx = static_cast<double>(prims[i].vertices[vi].x) - ofx;
+                        const double vy = static_cast<double>(prims[i].vertices[vi].y) - ofy;
+                        if (vx < minX) minX = vx;
+                        if (vx > maxX) maxX = vx;
+                        if (vy < minY) minY = vy;
+                        if (vy > maxY) maxY = vy;
+                    }
+                }
+                if (nv == 0u) minX = minY = maxX = maxY = 0.0;
+                ps2xSafeLog("[rtdraw] seq=%u fbp=0x%x fbw=%u psm=0x%x fbmsk=0x%08x prim=0x%x nv=%u tme=%d tex0{tbp=0x%x psm=0x%x %ux%u cbp=0x%x} alpha=0x%llx test=0x%llx zbuf{zbp=0x%x zmsk=%d} scissor=(%d,%d,%d,%d) bbox=(%g,%g,%g,%g) backend=%s why=%s isGeom=%d\n",
+                            seq, fbp, ctx.frame.fbw, ctx.frame.psm, ctx.frame.fbmsk,
+                            static_cast<unsigned>(state.prim.type), nv,
+                            state.prim.tme ? 1 : 0, ctx.tex0.tbp0, ctx.tex0.psm,
+                            state.textureWidth, state.textureHeight, ctx.tex0.cbp,
+                            static_cast<unsigned long long>(ctx.alpha), static_cast<unsigned long long>(ctx.test),
+                            ctx.zbuf.zbp, ctx.zbuf.zmask ? 1 : 0,
+                            ctx.scissor.x0, ctx.scissor.y0, ctx.scissor.x1, ctx.scissor.y1,
+                            minX, minY, maxX, maxY, backendStr, whyStr, g_rdCurDrawIsGeom ? 1 : 0);
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (ranVk && (fbp == 0x172u || fbp == 0x192u) &&
+                (!s_sampleInit || std::chrono::duration_cast<std::chrono::milliseconds>(now - s_sampleLast).count() >= 500))
+            {
+                s_sampleInit = true;
+                s_sampleLast = now;
+                const uint32_t bw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+                if (vkReady_)
+                {
+                    PageSet pg;
+                    pagesForRect(pg, fbp << 5u, bw, ctx.frame.psm, 0u, 255u, 0u, 255u);
+                    syncPages(pg, 5);
+                }
+                int minC = 255, maxC = 0, nz = 0;
+                uint32_t firstpx = 0u;
+                for (uint32_t sy = 0u; sy < 16u; ++sy)
+                {
+                    for (uint32_t sx = 0u; sx < 16u; ++sx)
+                    {
+                        const uint32_t px = cpu_->ReadVram(ctx.frame.psm, fbp << 5u, bw, sx * 16u, sy * 16u);
+                        if (sx == 0u && sy == 0u) firstpx = px;
+                        if ((px & 0x00FFFFFFu) != 0u) ++nz;
+                        for (int ch = 0; ch < 3; ++ch)
+                        {
+                            const int c = static_cast<int>((px >> (ch * 8)) & 0xFFu);
+                            if (c < minC) minC = c;
+                            if (c > maxC) maxC = c;
+                        }
+                    }
+                }
+                ps2xSafeLog("[rtsample] fbp=0x%x min/max/nonzero=%d/%d/%d firstpx=0x%08x\n",
+                            fbp, minC, maxC, nz, firstpx);
+            }
+
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - s_sumLast).count() >= 1)
+            {
+                std::string whyBuf;
+                for (const auto &kv : s_byWhy)
+                {
+                    whyBuf += ' ';
+                    whyBuf += kv.first;
+                    whyBuf += '=';
+                    whyBuf += std::to_string(kv.second);
+                }
+                ps2xSafeLog("[rtdraw-sum] n=%u ran=%u skipped=%u byFbp: 0x172=%u 0x192=%u 0x70=%u 0xe0=%u other=%u byWhy:%s\n",
+                            s_sumN, s_sumRan, s_sumSkip, s_fbp172, s_fbp192, s_fbp70, s_fbpE0, s_fbpOther, whyBuf.c_str());
+                s_sumN = s_sumRan = s_sumSkip = 0u;
+                s_fbp172 = s_fbp192 = s_fbp70 = s_fbpE0 = s_fbpOther = 0u;
+                s_byWhy.clear();
+                s_sumLast = now;
+            }
+        }
+
+        void submitRunPerPrim(const GSDrawState &state, const GSRunPrim *prims, size_t count, const char *runWhy = nullptr) // PERF-GA // PROBE-RT2
         {
             GSPrimitiveBatch batch;
             batch.state = state;
+            uint32_t vkRan = 0u, cpuRan = 0u;
+            int lastReason = 0;
             for (size_t i = 0; i < count; ++i)
             {
                 batch.vertices = prims[i].vertices;
@@ -782,14 +924,27 @@ namespace
                 if (!vkReady_ || batch.vertexCount == 0u)
                 {
                     cpuDraw(batch);
+                    ++cpuRan;
                     continue;
                 }
                 const int reason = gpuDraw(batch);
                 if (reason > 0)
                 {
                     ++fallback_[std::min(reason, 15)];
+                    lastReason = reason;
                     cpuDraw(batch);
+                    ++cpuRan;
                 }
+                else
+                {
+                    ++vkRan;
+                }
+            }
+            if (rt2LogOn()) // PROBE-RT2
+            {
+                const char *be = vkRan ? "vk" : (cpuRan ? "cpu" : "skipped");
+                const char *why = runWhy ? runWhy : (lastReason > 0 ? rt2WhyStr(lastReason) : (vkRan ? "ran" : "cpu-fallback"));
+                rt2RecordDraw(state, prims, count, be, why, vkRan > 0u);
             }
         }
 
@@ -804,6 +959,7 @@ namespace
                 return;
             if (ps2xRdTakeoverOn() && g_rdCurDrawIsGeom) // FEAT-RD12 // FEAT-RD18: skip GPU + CPU raster for geometry kicks, keep CLUT notes
             {
+                if (rt2LogOn()) rt2RecordDraw(state, prims, count, "skipped", "takeover-geom-skip", false); // PROBE-RT2
                 if (clutChanged_ || curClutSlot_ < 0)
                 {
                     curClutSlot_ = (curClutSlot_ + 1) & 0x7FFFFFFF;
@@ -818,7 +974,7 @@ namespace
                 primCount_ + count > maxPrims_ ||
                 (maxPrimPerFrame_ && primsThisFrame_ + count > maxPrimPerFrame_))
             {
-                submitRunPerPrim(state, prims, count);
+                submitRunPerPrim(state, prims, count, !vkReady_ ? "vk-not-ready" : "ring-or-ref-perprim");
                 return;
             }
             const uint32_t minVerts = (state.prim.type == GS_PRIM_SPRITE) ? 2u : 3u;
@@ -826,7 +982,7 @@ namespace
             {
                 if (prims[i].vertexCount < minVerts)
                 {
-                    submitRunPerPrim(state, prims, count);
+                    submitRunPerPrim(state, prims, count, "short-verts");
                     return;
                 }
             }
@@ -837,7 +993,7 @@ namespace
             const int reason = runBegin(state, tlo, thi, sprite, tmpl);
             if (reason > 0)
             {
-                submitRunPerPrim(state, prims, count);
+                submitRunPerPrim(state, prims, count, rt2WhyStr(reason));
                 return;
             }
 
@@ -861,7 +1017,10 @@ namespace
                 }
             }
             if (runPrims == 0u)
+            {
+                if (rt2LogOn()) rt2RecordDraw(state, prims, count, "skipped", "scissor-or-zero-area", false); // PROBE-RT2
                 return;
+            }
 
             const GSContext &ctx = state.context;
             uint32_t flo, fhi, zlo, zhi;
@@ -870,11 +1029,12 @@ namespace
             // PERF-GA: self-dependency check (sampled texture byte range overlaps run's own frame or Z range)
             if (runPrims > 1u && state.prim.tme && ((tlo < fhi && thi > flo) || (tlo < zhi && thi > zlo)))
             {
-                submitRunPerPrim(state, prims, count);
+                submitRunPerPrim(state, prims, count, "fb-feedback-perprim");
                 return;
             }
 
             runEnd(state, prims, count, sprite, tmpl, runPrims, uMinX, uMaxX, uMinY, uMaxY, sumPrimArea, tlo, thi, flo, fhi, zlo, zhi);
+            if (rt2LogOn()) rt2RecordDraw(state, prims, count, "vk", "ran", true); // PROBE-RT2
         }
 
         void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override

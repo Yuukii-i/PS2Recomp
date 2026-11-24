@@ -999,6 +999,204 @@ void rtt0bRecord(uint32_t tbp0, uint32_t tbw, uint32_t psm, uint32_t tw, uint32_
     if (fpLast > v.maxPage)
         v.maxPage = fpLast;
 }
+
+// PROBE-IP2 / PROBE-IP2b: texture save for chosen TBPs (PS2X_RD_TEXSAVE=2e40,3240,3640)
+struct Ip2TexSaveTarget // PROBE-IP2
+{
+    uint32_t tbp = 0u;
+    uint32_t count = 0u;
+    std::chrono::steady_clock::time_point lastSave{};
+    std::chrono::steady_clock::time_point lastReq{}; // PROBE-IP2b
+};
+
+static std::vector<Ip2TexSaveTarget> s_ip2TexTargets = []() { // PROBE-IP2
+    std::vector<Ip2TexSaveTarget> out;
+    const char *e = std::getenv("PS2X_RD_TEXSAVE");
+    if (!e || !*e)
+        return out;
+    const char *p = e;
+    while (*p)
+    {
+        while (*p == ',' || *p == ' ' || *p == '\t')
+            ++p;
+        if (!*p)
+            break;
+        char *end = nullptr;
+        const unsigned long val = std::strtoul(p, &end, 16);
+        if (end != p)
+        {
+            out.push_back(Ip2TexSaveTarget{static_cast<uint32_t>(val), 0u, {}});
+            p = end;
+        }
+        else
+        {
+            while (*p && *p != ',')
+                ++p;
+        }
+    }
+    return out;
+}();
+
+static const bool s_ip2TexSaveOn = !s_ip2TexTargets.empty(); // PROBE-IP2
+static std::mutex s_ip2TexMutex;                             // PROBE-IP2
+static const std::chrono::steady_clock::time_point s_ip2TexStart = std::chrono::steady_clock::now(); // PROBE-IP2b
+
+static bool ip2MatchesTbp(uint32_t tbp0) // PROBE-IP2
+{
+    for (const auto &t : s_ip2TexTargets)
+    {
+        if (t.tbp == tbp0)
+            return true;
+    }
+    return false;
+}
+
+static bool ip2VramAllZero(const uint8_t *vram, uint8_t psm, uint32_t tbp0, uint32_t tbw, uint32_t w, uint32_t h) // PROBE-IP2
+{
+    if (!vram)
+        return true;
+    const uint32_t effTbw = std::max<uint32_t>(tbw, 1u);
+    const uint32_t spanW = std::max<uint32_t>(w, effTbw * 64u);
+    uint64_t bytes = 0ull;
+    switch (psm)
+    {
+    case GS_PSM_T4:
+    case GS_PSM_T4HL:
+    case GS_PSM_T4HH:
+        bytes = (static_cast<uint64_t>(spanW) * h + 1ull) / 2ull;
+        break;
+    case GS_PSM_T8:
+    case GS_PSM_T8H:
+        bytes = static_cast<uint64_t>(spanW) * h;
+        break;
+    case GS_PSM_CT16:
+    case GS_PSM_CT16S:
+        bytes = static_cast<uint64_t>(spanW) * h * 2ull;
+        break;
+    default:
+        bytes = static_cast<uint64_t>(spanW) * h * 4ull;
+        break;
+    }
+    constexpr uint64_t kVramBytes = 4ull * 1024ull * 1024ull;
+    const uint64_t startByte = static_cast<uint64_t>(tbp0) * 256ull;
+    if (startByte >= kVramBytes)
+        return true;
+    const uint64_t endByte = std::min<uint64_t>(kVramBytes, startByte + std::max<uint64_t>(bytes, 4ull));
+    for (uint64_t off = startByte; off + 4ull <= endByte; off += 4ull)
+    {
+        uint32_t word = 0u;
+        std::memcpy(&word, vram + off, 4u);
+        if (word != 0u)
+            return false;
+    }
+    return true;
+}
+
+static void ip2WriteBmp32(const char *path, uint32_t w, uint32_t h, const uint8_t *rgba) // PROBE-IP2
+{
+    FILE *f = std::fopen(path, "wb");
+    if (!f)
+        return;
+    const uint32_t pixelBytes = w * h * 4u;
+    const uint32_t fileSize = 54u + pixelBytes;
+    uint8_t hdr[54] = {};
+    hdr[0] = 'B';
+    hdr[1] = 'M';
+    std::memcpy(hdr + 2, &fileSize, 4);
+    const uint32_t dataOff = 54u;
+    std::memcpy(hdr + 10, &dataOff, 4);
+    const uint32_t dibSize = 40u;
+    std::memcpy(hdr + 14, &dibSize, 4);
+    const int32_t bw = static_cast<int32_t>(w);
+    const int32_t bh = static_cast<int32_t>(h);
+    std::memcpy(hdr + 18, &bw, 4);
+    std::memcpy(hdr + 22, &bh, 4);
+    const uint16_t planes = 1u;
+    const uint16_t bpp = 32u;
+    std::memcpy(hdr + 26, &planes, 2);
+    std::memcpy(hdr + 28, &bpp, 2);
+    std::memcpy(hdr + 34, &pixelBytes, 4);
+    std::fwrite(hdr, 1, sizeof(hdr), f);
+
+    std::vector<uint8_t> row(static_cast<size_t>(w) * 4u);
+    for (int32_t y = static_cast<int32_t>(h) - 1; y >= 0; --y)
+    {
+        const uint8_t *src = rgba + static_cast<size_t>(y) * w * 4u;
+        for (uint32_t x = 0u; x < w; ++x)
+        {
+            row[x * 4u + 0u] = src[x * 4u + 2u];
+            row[x * 4u + 1u] = src[x * 4u + 1u];
+            row[x * 4u + 2u] = src[x * 4u + 0u];
+            row[x * 4u + 3u] = src[x * 4u + 3u];
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    std::fclose(f);
+}
+
+static void ip2MaybeTexSave(uint32_t tbp0, uint32_t tbw, uint8_t psm, uint32_t w, uint32_t h,
+                            uint32_t cbp, const uint8_t *rgba, const uint8_t *vram) // PROBE-IP2
+{
+    if (!s_ip2TexSaveOn || !rgba || w == 0u || h == 0u)
+        return;
+
+    long long hostMs = 0ll; // PROBE-IP2b
+    {
+        std::lock_guard<std::mutex> lk(s_ip2TexMutex);
+        Ip2TexSaveTarget *target = nullptr;
+        for (auto &t : s_ip2TexTargets)
+        {
+            if (t.tbp == tbp0)
+            {
+                target = &t;
+                break;
+            }
+        }
+        if (!target)
+            return;
+        const auto now = std::chrono::steady_clock::now();
+        if (target->lastReq != std::chrono::steady_clock::time_point{} &&
+            std::chrono::duration_cast<std::chrono::seconds>(now - target->lastReq).count() >= 8) // PROBE-IP2b
+        {
+            target->count = 0u;
+        }
+        target->lastReq = now; // PROBE-IP2b
+        if (target->count >= 12u)
+            return;
+        if (target->count > 0u &&
+            std::chrono::duration_cast<std::chrono::seconds>(now - target->lastSave).count() < 1)
+        {
+            return;
+        }
+        target->lastSave = now;
+        ++target->count;
+        hostMs = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - s_ip2TexStart).count()); // PROBE-IP2b
+    }
+
+    const size_t totalBytes = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
+    bool allZero = true;
+    for (size_t i = 0u; i < totalBytes; ++i)
+    {
+        if (rgba[i] != 0u)
+        {
+            allZero = false;
+            break;
+        }
+    }
+    const bool vramAllZero = ip2VramAllZero(vram, psm, tbp0, tbw, w, h);
+
+    std::error_code ec;
+    std::filesystem::create_directories("logs/texdump", ec);
+    char path[256];
+    std::snprintf(path, sizeof(path), "logs/texdump/tbp%04x_%ux%u_psm%02x_t%lld.bmp",
+                  tbp0, w, h, static_cast<unsigned>(psm), hostMs); // PROBE-IP2b
+    ip2WriteBmp32(path, w, h, rgba);
+
+    ps2xSafeLog("[texsave] tbp=0x%04x psm=0x%02x %ux%u clut=0x%x allzero=%d vram_allzero=%d\n",
+                tbp0, static_cast<unsigned>(psm), w, h, cbp,
+                allZero ? 1 : 0, vramAllZero ? 1 : 0);
+}
 } // namespace
 
 void ps2xRdBt2SetKind(int kind) // PROBE-BT2
@@ -1348,6 +1546,9 @@ unsigned int ps2xRdGetTexture(uint64_t tex0, uint64_t texa) // FEAT-RD3
     decodeTextureRaw(vram, psm, tbp0, effTbw, tbw, w, h, t_getRaw.data()); // FIX-RD73
     for (size_t i = 0; i < texelCount; ++i) // FIX-RD73
         dst[i] = decodeTexel(t_getRaw[i], psm, texa, indexed, clut); // FIX-RD73
+
+    if (s_ip2TexSaveOn) // PROBE-IP2
+        ip2MaybeTexSave(tbp0, tbw, psm, w, h, cbp, s_rgba.data(), vram);
 
     ++g_decodesSinceLog;
 
@@ -1888,6 +2089,30 @@ unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t t
                 const uint64_t tex0Key = tex0 & (0x3FFFFFFFFull | (0xFFFFFFull << 37));
                 bt1ReportReuseCid(cid, tex0, tex0Key, psm, tbp0, tbw, cbp, cpsm, isIndexedPsm(psm), serial);
             }
+            if (s_ip2TexSaveOn) // PROBE-IP2
+            {
+                const uint32_t tbp0 = static_cast<uint32_t>(tex0 & 0x3FFFull);
+                if (ip2MatchesTbp(tbp0))
+                {
+                    const uint32_t tbw = static_cast<uint32_t>((tex0 >> 14) & 0x3Full);
+                    const uint8_t psm = static_cast<uint8_t>((tex0 >> 20) & 0x3Full);
+                    const uint32_t cbp = static_cast<uint32_t>((tex0 >> 37) & 0x3FFFull);
+                    uint32_t w = 0u, h = 0u;
+                    std::vector<uint8_t> rgbaCopy;
+                    {
+                        std::lock_guard<std::mutex> lk(g_contentMutex);
+                        auto cit = g_contentMap.find(cid);
+                        if (cit != g_contentMap.end())
+                        {
+                            w = cit->second.w;
+                            h = cit->second.h;
+                            rgbaCopy = cit->second.rgba;
+                        }
+                    }
+                    if (w > 0u && h > 0u && !rgbaCopy.empty())
+                        ip2MaybeTexSave(tbp0, tbw, psm, w, h, cbp, rgbaCopy.data(), g_rdVram.load(std::memory_order_acquire));
+                }
+            }
             noteTexUse(cid, tex0); // PROBE-E3c
             return it->second.glId;
         }
@@ -1906,6 +2131,13 @@ unsigned int ps2xRdGetTextureForBatch(uint32_t serial, uint64_t tex0, uint64_t t
         }
         if (w > 0u && h > 0u && !rgbaCopy.empty())
         {
+            if (s_ip2TexSaveOn) // PROBE-IP2
+            {
+                const uint32_t tbp0 = static_cast<uint32_t>(tex0 & 0x3FFFull);
+                const uint32_t tbw = static_cast<uint32_t>((tex0 >> 14) & 0x3Full);
+                const uint32_t cbp = static_cast<uint32_t>((tex0 >> 37) & 0x3FFFull);
+                ip2MaybeTexSave(tbp0, tbw, static_cast<uint8_t>(cpsmFeat), w, h, cbp, rgbaCopy.data(), g_rdVram.load(std::memory_order_acquire));
+            }
             const unsigned int glId = rd6Upload(cid, w, h, cpsmFeat, rgbaCopy); // FEAT-RD6
             g_glByContentId.emplace(cid, RdContentGl{glId, g_texFrame});
             ++g_decodesSinceLog;

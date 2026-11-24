@@ -23,6 +23,12 @@ extern "C"
 #include "Syscalls/Helpers/State.h"
 
 extern void ps2xSafeLog(const char *fmt, ...);
+extern void ipuProbeLogCall(uint32_t ra, const char *fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t ret); // PROBE-IP1
+static inline bool ipuProbeOn() // PROBE-IP1
+{ // PROBE-IP1
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_IPU_LOG"); return e && e[0] == '1'; }(); // PROBE-IP1
+    return s_on; // PROBE-IP1
+} // PROBE-IP1
 extern std::atomic<uint32_t> g_trackedCurVtable;
 extern std::atomic<uint32_t> g_movieGetPictureCount;
 extern std::atomic<uint32_t> g_movieIsEndCount;
@@ -1907,6 +1913,10 @@ struct MpegCallLogger {
         }
     }
     ~MpegCallLogger() {
+        if (ipuProbeOn()) { // PROBE-IP1
+            uint32_t ret = ctx ? getRegU32(ctx, 2) : 0; // PROBE-IP1
+            ipuProbeLogCall(ra, name, a0, a1, a2, a3, ret); // PROBE-IP1
+        } // PROBE-IP1
         if (::g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u) {
             static std::atomic<uint32_t> s_movieLogCount{0};
             uint32_t count = s_movieLogCount.fetch_add(1, std::memory_order_relaxed);
