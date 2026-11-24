@@ -1,6 +1,10 @@
 #include "Common.h"
 #include "probe_ae.h"
 #include "Interrupt.h"
+#include <cstdlib> // PROBE-M13
+
+void ps2xSafeLog(const char *fmt, ...); // PROBE-M13
+extern int g_ps2M13SyncVIfreq; // PROBE-M13
 
 namespace ps2_syscalls
 {
@@ -97,16 +101,96 @@ namespace ps2_syscalls
         const uint32_t a0 = ctx ? getRegU32(ctx, 4) : 0u;
         const bool interlace = (fixedResult < 0);
         const auto t0 = std::chrono::steady_clock::now();
+        static const bool s_syncvLogOn = []() { const char *e = std::getenv("PS2X_SYNCV_LOG"); return e && e[0] == '1'; }(); // PROBE-M13
+        const bool dcProbeOn = probe_ae::isDcProbeEnabled();
 
-        if (probe_ae::isDcProbeEnabled()) {
-            probe_ae::onDcSyncVStart(ra, a0, interlace, rdram, ee.currentThreadId());
-            ee.waitVSync(startTick, fixedResult, [&ee, startTick, ra, t0](R5900Context &c) {
+        if (s_syncvLogOn) // PROBE-M13
+        {
+            const int tid = ee.currentThreadId();
+            if (tid != 1)
+            {
+                ::ps2xSafeLog("[syncv] non-main tid=%d ra=0x%08X\n", tid, ra);
+            }
+        }
+
+        if (dcProbeOn || s_syncvLogOn) {
+            if (dcProbeOn) {
+                probe_ae::onDcSyncVStart(ra, a0, interlace, rdram, ee.currentThreadId());
+            }
+            const int ifreq = s_syncvLogOn ? g_ps2M13SyncVIfreq : 0; // PROBE-M13
+            ee.waitVSync(startTick, fixedResult, [&ee, runtime, startTick, ra, t0, dcProbeOn, ifreq](R5900Context &c) {
                 const uint64_t resumeTick = ee.currentVSyncTick();
-                const uint64_t deltaTicks = (resumeTick >= startTick) ? (resumeTick - startTick) : 0u;
-                const uint32_t ret = getRegU32(&c, 2);
                 const auto t1 = std::chrono::steady_clock::now();
-                const double waitMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                probe_ae::onDcSyncVComplete(ra, deltaTicks, ret, waitMs);
+                if (dcProbeOn) {
+                    const uint64_t deltaTicks = (resumeTick >= startTick) ? (resumeTick - startTick) : 0u;
+                    const uint32_t ret = getRegU32(&c, 2);
+                    const double waitMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    probe_ae::onDcSyncVComplete(ra, deltaTicks, ret, waitMs);
+                }
+                if (s_syncvLogOn) { // PROBE-M13
+                    static uint32_t s_n = 0u, s_d0 = 0u, s_d1 = 0u, s_d2 = 0u, s_d3 = 0u, s_d4p = 0u, s_nowait = 0u, s_dtCount = 0u;
+                    static double s_minMs = 0.0, s_maxMs = 0.0, s_sumMs = 0.0;
+                    static bool s_hasPrevReturn = false, s_hasWindow = false;
+                    static uint64_t s_prevExitTick = 0u;
+                    static std::chrono::steady_clock::time_point s_prevReturnTime{};
+                    static std::chrono::steady_clock::time_point s_windowStartTime{};
+                    static uint32_t s_prevCount = 0u, s_prevT0 = 0u, s_prevT1 = 0u;
+
+                    if (!s_hasWindow) {
+                        s_hasWindow = true;
+                        s_windowStartTime = t1;
+                        s_prevCount = c.cop0_count;
+                        s_prevT0 = runtime ? runtime->memory().readIORegister(0x10000000u) : 0u;
+                        s_prevT1 = runtime ? runtime->memory().readIORegister(0x10000800u) : 0u;
+                    }
+
+                    ++s_n;
+                    if (resumeTick == startTick) {
+                        ++s_nowait;
+                    }
+                    if (s_hasPrevReturn) {
+                        const uint64_t dv = (resumeTick >= s_prevExitTick) ? (resumeTick - s_prevExitTick) : 0u;
+                        if (dv == 0u) ++s_d0;
+                        else if (dv == 1u) ++s_d1;
+                        else if (dv == 2u) ++s_d2;
+                        else if (dv == 3u) ++s_d3;
+                        else ++s_d4p;
+
+                        const double dtMs = std::chrono::duration<double, std::milli>(t1 - s_prevReturnTime).count();
+                        if (s_dtCount == 0u || dtMs < s_minMs) s_minMs = dtMs;
+                        if (s_dtCount == 0u || dtMs > s_maxMs) s_maxMs = dtMs;
+                        s_sumMs += dtMs;
+                        ++s_dtCount;
+                    }
+                    s_hasPrevReturn = true;
+                    s_prevExitTick = resumeTick;
+                    s_prevReturnTime = t1;
+
+                    const double windowMs = std::chrono::duration<double, std::milli>(t1 - s_windowStartTime).count();
+                    if (windowMs >= 1000.0) {
+                        const double minMs = (s_dtCount > 0u) ? s_minMs : 0.0;
+                        const double avgMs = (s_dtCount > 0u) ? (s_sumMs / static_cast<double>(s_dtCount)) : 0.0;
+                        const double maxMs = (s_dtCount > 0u) ? s_maxMs : 0.0;
+                        ::ps2xSafeLog("[syncv] n=%u d0=%u d1=%u d2=%u d3=%u d4p=%u nowait=%u hostMs(min/avg/max)=%.1f/%.1f/%.1f ifreq=%d\n",
+                                      s_n, s_d0, s_d1, s_d2, s_d3, s_d4p, s_nowait, minMs, avgMs, maxMs, ifreq);
+
+                        const uint32_t count = c.cop0_count;
+                        const uint32_t t0Reg = runtime ? runtime->memory().readIORegister(0x10000000u) : 0u;
+                        const uint32_t t1Reg = runtime ? runtime->memory().readIORegister(0x10000800u) : 0u;
+                        const uint32_t dCount = count - s_prevCount;
+                        const uint32_t dT0 = (t0Reg - s_prevT0) & 0xFFFFu;
+                        const uint32_t dT1 = (t1Reg - s_prevT1) & 0xFFFFu;
+                        ::ps2xSafeLog("[time] count=%u dCount=%u t0=%u dT0=%u t1=%u dT1=%u hostMs=%.1f\n",
+                                      count, dCount, t0Reg, dT0, t1Reg, dT1, windowMs);
+
+                        s_n = s_d0 = s_d1 = s_d2 = s_d3 = s_d4p = s_nowait = s_dtCount = 0u;
+                        s_minMs = s_maxMs = s_sumMs = 0.0;
+                        s_windowStartTime = t1;
+                        s_prevCount = count;
+                        s_prevT0 = t0Reg;
+                        s_prevT1 = t1Reg;
+                    }
+                }
             });
         } else {
             ee.waitVSync(startTick, fixedResult);

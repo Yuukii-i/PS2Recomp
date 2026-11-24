@@ -10,6 +10,7 @@
 extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 
 void ps2xSafeLog(const char *fmt, ...); // PROBE-LH (global, defined elsewhere)
+int g_ps2M13SyncVIfreq = 0; // PROBE-M13
 
 namespace ps2_stubs
 {
@@ -1391,6 +1392,11 @@ namespace ps2_stubs
 
     void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        static const bool s_syncvLogOn = []() { const char *e = std::getenv("PS2X_SYNCV_LOG"); return e && e[0] == '1'; }(); // PROBE-M13
+        if (s_syncvLogOn) // PROBE-M13
+        {
+            g_ps2M13SyncVIfreq = static_cast<int>(g_gparam.interlace); // PROBE-M13
+        }
         ps2_syscalls::WaitVSyncTick(rdram,
                                     ctx,
                                     runtime,
