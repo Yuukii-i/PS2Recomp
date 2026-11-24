@@ -4654,6 +4654,12 @@ struct EeProfilerScope {
 thread_local uint32_t g_acctPending = 0;
 bool g_fnReplayActive = false; // PROBE-FR1d
 bool g_fnReplaySuppressDcall = false; // PROBE-FR2
+uint32_t g_fnReplayStopPc = 0u; // PROBE-FR3
+bool g_fnReplayBlocked = false; // PROBE-FR3
+static uint32_t g_fnReplayBlockedPc = 0u; // PROBE-FR3
+static uint64_t g_fnReplaySteps = 0u; // PROBE-FR3
+static std::chrono::steady_clock::time_point g_fnReplayIterStart{}; // PROBE-FR3
+static constexpr uint64_t kFnReplayMaxSteps = 50000000ull; // PROBE-FR3
 static EeScheduler *g_acctSched = nullptr;
 static inline bool acctBatchEnabled()
 {
@@ -4900,6 +4906,20 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     if (g_profCounts) [[unlikely]] // PROBE-IJ, PERF-EX2
         ++g_pcDispatch[static_cast<int>(kind) % 5];
     ctx->pc = targetPc;
+    if (g_fnReplayActive) [[unlikely]] // PROBE-FR3
+    {
+        if (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && targetPc == g_fnReplayStopPc))
+            return false;
+        ++g_fnReplaySteps;
+        if (g_fnReplaySteps > kFnReplayMaxSteps ||
+            ((g_fnReplaySteps & 0x3FFu) == 0u &&
+             (std::chrono::steady_clock::now() - g_fnReplayIterStart) > std::chrono::seconds(20)))
+        {
+            g_fnReplayBlocked = true;
+            g_fnReplayBlockedPc = targetPc;
+            return false;
+        }
+    }
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
     if (g_fnReplayActive && !g_fnReplaySuppressDcall && isCall) [[unlikely]] // PROBE-FR1e // PROBE-FR2
     {
@@ -5017,6 +5037,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             {
                 while (!isStopRequested() && ctx->pc != 0u)
                 {
+                    if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
+                        return false;
                     const uint32_t currentPc = ctx->pc;
                     uint32_t s = 0u;
                     if (!generatedFunctionTableSlot(currentPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
@@ -5036,6 +5058,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             while (ctx->pc != fallthroughPc && !isStopRequested() && ctx->pc != 0u)
             {
                 const uint32_t nextPc = ctx->pc;
+                if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && nextPc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
+                    return false;
                 uint32_t s = 0u;
                 if (!generatedFunctionTableSlot(nextPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
                     break;
@@ -5049,7 +5073,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                     break;
             }
 
-            if (isStopRequested() || ctx->pc == 0u)
+            if (isStopRequested() || ctx->pc == 0u ||
+                (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc)))) // PROBE-FR3
                 return false;
             return ctx->pc == fallthroughPc;
         }
@@ -5100,6 +5125,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     {
         while (!isStopRequested() && ctx->pc != 0u && hasFunction(ctx->pc))
         {
+            if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
+                return false;
             const uint32_t currentPc = ctx->pc;
             RecompiledFunction fn = lookupFunction(currentPc);
             fn(rdram, ctx, this);
@@ -5121,6 +5148,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     uint32_t dispatchChainSteps = 0;
     while (ctx->pc != fallthroughPc && !isStopRequested() && ctx->pc != 0u && hasFunction(ctx->pc))
     {
+        if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
+        {
+            return false;
+        }
         if (++dispatchChainSteps > 1000)
         {
             // Safety bound against runaway dispatch chains
@@ -5139,7 +5170,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         }
     }
 
-    if (isStopRequested() || ctx->pc == 0u)
+    if (isStopRequested() || ctx->pc == 0u ||
+        (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc)))) // PROBE-FR3
     {
         return false;
     }
@@ -7312,6 +7344,7 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
     std::string outRegsPath;
     uint32_t pc = 0;
     uint32_t ra = 0;
+    uint32_t stopPc = 0; // PROBE-FR3
     bool hasPc = false;
 
     auto parseHex32 = [](const char *s) -> uint32_t {
@@ -7374,6 +7407,11 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
                 ra = parseHex32(p);
                 ctx->r[31] = _mm_set_epi32(0, 0, 0, static_cast<int32_t>(ra));
             }
+        }
+        else if (std::strcmp(cmd, "stop_pc") == 0) // PROBE-FR3
+        {
+            if (char *p = nextTok())
+                stopPc = parseHex32(p);
         }
         else if (std::strcmp(cmd, "gpr") == 0)
         {
@@ -7540,6 +7578,34 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
         }
     }
 
+    int64_t dumpIter = -1; // PROBE-FR3
+    if (const char *dumpEnv = std::getenv("PS2X_FNREPLAY_DUMPITER"))
+    {
+        if (*dumpEnv)
+        {
+            char *end = nullptr;
+            long v = std::strtol(dumpEnv, &end, 10);
+            if (end != dumpEnv && v >= 0L)
+                dumpIter = static_cast<int64_t>(v);
+        }
+    }
+
+    auto writeRamDump = [&](const std::string &path) { // PROBE-FR3
+        FILE *orf = std::fopen(path.c_str(), "wb");
+        if (!orf)
+        {
+            ps2xSafeLog("[fnreplay] ERROR: failed to open out_ram '%s'\n", path.c_str());
+            std::quick_exit(2);
+        }
+        size_t nwritten = std::fwrite(rdram, 1, kRamBytes, orf);
+        std::fclose(orf);
+        if (nwritten != kRamBytes)
+        {
+            ps2xSafeLog("[fnreplay] ERROR: short out_ram write %zu/%zu\n", nwritten, kRamBytes);
+            std::quick_exit(2);
+        }
+    };
+
     // Replicate GameThread MXCSR round-toward-zero setup (C310/C316) before running guest code
     {
         const char *rtz = std::getenv("PS2X_EE_RTZ");
@@ -7548,6 +7614,7 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
     }
 
     g_acctPending = 0u; // PROBE-FR1d
+    g_fnReplayStopPc = stopPc; // PROBE-FR3
     g_fnReplayActive = true; // PROBE-FR1d
     const uint32_t entrySp = static_cast<uint32_t>(_mm_extract_epi32(initialCtx.r[29], 0)); // PROBE-FR1f // PROBE-FR2
 
@@ -7556,6 +7623,10 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
         *ctx = initialCtx;
         const bool logIterDetails = (iter == 0u);
         g_fnReplaySuppressDcall = !logIterDetails;
+        g_fnReplayBlocked = false; // PROBE-FR3
+        g_fnReplayBlockedPc = 0u; // PROBE-FR3
+        g_fnReplaySteps = 0u; // PROBE-FR3
+        g_fnReplayIterStart = std::chrono::steady_clock::now(); // PROBE-FR3
 
         if (logIterDetails)
             ps2xSafeLog("[fnreplay] calling fn=0x%08x\n", pc);
@@ -7566,11 +7637,15 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
         // PROBE-FR1b: emulate the runtime dispatch loop until ra, pc==0, or step cap
         // PROBE-FR1c: trace steps (first 300 + final), log stop reason + last 8 dispatch PCs
         uint32_t steps = 1u;
-        constexpr uint32_t kMaxSteps = 5000000u;
         constexpr uint32_t kHangRepeatCap = 50000u; // PROBE-FR1f
         uint32_t prevHangPc = 0u, prevHangSp = 0u, samePcSpCount = 0u; // PROBE-FR1f
         uint32_t lastStepNum = 0u;
         uint32_t lastPrePc = 0u, lastPreSp = 0u, lastPreRa = 0u, lastPostPc = 0u, lastPostSp = 0u;
+        auto isIterDone = [&]() -> bool { // PROBE-FR3
+            if (g_fnReplayStopPc != 0u)
+                return ctx->pc == g_fnReplayStopPc;
+            return ctx->pc == ra && static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) == entrySp;
+        };
         auto logRecentDispatch8 = [&]() {
             const DispatchHistory &h = g_dispatchHistory;
             const uint32_t total = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
@@ -7586,11 +7661,19 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
             }
             ps2xSafeLog("[fnreplay] recent8(%u): %s\n", count, count ? buf : "(empty)");
         };
-        while (!(ctx->pc == ra && static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) == entrySp) && ctx->pc != 0u && !rt->isStopRequested()) // PROBE-FR1f
+        while (!g_fnReplayBlocked && !isIterDone() && ctx->pc != 0u && !rt->isStopRequested()) // PROBE-FR1f // PROBE-FR3
         {
-            if (steps > kMaxSteps) // PROBE-FR1f
+            if (static_cast<uint64_t>(steps) + g_fnReplaySteps > kFnReplayMaxSteps) // PROBE-FR1f // PROBE-FR3
             {
-                ps2xSafeLog("[fnreplay] step cap hit pc=0x%08x\n", ctx->pc);
+                g_fnReplayBlocked = true;
+                g_fnReplayBlockedPc = ctx->pc;
+                break;
+            }
+            if ((steps & 0x3FFu) == 0u &&
+                (std::chrono::steady_clock::now() - g_fnReplayIterStart) > std::chrono::seconds(20)) // PROBE-FR3
+            {
+                g_fnReplayBlocked = true;
+                g_fnReplayBlockedPc = ctx->pc;
                 break;
             }
             const uint32_t nextPc = ctx->pc;
@@ -7676,30 +7759,37 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
             ps2xSafeLog("%s\n", wbuf);
         }
 
-        if (!(ctx->pc == ra && finalSp == entrySp)) // PROBE-FR2
+        if (dumpIter >= 0 && static_cast<uint32_t>(dumpIter) == iter && !outRamPath.empty()) // PROBE-FR3
+        {
+            const std::string iterRamPath = outRamPath + ".iter" + std::to_string(iter);
+            writeRamDump(iterRamPath);
+            ps2xSafeLog("[fnreplay] iter %u dumped %s\n", iter, iterRamPath.c_str());
+        }
+
+        if (g_fnReplayBlocked) // PROBE-FR3
+        {
+            ps2xSafeLog("[fnreplay] BLOCKED in 0x%08x\n", g_fnReplayBlockedPc ? g_fnReplayBlockedPc : ctx->pc);
+            break;
+        }
+
+        if (!isIterDone()) // PROBE-FR2 // PROBE-FR3
         {
             ps2xSafeLog("[fnreplay] iter %u INCOMPLETE pc=0x%08x sp=0x%08x\n", iter, ctx->pc, finalSp);
             break;
         }
+        if (g_fnReplayStopPc != 0u) // PROBE-FR3
+        {
+            ps2xSafeLog("[fnreplay] iter %u reached stop_pc=0x%08x sp=0x%08x\n", iter, ctx->pc, finalSp);
+        }
     }
     g_fnReplaySuppressDcall = false; // PROBE-FR2
+    g_fnReplayStopPc = 0u; // PROBE-FR3
+    g_fnReplayBlocked = false; // PROBE-FR3
     g_fnReplayActive = false; // PROBE-FR2
 
     if (!outRamPath.empty())
     {
-        FILE *orf = std::fopen(outRamPath.c_str(), "wb");
-        if (!orf)
-        {
-            ps2xSafeLog("[fnreplay] ERROR: failed to open out_ram '%s'\n", outRamPath.c_str());
-            std::quick_exit(2);
-        }
-        size_t nwritten = std::fwrite(rdram, 1, kRamBytes, orf);
-        std::fclose(orf);
-        if (nwritten != kRamBytes)
-        {
-            ps2xSafeLog("[fnreplay] ERROR: short out_ram write %zu/%zu\n", nwritten, kRamBytes);
-            std::quick_exit(2);
-        }
+        writeRamDump(outRamPath);
     }
 
     if (!outRegsPath.empty())

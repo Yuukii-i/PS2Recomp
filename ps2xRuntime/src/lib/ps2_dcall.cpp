@@ -11,6 +11,8 @@ static_assert(kPs2DcallDispatchCycles == EeScheduler::kGuestDispatchCycles,
 
 extern const bool g_profCounts;
 extern bool g_fnReplayActive; // PROBE-FR1d
+extern uint32_t g_fnReplayStopPc; // PROBE-FR3
+extern bool g_fnReplayBlocked; // PROBE-FR3
 
 extern const bool g_ps2DcallSlowMode = []() {
     const char *dcall = std::getenv("PS2X_DCALL");
@@ -77,6 +79,10 @@ bool ps2DcallContinue(uint8_t *rdram,
     while (ctx->pc != fallthrough && !runtime->isStopRequested() && ctx->pc != 0u)
     {
         const uint32_t nextPc = ctx->pc;
+        if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && nextPc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
+        {
+            return false;
+        }
         if ((nextPc & 3u) != 0u ||
             nextPc < tableBase ||
             nextPc >= tableEnd) [[unlikely]]
@@ -109,7 +115,8 @@ bool ps2DcallContinue(uint8_t *rdram,
         }
     }
 
-    if (runtime->isStopRequested() || ctx->pc == 0u)
+    if (runtime->isStopRequested() || ctx->pc == 0u ||
+        (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc)))) // PROBE-FR3
     {
         return false;
     }
