@@ -29,6 +29,7 @@ extern std::atomic<bool> g_rdFrameIsFx; // FXC1
 extern bool ps2xRdGetPrevFrame(uint32_t &texId, int &w, int &h); // FXC1
 extern void ps2xPadMarker(); // PROBE-MK
 extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
+void ps2xDevToggleMcChoice(); // FIX-DK
 extern void ps2xMcInit(); // FEAT-DE
 extern "C" bool ps2_gt_enabled(); // PROBE-GT
 extern "C" void ps2_gt_count(int what, uint64_t n); // PROBE-GT
@@ -5070,12 +5071,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     if (g_fnReplayActive && !g_fnReplaySuppressDcall && isCall) [[unlikely]] // PROBE-FR1e // PROBE-FR2
     {
         static uint32_t s_fnReplayDcallCount = 0u;
-        if (s_fnReplayDcallCount < 400u)
+        static const uint32_t s_fr8DcallMax = []() { const char *e = std::getenv("PS2X_FNREPLAY_DCALLMAX"); return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 400u; }(); // PROBE-FR8
+        if (s_fnReplayDcallCount < s_fr8DcallMax) // PROBE-FR8
         {
             ++s_fnReplayDcallCount;
             const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
-            ps2xSafeLog("[fnreplay] dcall target=0x%08x ret=0x%08x sp=0x%08x\n",
-                        targetPc, fallthroughPc, sp);
+            ps2xSafeLog("[fnreplay] dcall target=0x%08x ret=0x%08x sp=0x%08x from=0x%08x\n", // PROBE-FR8
+                        targetPc, fallthroughPc, sp, ctx ? ctx->pc : 0u); // PROBE-FR8
         }
     }
 
@@ -7855,7 +7857,8 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
         g_fnReplayCurrentIter = iter; // PROBE-FR6
         *ctx = initialCtx;
         const bool logIterDetails = (iter == 0u);
-        g_fnReplaySuppressDcall = !logIterDetails;
+        static const uint32_t s_fr8DcallIter = []() { const char *e = std::getenv("PS2X_FNREPLAY_DCALLITER"); return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u; }(); // PROBE-FR8
+        g_fnReplaySuppressDcall = (iter != s_fr8DcallIter); // PROBE-FR8
         g_fnReplayBlocked = false; // PROBE-FR3
         g_fnReplayBlockedPc = 0u; // PROBE-FR3
         g_fnReplaySteps = 0u; // PROBE-FR3
@@ -8619,26 +8622,7 @@ void PS2Runtime::run()
             else if (IsKeyPressed(KEY_F6)) ft3Tag = 6;
         }
         if (IsKeyPressed(KEY_F7)) ps2xPadMarker(); // PROBE-MK
-        if (IsKeyPressed(KEY_F8)) // FEAT-DE
-        {
-            int cur = g_mcPendingChoice.load(std::memory_order_relaxed);
-            int next = 0;
-            if (cur == 0 || cur == 1)
-            {
-                next = (cur == 0) ? 1 : 0;
-            }
-            else
-            {
-                uint32_t guestVal = 0;
-                if (const uint8_t *rdram = m_memory.getRDRAM())
-                {
-                    std::memcpy(&guestVal, rdram + 0x00649910u, sizeof(uint32_t));
-                }
-                next = (guestVal == 0u) ? 1 : 0;
-            }
-            g_mcPendingChoice.store(next, std::memory_order_relaxed);
-            ps2xSafeLog("[mc] pending=%s\n", (next == 0) ? "boy" : "girl");
-        }
+        if (IsKeyPressed(KEY_F8)) ps2xDevToggleMcChoice(); // FEAT-DE // FIX-DK
         { // FEAT-DE2: detect game-set MC value and override with pending choice
             const int mcPend = g_mcPendingChoice.load(std::memory_order_relaxed);
             if (mcPend == 0 || mcPend == 1)
@@ -10367,6 +10351,28 @@ void ps2xAn1Poll(bool f9, bool f10)
     }
 }
 // ---- end PROBE-AN1 --------------------------------------------------------------------------------------------
+
+void ps2xDevToggleMcChoice() // FIX-DK (FEAT-DE body, callable from SDL frontend)
+{
+    PS2Runtime *rt = s_activeRuntime.load(std::memory_order_acquire);
+    int cur = g_mcPendingChoice.load(std::memory_order_relaxed);
+    int next = 0;
+    if (cur == 0 || cur == 1)
+    {
+        next = (cur == 0) ? 1 : 0;
+    }
+    else
+    {
+        uint32_t guestVal = 0;
+        if (const uint8_t *rdram = rt ? rt->memory().getRDRAM() : nullptr)
+        {
+            std::memcpy(&guestVal, rdram + 0x00649910u, sizeof(uint32_t));
+        }
+        next = (guestVal == 0u) ? 1 : 0;
+    }
+    g_mcPendingChoice.store(next, std::memory_order_relaxed);
+    ps2xSafeLog("[mc] pending=%s\n", (next == 0) ? "boy" : "girl");
+}
 
 void ps2xDumpEeRam() // PROBE-DR1
 {

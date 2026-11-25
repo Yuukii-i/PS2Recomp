@@ -64,6 +64,8 @@ void ps2xSdlSetPresentMode(int mode); // FIX-P2
 bool ps2xSdlPresentModeSupported(int mode); // FIX-P2
 void ps2xSdlGetWindowPixelSize(int *w, int *h); // FIX-P2
 extern void ps2xDumpEeRam(); // PROBE-DR1
+extern void ps2xDevToggleMcChoice(); // FIX-DK
+extern void ps2xPadMarker();         // FIX-DK
 extern bool g_an1;           // PROBE-AN1b
 extern void ps2xAn1Poll(bool f9, bool f10); // PROBE-AN1b
 extern void ps2xAn1DumpAll();               // PROBE-AN1b
@@ -1187,6 +1189,10 @@ namespace // FIX-RDG4Q
                 {
                     ps2xDumpEeRam(); // PROBE-DR1
                 } // PROBE-DR1
+                if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.scancode == SDL_SCANCODE_F8) // FIX-DK
+                    ps2xDevToggleMcChoice(); // FIX-DK
+                if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.scancode == SDL_SCANCODE_F7) // FIX-DK
+                    ps2xPadMarker(); // FIX-DK
                 if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) // PROBE-AN1b
                 {
                     an1F9 = an1F9 || ev.key.scancode == SDL_SCANCODE_F9;
