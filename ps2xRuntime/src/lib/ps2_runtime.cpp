@@ -6,6 +6,7 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 #include <io.h>
 #endif
 #include "ps2_runtime.h"
+void ps2xAn1DumpAll(); // PROBE-AN1c
 extern void ps2xEeGfxDecompInstall(PS2Runtime &); // DECOMP-BM
 extern void ps2xDevConsoleInstall(PS2Runtime &); // FEAT-DF
 extern bool ps2xRdViewOn(); // FEAT-RD1
@@ -156,6 +157,7 @@ static inline int ps2x_bgSetWindowPos(void *h, void *after, int x, int y, int cx
 extern "C" __declspec(dllimport) int __stdcall QueryPerformanceCounter(long long *lpPerformanceCount); // FEAT-FT3
 extern "C" __declspec(dllimport) int __stdcall QueryPerformanceFrequency(long long *lpFrequency); // FEAT-FT3
 extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void); // FEAT-FT3
+extern "C" __declspec(dllimport) short __stdcall GetAsyncKeyState(int vKey); // PROBE-AN1c
 extern "C" __declspec(dllimport) void *__stdcall CreateWaitableTimerExW(void *lpTimerAttributes, const wchar_t *lpTimerName, unsigned long dwFlags, unsigned long dwDesiredAccess); // FIX-PACE1
 extern "C" __declspec(dllimport) int __stdcall SetWaitableTimer(void *hTimer, const long long *lpDueTime, long lPeriod, void *pfnCompletionRoutine, void *lpArgToCompletionRoutine, int fResume); // FIX-PACE1
 extern "C" __declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void *hHandle, unsigned long dwMilliseconds); // FIX-PACE1
@@ -4656,6 +4658,73 @@ bool g_fnReplayActive = false; // PROBE-FR1d
 bool g_fnReplaySuppressDcall = false; // PROBE-FR2
 uint32_t g_fnReplayStopPc = 0u; // PROBE-FR3
 bool g_fnReplayBlocked = false; // PROBE-FR3
+struct FnReplaySkipEntry // PROBE-FR5
+{
+    uint32_t pc;
+    uint64_t v0;
+};
+static constexpr size_t kFnReplayMaxSkip = 8u; // PROBE-FR5
+static FnReplaySkipEntry g_fnReplaySkips[kFnReplayMaxSkip]{}; // PROBE-FR5
+size_t g_fnReplaySkipCount = 0u; // PROBE-FR5
+static uint32_t g_fnReplayCurrentIter = 0u; // PROBE-FR6
+static uint32_t g_fnReplaySkipHitCount = 0u; // PROBE-FR6
+static uint8_t *g_fr7Ram = nullptr; // PROBE-FR7
+static uint32_t g_fr7VsyncAddr = 0x00649DE4u; // PROBE-FR7
+static void fr7SetVsyncWord() // PROBE-FR7
+{
+    if (!g_fr7Ram)
+        return;
+    const uint32_t one = 1u;
+    std::memcpy(g_fr7Ram + (g_fr7VsyncAddr & 0x01FFFFFFu), &one, sizeof(one));
+}
+static uint32_t g_fr7SkipRa[12]{}; // PROBE-FR7
+static uint32_t g_fr7SkipRaN[12]{}; // PROBE-FR7
+static uint32_t g_fr7SkipRaCount = 0u; // PROBE-FR7
+static uint32_t g_fr7SkipCtxLogs = 0u; // PROBE-FR7
+static uint32_t g_fr7Entries[8]{}; // PROBE-FR7
+static uint32_t g_fr7EntryCount = 0u; // PROBE-FR7
+bool ps2xFnReplayTrySkip(R5900Context *ctx, uint32_t targetPc) // PROBE-FR5 // PROBE-FR6
+{
+    const size_t count = g_fnReplaySkipCount;
+    for (size_t i = 0u; i < count; ++i)
+    {
+        if (g_fnReplaySkips[i].pc == targetPc)
+        {
+            fr7SetVsyncWord(); // PROBE-FR7
+            { // PROBE-FR7
+                const uint32_t ra7 =static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+                uint32_t k = 0u;
+                while (k < g_fr7SkipRaCount && g_fr7SkipRa[k] != ra7)
+                    ++k;
+                if (k == g_fr7SkipRaCount && k < 12u)
+                {
+                    g_fr7SkipRa[k] = ra7;
+                    g_fr7SkipRaN[k] = 0u;
+                    ++g_fr7SkipRaCount;
+                }
+                if (k < 12u)
+                    ++g_fr7SkipRaN[k];
+                if (g_fr7SkipCtxLogs < 3u)
+                {
+                    ++g_fr7SkipCtxLogs;
+                    ps2xSafeLog("[fnreplay] skipctx pc=0x%08x ra=0x%08x a0=0x%08x a1=0x%08x sp=0x%08x s0=0x%08x s1=0x%08x\n", targetPc, ra7,
+                                static_cast<uint32_t>(_mm_extract_epi32(ctx->r[4], 0)), static_cast<uint32_t>(_mm_extract_epi32(ctx->r[5], 0)),
+                                static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)), static_cast<uint32_t>(_mm_extract_epi32(ctx->r[16], 0)),
+                                static_cast<uint32_t>(_mm_extract_epi32(ctx->r[17], 0)));
+                }
+            }
+            if (g_fnReplaySkipHitCount < 5u) // PROBE-FR6
+            {
+                ps2xSafeLog("[fnreplay] skip hit pc=0x%08x iter=%u\n", targetPc, g_fnReplayCurrentIter);
+                ++g_fnReplaySkipHitCount;
+            }
+            ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(g_fnReplaySkips[i].v0));
+            ctx->pc = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+            return true;
+        }
+    }
+    return false;
+}
 static uint32_t g_fnReplayBlockedPc = 0u; // PROBE-FR3
 static uint64_t g_fnReplaySteps = 0u; // PROBE-FR3
 static std::chrono::steady_clock::time_point g_fnReplayIterStart{}; // PROBE-FR3
@@ -4672,10 +4741,73 @@ static inline bool acctBatchEnabled()
     }();
     return s_on;
 }
+// PROBE-FR7: replay-virtual EE timer: advances PS2Memory EE timers deterministically, emulates timer1 overflow IRQ handler (RAM 0x6A2E20 += 1)
+static PS2Memory *g_fnReplayMem = nullptr; // PROBE-FR7
+static uint8_t *g_fnReplayRdram = nullptr; // PROBE-FR7
+static uint64_t g_fnReplayPendCycles = 0u; // PROBE-FR7
+static bool g_fnReplayOvfLogged = false; // PROBE-FR7
+static uint32_t g_fnReplayT1ReadLogs = 0u; // PROBE-FR7
+static uint64_t g_replayCycles = 0u; // PROBE-FR7
+static uint64_t g_fnReplayT1Reads = 0u; // PROBE-FR7
+static bool g_fnReplayOvfFlag = false; // PROBE-FR7
+static uint32_t g_fnReplayOvfLogs = 0u; // PROBE-FR7
+static void fnReplayTickTimers(uint64_t cycles) // PROBE-FR7: bypass virtual timer (count = cycles>>8)
+{
+    if (!g_fnReplayRdram || cycles == 0u)
+        return;
+    const uint64_t oldEpoch = g_replayCycles >> 24;
+    g_replayCycles += cycles;
+    const uint64_t newEpoch = g_replayCycles >> 24;
+    for (uint64_t e = oldEpoch; e < newEpoch; ++e)
+    {
+        uint64_t v = 0u;
+        std::memcpy(&v, g_fnReplayRdram + 0x006A2E20u, sizeof(v));
+        ++v;
+        std::memcpy(g_fnReplayRdram + 0x006A2E20u, &v, sizeof(v));
+        g_fnReplayOvfFlag = true;
+        if (g_fnReplayOvfLogs++ < 5u)
+            ps2xSafeLog("[fnreplay] timer1 ovf -> %llu\n", static_cast<unsigned long long>(v));
+    }
+}
+// PROBE-FR7: returns true and sets out if vaddr is a replay-served timer register read
+static bool fnReplayTimerRead(uint32_t vaddr, uint32_t &out)
+{
+    const uint32_t a = vaddr & 0x1FFFFFFFu;
+    if (a != 0x10001000u && a != 0x10001010u)
+        return false;
+    if (g_fnReplayPendCycles != 0u)
+    {
+        const uint64_t c = g_fnReplayPendCycles;
+        g_fnReplayPendCycles = 0u;
+        fnReplayTickTimers(c);
+    }
+    if (a == 0x10001000u)
+    {
+        static const uint64_t s_readTick = []() {
+            const char *e = std::getenv("PS2X_FNREPLAY_READTICK");
+            return e ? std::strtoull(e, nullptr, 10) : 20000ull;
+        }();
+        ++g_fnReplayT1Reads;
+        fnReplayTickTimers(s_readTick);
+        out =static_cast<uint32_t>((g_replayCycles >> 8) & 0xFFFFu);
+        if (g_fnReplayT1ReadLogs < 3u)
+        {
+            ++g_fnReplayT1ReadLogs;
+            ps2xSafeLog("[fnreplay] t1read=0x%x\n", out);
+        }
+    }
+    else
+    {
+        out = 0x0282u | (g_fnReplayOvfFlag ? 0x0800u : 0u);
+        g_fnReplayOvfFlag = false;
+    }
+    return true;
+}
 static inline void acctDispatch(EeScheduler *s)
 {
     if (g_fnReplayActive) // PROBE-FR1d
     {
+        g_fnReplayPendCycles += EeScheduler::kGuestDispatchCycles; // PROBE-FR7
         return;
     }
     if (acctBatchEnabled())
@@ -4911,6 +5043,14 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         if (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && targetPc == g_fnReplayStopPc))
             return false;
         ++g_fnReplaySteps;
+        if (g_fnReplayCurrentIter == 1u && g_fr7EntryCount < 8u && (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall)) // PROBE-FR7
+        {
+            bool seen = false;
+            for (uint32_t q = 0u; q < g_fr7EntryCount; ++q)
+                seen = seen || g_fr7Entries[q] == targetPc;
+            if (!seen)
+                g_fr7Entries[g_fr7EntryCount++] = targetPc;
+        }
         if (g_fnReplaySteps > kFnReplayMaxSteps ||
             ((g_fnReplaySteps & 0x3FFu) == 0u &&
              (std::chrono::steady_clock::now() - g_fnReplayIterStart) > std::chrono::seconds(20)))
@@ -4921,6 +5061,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         }
     }
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+    if (g_fnReplayActive && ps2xFnReplayTrySkip(ctx, targetPc)) [[unlikely]] // PROBE-FR5
+    {
+        if (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc)
+            return false;
+        return isCall && (ctx->pc == fallthroughPc);
+    }
     if (g_fnReplayActive && !g_fnReplaySuppressDcall && isCall) [[unlikely]] // PROBE-FR1e // PROBE-FR2
     {
         static uint32_t s_fnReplayDcallCount = 0u;
@@ -5060,6 +5206,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                 const uint32_t nextPc = ctx->pc;
                 if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && nextPc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
                     return false;
+                if (g_fnReplayActive && ps2xFnReplayTrySkip(ctx, nextPc)) [[unlikely]] // PROBE-FR5
+                    continue;
                 uint32_t s = 0u;
                 if (!generatedFunctionTableSlot(nextPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
                     break;
@@ -5151,6 +5299,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
         {
             return false;
+        }
+        if (g_fnReplayActive && ps2xFnReplayTrySkip(ctx, ctx->pc)) [[unlikely]] // PROBE-FR5
+        {
+            continue;
         }
         if (++dispatchChainSteps > 1000)
         {
@@ -5845,10 +5997,7 @@ extern std::vector<uint32_t> consumeCompletedIntcCauses();
 
 void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
 {
-    if (g_fnReplayActive) // PROBE-FR1d
-    {
-        return;
-    }
+    // PROBE-FR4: allow DMAC/INTC completion draining during fnreplay (scheduler switches/timers stay gated in eeCheckpointDue/acctDispatch)
     for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
     {
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
@@ -6441,6 +6590,7 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
     acctFlushForIo(vaddr); // PERF-LM
+    if (g_fnReplayActive) [[unlikely]] { uint32_t tv; if (fnReplayTimerRead(vaddr, tv)) return tv; } // PROBE-FR7
     if (sprFastAddr<uint32_t>(vaddr))
     {
         uint32_t v;
@@ -6689,7 +6839,44 @@ static float ps2xVu0Max(uint32_t signBits)
     std::memcpy(&f, &b, sizeof(f));
     return f;
 }
-extern "C" float ps2x_vu0_div(float fs, float ft)
+// PROBE-AN1: Q-operation events (div by 0, sqrt of negative, Q Inf/NaN/huge).
+static void ps2xAn1Q(int op, float fs, float ft, float q)
+{
+    uint32_t a, b, r;
+    std::memcpy(&a, &fs, 4);
+    std::memcpy(&b, &ft, 4);
+    std::memcpy(&r, &q, 4);
+    if (op != 1 && (b & 0x7F800000u) == 0u) // div / rsqrt by zero (or denormal)
+        ps2xAn1Ev(AN1_Q_DIV0, a, b, r);
+    if (op != 0 && (b & 0x80000000u) && (b & 0x7F800000u) != 0u) // sqrt/rsqrt of negative
+        ps2xAn1Ev(AN1_Q_SQRTNEG, a, b, r);
+    if (!std::isfinite(q) || std::fabs(q) > 1.0e9f)
+        ps2xAn1Ev(AN1_Q_BAD, a, b, r);
+    if ((a & 0x7F800000u) == 0x7F800000u || (b & 0x7F800000u) == 0x7F800000u)
+        ps2xAn1Ev(AN1_V_IN_NANHUGE, a, b, r);
+}
+static float ps2xVu0DivImpl(float fs, float ft);
+static float ps2xVu0SqrtImpl(float ft);
+static float ps2xVu0RsqrtImpl(float fs, float ft);
+extern "C" float ps2x_vu0_div(float fs, float ft) // PROBE-AN1 wrapper
+{
+    const float q = ps2xVu0DivImpl(fs, ft);
+    if (g_an1) [[unlikely]] ps2xAn1Q(0, fs, ft, q);
+    return q;
+}
+extern "C" float ps2x_vu0_sqrt(float ft) // PROBE-AN1 wrapper
+{
+    const float q = ps2xVu0SqrtImpl(ft);
+    if (g_an1) [[unlikely]] ps2xAn1Q(1, 0.0f, ft, q);
+    return q;
+}
+extern "C" float ps2x_vu0_rsqrt(float fs, float ft) // PROBE-AN1 wrapper
+{
+    const float q = ps2xVu0RsqrtImpl(fs, ft);
+    if (g_an1) [[unlikely]] ps2xAn1Q(2, fs, ft, q);
+    return q;
+}
+static float ps2xVu0DivImpl(float fs, float ft)
 {
     if (!ps2xVu0HwQ())
         return (ft != 0.0f) ? (fs / ft) : 0.0f;
@@ -6701,13 +6888,13 @@ extern "C" float ps2x_vu0_div(float fs, float ft)
     const float q = fs / ft;
     return std::isfinite(q) ? q : ps2xVu0Max(sb ^ tb);
 }
-extern "C" float ps2x_vu0_sqrt(float ft)
+static float ps2xVu0SqrtImpl(float ft)
 {
     if (!ps2xVu0HwQ())
         return std::sqrt(std::max(0.0f, ft));
     return std::sqrt(std::fabs(ft));
 }
-extern "C" float ps2x_vu0_rsqrt(float fs, float ft)
+static float ps2xVu0RsqrtImpl(float fs, float ft)
 {
     if (!ps2xVu0HwQ())
         return (ft > 0.0f) ? (fs / std::sqrt(ft)) : 0.0f;
@@ -6798,6 +6985,7 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
+    if (g_fnReplayActive) [[unlikely]] { const uint32_t pa = vaddr & 0x1FFFFFFFu; if (pa == 0x10001000u || pa == 0x10001010u || pa == 0x10001020u) return; } // PROBE-FR7
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
     acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint32_t>(vaddr))
@@ -7327,9 +7515,13 @@ namespace
     }
 } // PROBE-RW1
 
+extern "C" void ps2_vif1_fence(); // PROBE-FR4
+
 // PROBE-FR1: single-function replay harness (PS2X_FNREPLAY=<spec_path>)
+static std::atomic<R5900Context *> g_fnReplayCtx{nullptr}; // PROBE-WW4
 static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, const char *specPath)
 {
+    g_fnReplayCtx.store(ctx, std::memory_order_release); // PROBE-WW4
     FILE *sf = std::fopen(specPath, "r");
     if (!sf)
     {
@@ -7345,10 +7537,15 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
     uint32_t pc = 0;
     uint32_t ra = 0;
     uint32_t stopPc = 0; // PROBE-FR3
+    FnReplaySkipEntry skipEntries[kFnReplayMaxSkip]{}; // PROBE-FR5
+    size_t skipCount = 0u; // PROBE-FR5
     bool hasPc = false;
 
     auto parseHex32 = [](const char *s) -> uint32_t {
         return static_cast<uint32_t>(std::strtoul(s, nullptr, 16));
+    };
+    auto parseHex64 = [](const char *s) -> uint64_t { // PROBE-FR5
+        return static_cast<uint64_t>(std::strtoull(s, nullptr, 16));
     };
 
     char line[1024];
@@ -7412,6 +7609,19 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
         {
             if (char *p = nextTok())
                 stopPc = parseHex32(p);
+        }
+        else if (std::strcmp(cmd, "skip_pc") == 0) // PROBE-FR5
+        {
+            if (char *pPc = nextTok())
+            {
+                if (skipCount < kFnReplayMaxSkip)
+                {
+                    uint64_t v0 = 0ull;
+                    if (char *pV0 = nextTok())
+                        v0 = parseHex64(pV0);
+                    skipEntries[skipCount++] = { parseHex32(pPc), v0 };
+                }
+            }
         }
         else if (std::strcmp(cmd, "gpr") == 0)
         {
@@ -7615,11 +7825,34 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
 
     g_acctPending = 0u; // PROBE-FR1d
     g_fnReplayStopPc = stopPc; // PROBE-FR3
+    for (size_t i = 0u; i < skipCount; ++i) // PROBE-FR5
+        g_fnReplaySkips[i] = skipEntries[i];
+    g_fnReplaySkipCount = skipCount; // PROBE-FR5
+    g_fnReplaySkipHitCount = 0u; // PROBE-FR6
     g_fnReplayActive = true; // PROBE-FR1d
     const uint32_t entrySp = static_cast<uint32_t>(_mm_extract_epi32(initialCtx.r[29], 0)); // PROBE-FR1f // PROBE-FR2
 
+    // PROBE-FR6: install wrapper in g_ps2RecompiledFunctionTable for each skip_pc during replay
+    PS2Runtime::RecompiledFunction origSkipFns[kFnReplayMaxSkip]{};
+    uint32_t origSkipSlots[kFnReplayMaxSkip]{};
+    bool skipSlotValid[kFnReplayMaxSkip]{};
+    for (size_t i = 0u; i < skipCount; ++i)
+    {
+        uint32_t s = 0u;
+        if (generatedFunctionTableSlot(skipEntries[i].pc, s))
+        {
+            origSkipSlots[i] = s;
+            origSkipFns[i] = g_ps2RecompiledFunctionTable[s];
+            skipSlotValid[i] = true;
+            g_ps2RecompiledFunctionTable[s] = [](uint8_t *, R5900Context *c, PS2Runtime *) {
+                ps2xFnReplayTrySkip(c, c->pc);
+            };
+        }
+    }
+
     for (uint32_t iter = 0u; iter < repeatCount; ++iter) // PROBE-FR2
     {
+        g_fnReplayCurrentIter = iter; // PROBE-FR6
         *ctx = initialCtx;
         const bool logIterDetails = (iter == 0u);
         g_fnReplaySuppressDcall = !logIterDetails;
@@ -7628,9 +7861,68 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
         g_fnReplaySteps = 0u; // PROBE-FR3
         g_fnReplayIterStart = std::chrono::steady_clock::now(); // PROBE-FR3
 
+        // PROBE-FR7: advance virtual EE timers at iteration start
+        {
+            PS2Memory &tmem = rt->memory();
+            g_fnReplayT1ReadLogs = 0u;
+            if (iter == 0u)
+            {
+                if (const char *ve = std::getenv("PS2X_FNREPLAY_VSYNCWORD"))
+                    g_fr7VsyncAddr = static_cast<uint32_t>(std::strtoul(ve, nullptr, 16));
+                g_fr7Ram = rdram;
+                ps2xSafeLog("[fnreplay] vsyncword set addr=0x%x\n", g_fr7VsyncAddr);
+            }
+            fr7SetVsyncWord();
+            g_fnReplayMem = &tmem;
+            g_fnReplayRdram = rdram;
+            if (iter == 0u)
+            {
+                uint64_t base = 0u, ovfw = 0u;
+                std::memcpy(&base, rdram + 0x0072D490u, sizeof(base));
+                std::memcpy(&ovfw, rdram + 0x006A2E20u, sizeof(ovfw));
+                uint64_t seedAdd = 3080000ull;
+                if (const char *ce = std::getenv("PS2X_FNREPLAY_CYCLES"))
+                    seedAdd = std::strtoull(ce, nullptr, 10);
+                if (const char *se = std::getenv("PS2X_FNREPLAY_SEEDADD"))
+                    seedAdd = std::strtoull(se, nullptr, 10);
+                g_replayCycles = (base != 0u ? base : (ovfw << 24)) + seedAdd;
+                ps2xSafeLog("[fnreplay] seeded replay cycles=0x%llx\n", static_cast<unsigned long long>(g_replayCycles));
+            }
+            else
+            {
+                uint64_t cyc = 3080000ull;
+                if (const char *ce = std::getenv("PS2X_FNREPLAY_CYCLES"))
+                    cyc = std::strtoull(ce, nullptr, 10);
+                g_fnReplayPendCycles = 0u;
+                fnReplayTickTimers(cyc);
+            }
+            if (iter < 5u)
+            {
+                uint64_t ovf = 0u;
+                std::memcpy(&ovf, rdram + 0x006A2E20u, sizeof(ovf));
+                uint64_t baseNow = 0u;
+                std::memcpy(&baseNow, rdram + 0x0072D490u, sizeof(baseNow));
+                ps2xSafeLog("[fnreplay] iter=%u elapsed=%lld\n", iter, static_cast<long long>(g_replayCycles - baseNow));
+                ps2xSafeLog("[fnreplay] iter=%u timer1=0x%04x ovf=%llu\n", iter, static_cast<uint32_t>((g_replayCycles >> 8) & 0xFFFFu), static_cast<unsigned long long>(ovf));
+            }
+        }
+
+        // PROBE-FR6: log DMA CHCR values at the start of each iteration (first 5)
+        if (iter < 5u)
+        {
+            PS2Memory &mem = rt->memory();
+            auto getChcrVal = [&](uint32_t chBase) -> uint32_t {
+                auto it = mem.m_ioRegisters.find(chBase);
+                return (it != mem.m_ioRegisters.end()) ? it->second : 0u;
+            };
+            ps2xSafeLog("[fnreplay] iter %u CHCR 9000=0x%08x a000=0x%08x b400=0x%08x dstat=0x%08x\n",
+                        iter, getChcrVal(0x10009000u), getChcrVal(0x1000A000u), getChcrVal(0x1000B400u), getChcrVal(0x1000E010u));
+        }
+
         if (logIterDetails)
             ps2xSafeLog("[fnreplay] calling fn=0x%08x\n", pc);
-        fn(rdram, ctx, rt);
+        if (!ps2xFnReplayTrySkip(ctx, pc)) // PROBE-FR5
+            fn(rdram, ctx, rt);
         if (logIterDetails)
             ps2xSafeLog("[fnreplay] returned from fn=0x%08x pc=0x%08x\n", pc, ctx->pc);
 
@@ -7677,6 +7969,11 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
                 break;
             }
             const uint32_t nextPc = ctx->pc;
+            if (ps2xFnReplayTrySkip(ctx, nextPc)) [[unlikely]] // PROBE-FR5
+            {
+                ++steps;
+                continue;
+            }
             uint32_t s = 0u;
             if (!generatedFunctionTableSlot(nextPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
             {
@@ -7769,6 +8066,33 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
         if (g_fnReplayBlocked) // PROBE-FR3
         {
             ps2xSafeLog("[fnreplay] BLOCKED in 0x%08x\n", g_fnReplayBlockedPc ? g_fnReplayBlockedPc : ctx->pc);
+            ps2xSafeLog("[fnreplay] t1reads=%llu cycles=0x%llx\n", static_cast<unsigned long long>(g_fnReplayT1Reads), static_cast<unsigned long long>(g_replayCycles)); // PROBE-FR7
+            { // PROBE-FR7
+                const long long ms = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_fnReplayIterStart).count());
+                ps2xSafeLog("[fnreplay] blocked iter=%u limit=%s steps=%llu elapsed_ms=%lld\n", iter,
+                            (g_fnReplaySteps + steps > kFnReplayMaxSteps) ? "steps" : "timer20s",
+                            static_cast<unsigned long long>(g_fnReplaySteps + steps), ms);
+                const DispatchHistory &h7 = g_dispatchHistory;
+                const uint32_t n7 = static_cast<uint32_t>(h7.pcs.size());
+                const uint32_t tot7 = h7.wrapped ? n7 : h7.next;
+                char line[128];
+                size_t pos = 0u;
+                for (uint32_t i = 0u; i < tot7; ++i)
+                {
+                    const uint32_t idx = (h7.next + n7 - tot7 + i) % n7;
+                    pos += static_cast<size_t>(std::snprintf(line + pos, sizeof(line) - pos, "%08x ", h7.pcs[idx]));
+                    if ((i & 7u) == 7u || i + 1u == tot7)
+                    {
+                        ps2xSafeLog("[fnreplay] ring: %s\n", line);
+                        pos = 0u;
+                        line[0] = '\0';
+                    }
+                }
+                for (uint32_t k = 0u; k < g_fr7SkipRaCount; ++k)
+                    ps2xSafeLog("[fnreplay] skip ra=0x%08x n=%u\n", g_fr7SkipRa[k], g_fr7SkipRaN[k]);
+                for (uint32_t k = 0u; k < g_fr7EntryCount; ++k)
+                    ps2xSafeLog("[fnreplay] iter1 entry[%u]=0x%08x\n", k, g_fr7Entries[k]);
+            }
             break;
         }
 
@@ -7781,9 +8105,58 @@ static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, cons
         {
             ps2xSafeLog("[fnreplay] iter %u reached stop_pc=0x%08x sp=0x%08x\n", iter, ctx->pc, finalSp);
         }
+
+        { // PROBE-FR4: synchronously complete all pending DMA and drain VIF1/GIF queues between iterations
+            PS2Memory &mem = rt->memory();
+            uint32_t drained = static_cast<uint32_t>(
+                mem.m_pendingGifTransfers.size() +
+                mem.m_pendingVif0Transfers.size() +
+                mem.m_pendingVif1Transfers.size());
+            mem.processPendingTransfers();
+            ps2_vif1_fence();
+            (void)mem.readIORegister(0x10009000u);
+            if (mem.m_gifArbiter)
+                rt->gifArbiter().drain();
+            mem.m_pendingGifTransfers.clear();
+            mem.m_pendingVif0Transfers.clear();
+            mem.m_pendingVif1Transfers.clear();
+            mem.m_path3MaskedFifo.clear();
+            static constexpr uint32_t kDmaChannels[10] = {
+                0x10008000u, 0x10009000u, 0x1000A000u, 0x1000B000u, 0x1000B400u,
+                0x1000C000u, 0x1000C400u, 0x1000C800u, 0x1000D000u, 0x1000D400u
+            };
+            for (size_t ci = 0; ci < 10; ++ci)
+            {
+                auto it = mem.m_ioRegisters.find(kDmaChannels[ci]);
+                if (it != mem.m_ioRegisters.end()) // PROBE-FR6: unconditionally ensure bit 0x100 is clear in all DMA CHCR regs
+                {
+                    if ((it->second & 0x100u) != 0u)
+                    {
+                        it->second &= ~0x100u;
+                        mem.m_ioRegisters[kDmaChannels[ci] + 0x20u] = 0u;
+                        ++drained;
+                    }
+                }
+                mem.dma_regs[ci].chcr &= ~0x100u;
+                mem.dma_regs[ci].qwc = 0u;
+            }
+            mem.vif1_regs.stat &= ~0x1F000003u;
+            if (auto git = mem.m_ioRegisters.find(0x10003020u); git != mem.m_ioRegisters.end())
+                git->second &= ~0xC00u;
+            rt->drainCompletedDmacHandlers(rdram);
+            if (iter < 5u)
+                ps2xSafeLog("[fnreplay] dma drained n=%u\n", drained);
+        }
+    }
+    // PROBE-FR6: restore wrapped table functions
+    for (size_t i = 0u; i < skipCount; ++i)
+    {
+        if (skipSlotValid[i])
+            g_ps2RecompiledFunctionTable[origSkipSlots[i]] = origSkipFns[i];
     }
     g_fnReplaySuppressDcall = false; // PROBE-FR2
     g_fnReplayStopPc = 0u; // PROBE-FR3
+    g_fnReplaySkipCount = 0u; // PROBE-FR5
     g_fnReplayBlocked = false; // PROBE-FR3
     g_fnReplayActive = false; // PROBE-FR2
 
@@ -7852,6 +8225,7 @@ void PS2Runtime::run()
     if (const char *spec = std::getenv("PS2X_FNREPLAY")) // PROBE-FR1
     {
         ps2xFnReplay(m_memory.getRDRAM(), &m_cpuContext, this, spec);
+        if (g_an1) ps2xAn1DumpAll(); // PROBE-AN1c
         std::quick_exit(0);
     } // PROBE-FR1
     m_stopRequested.store(false, std::memory_order_relaxed);
@@ -8283,6 +8657,11 @@ void PS2Runtime::run()
                     std::memcpy(&s_mcLastSeen, mcRam + 0x00649910u, sizeof(uint32_t));
                 }
             }
+        }
+        if (g_an1) // PROBE-AN1
+        {
+            extern void ps2xAn1Poll(bool f9, bool f10);
+            ps2xAn1Poll(IsKeyPressed(KEY_F9), IsKeyPressed(KEY_F10));
         }
         extern std::atomic<int> g_ps2xPause;      // FEAT-PA1
         extern std::atomic<int> g_ps2xStepTokens; // FEAT-PA1
@@ -9719,6 +10098,276 @@ void ps2xFpuProbe(void *ra, int kind)
     }
 } // PROBE-M14
 
+// ---- PROBE-AN1: EE anomaly probe ------------------------------------------------------------------------------
+void ps2xAn1DumpAll(); // PROBE-AN1b (non-static, used from the SDL platform)
+static void ps2xAn1StartWatcher(); // PROBE-AN1c
+static uint64_t g_an1Seq = 0; // PROBE-AN1c: bumped on every recorded event (read racy on purpose, probe only)
+static bool ps2xAn1Init()
+{
+    const char *e = std::getenv("PS2X_AN1");
+    const bool on = e && e[0] == '1' && e[1] == '\0';
+    if (on)
+    {
+        std::atexit([]() { ps2xAn1DumpAll(); std::fflush(stderr); }); // PROBE-AN1b
+        std::at_quick_exit([]() { ps2xAn1DumpAll(); std::fflush(stderr); }); // PROBE-AN1c
+        ps2xAn1StartWatcher(); // PROBE-AN1c
+        std::fprintf(stderr, "[an1] enabled\n"); // PROBE-AN1b
+        std::fflush(stderr);
+    }
+    return on;
+}
+bool g_an1 = ps2xAn1Init(); // PROBE-AN1
+
+namespace
+{
+struct An1Entry // PROBE-AN1
+{
+    uint64_t count = 0;
+    uint32_t nfirst = 0;
+};
+struct An1First // PROBE-AN1
+{
+    uint32_t pc, a, b, r;
+    int kind;
+};
+std::mutex g_an1Mtx;
+std::unordered_map<uint64_t, An1Entry> g_an1Map;
+std::vector<An1First> g_an1First;
+const char *const kAn1Names[AN1_KIND_COUNT] = {
+    "fpu_slowpath", "f_result_nan", "f_result_inf", "f_result_denorm", "f_input_denorm", "f_expgap24", "f_div0", "f_sqrt_neg", "f_huge",
+    "v_result_nan", "v_result_inf", "v_result_denorm", "v_input_denorm", "v_expgap24", "v_huge", "f_input_exp255",
+    "q_div0", "q_sqrt_neg", "q_bad_result", "store_nan_or_huge", "v_slowpath", "f_rsqrt0", "v_input_exp255"};
+static_assert(sizeof(kAn1Names) / sizeof(kAn1Names[0]) == AN1_KIND_COUNT);
+
+inline uint32_t an1Bits(float f)
+{
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    return u;
+}
+} // namespace
+
+uint32_t ps2xAn1CurPc() // PROBE-AN1: last pushDispatchPc of this thread (0 when none)
+{
+    const DispatchHistory &h = g_dispatchHistory;
+    if (!h.wrapped && h.next == 0u)
+        return 0u;
+    return h.pcs[(h.next + static_cast<uint32_t>(h.pcs.size()) - 1u) % static_cast<uint32_t>(h.pcs.size())];
+}
+
+void ps2xAn1Ev(int kind, uint32_t a, uint32_t b, uint32_t r) // PROBE-AN1
+{
+    const uint32_t pc = ps2xAn1CurPc();
+    std::lock_guard<std::mutex> lk(g_an1Mtx);
+    An1Entry &e = g_an1Map[(static_cast<uint64_t>(pc) << 8) | static_cast<uint64_t>(kind & 0xFF)];
+    ++e.count;
+    ++g_an1Seq; // PROBE-AN1c
+    if (e.nfirst < 3u && g_an1First.size() < 400u)
+    {
+        ++e.nfirst;
+        g_an1First.push_back({pc, a, b, r, kind});
+    }
+}
+
+// Classify one scalar (FPU or one VU0 lane). a,b = inputs, r = final value returned to the guest.
+static void ps2xAn1Lane(bool vu, int op, float a, float b, float r)
+{
+    const uint32_t ua = an1Bits(a), ub = an1Bits(b), ur = an1Bits(r);
+    const uint32_t ea = (ua >> 23) & 0xFFu, eb = (ub >> 23) & 0xFFu, er = (ur >> 23) & 0xFFu;
+    const bool two = (op <= 3 || op == 5);
+    if (ea == 0xFFu || (two && eb == 0xFFu))
+        ps2xAn1Ev(vu ? AN1_V_IN_NANHUGE : AN1_IN_NANHUGE, ua, ub, ur);
+    if (er == 0xFFu)
+        ps2xAn1Ev(vu ? ((ur & 0x7FFFFFu) ? AN1_V_NAN : AN1_V_INF) : ((ur & 0x7FFFFFu) ? AN1_F_NAN : AN1_F_INF), ua, ub, ur);
+    else if (std::fabs(r) > 1.0e9f)
+        ps2xAn1Ev(vu ? AN1_V_HUGE : AN1_F_HUGE, ua, ub, ur);
+    if ((ea == 0u && (ua & 0x7FFFFFu)) || (two && eb == 0u && (ub & 0x7FFFFFu)))
+        ps2xAn1Ev(vu ? AN1_V_DENORM_IN : AN1_F_DENORM_IN, ua, ub, ur);
+    // Host result before the PS2 flush: a denormal means the guest result was flushed to zero.
+    float hr;
+    switch (op)
+    {
+    case 0: hr = a + b; break;
+    case 1: hr = a - b; break;
+    case 2: hr = a * b; break;
+    case 3: hr = (b != 0.0f) ? a / b : 1.0f; break;
+    case 4: hr = std::sqrt(std::fabs(a)); break;
+    default: hr = (b != 0.0f) ? a / std::sqrt(std::fabs(b)) : 1.0f; break;
+    }
+    const uint32_t uh = an1Bits(hr);
+    if (((uh >> 23) & 0xFFu) == 0u && (uh & 0x7FFFFFu))
+        ps2xAn1Ev(vu ? AN1_V_DENORM_RES : AN1_F_DENORM_RES, ua, ub, ur);
+    if ((op == 0 || op == 1) && ea != 0u && eb != 0u)
+    {
+        const int gap = static_cast<int>(ea) - static_cast<int>(eb);
+        if (gap >= 24 || gap <= -24)
+            ps2xAn1Ev(vu ? AN1_V_CANCEL : AN1_F_CANCEL, ua, ub, ur);
+    }
+    if (!vu)
+    {
+        if (op == 3 && eb == 0u)
+            ps2xAn1Ev(AN1_F_DIV0, ua, ub, ur);
+        if (op == 5 && eb == 0u)
+            ps2xAn1Ev(AN1_F_RSQRT0, ua, ub, ur);
+        if ((op == 4 && (ua & 0x80000000u) && ea != 0u) || (op == 5 && (ub & 0x80000000u) && eb != 0u))
+            ps2xAn1Ev(AN1_F_SQRTNEG, ua, ub, ur);
+    }
+}
+
+void ps2xAn1Fpu(int op, float a, float b, float r) // PROBE-AN1
+{
+    ps2xAn1Lane(false, op, a, b, r);
+}
+
+void ps2xAn1Vec(int op, __m128 a, __m128 b, __m128 r) // PROBE-AN1
+{
+    alignas(16) float la[4], lb[4], lr[4];
+    _mm_store_ps(la, a);
+    _mm_store_ps(lb, b);
+    _mm_store_ps(lr, r);
+    for (int i = 0; i < 4; ++i)
+        ps2xAn1Lane(true, op, la[i], lb[i], lr[i]);
+}
+
+void ps2xAn1Store(uint32_t addr, const void *p, int bytes) // PROBE-AN1: key = guest pc of the store, a = address, b = lane index, r = bad lane bits
+{
+    uint32_t w[4];
+    std::memcpy(w, p, static_cast<size_t>(bytes));
+    for (int i = 0; i < bytes / 4; ++i)
+    {
+        const uint32_t m = w[i] & 0x7FFFFFFFu;
+        const bool nan = m > 0x7F800000u && (w[i] >> 16) != 0xFFFFu && (w[i] >> 16) != 0x7FFFu;
+        const bool huge = m >= 0x4E6E6B28u && m < 0x7F800000u; // |x| >= 1e9
+        if (nan || huge)
+        {
+            ps2xAn1Ev(AN1_ST_BAD, addr, static_cast<uint32_t>(i), w[i]);
+            return;
+        }
+    }
+}
+
+void ps2xAn1DumpAll() // PROBE-AN1
+{
+    std::lock_guard<std::mutex> lk(g_an1Mtx);
+    std::vector<std::pair<uint64_t, uint64_t>> v; // count, key
+    v.reserve(g_an1Map.size());
+    for (const auto &kv : g_an1Map)
+        v.emplace_back(kv.second.count, kv.first);
+    std::sort(v.begin(), v.end(), [](const auto &x, const auto &y) { return x.first > y.first; });
+    ps2xSafeLog("[an1] dump begin entries=%zu\n", v.size()); // PROBE-AN1d
+    ps2xSafeLog("[an1] top 40 (pc, kind, count) of %zu\n", v.size());
+    for (size_t i = 0; i < v.size() && i < 40; ++i)
+        ps2xSafeLog("[an1] pc=0x%08x kind=%s count=%llu\n", static_cast<uint32_t>(v[i].second >> 8),
+                    kAn1Names[(v[i].second & 0xFF) < AN1_KIND_COUNT ? (v[i].second & 0xFF) : 0], static_cast<unsigned long long>(v[i].first));
+    for (const An1First &f : g_an1First)
+        ps2xSafeLog("[an1-first] pc=0x%08x kind=%s a=%08x b=%08x r=%08x\n", f.pc,
+                    kAn1Names[f.kind < AN1_KIND_COUNT ? f.kind : 0], f.a, f.b, f.r);
+    ps2xSafeLog("[an1] dump end\n"); // PROBE-AN1d
+    ps2xFlushLog(); // PROBE-AN1d
+}
+
+// PROBE-AN1c: frame-loop independent watcher (keys via GetAsyncKeyState, trigger files, 20 s auto dump when counters changed).
+static void ps2xAn1Reset()
+{
+    {
+        std::lock_guard<std::mutex> lk(g_an1Mtx);
+        g_an1Map.clear();
+        g_an1First.clear();
+    }
+    ps2xSafeLog("[an1] reset\n"); // PROBE-AN1d
+    ps2xFlushLog();
+}
+static void ps2xAn1StartWatcher()
+{
+    std::thread([]() {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto lastDump = t0;
+        uint64_t lastSeq = 0;
+        bool d9 = false, d10 = false;
+        for (;;)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            const auto now = std::chrono::steady_clock::now();
+#ifdef _WIN32
+            const bool k9 = (GetAsyncKeyState(0x78) & 0x8000) != 0;  // VK_F9
+            const bool k10 = (GetAsyncKeyState(0x79) & 0x8000) != 0; // VK_F10
+            if (k9 && !d9)
+                ps2xAn1Reset();
+            if (k10 && !d10)
+            {
+                ps2xAn1DumpAll();
+                lastDump = now;
+                lastSeq = g_an1Seq;
+            }
+            d9 = k9;
+            d10 = k10;
+#endif
+            std::error_code ec;
+            if (std::filesystem::exists("an1_reset.txt", ec))
+            {
+                std::filesystem::remove("an1_reset.txt", ec);
+                ps2xAn1Reset();
+            }
+            if (std::filesystem::exists("an1_dump.txt", ec))
+            {
+                std::filesystem::remove("an1_dump.txt", ec);
+                ps2xAn1DumpAll();
+                lastDump = now;
+                lastSeq = g_an1Seq;
+            }
+            if (now - lastDump >= std::chrono::seconds(20))
+            {
+                lastDump = now;
+                if (g_an1Seq != lastSeq)
+                {
+                    lastSeq = g_an1Seq;
+                    ps2xSafeLog("[an1] auto dump t=%u s\n", // PROBE-AN1d
+                                static_cast<unsigned>(std::chrono::duration_cast<std::chrono::seconds>(now - t0).count()));
+                    ps2xAn1DumpAll();
+                }
+            }
+        }
+    }).detach();
+}
+
+// Called once per frame from the main loop: F10 dumps, F9 (PS2X_AN1_RESET=F9) or a file an1_reset.txt in cwd clears.
+void ps2xAn1Poll(bool f9, bool f10)
+{
+    if (!g_an1)
+        return;
+    static const bool s_f9Reset = []() { const char *e = std::getenv("PS2X_AN1_RESET"); return e && e[0] == 'F' && e[1] == '9'; }();
+    bool reset = s_f9Reset && f9;
+    // PROBE-AN1b: callable from the raylib frame loop and from the SDL event poll (~1 kHz), so everything is time based.
+    static auto s_lastFile = std::chrono::steady_clock::now();
+    static auto s_lastDump = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s_lastFile >= std::chrono::milliseconds(250))
+    {
+        s_lastFile = now;
+        std::error_code ec0;
+        if (std::filesystem::exists("an1_reset.txt", ec0))
+        {
+            reset = true;
+            std::error_code ec;
+            std::filesystem::remove("an1_reset.txt", ec);
+        }
+    }
+    if (f10 || now - s_lastDump >= std::chrono::seconds(30))
+    {
+        s_lastDump = now;
+        ps2xAn1DumpAll();
+    }
+    if (reset)
+    {
+        std::lock_guard<std::mutex> lk(g_an1Mtx);
+        g_an1Map.clear();
+        g_an1First.clear();
+        ps2xSafeLog("[an1] reset\n"); // PROBE-AN1d
+        ps2xFlushLog();
+    }
+}
+// ---- end PROBE-AN1 --------------------------------------------------------------------------------------------
+
 void ps2xDumpEeRam() // PROBE-DR1
 {
     PS2Runtime *rt = s_activeRuntime.load(std::memory_order_acquire);
@@ -9866,10 +10515,18 @@ void ps2xGuestWriteHit(uint32_t addr, uint32_t size, uint64_t val)
     const uint32_t fn2 = recentFn(2u);
     uint32_t guestSp = 0u;
     uint32_t guestRa = 0u;
-    if (R5900Context *ctx = rt ? rt->eeScheduler().currentContext() : nullptr)
+    uint32_t gPc = 0u, gA0 = 0u, gA1 = 0u, gA2 = 0u, gA3 = 0u; // PROBE-WW4
+    R5900Context *wwCtx = g_fnReplayCtx.load(std::memory_order_acquire); // PROBE-WW4
+    if (!wwCtx && rt) wwCtx = rt->eeScheduler().currentContext(); // PROBE-WW4
+    if (R5900Context *ctx = wwCtx)
     {
         guestSp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
         guestRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+        gPc = ctx->pc; // PROBE-WW4
+        gA0 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[4], 0)); // PROBE-WW4
+        gA1 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[5], 0)); // PROBE-WW4
+        gA2 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[6], 0)); // PROBE-WW4
+        gA3 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[7], 0)); // PROBE-WW4
     }
 
     std::lock_guard<std::mutex> lk(g_wwMtx);
@@ -9885,10 +10542,10 @@ void ps2xGuestWriteHit(uint32_t addr, uint32_t size, uint64_t val)
     if (g_wwLogged < g_wwMax) // PROBE-WW2
     {
         ++g_wwLogged;
-        ps2xSafeLog("[wwatch] #%u addr=0x%08x size=%u val=0x%llx float=%g sym=%s+0x%x hostra=%p vbl=%u n=%u fn0=0x%08x fn1=0x%08x fn2=0x%08x sp=0x%08x ra=0x%08x\n", // PROBE-WW2 // PROBE-WW3
+        ps2xSafeLog("[wwatch] #%u addr=0x%08x size=%u val=0x%llx float=%g sym=%s+0x%x hostra=%p vbl=%u n=%u fn0=0x%08x fn1=0x%08x fn2=0x%08x sp=0x%08x ra=0x%08x pc=0x%08x a0=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x\n", // PROBE-WW2 // PROBE-WW3 // PROBE-WW4
                     hitIdx, addr, size, static_cast<unsigned long long>(val),
                     static_cast<double>(fval), symName, symOff, ra, vbl, symHitIdx,
-                    fn0, fn1, fn2, guestSp, guestRa);
+                    fn0, fn1, fn2, guestSp, guestRa, gPc, gA0, gA1, gA2, gA3);
     }
     const auto now = std::chrono::steady_clock::now();
     if (now - g_wwLastSummary >= std::chrono::seconds(10))

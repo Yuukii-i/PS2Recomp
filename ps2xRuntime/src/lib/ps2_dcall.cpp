@@ -13,6 +13,7 @@ extern const bool g_profCounts;
 extern bool g_fnReplayActive; // PROBE-FR1d
 extern uint32_t g_fnReplayStopPc; // PROBE-FR3
 extern bool g_fnReplayBlocked; // PROBE-FR3
+extern bool ps2xFnReplayTrySkip(R5900Context *ctx, uint32_t targetPc); // PROBE-FR5
 
 extern const bool g_ps2DcallSlowMode = []() {
     const char *dcall = std::getenv("PS2X_DCALL");
@@ -82,6 +83,10 @@ bool ps2DcallContinue(uint8_t *rdram,
         if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && nextPc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
         {
             return false;
+        }
+        if (g_fnReplayActive && ps2xFnReplayTrySkip(ctx, nextPc)) [[unlikely]] // PROBE-FR5
+        {
+            continue;
         }
         if ((nextPc & 3u) != 0u ||
             nextPc < tableBase ||

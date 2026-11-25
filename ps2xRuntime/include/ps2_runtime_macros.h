@@ -206,6 +206,19 @@ inline float ps2_from_double(double d)
     return static_cast<float>(d);
 }
 
+// PROBE-AN1: EE anomaly probe. g_an1 is set from env PS2X_AN1=1; everything below costs one predictable branch when off.
+extern bool g_an1; // PROBE-AN1
+enum Ps2An1Kind : int // PROBE-AN1 (names in ps2_runtime.cpp must match this order)
+{
+    AN1_SLOW = 0, AN1_F_NAN, AN1_F_INF, AN1_F_DENORM_RES, AN1_F_DENORM_IN, AN1_F_CANCEL, AN1_F_DIV0, AN1_F_SQRTNEG, AN1_F_HUGE,
+    AN1_V_NAN, AN1_V_INF, AN1_V_DENORM_RES, AN1_V_DENORM_IN, AN1_V_CANCEL, AN1_V_HUGE, AN1_IN_NANHUGE,
+    AN1_Q_DIV0, AN1_Q_SQRTNEG, AN1_Q_BAD, AN1_ST_BAD, AN1_V_SLOW, AN1_F_RSQRT0, AN1_V_IN_NANHUGE, AN1_KIND_COUNT
+}; // PROBE-AN1
+void ps2xAn1Ev(int kind, uint32_t a, uint32_t b, uint32_t r);                  // PROBE-AN1
+void ps2xAn1Fpu(int op, float a, float b, float r);                            // PROBE-AN1 op: 0 add 1 sub 2 mul 3 div 4 sqrt 5 rsqrt
+void ps2xAn1Vec(int op, __m128 a, __m128 b, __m128 r);                         // PROBE-AN1 op: 0 add 1 sub 2 mul
+void ps2xAn1Store(uint32_t addr, const void *p, int bytes);                    // PROBE-AN1
+
 // PROBE-M14
 bool ps2xFpuProbeEnabled();
 void ps2xFpuProbe(void *ra, int kind);
@@ -217,6 +230,7 @@ void ps2xFpuProbe(void *ra, int kind);
 
 PS2_FLOAT_NOINLINE inline float ps2_fadd_slow(float a, float b)
 {
+    if (g_an1) [[unlikely]] ps2xAn1Ev(AN1_SLOW, std::bit_cast<uint32_t>(a), std::bit_cast<uint32_t>(b), 0); // PROBE-AN1
     // Zero operands and results end up here too; the host result is right for them.
     const float r = a + b;
     if (!(ps2_fspecial(a) | ps2_fspecial(b) | ps2_fspecial(r)))
@@ -232,6 +246,7 @@ PS2_FLOAT_NOINLINE inline float ps2_fadd_slow(float a, float b)
 
 PS2_FLOAT_NOINLINE inline float ps2_fsub_slow(float a, float b)
 {
+    if (g_an1) [[unlikely]] ps2xAn1Ev(AN1_SLOW, std::bit_cast<uint32_t>(a), std::bit_cast<uint32_t>(b), 1); // PROBE-AN1
     // Zero operands and results end up here too; the host result is right for them.
     const float r = a - b;
     if (!(ps2_fspecial(a) | ps2_fspecial(b) | ps2_fspecial(r)))
@@ -247,6 +262,7 @@ PS2_FLOAT_NOINLINE inline float ps2_fsub_slow(float a, float b)
 
 PS2_FLOAT_NOINLINE inline float ps2_fmul_slow(float a, float b)
 {
+    if (g_an1) [[unlikely]] ps2xAn1Ev(AN1_SLOW, std::bit_cast<uint32_t>(a), std::bit_cast<uint32_t>(b), 2); // PROBE-AN1
     // Zero operands and results end up here too; the host result is right for them.
     const float r = a * b;
     if (!(ps2_fspecial(a) | ps2_fspecial(b) | ps2_fspecial(r)))
@@ -263,6 +279,7 @@ PS2_FLOAT_NOINLINE inline float ps2_fmul_slow(float a, float b)
 // A zero divisor gives +-max with the sign of fs xor ft.
 PS2_FLOAT_NOINLINE inline float ps2_fdiv_slow(float a, float b)
 {
+    if (g_an1) [[unlikely]] ps2xAn1Ev(AN1_SLOW, std::bit_cast<uint32_t>(a), std::bit_cast<uint32_t>(b), 3); // PROBE-AN1
     const uint32_t ua = std::bit_cast<uint32_t>(a);
     const uint32_t ub = std::bit_cast<uint32_t>(b);
     if ((ub & PS2_FLOAT_EXP_MASK) == 0u)
@@ -286,6 +303,7 @@ PS2_FLOAT_NOINLINE inline float ps2_fdiv_slow(float a, float b)
 // sqrt(|ft|); the result is never negative, sqrt(-0) is +0.
 PS2_FLOAT_NOINLINE inline float ps2_fsqrt_slow(float a)
 {
+    if (g_an1) [[unlikely]] ps2xAn1Ev(AN1_SLOW, std::bit_cast<uint32_t>(a), 0, 4); // PROBE-AN1
     if ((std::bit_cast<uint32_t>(a) & PS2_FLOAT_EXP_MASK) == 0u)
         return 0.0f;
     return ps2_from_double(std::sqrt(std::fabs(ps2_to_double(a))));
@@ -294,6 +312,7 @@ PS2_FLOAT_NOINLINE inline float ps2_fsqrt_slow(float a)
 // fs / sqrt(|ft|). The sign of ft is ignored everywhere, so a zero ft gives +-max with the sign of fs alone.
 PS2_FLOAT_NOINLINE inline float ps2_frsqrt_slow(float a, float b)
 {
+    if (g_an1) [[unlikely]] ps2xAn1Ev(AN1_SLOW, std::bit_cast<uint32_t>(a), std::bit_cast<uint32_t>(b), 5); // PROBE-AN1
     if ((std::bit_cast<uint32_t>(b) & PS2_FLOAT_EXP_MASK) == 0u)
     {
         static const bool on = ps2xFpuProbeEnabled(); // PROBE-M14
@@ -342,7 +361,7 @@ inline float ps2_round_nearest_from_rtz(float r, double rem)
     return r;
 }
 
-inline float ps2_fadd(float a, float b)
+inline float ps2_fadd_core(float a, float b) // PROBE-AN1
 {
     const float r = a + b;
     if (!ps2_fnormal(r)) [[unlikely]]
@@ -353,7 +372,7 @@ inline float ps2_fadd(float a, float b)
     return r;
 }
 
-inline float ps2_fsub(float a, float b)
+inline float ps2_fsub_core(float a, float b) // PROBE-AN1
 {
     const float r = a - b;
     if (!ps2_fnormal(r)) [[unlikely]]
@@ -364,13 +383,13 @@ inline float ps2_fsub(float a, float b)
     return r;
 }
 
-inline float ps2_fmul(float a, float b)
+inline float ps2_fmul_core(float a, float b) // PROBE-AN1
 {
     const float r = a * b;
     return ps2_fnormal(r) ? r : ps2_fmul_slow(a, b);
 }
 
-inline float ps2_fdiv(float a, float b)
+inline float ps2_fdiv_core(float a, float b) // PROBE-AN1
 {
     const float r = a / b;
     if (!ps2_fall_normal(a, b, r)) [[unlikely]]
@@ -388,7 +407,7 @@ inline float ps2_fdiv(float a, float b)
     return r;
 }
 
-inline float ps2_fsqrt(float a)
+inline float ps2_fsqrt_core(float a) // PROBE-AN1
 {
     // FIX-FC2b: SQRT.S ignores operand sign (sqrt(-x) = sqrt(|x|)).
     const float aa = std::fabs(a);
@@ -405,11 +424,19 @@ inline float ps2_fsqrt(float a)
     return r;
 }
 
-inline float ps2_frsqrt(float a, float b)
+inline float ps2_frsqrt_core(float a, float b) // PROBE-AN1
 {
     const float r = a / std::sqrt(b);
     return ps2_fall_normal(a, b, r) ? r : ps2_frsqrt_slow(a, b);
 }
+
+// PROBE-AN1: public entry points; one branch on g_an1 when the probe is off.
+inline float ps2_fadd(float a, float b) { const float r = ps2_fadd_core(a, b); if (g_an1) [[unlikely]] ps2xAn1Fpu(0, a, b, r); return r; }
+inline float ps2_fsub(float a, float b) { const float r = ps2_fsub_core(a, b); if (g_an1) [[unlikely]] ps2xAn1Fpu(1, a, b, r); return r; }
+inline float ps2_fmul(float a, float b) { const float r = ps2_fmul_core(a, b); if (g_an1) [[unlikely]] ps2xAn1Fpu(2, a, b, r); return r; }
+inline float ps2_fdiv(float a, float b) { const float r = ps2_fdiv_core(a, b); if (g_an1) [[unlikely]] ps2xAn1Fpu(3, a, b, r); return r; }
+inline float ps2_fsqrt(float a) { const float r = ps2_fsqrt_core(a); if (g_an1) [[unlikely]] ps2xAn1Fpu(4, a, 0.0f, r); return r; }
+inline float ps2_frsqrt(float a, float b) { const float r = ps2_frsqrt_core(a, b); if (g_an1) [[unlikely]] ps2xAn1Fpu(5, a, b, r); return r; }
 
 enum class Ps2VecOp
 {
@@ -444,7 +471,7 @@ PS2_FLOAT_NOINLINE inline __m128 ps2_vslow(__m128 a, __m128 b, Ps2VecOp op)
 
 // r is the host result of a op b. As in ps2_fnormal, testing r alone finds every lane that needs the double
 // path. Results with exponent 0 are flushed to +-0.
-inline __m128 ps2_vfinish(__m128 a, __m128 b, __m128 r, Ps2VecOp op)
+inline __m128 ps2_vfinish_core(__m128 a, __m128 b, __m128 r, Ps2VecOp op) // PROBE-AN1
 {
     const __m128i expMask = _mm_set1_epi32(0x7F800000);
     const __m128i rexp = _mm_and_si128(_mm_castps_si128(r), expMask);
@@ -452,6 +479,14 @@ inline __m128 ps2_vfinish(__m128 a, __m128 b, __m128 r, Ps2VecOp op)
         return ps2_vslow(a, b, op);
     const __m128i flush = _mm_and_si128(_mm_cmpeq_epi32(rexp, _mm_setzero_si128()), _mm_set1_epi32(0x7FFFFFFF));
     return _mm_castsi128_ps(_mm_andnot_si128(flush, _mm_castps_si128(r)));
+}
+
+// PROBE-AN1: hook point for every PS2_VADD/VSUB/VMUL (and so VMADD/VMSUB/VOPMSUB/VADDQ/VMULI... which compose them).
+inline __m128 ps2_vfinish(__m128 a, __m128 b, __m128 r, Ps2VecOp op)
+{
+    const __m128 res = ps2_vfinish_core(a, b, r, op);
+    if (g_an1) [[unlikely]] ps2xAn1Vec(static_cast<int>(op), a, b, res);
+    return res;
 }
 
 inline __m128 ps2_vadd(__m128 a, __m128 b)
@@ -561,16 +596,19 @@ static PS2_FORCEINLINE void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16
 
 static PS2_FORCEINLINE void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
 {
+    if (g_an1) [[unlikely]] ps2xAn1Store(addr, &value, 4); // PROBE-AN1
     Ps2FastWriteT<uint32_t>(rdram, addr, value);
 }
 
 static PS2_FORCEINLINE void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
 {
+    if (g_an1) [[unlikely]] ps2xAn1Store(addr, &value, 8); // PROBE-AN1
     Ps2FastWriteT<uint64_t>(rdram, addr, value);
 }
 
 static PS2_FORCEINLINE void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 {
+    if (g_an1) [[unlikely]] ps2xAn1Store(addr, &value, 16); // PROBE-AN1
     Ps2FastWriteT<__m128i>(rdram, addr, value);
 }
 

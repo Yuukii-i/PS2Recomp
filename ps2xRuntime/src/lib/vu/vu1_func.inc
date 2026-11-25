@@ -1827,6 +1827,111 @@ inline void m9DumpBad(uint32_t serial, uint16_t mscal, uint32_t clipMode, bool c
     if (unsetSlot >= 0)
         emit("  note: unset-output-slot=%d", unsetSlot);
 }
+
+inline bool clipbadDumpOn() // PROBE-CB1
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_CLIPBAD_DUMP");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+
+struct Cb1State // PROBE-CB1
+{
+    std::mutex mtx;
+    uint32_t calls = 0u;
+    uint32_t dumps = 0u;
+    uint32_t inputNaNOrHuge = 0u;
+    uint32_t inputSane = 0u;
+    bool atexitReg = false;
+};
+
+inline Cb1State &cb1State() // PROBE-CB1
+{
+    static Cb1State s_cb1;
+    return s_cb1;
+}
+
+inline void cb1PrintSummary() // PROBE-CB1
+{
+    Cb1State &st = cb1State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    ::ps2xSafeLog("[clipbad-in] summary: inputNaNOrHuge=%u inputSane=%u\n", st.inputNaNOrHuge, st.inputSane);
+}
+
+inline uint32_t cb1NextCall() // PROBE-CB1
+{
+    Cb1State &st = cb1State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    if (!st.atexitReg)
+    {
+        st.atexitReg = true;
+        std::atexit(cb1PrintSummary);
+    }
+    return ++st.calls;
+}
+
+inline void cb1DumpBad(uint32_t serial, uint16_t mscal, uint32_t callNum, // PROBE-CB1
+                       const __m128 inPos[3], const uint32_t inFlags[3],
+                       const __m128 outPos[16], int32_t vout,
+                       __m128 c1v, __m128 c2v, __m128 c5v,
+                       uint16_t vi13, int32_t vi5, int32_t vi6, int32_t vi7, int32_t vi8, int32_t vi9, int32_t vi10,
+                       uint32_t clipMode, bool copyS)
+{
+    bool badInput = false;
+    alignas(16) float ip[3][4]{};
+    uint32_t ib[3][4]{};
+    for (int i = 0; i < 3; ++i)
+    {
+        _mm_store_ps(ip[i], inPos[i]);
+        for (int c = 0; c < 4; ++c)
+        {
+            std::memcpy(&ib[i][c], &ip[i][c], sizeof(uint32_t));
+            const float v = ip[i][c];
+            if (std::isnan(v) || std::isinf(v) || std::fpclassify(v) == FP_SUBNORMAL || std::fabs(v) > 1e6f)
+                badInput = true;
+        }
+    }
+    Cb1State &st = cb1State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    if (badInput)
+        ++st.inputNaNOrHuge;
+    else
+        ++st.inputSane;
+    if (st.dumps >= 40u)
+        return;
+    ++st.dumps;
+    ::ps2xSafeLog("[clipbad-in] serial=%u mscal=0x%04x call#=%u\n",
+                  serial, static_cast<unsigned>(mscal), callNum);
+    for (int i = 0; i < 3; ++i)
+    {
+        ::ps2xSafeLog("  in[%d] xyzw=(%g,%g,%g,%g) bits=(%08x %08x %08x %08x) clipflags=0x%x\n",
+                      i, ip[i][0], ip[i][1], ip[i][2], ip[i][3],
+                      ib[i][0], ib[i][1], ib[i][2], ib[i][3], inFlags[i]);
+    }
+    const int32_t nOut = (vout < 16) ? vout : 16;
+    for (int32_t j = 0; j < nOut; ++j)
+    {
+        alignas(16) float op[4];
+        uint32_t ob[4];
+        _mm_store_ps(op, outPos[j]);
+        for (int c = 0; c < 4; ++c)
+            std::memcpy(&ob[c], &op[c], sizeof(uint32_t));
+        ::ps2xSafeLog("  out[%d] xyzw=(%g,%g,%g,%g) bits=(%08x %08x %08x %08x)\n",
+                      j, op[0], op[1], op[2], op[3], ob[0], ob[1], ob[2], ob[3]);
+    }
+    alignas(16) float fc1[4], fc2[4], fc5[4];
+    _mm_store_ps(fc1, c1v);
+    _mm_store_ps(fc2, c2v);
+    _mm_store_ps(fc5, c5v);
+    ::ps2xSafeLog("  consts: c1v=(%g,%g,%g,%g) c2v=(%g,%g,%g,%g) c5v=(%g,%g,%g,%g)\n",
+                  fc1[0], fc1[1], fc1[2], fc1[3],
+                  fc2[0], fc2[1], fc2[2], fc2[3],
+                  fc5[0], fc5[1], fc5[2], fc5[3]);
+    ::ps2xSafeLog("  vi: vi5=%d vi6=%d vi7=0x%x vi8=%d vi9=%d vi10=%d vi13=0x%x clipMode=%u copyS=%d\n",
+                  vi5, vi6, static_cast<unsigned>(vi7), vi8, vi9, vi10, static_cast<unsigned>(vi13), clipMode, copyS ? 1 : 0);
+}
 } // namespace watch
 
 // Handler 00A8: matrix setup (00A8..0150) + table transform loop (0158..0180), docs/VU1_HANDLER_FORMS.md sections 1, 2 (verified bit-exact there).
@@ -2986,6 +3091,18 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
 
     int32_t polyCount = 3;
     __m128 vf19_last = zero;
+    const bool cb1On = watch::clipbadDumpOn(); // PROBE-CB1
+    const uint32_t cb1Call = cb1On ? watch::cb1NextCall() : 0u; // PROBE-CB1
+    __m128 cb1InPos[3]{}; // PROBE-CB1
+    uint32_t cb1InFlags[3]{}; // PROBE-CB1
+    if (cb1On) // PROBE-CB1
+    {
+        cb1InPos[0] = vf28;
+        cb1InPos[1] = vf29;
+        cb1InPos[2] = vf10;
+        for (int i = 0; i < 3; ++i)
+            cb1InFlags[i] = clipBitsV(cb1InPos[i]);
+    }
     const bool m9On = watch::spikeOn(); // PROBE-M9
     __m128 m9InPos[3]{}, m9InCol[3]{}, m9InTex[3]{}; // PROBE-M9
     uint32_t m9InFlags[3]{}; // PROBE-M9
@@ -3216,6 +3333,26 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
                              m9InPos, m9InCol, m9InTex, m9InFlags, m9InFog,
                              m9OutPos, m9OutCol, m9OutTex, m9OutFog,
                              m9SrcA, m9UnsetSlot, m9Planes, m9NPlanes);
+    }
+    if (cb1On) // PROBE-CB1
+    {
+        bool cb1Bad = (m9UnsetSlot >= 0);
+        __m128 cb1OutPos[16]{};
+        for (int32_t k = 0; k < polyCount && k < 16; ++k)
+        {
+            cb1OutPos[k] = ldq(vu, 918u + 3u * static_cast<uint32_t>(k));
+            alignas(16) float p[4];
+            _mm_store_ps(p, cb1OutPos[k]);
+            if (p[3] == 0.0f || (p[0] == 0.0f && p[1] == 0.0f && p[2] == 0.0f && p[3] == 0.0f))
+                cb1Bad = true;
+        }
+        if (cb1Bad)
+        {
+            const uint32_t serial30 = scene::t_scene.curKickSerial & 0x3FFFFFFFu;
+            watch::cb1DumpBad(serial30, watch::t_m8Mscal, cb1Call,
+                              cb1InPos, cb1InFlags, cb1OutPos, polyCount,
+                              c1v, c2v, c5v, vi13, vi5, vi6, vi7, vi8, vi9, vi10, clipMode, copyS);
+        }
     }
     if (scene::on()) // PERF-SA
         scene::recordClipPolygon(vu, polyCount, copyS, c1v, c2v, kicks.back().first, kicks.back().second, gif);

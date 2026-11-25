@@ -64,6 +64,9 @@ void ps2xSdlSetPresentMode(int mode); // FIX-P2
 bool ps2xSdlPresentModeSupported(int mode); // FIX-P2
 void ps2xSdlGetWindowPixelSize(int *w, int *h); // FIX-P2
 extern void ps2xDumpEeRam(); // PROBE-DR1
+extern bool g_an1;           // PROBE-AN1b
+extern void ps2xAn1Poll(bool f9, bool f10); // PROBE-AN1b
+extern void ps2xAn1DumpAll();               // PROBE-AN1b
 
 namespace
 {
@@ -1146,6 +1149,16 @@ namespace // FIX-RDG4Q
     void pollSdlEventsNow()
     {
         SDL_Event ev{};
+        bool an1F9 = false, an1F10 = false; // PROBE-AN1b
+        struct An1PollGuard // PROBE-AN1b: runs after the event loop on every exit path
+        {
+            bool &f9;
+            bool &f10;
+            ~An1PollGuard()
+            {
+                ps2xAn1Poll(f9, f10);
+            }
+        } an1Guard{an1F9, an1F10}; // PROBE-AN1b
         while (SDL_PollEvent(&ev))
         {
 #if defined(PS2X_HAS_IMGUI) // DBG1
@@ -1174,6 +1187,11 @@ namespace // FIX-RDG4Q
                 {
                     ps2xDumpEeRam(); // PROBE-DR1
                 } // PROBE-DR1
+                if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) // PROBE-AN1b
+                {
+                    an1F9 = an1F9 || ev.key.scancode == SDL_SCANCODE_F9;
+                    an1F10 = an1F10 || ev.key.scancode == SDL_SCANCODE_F10;
+                } // PROBE-AN1b
                 break;
             case SDL_EVENT_GAMEPAD_ADDED:
                 if (!g_sdl.gamepad)
@@ -1572,6 +1590,13 @@ void ps2xSdlSetTitle(const char *t)
 
 void ps2xSdlShutdown()
 {
+    { // PROBE-AN1b
+        if (g_an1)
+        {
+            ps2xAn1DumpAll();
+            std::fflush(stderr);
+        }
+    } // PROBE-AN1b
     if (g_sdl.audioStream)
     {
         SDL_DestroyAudioStream(g_sdl.audioStream);
