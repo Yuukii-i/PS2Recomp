@@ -1130,11 +1130,11 @@ static inline bool rdFogEnvEnabled() // FIX-E1c
     return s_fogEnabled;
 }
 
-static inline bool rdFogZeroEnvEnabled() // FIX-E1d
+static inline bool rdFogZeroEnvEnabled() // FIX-E1d // FIX-TR12
 {
     static const bool s_fogZero = []{
         const char *e = std::getenv("PS2X_RD_FOG_ZERO");
-        return e && e[0] == '1';
+        return !(e && e[0] == '0'); // FIX-TR12
     }();
     return s_fogZero;
 }
@@ -4158,6 +4158,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     }
                     continue;
                 }
+                static const bool s_fxStretch = []{ const char *e = std::getenv("PS2X_FX_STRETCH"); return !(e && e[0] == '0'); }(); // FIX-TR3
+                if (s_fxStretch && uiTag == 0u && ((b.prim >> 4) & 1ull) == 0ull) continue; // FIX-TR3 untextured effects stretch
                 const bool isWide = (bw >= 0.8f * fbW); // FIX-RD64
                 if (isWide && (bh >= 0.9f * fbH || (!menuFrame && !s_hudCenter))) // FIX-RD64 / FIX-RD65
                     continue; // full-width draw stretches to full window
@@ -7221,6 +7223,10 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const bool alphaReplace = (b.alpha & 0xFFull) == 0x44ull;
                 if (!abeOff && !alphaReplace)
                     continue;
+                static const bool s_keepFade = [] { const char *e = std::getenv("PS2X_RD_KEEPFADE"); return !e || e[0] != '0'; }();
+                const bool isFadeQuad = ((b.prim >> 6) & 1ull) && (b.test & 1ull) && (((b.test >> 1) & 7ull) == 6ull) &&
+                                        (((b.test >> 4) & 0xFFull) == 0ull);
+                if (s_keepFade && isFadeQuad) continue; // FIX-TR11
                 float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
                 uint8_t maxA = 0u;
                 const size_t e2 = std::min<size_t>(static_cast<size_t>(b.first) + b.count, g_rdGpu.local2dScratch.size());
@@ -7282,6 +7288,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d); // RDG1
             curVao = 0u;
         }
+        swirlMask2d.clear(); // FIX-TR14: all masks of this frame, not only those already walked
+        for (size_t k = 0; k < n2d; ++k) { const Rd2DBatch &b = g_rdGpu.local2dBatches[k];
+            if (b.count != 0u && allow2dIdx(k) && isRdSwirlMask(b)) swirlMask2d.push_back(k); }
         if (!swirlMask2d.empty()) // FEAT-E4a
         {
             uint32_t numSprites = 0;
