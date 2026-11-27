@@ -4144,8 +4144,22 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     {
                         const float sx0 = static_cast<float>(b.scissor & 0x7FFull);
                         const float sx1 = static_cast<float>((b.scissor >> 16) & 0x7FFull);
-                        const float n0 = std::max(0.0f, std::min(2047.0f, std::floor(mapX(sx0))));
-                        const float n1 = std::max(0.0f, std::min(2047.0f, std::ceil(mapX(sx1 + 1.0f)) - 1.0f));
+                        static const bool s_lselWide = []{ const char *e = std::getenv("PS2X_LSEL_WIDE"); return !(e && e[0] == '0'); }(); // FIX-LSEL1
+                        float n0, n1;
+                        if (s_lselWide && uiTag == 17u && sx0 <= 1.0f && sx1 >= fbW - 2.0f) // FIX-LSEL1: level select shows up to 16:9 of its carousel
+                        {
+                            const float areaPx = std::min(w, h * 16.0f / 9.0f);
+                            const float halfFb = 0.5f * fbW * areaPx / w;
+                            n0 = std::floor(0.5f * fbW - halfFb);
+                            n1 = std::ceil(0.5f * fbW + halfFb) - 1.0f;
+                        }
+                        else
+                        {
+                            n0 = std::floor(mapX(sx0));
+                            n1 = std::ceil(mapX(sx1 + 1.0f)) - 1.0f;
+                        }
+                        n0 = std::max(0.0f, std::min(2047.0f, n0));
+                        n1 = std::max(0.0f, std::min(2047.0f, n1));
                         b.scissor = (b.scissor & ~(0x7FFull | (0x7FFull << 16))) |
                                     static_cast<uint64_t>(n0) | (static_cast<uint64_t>(n1) << 16);
                     }
