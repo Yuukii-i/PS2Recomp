@@ -6441,7 +6441,11 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
                                     (((ctx.test >> 1u) & 7ull) == 6ull) &&
                                     (((ctx.test >> 4u) & 0xFFull) == 0ull); // FIX-E5c
             const bool noColour = writesNoColour(ctx.test, ctx.frame.fbmsk); // PROBE-PA1c
-            const bool wantClearCheck = rdFrameCutOn() && !prim.tme && addCount > 0u && !isFadeQuad && // FEAT-RD55: O(1) early-out when FRAMECUT=0, TME=1, or count==0 // FIX-E5c
+            // FIX-SAVE2: the save menu draws a dim overlay between the 3D scene and the menu; counting it as a screen clear cut the
+            // frame there and put the menu before the next frame's scene. PS2X_RD_DIMCLEAR=1 restores.
+            static const bool s_rdDimNoClear = []() { const char *e = std::getenv("PS2X_RD_DIMCLEAR"); return !(e && e[0] == '1'); }();
+            const bool isDimOverlay = prim.abe && (ctx.test & 1ull) != 0ull && ((ctx.test >> 1u) & 7ull) == 0ull && ((ctx.test >> 12u) & 3ull) == 1ull;
+            const bool wantClearCheck = rdFrameCutOn() && !prim.tme && addCount > 0u && !isFadeQuad && !(isDimOverlay && s_rdDimNoClear) && // FEAT-RD55: O(1) early-out when FRAMECUT=0, TME=1, or count==0 // FIX-E5c
                                         (!prim.abe || ((b2d.alpha & 0xFFull) == 0x44ull)) &&
                                         ((b2d.frame >> 32) & 0xFFFFFFull) == 0ull &&
                                         !noColour; // FIX-E8b
