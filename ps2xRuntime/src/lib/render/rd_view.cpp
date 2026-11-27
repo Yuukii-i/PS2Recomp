@@ -338,6 +338,9 @@ static uint32_t s_fbTexCopies = 0u; // FIX-RD79
 static uint32_t s_fbTexFrozen = 0u; // FIX-RD86
 static uint32_t s_fbCopySkip = 0u; // FIX-RD87
 static unsigned int s_prevTexId = 0u; // FIX-RD79
+static unsigned int s_sceneTexId = 0u, s_sceneFbo = 0u; // FIX-PA5
+static int s_sceneW = 0, s_sceneH = 0; // FIX-PA5
+static bool s_sceneFilled = false; // FIX-PA5
 static int s_prevW = 0, s_prevH = 0; // FXC1
 static bool s_prevFilled = false; // FXC1
 static uint64_t s_prevFlipSeq = 0ull; // PROBE-E7b
@@ -4355,6 +4358,35 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
     uint64_t draws2dThisFrame = 0; // FEAT-RD8
     uint32_t drawn3dThisFrame = 0u; // FEAT-RD34
     bool palDrawnThisFrame = false; // FIX-RD86
+    static const bool pauseBgOn = []() { const char *e = std::getenv("PS2X_PAUSE_BG"); return !e || !*e || e[0] != '0'; }(); // FIX-PA5
+    bool pauseFrame = false; // FIX-PA5
+    bool sceneSnapped = false; // FIX-PA5
+    auto takeScene = [&]() { // FIX-PA5
+        const int wantW = vw; // FIX-PA5
+        const int wantH = static_cast<int>((static_cast<int64_t>(vh) * 512 + 224) / 448); // FIX-PA5
+        rdgfx::BackbufferCopyState copyState{}; // FIX-PA5
+        rdgfx::beginBackbufferCopy(copyState); // FIX-PA5
+        const bool willResize = (s_sceneTexId == 0u || s_sceneW != wantW || s_sceneH != wantH); // FIX-PA5
+        if (willResize) // FIX-PA5
+        { // FIX-PA5
+            if (s_sceneTexId != 0u) // FIX-PA5
+                g_rdc.invalidateTex(s_sceneTexId); // FIX-PA5
+            s_sceneFilled = false; // FIX-PA5
+        } // FIX-PA5
+        if (rdgfx::copyBackbufferToTexture(copyState, s_sceneTexId, s_sceneFbo, s_sceneW, s_sceneH, // FIX-PA5
+                                           wantW, wantH, vx, vy, vw, vh, vw, vh, false)) // FIX-PA5
+        { // FIX-PA5
+            if (willResize && s_sceneTexId != 0u) // FIX-PA5
+                g_rdc.invalidateTex(s_sceneTexId); // FIX-PA5
+            s_sceneFilled = true; // FIX-PA5
+            sceneSnapped = true; // FIX-PA5
+        } // FIX-PA5
+        else if (willResize && s_sceneTexId != 0u) // FIX-PA5
+        { // FIX-PA5
+            g_rdc.invalidateTex(s_sceneTexId); // FIX-PA5
+        } // FIX-PA5
+        rdgfx::endBackbufferCopy(copyState); // FIX-PA5
+    }; // FIX-PA5
     uint64_t ztested2dThisFrame = 0; // FEAT-RD11
     uint64_t zclears2dThisFrame = 0; // FEAT-RD20
     struct RdPassEnt { uint32_t fbp, xo, yo, sx0, sy0, sx1, sy1; float vox, voy; uint32_t n; }; // FEAT-RD22
@@ -4931,6 +4963,49 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 return false;
             return true;
         };
+        uint32_t copyTargets[32]; // FIX-PA5
+        size_t copyTargetCount = 0; // FIX-PA5
+        for (const auto &b : g_rdGpu.local2dBatches) // FIX-PA5
+        { // FIX-PA5
+            const bool tme = ((b.prim >> 4) & 1ull) != 0ull; // FIX-PA5
+            if (tme && ps2xRdIsFbFeedback(b.texSerial) && !isRdFbTexDisplayBatch(b)) // FIX-PA5
+            { // FIX-PA5
+                const uint32_t targetFbp = static_cast<uint32_t>(b.frame & 0x1FFull); // FIX-PA5
+                bool found = false; // FIX-PA5
+                for (size_t ci = 0; ci < copyTargetCount; ++ci) // FIX-PA5
+                { // FIX-PA5
+                    if (copyTargets[ci] == targetFbp) { found = true; break; } // FIX-PA5
+                } // FIX-PA5
+                if (!found && copyTargetCount < sizeof(copyTargets) / sizeof(copyTargets[0])) // FIX-PA5
+                    copyTargets[copyTargetCount++] = targetFbp; // FIX-PA5
+            } // FIX-PA5
+        } // FIX-PA5
+        auto inCopyTargets = [&](uint32_t fbp) -> bool { // FIX-PA5
+            for (size_t ci = 0; ci < copyTargetCount; ++ci) // FIX-PA5
+                if (copyTargets[ci] == fbp) return true; // FIX-PA5
+            return false; // FIX-PA5
+        }; // FIX-PA5
+        auto isPauseTint = [&](const Rd2DBatch &b) -> bool { // FIX-PA5
+            const bool tme = ((b.prim >> 4) & 1ull) != 0ull; // FIX-PA5
+            const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull); // FIX-PA5
+            const uint32_t psm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full); // FIX-PA5
+            const bool fromTarget = (tbp0 & 31u) == 0u && inCopyTargets(tbp0 >> 5); // FIX-PA5
+            return tme && psm == 0x1Bu && fromTarget; // FIX-PA5
+        }; // FIX-PA5
+        auto isPauseBlur = [&](const Rd2DBatch &b) -> bool { // FIX-PA5
+            const bool tme = ((b.prim >> 4) & 1ull) != 0ull; // FIX-PA5
+            const uint32_t tbp0 = static_cast<uint32_t>(b.tex0 & 0x3FFFull); // FIX-PA5
+            const uint32_t psm = static_cast<uint32_t>((b.tex0 >> 20) & 0x3Full); // FIX-PA5
+            const bool fromTarget = (tbp0 & 31u) == 0u && inCopyTargets(tbp0 >> 5); // FIX-PA5
+            return tme && psm == 0u && fromTarget && !inCopyTargets(static_cast<uint32_t>(b.frame & 0x1FFull)); // FIX-PA5
+        }; // FIX-PA5
+        bool hasPauseTint = false, hasPauseBlur = false; // FIX-PA5
+        for (const auto &b : g_rdGpu.local2dBatches) // FIX-PA5
+        { // FIX-PA5
+            if (isPauseTint(b)) hasPauseTint = true; // FIX-PA5
+            if (isPauseBlur(b)) hasPauseBlur = true; // FIX-PA5
+        } // FIX-PA5
+        pauseFrame = pauseBgOn && hasPauseTint && hasPauseBlur; // FIX-PA5
         auto emit2dBatch = [&](size_t idx, const Rd2DBatch &b0, uint32_t totalCount, size_t jEnd, bool forceNoZ, bool logReason) // FIX-RD63
         {
             if (!allow2dIdx(idx)) // PROBE-RD83
@@ -5027,6 +5102,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
 
             int texVal = 0, tfxVal = 0, tccVal = 0;
             int palMode = 0; // FIX-RD82B
+            bool pauseSceneSub = false; // FIX-PA5
             int palFallback = 0; // FIX-RD84
             unsigned int texId = 0u;
             if ((b0.prim >> 4) & 1ull)
@@ -5034,6 +5110,12 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 if (isRdFbTexDisplayBatch(b0)) // FIX-RD79
                 {
                     texId = rdFbTexSelectId(b0.tex0); // FIX-RD85
+                    if (pauseFrame && isPauseTint(b0) && s_sceneFilled && s_sceneTexId != 0u) // FIX-PA5
+                    { // FIX-PA5
+                        texId = s_sceneTexId; // FIX-PA5
+                        pauseSceneSub = true; // FIX-PA5
+                        palDrawnThisFrame = true; // FIX-PA5
+                    } // FIX-PA5
                     ++s_fbTexUsed;
                     palMode = 2; // FIX-RD82J
                     ++s_fbTexAlphaFix; // FIX-RD82J
@@ -5114,6 +5196,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     rdBindTex(texId, (wms != 0u ? 1u : 0u) | (wmt != 0u ? 2u : 0u) | ((((b0.tex1 >> 5) & 1ull) != 0ull) ? 4u : 0u) | ((((b0.tex1 >> 6) & 7ull) != 0ull) ? 8u : 0u)); // FEAT-RD15
                     texVal = 1;
                     tfxVal = static_cast<int>((b0.tex0 >> 35) & 3ull);
+                    if (pauseSceneSub) tfxVal = 1; // FIX-PA5
                     tccVal = static_cast<int>((b0.tex0 >> 34) & 1ull);
                 }
             }
@@ -5332,6 +5415,14 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     ++i2d;
                     continue;
                 }
+                if (pauseFrame && isPauseBlur(b0)) // FIX-PA5
+                { // FIX-PA5
+                    log2dReason(i2d, b0, "skip-pauseBlur"); // FIX-PA5
+                    ++i2d; // FIX-PA5
+                    continue; // FIX-PA5
+                } // FIX-PA5
+                if (pauseBgOn && !pauseFrame && !sceneSnapped && drawn3dThisFrame > 0u && ((b0.prim >> 48) & 0xFFull) != 0ull) // FIX-PA5
+                    takeScene(); // FIX-PA5
                 const uint32_t ate = static_cast<uint32_t>(b0.test & 1ull);
                 const uint32_t atst = ate ? static_cast<uint32_t>((b0.test >> 1) & 7ull) : 1u;
                 const int afail = (ate && atst != 1u) ? static_cast<int>((b0.test >> 12) & 3ull) : 0; // FEAT-RD30
@@ -7661,6 +7752,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 }
                 rdgfx::endBackbufferCopy(copyState); // RDG1
             };
+            if (pauseBgOn && !pauseFrame && !sceneSnapped && drawn3dThisFrame > 0u) // FIX-PA5
+                takeScene(); // FIX-PA5
             if (!palDrawnThisFrame) // FIX-RD86
             {
                 copyToFbTarget(s_prevTexId, s_prevFbo, s_prevW, s_prevH, s_prevFilled, s_fbTexCopies); // FIX-RD85B

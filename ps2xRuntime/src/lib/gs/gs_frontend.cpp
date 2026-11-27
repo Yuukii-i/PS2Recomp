@@ -1611,7 +1611,7 @@ static uint32_t s_rdCgLastFbp = 0u, s_rdCgLastPsm = 0u; // PROBE-CUT2B
 static uint32_t s_rdCgLastScX0 = 0u, s_rdCgLastScX1 = 0u, s_rdCgLastScY0 = 0u, s_rdCgLastScY1 = 0u; // PROBE-CUT2B
 static uint32_t s_rdCgLastScW = 0u, s_rdCgLastScH = 0u; // PROBE-CUT2B
 static float s_rdCgLastBbW = 0.0f, s_rdCgLastBbH = 0.0f; // PROBE-CUT2B
-static const bool s_rdFxOn = []() { const char *e = std::getenv("PS2X_RD_FXCLASSIC"); return !e || !*e || e[0] != '0'; }(); // FIX-FX1 // FIX-FX4
+static const bool s_rdFxOn = []() { const char *e = std::getenv("PS2X_RD_FXCLASSIC"); return e && e[0] == '1'; }(); // FIX-PA5
 static const bool s_rdFxPause = []() { const char *e = std::getenv("PS2X_RD_FXPAUSE"); return !e || !*e || e[0] != '0'; }(); // FIX-FX2
 static std::atomic<bool> s_rdFxPending{false}; // FIX-FX1
 static uint32_t s_rdFxMarkers = 0u; // FIX-FX1
