@@ -4130,6 +4130,35 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     else if (q == 10u) anchor = 2;                // gadget ring
                     else if (q == 5u && !(bw >= 0.8f * fbW) && !(dc >= -0.1f * fbW && dc <= 0.1f * fbW))
                         anchor = (cx < c) ? 1 : 2;                // mixed HUD layer
+                    static const bool s_lselWide = []{ const char *e = std::getenv("PS2X_LSEL_WIDE"); return !(e && e[0] == '0'); }(); // FIX-LSEL1
+                    float lselOffset = 0.0f; // FIX-LSEL3
+                    bool isLselBand = false; // FIX-LSEL3
+                    if (s_lselWide && uiTag == 17u) // FIX-LSEL3
+                    {
+                        const float areaPx = std::min(w, h * 16.0f / 9.0f);
+                        const float halfFb = 0.5f * fbW * areaPx / w;
+                        const float d = std::max(0.0f, halfFb / scaleToShader - 0.5f * fbW);
+                        const float dS = std::max(0.0f, 0.5f * fbW / scaleToShader - 0.5f * fbW);
+                        const bool textured = ((b.prim >> 4) & 1) != 0; // FIX-LSEL4
+                        const uint32_t tbp = static_cast<uint32_t>(b.tex0 & 0x3FFFull); // FIX-LSEL4
+                        if ((textured && tbp == 0x3ec0u && minY < 200.0f) || (cx > 330.0f && minY < 150.0f && maxY < 210.0f)) // a) "Level Complete" band // FIX-LSEL4
+                        {
+                            lselOffset = dS;
+                            isLselBand = true;
+                        }
+                        else if (minY >= 372.0f) // b) bottom bars
+                        {
+                            lselOffset = (cx < 200.0f) ? -d : d;
+                        }
+                        else if (minY >= 200.0f && minY <= 245.0f && maxY <= 275.0f) // c) counter / best-time row
+                        {
+                            lselOffset = (cx < 256.0f) ? -d : d;
+                        }
+                        else if (textured && tbp == 0x2e00u && minY >= 255.0f && minY <= 300.0f) // d) arrows // FIX-LSEL4
+                        {
+                            lselOffset = (cx < 256.0f) ? -d : d;
+                        }
+                    }
                     const auto mapX = [&](float v) -> float {
                         if (anchor == 1) return m + v * scaleToShader;
                         if (anchor == 2) return fbW - m - (fbW - v) * scaleToShader;
@@ -4138,14 +4167,32 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                     for (uint32_t k = 0u; k < b.count; ++k)
                     {
                         float &vx2 = g_rdGpu.local2dScratch[b.first + k].pos[0];
-                        vx2 = mapX(vx2);
+                        vx2 = mapX(vx2 + lselOffset); // FIX-LSEL3
                     }
                     if (anchor == 0 && b.scissor != 0ull) // keep off-frame items hidden
                     {
                         const float sx0 = static_cast<float>(b.scissor & 0x7FFull);
                         const float sx1 = static_cast<float>((b.scissor >> 16) & 0x7FFull);
-                        const float n0 = std::max(0.0f, std::min(2047.0f, std::floor(mapX(sx0))));
-                        const float n1 = std::max(0.0f, std::min(2047.0f, std::ceil(mapX(sx1 + 1.0f)) - 1.0f));
+                        float n0, n1;
+                        if (s_lselWide && uiTag == 17u && isLselBand) // FIX-LSEL3: band scissor spans whole frame
+                        {
+                            n0 = 0.0f;
+                            n1 = fbW - 1.0f;
+                        }
+                        else if (s_lselWide && uiTag == 17u && sx0 <= 1.0f && sx1 >= fbW - 2.0f) // FIX-LSEL1: level select shows up to 16:9 of its carousel
+                        {
+                            const float areaPx = std::min(w, h * 16.0f / 9.0f);
+                            const float halfFb = 0.5f * fbW * areaPx / w;
+                            n0 = std::floor(0.5f * fbW - halfFb);
+                            n1 = std::ceil(0.5f * fbW + halfFb) - 1.0f;
+                        }
+                        else
+                        {
+                            n0 = std::floor(mapX(sx0));
+                            n1 = std::ceil(mapX(sx1 + 1.0f)) - 1.0f;
+                        }
+                        n0 = std::max(0.0f, std::min(2047.0f, n0));
+                        n1 = std::max(0.0f, std::min(2047.0f, n1));
                         b.scissor = (b.scissor & ~(0x7FFull | (0x7FFull << 16))) |
                                     static_cast<uint64_t>(n0) | (static_cast<uint64_t>(n1) << 16);
                     }
