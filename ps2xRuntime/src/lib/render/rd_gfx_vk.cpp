@@ -3621,7 +3621,9 @@ static void drawQuad2d(uint32_t texId,
         float pos[4];
         uint8_t col[4];
         float uv[2];
+        float fog; // FIX-PA2
     };
+    static_assert(sizeof(OverlayVertex) == 32, "OverlayVertex must match 32-byte stride"); // FIX-PA2
     constexpr uint32_t kMaxOverlayVerts = 64u * 6u;
     if (s_vk.overlayVbo == 0u)
     {
@@ -3641,12 +3643,12 @@ static void drawQuad2d(uint32_t texId,
     const float x1 = dstX + dstW;
     const float y1 = dstY + dstH;
     const OverlayVertex quad[6] = {
-        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}},
-        {{x1, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v0}},
-        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}},
-        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}},
-        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}},
-        {{x0, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v1}},
+        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}, 1.0f}, // FIX-PA2
+        {{x1, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v0}, 1.0f}, // FIX-PA2
+        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}, 1.0f}, // FIX-PA2
+        {{x0, y0, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v0}, 1.0f}, // FIX-PA2
+        {{x1, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u1, v1}, 1.0f}, // FIX-PA2
+        {{x0, y1, 0.0f, 1.0f}, {255, 255, 255, 255}, {u0, v1}, 1.0f}, // FIX-PA2
     };
 
     const uint32_t firstVertex = s_vk.overlayVertexCursor;
