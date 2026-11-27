@@ -150,6 +150,7 @@ static bool s_rdKickStateChanged = false; // FEAT-RD17
 static uint32_t s_rdLastNonZeroSerial = 0u; // FEAT-RD8
 static uint32_t s_rdMainFbp = 0xFFFFFFFFu;  // FEAT-RD8b
 static uint32_t s_rd2dTexCounter = 1u;      // FEAT-RD8
+static uint32_t s_uiCurLayer = 0xFFu; // FIX-UI2
 bool g_rdCurDrawIsGeom = false;             // FEAT-RD18
 std::atomic<bool> g_rdForceClassic{false};  // FEAT-RD48
 std::atomic<uint64_t> g_rdFrameRtSyncCyc{0ull}; // FEAT-RD48
@@ -5307,6 +5308,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     {
     case GS_REG_PRIM:
     {
+        s_uiCurLayer = (((value >> 40) & 0xFFu) == 0xA5u) ? static_cast<uint32_t>((value >> 32) & 0xFFu) : 0xFFu; // FIX-UI2
         m_primRegister = decodePrimRegister(value);
         if (m_prmodecont)
         {
@@ -6419,6 +6421,8 @@ void GS::queueDraw(const GSPrimitiveBatch &batch)
             b2d.afterSerial = (s_rdCurSerial != 0u) ? s_rdCurSerial : s_rdLastNonZeroSerial; // FEAT-RD10
             b2d.texSerial = texSerial;
             b2d.prim = rdPackPrim(prim);
+            // FIX-UI5: bits 48..55 = UI label (0 = none, else queue index + 1; text = 255)
+            if (s_uiCurLayer != 0xFFu) b2d.prim |= static_cast<uint64_t>((s_uiCurLayer + 1u) & 0xFFu) << 48;
             b2d.tex0 = rawTex0;
             b2d.texa = rawTexa;
             b2d.clamp = ctx.clamp;

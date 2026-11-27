@@ -20452,6 +20452,11 @@ label_3bb51c:
         loadF(4, ADD32(sp, 0x48u));
         SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(GPR_U32(ctx, 30), 0x2E0u)));
         loadF(3, ADD32(sp, 0x4Cu));
+        if (g_rdAspectK > 1.0f) // FIX-WS1
+        {
+            ctx->f[4] *= g_rdAspectK;
+            ctx->f[3] *= g_rdAspectK;
+        }
         SET_GPR_U64(ctx, 6, GPR_U64(ctx, 17));
         loadF(0, ADD32(sp, 0x40u));
         SET_GPR_S32(ctx, 7, static_cast<int32_t>(ADD32(sp, 0x70u)));
@@ -20483,6 +20488,11 @@ label_3bb51c:
 label_3bb57c:
     {
         const uint32_t sp = GPR_U32(ctx, 29);
+        const float rdK = (g_rdAspectK > 1.0f) ? g_rdAspectK : 1.0f; // FIX-WS1
+        const float f26Saved = ctx->f[26]; // FIX-WS1
+        const float f25Saved = ctx->f[25]; // FIX-WS1
+        ctx->f[26] = f26Saved * rdK; // FIX-WS1
+        ctx->f[25] = f25Saved * rdK; // FIX-WS1
         loadF(0, ADD32(sp, 0x40u));
         SET_GPR_S32(ctx, 7, static_cast<int32_t>(ADD32(sp, 0xB0u)));
         storeF(26, ADD32(sp, 0xB0u));
@@ -20501,6 +20511,8 @@ label_3bb57c:
         storeF(23, ADD32(sp, 0xB4u));
         storeF(0, ADD32(sp, 0xB8u));
         storeF(25, ADD32(sp, 0xC0u));
+        ctx->f[26] = f26Saved; // FIX-WS1
+        ctx->f[25] = f25Saved; // FIX-WS1
         SET_GPR_U32(ctx, 31, 0x3BB5CCu);
         storeF(0, ADD32(sp, 0xC8u));
         ctx->pc = 0x3BAE50u;

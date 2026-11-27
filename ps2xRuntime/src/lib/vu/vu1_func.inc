@@ -52,6 +52,8 @@ struct RdBatch // FEAT-RD2 // FEAT-RD14
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern bool ps2xRdActive(); // FEAT-RD49
+extern float g_rdAspectK; // FIX-WS1
+extern int g_ps2xWsMode; // FIX-WS2
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
 extern void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD14
 extern std::atomic<uint32_t> g_rdKickSerial; // FEAT-RD5
@@ -2224,6 +2226,8 @@ inline void stqi(uint8_t *vu, uint32_t q, __m128i v) { stq(vu, q, _mm_castsi128_
 
 inline uint32_t clipBitsV(__m128 v) // lbClipBits (CLIP.xyz against |w|)
 {
+    if (::ps2xRdActive() && ::g_rdAspectK > 1.0f && ::g_ps2xWsMode != 1) // FIX-WS1
+        v = _mm_mul_ps(v, _mm_set_ps(1.0f, 1.0f, 1.0f, 1.0f / ::g_rdAspectK));
     uint32_t w[4];
     _mm_storeu_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(v));
     const int32_t limit = (w[3] & 0x7F800000u) != 0u ? static_cast<int32_t>(w[3] & 0x7FFFFFFFu) : 0x007FFFFF;
@@ -3129,7 +3133,8 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
     for (int p = 0; p < 6; ++p)
     {
         const PlaneSpec &pl = kPlanes[p];
-        const __m128 sgnV = _mm_set1_ps(pl.sgn);
+        const float effSgn = (pl.axis == 0 && ::ps2xRdActive() && ::g_rdAspectK > 1.0f && ::g_ps2xWsMode != 1) ? (pl.sgn * ::g_rdAspectK) : pl.sgn; // FIX-WS1
+        const __m128 sgnV = _mm_set1_ps(effSgn);
         __m128 vf17 = ldq(vu, pl.inBase + 0u);
         __m128 vf18 = ldq(vu, pl.inBase + 1u);
         __m128 vf23 = ldq(vu, pl.inBase + 2u);

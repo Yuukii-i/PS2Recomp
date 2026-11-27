@@ -4,6 +4,7 @@
 #include "ps2_log.h"
 #include "runtime/ee_scheduler.h"
 
+#include <atomic> // FIX-WS3
 #include <unordered_set>
 #include "Kernel/Syscalls/Helpers/State.h"
 #include "Kernel/Stubs/CD.h"
@@ -21,6 +22,7 @@ extern void ps2xSdlImGuiNewFrame();
 extern void ps2xSdlImGuiEndFrame();
 extern void ps2xSdlImGuiShutdown();
 extern bool ps2xSdlKeyPressedEdge(int sdlScancode);
+extern std::atomic<bool> g_ps2xF1Pressed; // FIX-WS3
 // FIX-P3
 extern int ps2xGfxGetAspectMode();
 extern void ps2xGfxSetAspectMode(int);
@@ -2216,7 +2218,7 @@ namespace
         }
 
         int aspect = ps2xGfxGetAspectMode();
-        const char *aspectItems[] = { "4:3", "fill (widescreen)", "16:9", "16:10", "native" };
+        const char *aspectItems[] = { "4:3 original (black bars)", "Widescreen (shows more)", "16:9 (stretched)", "16:10 (stretched)", "Raw pixels (unscaled shape)" }; // FIX-WS3
         if (ImGui::Combo("Aspect", &aspect, aspectItems, IM_ARRAYSIZE(aspectItems)))
         {
             ps2xGfxSetAspectMode(aspect);
@@ -2239,13 +2241,13 @@ namespace
                 }
             }
         }
-        if (ImGui::Combo("Widescreen cap (fill)", &capIdx, capItems, IM_ARRAYSIZE(capItems)))
+        if (ImGui::Combo("Widest widescreen", &capIdx, capItems, IM_ARRAYSIZE(capItems))) // FIX-WS3
         {
             ps2xGfxSetAspectMax(capValues[capIdx]);
         }
 
         const float hudValues[] = { 0.0f, 21.0f / 9.0f, 16.0f / 9.0f, 4.0f / 3.0f };
-        const char *hudItems[] = { "edge", "safe 21:9", "safe 16:9", "safe 4:3" };
+        const char *hudItems[] = { "screen corners", "within 21:9", "within 16:9", "within 4:3" }; // FIX-WS3
         float curHud = ps2xGfxGetHudSafeAspect();
         int hudIdx = 0;
         if (curHud > 0.0f)
@@ -2261,7 +2263,7 @@ namespace
                 }
             }
         }
-        if (ImGui::Combo("HUD anchor", &hudIdx, hudItems, IM_ARRAYSIZE(hudItems)))
+        if (ImGui::Combo("HUD position", &hudIdx, hudItems, IM_ARRAYSIZE(hudItems))) // FIX-WS3
         {
             ps2xGfxSetHudSafeAspect(hudValues[hudIdx]);
         }
@@ -2406,7 +2408,7 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
         return;
     }
 
-    if (ps2xSdlActive() ? ps2xSdlKeyPressedEdge(58) : IsKeyPressed(KEY_F1)) // DBG1
+    if (ps2xSdlActive() ? g_ps2xF1Pressed.exchange(false) : IsKeyPressed(KEY_F1)) // FIX-WS3
     {
         toggleVisible();
     }

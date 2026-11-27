@@ -2591,6 +2591,7 @@ static void installBrProbe(PS2Runtime *rt) {
     }
 }
 
+
 bool PS2Runtime::loadELF(const std::string &elfPath)
 {
     configureIoPathsFromElf(elfPath);
@@ -2921,6 +2922,64 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     }
 
     ps2xEeGfxDecompInstall(*this); // DECOMP-BM
+
+    // FIX-UI5: tag game UI quads with their layer in PRIM's unused upper bits
+    if (const char *uiEnv = std::getenv("PS2X_UI_TAG"); !(uiEnv && uiEnv[0] == '0'))
+    {
+        static RecompiledFunction s_uiOrig = nullptr;
+        s_uiOrig = lookupFunction(0x003B7798u);
+        if (s_uiOrig)
+        {
+            registerFunction(0x003B7798u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+                if (GPR_U32(ctx, 31) == 0x00508D94u)
+                {
+                    auto host = [rdram](uint32_t a) -> uint8_t * { return rdram + (a & 0x01FFFFF8u) + (a & 7u); };
+                    uint32_t base = 0u;
+                    std::memcpy(&base, host(0x006AF340u), 4);
+                    const uint32_t s3 = GPR_U32(ctx, 19), s2 = GPR_U32(ctx, 18), end = GPR_U32(ctx, 5);
+                    const uint32_t layer = (s3 - base) / 0x20u;
+                    const uint32_t trailers = (*host(s2 + 1u) != 0 ? 1u : 0u) + ((*host(s2) & 1u) ? 1u : 0u);
+                    const uint32_t prim = end - 0x70u - 0x30u * trailers;
+                    uint64_t v = 0ull;
+                    std::memcpy(&v, host(prim), 8);
+                    if (layer < 35u && (v == 0x14Cull || v == 0x15Cull))
+                    {
+                        v |= static_cast<uint64_t>(0xA500u | layer) << 32;
+                        std::memcpy(host(prim), &v, 8);
+                    }
+                }
+                else if (GPR_U32(ctx, 31) == 0x001DF85Cu) // FIX-UI4
+                {
+                    auto host = [rdram](uint32_t a) -> uint8_t * { return rdram + (a & 0x01FFFFF8u) + (a & 7u); };
+                    const uint32_t end = GPR_U32(ctx, 5) & 0x01FFFFFFu;
+                    if (end >= 0x100000u)
+                    {
+                        const uint32_t floorA = (end >= 0x4000u ? (end - 0x4000u) : 0x100000u);
+                        const uint32_t minA = floorA > 0x100000u ? floorA : 0x100000u;
+                        for (uint32_t a = (end & ~0xFu) - 16u; a >= minA; a -= 16u)
+                        {
+                            uint64_t v = 0ull, g = 0ull;
+                            std::memcpy(&v, host(a), 8);
+                            std::memcpy(&g, host(a - 16u), 8);
+                            if (g == 0x6400000000008001ull)
+                            {
+                                if (v == 0x156ull)
+                                {
+                                    v |= (static_cast<uint64_t>(0xA5FEu) << 32);
+                                    std::memcpy(host(a), &v, 8);
+                                }
+                                else if (v == (0x156ull | (static_cast<uint64_t>(0xA5FEu) << 32)))
+                                {
+                                    break; // reached an already-tagged earlier run
+                                }
+                            }
+                        }
+                    }
+                }
+                s_uiOrig(rdram, ctx, runtime);
+            });
+        }
+    }
     ps2xDevConsoleInstall(*this); // FEAT-DF
 
     // 0x003703D4: Early exit check returning non-zero error code -> force return 0

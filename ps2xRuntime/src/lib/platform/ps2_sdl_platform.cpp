@@ -66,6 +66,9 @@ void ps2xSdlGetWindowPixelSize(int *w, int *h); // FIX-P2
 extern void ps2xDumpEeRam(); // PROBE-DR1
 extern void ps2xDevToggleMcChoice(); // FIX-DK
 extern void ps2xPadMarker();         // FIX-DK
+extern void ps2xSafeLog(const char *fmt, ...);
+std::atomic<bool> g_ps2xF1Pressed{false}; // FIX-WS3
+extern int g_ps2xWsMode; // FIX-WS2
 extern bool g_an1;           // PROBE-AN1b
 extern void ps2xAn1Poll(bool f9, bool f10); // PROBE-AN1b
 extern void ps2xAn1DumpAll();               // PROBE-AN1b
@@ -1097,6 +1100,33 @@ bool ps2xSdlInit(const char *title, int w, int h)
         return false;
     }
 
+    // FIX-SCR1: choose which monitor the game window opens on
+    int n = 0;
+    SDL_DisplayID *ids = SDL_GetDisplays(&n);
+    if (ids)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            SDL_Rect r;
+            if (SDL_GetDisplayBounds(ids[i], &r))
+            {
+                std::printf("[sdl] display %d bounds=%d,%d %dx%d\n", i + 1, r.x, r.y, r.w, r.h);
+            }
+        }
+        if (const char *dispEnv = std::getenv("PS2X_DISPLAY"))
+        {
+            int k = std::atoi(dispEnv);
+            SDL_Rect r;
+            if (k >= 1 && k <= n && SDL_GetDisplayBounds(ids[k - 1], &r))
+            {
+                SDL_SetWindowPosition(g_sdl.window, SDL_WINDOWPOS_CENTERED_DISPLAY(ids[k - 1]), SDL_WINDOWPOS_CENTERED_DISPLAY(ids[k - 1]));
+                SDL_SyncWindow(g_sdl.window);
+                std::printf("[sdl] window on display %d\n", k);
+            }
+        }
+        SDL_free(ids);
+    }
+
     // FIX-R1: start fullscreen when env PS2X_FULLSCREEN=1
     if (const char *fsEnv = std::getenv("PS2X_FULLSCREEN"))
     {
@@ -1193,6 +1223,10 @@ namespace // FIX-RDG4Q
                     ps2xDevToggleMcChoice(); // FIX-DK
                 if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.scancode == SDL_SCANCODE_F7) // FIX-DK
                     ps2xPadMarker(); // FIX-DK
+                if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.scancode == SDL_SCANCODE_F1) // FIX-WS3
+                {
+                    g_ps2xF1Pressed = true;
+                }
                 if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) // PROBE-AN1b
                 {
                     an1F9 = an1F9 || ev.key.scancode == SDL_SCANCODE_F9;
