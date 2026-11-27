@@ -83,6 +83,21 @@ else()
     )
     FetchContent_MakeAvailable(raylib)
 
+    option(PS2X_ENABLE_SDL3 "SDL3 platform layer (Vulkan frontend)" ON) # SDL-PLAT
+    if(PS2X_ENABLE_SDL3 AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # SDL-PLAT
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE) # SDL-PLAT
+        set(SDL_STATIC ON CACHE BOOL "" FORCE) # SDL-PLAT
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE) # SDL-PLAT
+        set(SDL_INSTALL OFF CACHE BOOL "" FORCE) # SDL-PLAT
+        FetchContent_Declare( # SDL-PLAT
+            SDL3 # SDL-PLAT
+            GIT_REPOSITORY "https://github.com/libsdl-org/SDL.git" # SDL-PLAT
+            GIT_TAG "release-3.2.28" # SDL-PLAT
+            GIT_SHALLOW TRUE # SDL-PLAT
+        ) # SDL-PLAT
+        FetchContent_MakeAvailable(SDL3) # SDL-PLAT
+    endif() # SDL-PLAT
+
     if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
         FetchContent_Declare(
             imgui
@@ -413,9 +428,17 @@ add_library(ps2_runtime STATIC
     src/lib/decomp/ee_gfx_decomp.cpp # DECOMP-BM
     src/lib/dev/dev_console.cpp # FEAT-DF
     src/lib/render/rd_view.cpp # FEAT-RD1
+    src/lib/render/rd_gfx_gl.cpp # RDG1
     src/lib/config/ps2x_config.cpp # FEAT-CFG
     src/lib/render/rd_texture.cpp # FEAT-RD3
 )
+
+if(PS2X_ENABLE_SDL3 AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # SDL-PLAT
+    target_sources(ps2_runtime PRIVATE src/lib/platform/ps2_sdl_platform.cpp) # SDL-PLAT
+    target_sources(ps2_runtime PRIVATE src/lib/render/rd_gfx_vk.cpp) # RDG2
+    target_link_libraries(ps2_runtime PRIVATE SDL3::SDL3-static) # SDL-PLAT
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_HAS_SDL3=1) # SDL-PLAT
+endif() # SDL-PLAT
 
 if(PS2X_ENABLE_RUNTIME_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC
@@ -529,11 +552,60 @@ target_include_directories(ps2_runtime PUBLIC
 
 find_package(Vulkan REQUIRED) # PERF-VK: GS Vulkan backend (docs/VULKAN_PLAN.md)
 target_link_libraries(ps2_runtime PRIVATE Vulkan::Vulkan)
+
+if(PS2X_ENABLE_SDL3 AND PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # DBG1
+    target_sources(imgui PRIVATE # DBG1
+        "${PS2X_IMGUI_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp" # DBG1
+        "${PS2X_IMGUI_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp" # DBG1
+    ) # DBG1
+    target_link_libraries(imgui PRIVATE SDL3::SDL3-static Vulkan::Vulkan) # DBG1
+    target_link_libraries(ps2_runtime PRIVATE imgui) # DBG1
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_HAS_IMGUI=1) # DBG1
+endif() # DBG1
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
+if(WIN32) # PROBE-M14
+    target_link_libraries(ps2_runtime PRIVATE dbghelp) # PROBE-M14
+endif() # PROBE-M14
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
 )
+
+if(PS2X_ENABLE_SDL3 AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # RDG2
+    set(PS2X_RD_GLSLC "${Vulkan_GLSLC_EXECUTABLE}") # RDG2
+    if(NOT PS2X_RD_GLSLC) # RDG2
+        find_program(PS2X_RD_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin" "C:/VulkanSDK/1.4.363.0/Bin") # RDG2
+    endif() # RDG2
+    if(PS2X_RD_GLSLC) # RDG2
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/shaders") # RDG2
+        set(PS2X_RD_VERT_SPV "${CMAKE_BINARY_DIR}/shaders/rd.vert.spv") # RDG2
+        set(PS2X_RD_FRAG_SPV "${CMAKE_BINARY_DIR}/shaders/rd.frag.spv") # RDG2
+        add_custom_command( # RDG2
+            OUTPUT "${PS2X_RD_VERT_SPV}" # RDG2
+            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.2 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.vert" -o "${PS2X_RD_VERT_SPV}" # RDG2 FIX-RDG3C
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.vert" # RDG2
+            COMMENT "Compiling rd.vert -> rd.vert.spv" # RDG2
+            VERBATIM # RDG2
+        ) # RDG2
+        add_custom_command( # RDG2
+            OUTPUT "${PS2X_RD_FRAG_SPV}" # RDG2
+            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.2 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.frag" -o "${PS2X_RD_FRAG_SPV}" # RDG2 FIX-RDG3C
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.frag" # RDG2
+            COMMENT "Compiling rd.frag -> rd.frag.spv" # RDG2
+            VERBATIM # RDG2
+        ) # RDG2
+        add_custom_target(ps2x_rd_shaders DEPENDS "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}") # RDG2
+        add_dependencies(ps2_runtime ps2x_rd_shaders) # RDG2
+        add_custom_command( # RDG2
+            TARGET ps2EntryRunner POST_BUILD # RDG2
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:ps2EntryRunner>/shaders" # RDG2
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}" "$<TARGET_FILE_DIR:ps2EntryRunner>/shaders/" # RDG2
+            VERBATIM # RDG2
+        ) # RDG2
+    else() # RDG2
+        message(WARNING "glslc not found; rd.vert.spv / rd.frag.spv will not be compiled") # RDG2
+    endif() # RDG2
+endif() # RDG2
 
 if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
     target_sources(ps2EntryRunner PRIVATE

@@ -3,6 +3,8 @@
 void ps2xSafeLog(const char *fmt, ...);
 void ps2xSpu2GuestVblank(); // FIX-AU4
 void ps2xCid1Vblank(); // FIX-AU5
+class EeScheduler; // FIX-T3
+void ps2xRpcBlockCheckTimeout(EeScheduler *sched, uint64_t eeCycle); // FIX-T3
 extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg); // PROBE-FT2
 static inline bool isVerboseLog()
 {
@@ -50,6 +52,11 @@ static inline bool aw2ProbeOn() // PROBE-AW2
     static const bool s_on = []() { const char *e = std::getenv("PS2X_AW2_PROBE"); return e && e[0] == '1'; }(); // PROBE-AW2
     return s_on; // PROBE-AW2
 } // PROBE-AW2
+static inline bool semaLogOn() // PROBE-T2
+{ // PROBE-T2
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_SEMALOG"); return e && e[0] == '1'; }(); // PROBE-T2
+    return s_on; // PROBE-T2
+} // PROBE-T2
 namespace // PERF-SA
 {
 struct ScratchDepthGuard
@@ -237,6 +244,107 @@ namespace
     constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(1400u); // NTSC vblank ~22 of 262.5 lines (was 500)
     constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
 
+    struct SemaLogRateEntry // PROBE-T2
+    { // PROBE-T2
+        uint32_t count = 0; // PROBE-T2
+        uint32_t lastRa = 0; // PROBE-T2
+    }; // PROBE-T2
+    static std::unordered_map<int, SemaLogRateEntry> s_semaLogRates; // PROBE-T2
+    static uint64_t s_semaLogCurSec = 0; // PROBE-T2
+    static uint64_t s_semaLogThrSec = 0; // PROBE-T2
+
+    static inline uint64_t semaLogHostMs() // PROBE-T2
+    { // PROBE-T2
+        static const auto s_t0 = std::chrono::steady_clock::now(); // PROBE-T2
+        return static_cast<uint64_t>( // PROBE-T2
+            std::chrono::duration_cast<std::chrono::milliseconds>( // PROBE-T2
+                std::chrono::steady_clock::now() - s_t0) // PROBE-T2
+                .count()); // PROBE-T2
+    } // PROBE-T2
+
+    static void semaLogFlushRates(uint64_t curSec) // PROBE-T2
+    { // PROBE-T2
+        if (curSec == s_semaLogCurSec) return; // PROBE-T2
+        for (const auto &kv : s_semaLogRates) // PROBE-T2
+        { // PROBE-T2
+            if (kv.second.count > 200u) // PROBE-T2
+            { // PROBE-T2
+                ps2xSafeLog("[sema-sum] id=%d n=%u ra=0x%08x\n", // PROBE-T2
+                            kv.first, kv.second.count, kv.second.lastRa); // PROBE-T2
+            } // PROBE-T2
+        } // PROBE-T2
+        s_semaLogRates.clear(); // PROBE-T2
+        s_semaLogCurSec = curSec; // PROBE-T2
+    } // PROBE-T2
+
+    static void semaLogOp(uint64_t vbl, int tid, const char *op, int id, uint32_t ra, // PROBE-T2
+                          int cntBefore, int cntAfter, int blocked, int waiters, bool isSemaOp) // PROBE-T2
+    { // PROBE-T2
+        if (ra == 0x35f4b4u) return; // PROBE-T2
+        const uint64_t ms = semaLogHostMs(); // PROBE-T2
+        semaLogFlushRates(ms / 1000ull); // PROBE-T2
+        if (isSemaOp) // PROBE-T2
+        { // PROBE-T2
+            auto &e = s_semaLogRates[id]; // PROBE-T2
+            ++e.count; // PROBE-T2
+            e.lastRa = ra; // PROBE-T2
+            if (e.count > 200u) return; // PROBE-T2
+        } // PROBE-T2
+        ps2xSafeLog("[sema] t=%llums vbl=%llu tid=%d op=%s id=%d ra=0x%08x cnt_before=%d cnt_after=%d blocked=%d waiters=%d\n", // PROBE-T2
+                    (unsigned long long)ms, (unsigned long long)vbl, tid, op, id, ra, // PROBE-T2
+                    cntBefore, cntAfter, blocked, waiters); // PROBE-T2
+    } // PROBE-T2
+
+    static void semaLogThreadsPerSec(uint64_t vbl, const std::unordered_map<int, GuestThread> &threads) // PROBE-T2
+    { // PROBE-T2
+        const uint64_t ms = semaLogHostMs(); // PROBE-T2
+        const uint64_t curSec = ms / 1000ull; // PROBE-T2
+        semaLogFlushRates(curSec); // PROBE-T2
+        if (curSec == s_semaLogThrSec) return; // PROBE-T2
+        s_semaLogThrSec = curSec; // PROBE-T2
+        std::vector<const GuestThread *> sorted; // PROBE-T2
+        sorted.reserve(threads.size()); // PROBE-T2
+        for (const auto &kv : threads) sorted.push_back(&kv.second); // PROBE-T2
+        std::sort(sorted.begin(), sorted.end(), [](const GuestThread *a, const GuestThread *b) { return a->id < b->id; }); // PROBE-T2
+        ps2xSafeLog("[thr] vbl=%llu\n", (unsigned long long)vbl); // PROBE-T2
+        for (const GuestThread *t : sorted) // PROBE-T2
+        { // PROBE-T2
+            const char *stateStr = "waiting"; // PROBE-T2
+            int waitObjId = -1; // PROBE-T2
+            switch (t->status) // PROBE-T2
+            { // PROBE-T2
+            case EeThreadStatus::Running: stateStr = "running"; break; // PROBE-T2
+            case EeThreadStatus::Ready: stateStr = "ready"; break; // PROBE-T2
+            case EeThreadStatus::Dormant: stateStr = "dormant"; break; // PROBE-T2
+            case EeThreadStatus::Suspended: stateStr = "suspended"; break; // PROBE-T2
+            case EeThreadStatus::Waiting: // PROBE-T2
+            case EeThreadStatus::WaitingSuspended: // PROBE-T2
+                if (t->wait.reason == EeWaitReason::Semaphore) // PROBE-T2
+                { // PROBE-T2
+                    stateStr = "waiting-sema"; // PROBE-T2
+                    waitObjId = std::get<EeSemaphoreWait>(t->wait.payload).id; // PROBE-T2
+                } // PROBE-T2
+                else if (t->wait.reason == EeWaitReason::Sleep) // PROBE-T2
+                    stateStr = "sleeping"; // PROBE-T2
+                else if (t->wait.reason == EeWaitReason::EventFlag) // PROBE-T2
+                { // PROBE-T2
+                    stateStr = "waiting-evf"; // PROBE-T2
+                    waitObjId = std::get<EeEventFlagWait>(t->wait.payload).id; // PROBE-T2
+                } // PROBE-T2
+                else if (t->wait.reason == EeWaitReason::VSync) // PROBE-T2
+                    stateStr = "waiting-vsync"; // PROBE-T2
+                break; // PROBE-T2
+            } // PROBE-T2
+            const R5900Context &ctx = t->activeContext(); // PROBE-T2
+            if (waitObjId >= 0) // PROBE-T2
+                ps2xSafeLog("[thr]   tid=%d state=%s %d entry=0x%08x pc=0x%08x ra=0x%08x\n", // PROBE-T2
+                            t->id, stateStr, waitObjId, t->entry, ctx.pc, getRegU32(&ctx, 31)); // PROBE-T2
+            else // PROBE-T2
+                ps2xSafeLog("[thr]   tid=%d state=%s entry=0x%08x pc=0x%08x ra=0x%08x\n", // PROBE-T2
+                            t->id, stateStr, t->entry, ctx.pc, getRegU32(&ctx, 31)); // PROBE-T2
+        } // PROBE-T2
+    } // PROBE-T2
+
     template <typename Map>
     int allocatePositiveId(int &nextId, const Map &objects)
     {
@@ -304,6 +412,8 @@ std::string ps2xGetIntcSummary()
 static EeScheduler *s_activeScheduler = nullptr;
 static PS2Runtime *s_activeRuntime = nullptr;
 static std::atomic<uint32_t> s_diagEnabledIntcMask{0xFFFFFFFFu};
+std::atomic<int> g_ps2xPause{0};      // FEAT-PA1
+std::atomic<int> g_ps2xStepTokens{0}; // FEAT-PA1
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
     : m_runtime(runtime)
@@ -360,6 +470,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_eeCycle = 0u;
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
+    g_ps2xPause.store(0, std::memory_order_release);      // FEAT-PA1
+    g_ps2xStepTokens.store(0, std::memory_order_release); // FEAT-PA1
     m_checkpointPending.store(false, std::memory_order_release);
     m_debugPublishCountdown = 0u;
     {
@@ -680,31 +792,41 @@ void EeScheduler::postEvent(EeEvent event)
 
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
+    // PERF-EX1: pack checkpointDue TLS state into one struct to avoid multiple TLS lookups/guards.
+    struct CkptTlsCache
+    {
+        const GuestThread *cachedThread = nullptr;
+        int cachedThreadId = -1;
+        uint32_t cachedGen = ~0u;
+        const EeScheduler *cachedOwner = nullptr;
+        uint32_t ckptAcc = 0;
+    };
+    static thread_local CkptTlsCache s_ckptTls;
+
     uint32_t pc = g_currentExecutingFunction;
     bool hasThreadPc = false; // FIX-AU9
-    if (m_currentThreadId != 0)
+    if (m_currentThreadId != 0) [[likely]]
     {
         // PERF-KM: cached record of the running guest thread (was an unordered_map lookup on every checkpoint, ~4.5M/s)
-        static thread_local const GuestThread *s_cachedThread = nullptr;
-        static thread_local int s_cachedThreadId = -1;
-        static thread_local uint32_t s_cachedGen = ~0u;
-        static thread_local const EeScheduler *s_cachedOwner = nullptr;
-        if (s_cachedOwner != this || s_cachedThreadId != m_currentThreadId || s_cachedGen != s_threadMapGen)
+        if (s_ckptTls.cachedOwner != this || s_ckptTls.cachedThreadId != m_currentThreadId || s_ckptTls.cachedGen != s_threadMapGen) [[unlikely]]
         {
-            s_cachedThread = currentThread();
-            s_cachedThreadId = m_currentThreadId;
-            s_cachedGen = s_threadMapGen;
-            s_cachedOwner = this;
+            s_ckptTls.cachedThread = currentThread();
+            s_ckptTls.cachedThreadId = m_currentThreadId;
+            s_ckptTls.cachedGen = s_threadMapGen;
+            s_ckptTls.cachedOwner = this;
         }
-        const GuestThread *running = s_cachedThread;
-        if (running != nullptr)
+        const GuestThread *running = s_ckptTls.cachedThread;
+        if (running != nullptr) [[likely]]
         {
             pc = running->activeContext().pc;
             hasThreadPc = true; // FIX-AU9
         }
     }
-    if ((pc >= 0x003D7000u && pc <= 0x003E5000u) ||
-        (g_currentExecutingFunction >= 0x003D7000u && g_currentExecutingFunction <= 0x003E5000u))
+    // PERF-EX1: single unsigned range check per PC instead of two comparisons.
+    constexpr uint32_t kThrottleBase = 0x003D7000u;
+    constexpr uint32_t kThrottleSpan = 0x003E5000u - 0x003D7000u;
+    if ((pc - kThrottleBase) <= kThrottleSpan ||
+        (g_currentExecutingFunction - kThrottleBase) <= kThrottleSpan) [[unlikely]]
     {
         static thread_local uint32_t s_throttleCount = 0;
         if ((++s_throttleCount & 0x3FFu) != 0)
@@ -713,7 +835,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         }
     }
 
-    if (m_currentThreadId == kMainThreadId && (pc == 0x0010384Cu || (g_currentExecutingFunction == 0x001037E8u && pc >= 0x00103960u)))
+    if (m_currentThreadId == kMainThreadId && (pc == 0x0010384Cu || (g_currentExecutingFunction == 0x001037E8u && pc >= 0x00103960u))) [[unlikely]]
     {
         accountCycles(kVBlankPeriodCycles / 4);
         processPendingEvents();
@@ -729,16 +851,15 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         const char *e = std::getenv("PS2X_CKPT_BATCH");
         return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 256u;
     }();
-    static thread_local uint32_t s_ckptAcc = 0;
-    if (kCkptBatch > cycles)
+    if (kCkptBatch > cycles) [[likely]]
     {
-        s_ckptAcc += cycles;
-        if (s_ckptAcc < kCkptBatch && !m_checkpointPending.load(std::memory_order_acquire) && !m_stopRequested.load(std::memory_order_acquire))
+        s_ckptTls.ckptAcc += cycles;
+        if (s_ckptTls.ckptAcc < kCkptBatch && !m_checkpointPending.load(std::memory_order_acquire) && !m_stopRequested.load(std::memory_order_acquire)) [[likely]]
         {
             return false;
         }
-        cycles = s_ckptAcc;
-        s_ckptAcc = 0;
+        cycles = s_ckptTls.ckptAcc;
+        s_ckptTls.ckptAcc = 0;
     }
 
     accountCycles(cycles);
@@ -759,7 +880,13 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         }
         else if (m_eeCycle >= m_sliceEndCycle) // FIX-AU9
         { // FIX-AU9
-            const GuestThread *running = currentThread();
+            // PERF-EX1: reuse cached GuestThread when valid instead of repeating currentThread() map lookup.
+            const GuestThread *running = (m_currentThreadId != 0 &&
+                                          s_ckptTls.cachedOwner == this &&
+                                          s_ckptTls.cachedThreadId == m_currentThreadId &&
+                                          s_ckptTls.cachedGen == s_threadMapGen)
+                                             ? s_ckptTls.cachedThread
+                                             : currentThread();
             if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
             {
                 m_rescheduleRequested = true;
@@ -774,7 +901,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     } // FIX-AU9
 
     static thread_local uint64_t s_au9ConsecutiveDeferrals = 0; // FIX-AU9
-    if (due) // FIX-AU9
+    if (due) [[unlikely]] // FIX-AU9
     { // FIX-AU9
         if (hasThreadPc && pc != 0u && pc == g_currentExecutingFunction && g_currentExecutingFunction != g_au9SchedulerEntry) // FIX-AU9
         { // FIX-AU9
@@ -814,19 +941,19 @@ void EeScheduler::accountCycles(uint32_t cycles) noexcept
         g_acctPending = 0u;
     }
     const uint64_t t0 = g_profCounts ? __rdtsc() : 0u;
-    const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
+    const uint64_t elapsed = cycles != 0u ? static_cast<uint64_t>(cycles) : 1ull; // PERF-EX1
     m_eeCycle += elapsed;
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
     const uint64_t t1 = g_profCounts ? __rdtsc() : 0u;
     m_runtime.advanceIopEeCycles(elapsed);
-    if (g_profCounts) // PROBE-IJ
+    if (g_profCounts) [[unlikely]] // PROBE-IJ
     {
         const uint64_t t2 = __rdtsc();
         ++g_pcAcctCalls;
         g_pcAcctTicks += t2 - t0;
         g_pcIopTicks += t2 - t1;
     }
-    if (m_pendingEeTimerInterrupts != 0u)
+    if (m_pendingEeTimerInterrupts != 0u) [[unlikely]]
     {
         m_checkpointPending.store(true, std::memory_order_release);
     }
@@ -1108,6 +1235,8 @@ void EeScheduler::sleepCurrent()
     {
         --self->wakeupCount;
         setReturnS32(&self->activeContext(), KE_OK);
+        if (semaLogOn()) // PROBE-T2
+            semaLogOp(m_vsyncTick, self->id, "SleepThread", self->id, ra, (int)wakeBefore, (int)self->wakeupCount, 0, 0, false); // PROBE-T2
         if (isSchedTraceEnabled())
         {
             ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=SleepThread(ConsumedWakeup) thid=%d state=%s->%s wakeups=%u->%u\n",
@@ -1117,6 +1246,8 @@ void EeScheduler::sleepCurrent()
         }
         return;
     }
+    if (semaLogOn()) // PROBE-T2
+        semaLogOp(m_vsyncTick, self->id, "SleepThread", self->id, ra, (int)wakeBefore, 0, 1, 0, false); // PROBE-T2
     if (isSchedTraceEnabled())
     {
         ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=SleepThread(Blocked) thid=%d state=%s->WAITING wakeups=%u->0\n",
@@ -1156,6 +1287,8 @@ int EeScheduler::wakeupThread(int id, bool interruptSafe)
     {
         ++target->wakeupCount;
     }
+    if (semaLogOn()) // PROBE-T2
+        semaLogOp(m_vsyncTick, m_currentThreadId, interruptSafe ? "iWakeupThread" : "WakeupThread", id, ra, (int)wakeBefore, (int)target->wakeupCount, 0, 0, false); // PROBE-T2
     if (isSchedTraceEnabled())
     {
         ps2xSafeLog("[sched:trace] tick=%llu callerPc=0x%08x ra=0x%08x op=%s target=%d state=%s->%s wakeups=%u->%u intSafe=%d\n",
@@ -1356,6 +1489,12 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
     semaphore.attr = attr;
     semaphore.option = option;
     m_semaphores.emplace(id, std::move(semaphore));
+    if (semaLogOn()) // PROBE-T2
+    { // PROBE-T2
+        const GuestThread *self = currentThread(); // PROBE-T2
+        const uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0u; // PROBE-T2
+        semaLogOp(m_vsyncTick, m_currentThreadId, "CreateSema", id, ra, initCount, initCount, 0, 0, true); // PROBE-T2
+    } // PROBE-T2
     publishSnapshot();
     return id;
 }
@@ -1368,7 +1507,9 @@ int EeScheduler::deleteSemaphore(int id, bool interruptSafe)
     {
         return KE_UNKNOWN_SEMID;
     }
+    const int cntBefore = it->second.count; // PROBE-T2
     std::deque<int> waiters = std::move(it->second.waiters);
+    const int waitersBefore = static_cast<int>(waiters.size()); // PROBE-T2
     m_semaphores.erase(it);
     for (const int threadId : waiters)
     {
@@ -1377,6 +1518,12 @@ int EeScheduler::deleteSemaphore(int id, bool interruptSafe)
             makeReady(*waiter, KE_WAIT_DELETE, interruptSafe);
         }
     }
+    if (semaLogOn()) // PROBE-T2
+    { // PROBE-T2
+        const GuestThread *self = currentThread(); // PROBE-T2
+        const uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0u; // PROBE-T2
+        semaLogOp(m_vsyncTick, m_currentThreadId, interruptSafe ? "iDeleteSema" : "DeleteSema", id, ra, cntBefore, 0, 0, waitersBefore, true); // PROBE-T2
+    } // PROBE-T2
     publishSnapshot();
     return id;
 }
@@ -1396,14 +1543,32 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
         GuestThread *waiter = thread(waiterId);
         assert(waiter != nullptr);
         makeReady(*waiter, id, interruptSafe);
+        if (semaLogOn()) // PROBE-T2
+        { // PROBE-T2
+            const GuestThread *self = currentThread(); // PROBE-T2
+            const uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0u; // PROBE-T2
+            semaLogOp(m_vsyncTick, m_currentThreadId, interruptSafe ? "iSignalSema" : "SignalSema", id, ra, object->count, object->count, 0, static_cast<int>(object->waiters.size()), true); // PROBE-T2
+        } // PROBE-T2
         publishSnapshot();
         return id;
     }
     if (object->count == object->maxCount)
     {
+        if (semaLogOn()) // PROBE-T2
+        { // PROBE-T2
+            const GuestThread *self = currentThread(); // PROBE-T2
+            const uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0u; // PROBE-T2
+            semaLogOp(m_vsyncTick, m_currentThreadId, interruptSafe ? "iSignalSema" : "SignalSema", id, ra, object->count, object->count, 0, 0, true); // PROBE-T2
+        } // PROBE-T2
         return KE_SEMA_OVF;
     }
     const int oldCount = object->count++;
+    if (semaLogOn()) // PROBE-T2
+    { // PROBE-T2
+        const GuestThread *self = currentThread(); // PROBE-T2
+        const uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0u; // PROBE-T2
+        semaLogOp(m_vsyncTick, m_currentThreadId, interruptSafe ? "iSignalSema" : "SignalSema", id, ra, oldCount, object->count, 0, 0, true); // PROBE-T2
+    } // PROBE-T2
     if (isSchedTraceEnabled())
     {
         const GuestThread *self = currentThread();
@@ -1426,9 +1591,21 @@ int EeScheduler::pollSemaphore(int id)
     }
     if (object->count == 0)
     {
+        if (semaLogOn()) // PROBE-T2
+        { // PROBE-T2
+            const GuestThread *self = currentThread(); // PROBE-T2
+            const uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0u; // PROBE-T2
+            semaLogOp(m_vsyncTick, m_currentThreadId, "PollSema", id, ra, 0, 0, 0, static_cast<int>(object->waiters.size()), true); // PROBE-T2
+        } // PROBE-T2
         return KE_SEMA_ZERO;
     }
-    --object->count;
+    const int cntBefore = object->count--; // PROBE-T2
+    if (semaLogOn()) // PROBE-T2
+    { // PROBE-T2
+        const GuestThread *self = currentThread(); // PROBE-T2
+        const uint32_t ra = self ? getRegU32(&self->activeContext(), 31) : 0u; // PROBE-T2
+        semaLogOp(m_vsyncTick, m_currentThreadId, "PollSema", id, ra, cntBefore, object->count, 0, static_cast<int>(object->waiters.size()), true); // PROBE-T2
+    } // PROBE-T2
     publishSnapshot();
     return id;
 }
@@ -1441,14 +1618,18 @@ void EeScheduler::waitSemaphore(int id)
     {
         GuestThread *self = currentThread();
         assert(self != nullptr);
+        if (semaLogOn()) // PROBE-T2
+            semaLogOp(m_vsyncTick, self->id, "WaitSema", id, getRegU32(&self->activeContext(), 31), 0, 0, 0, 0, true); // PROBE-T2
         setReturnS32(&self->activeContext(), KE_UNKNOWN_SEMID);
         return;
     }
     if (object->count != 0)
     {
-        --object->count;
+        const int cntBefore = object->count--; // PROBE-T2
         GuestThread *self = currentThread();
         assert(self != nullptr);
+        if (semaLogOn()) // PROBE-T2
+            semaLogOp(m_vsyncTick, self->id, "WaitSema", id, getRegU32(&self->activeContext(), 31), cntBefore, object->count, 0, static_cast<int>(object->waiters.size()), true); // PROBE-T2
         setReturnS32(&self->activeContext(), id);
         publishSnapshot();
         return;
@@ -1456,7 +1637,19 @@ void EeScheduler::waitSemaphore(int id)
     GuestThread *self = currentThread();
     assert(self != nullptr);
     object->waiters.push_back(self->id);
-    blockCurrent(EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{id}});
+    std::function<void(R5900Context &)> wakeProbe; // PROBE-T2
+    if (semaLogOn()) // PROBE-T2
+    { // PROBE-T2
+        const uint32_t ra = getRegU32(&self->activeContext(), 31); // PROBE-T2
+        semaLogOp(m_vsyncTick, self->id, "WaitSema", id, ra, 0, 0, 1, static_cast<int>(object->waiters.size()), true); // PROBE-T2
+        wakeProbe = [this, id](R5900Context &wctx) { // PROBE-T2
+            const EeSemaphore *s = semaphore(id); // PROBE-T2
+            const int cnt = s ? s->count : 0; // PROBE-T2
+            const int w = s ? static_cast<int>(s->waiters.size()) : 0; // PROBE-T2
+            semaLogOp(m_vsyncTick, m_currentThreadId, "WaitSema.wake", id, getRegU32(&wctx, 31), 0, cnt, 0, w, true); // PROBE-T2
+        }; // PROBE-T2
+    } // PROBE-T2
+    blockCurrent(EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{id}, std::move(wakeProbe)}); // PROBE-T2
 }
 
 int EeScheduler::createEventFlag(uint32_t initialBits, uint32_t attr, uint32_t option)
@@ -2391,6 +2584,13 @@ void EeScheduler::processPendingEvents()
 
 void EeScheduler::processDueDeadlines()
 {
+    ps2xRpcBlockCheckTimeout(this, m_eeCycle); // FIX-T3
+    static const bool s_hostLock = []() { // FIX-E8d
+        const char *e = std::getenv("PS2X_VBLANK_HOSTLOCK"); // FIX-E8d
+        const bool on = !(e && std::strcmp(e, "0") == 0); // FIX-E8d
+        ps2xSafeLog("[e8d] vblank host lock: %s\n", on ? "on" : "off"); // FIX-E8d
+        return on; // FIX-E8d
+    }(); // FIX-E8d
     static thread_local std::vector<ScheduledEvent> s_dueScratch; // PERF-SA
     static thread_local int s_dueDepth = 0; // PERF-SA
     const bool outer = (s_dueDepth++ == 0); // PERF-SA
@@ -2401,10 +2601,27 @@ void EeScheduler::processDueDeadlines()
     {
         due.clear(); // PERF-SA
         {
+            const auto now = std::chrono::steady_clock::now(); // FIX-E8d
             std::unique_lock lock(m_eventMutex);
             auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
-                                              [this](const ScheduledEvent &item)
-                                              { return item.deadlineCycle <= m_eeCycle; });
+                                              [this, now](ScheduledEvent &item) // FIX-E8d
+                                              { // FIX-E8d
+                                                  if (item.deadlineCycle > m_eeCycle) // FIX-E8d
+                                                  { // FIX-E8d
+                                                      return false; // FIX-E8d
+                                                  } // FIX-E8d
+                                                  if (s_hostLock && // FIX-E8d
+                                                      (item.event.type == EeEventType::VBlankStart || // FIX-E8d
+                                                       item.event.type == EeEventType::VBlankEnd)) // FIX-E8d
+                                                  { // FIX-E8d
+                                                      if (now < item.hostDeadline - std::chrono::microseconds(500)) // FIX-E8d
+                                                      { // FIX-E8d
+                                                          item.deadlineCycle += kVBlankPeriodCycles / 32; // FIX-E8d
+                                                          return false; // FIX-E8d
+                                                      } // FIX-E8d
+                                                  } // FIX-E8d
+                                                  return true; // FIX-E8d
+                                              }); // FIX-E8d
             if (firstFuture == m_deadlines.begin())
             {
                 updateNextDeadline();
@@ -2442,6 +2659,28 @@ void EeScheduler::processDueDeadlines()
         {
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
+                if (g_ps2xPause.load(std::memory_order_relaxed) != 0) // FEAT-PA1
+                {
+                    while (!m_stopRequested.load(std::memory_order_acquire) &&
+                           g_ps2xPause.load(std::memory_order_acquire) != 0)
+                    {
+                        int tok = g_ps2xStepTokens.load(std::memory_order_acquire);
+                        bool consumed = false;
+                        while (tok > 0)
+                        {
+                            if (g_ps2xStepTokens.compare_exchange_weak(tok, tok - 1, std::memory_order_acq_rel))
+                            {
+                                consumed = true;
+                                break;
+                            }
+                        }
+                        if (consumed)
+                            break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    if (m_stopRequested.load(std::memory_order_acquire))
+                        return;
+                }
                 const auto now = std::chrono::steady_clock::now();
                 const double lateMs = std::chrono::duration<double, std::milli>(now - scheduled.hostDeadline).count();
                 probe_ae::onDc2VBlankStart(lateMs);
@@ -2537,14 +2776,42 @@ bool postPresentLatch(GS &gs)
 }
 } // namespace
 
-static bool isVblankLatchEnabled()
+extern bool ps2xRdTakeoverOn(); // FIX-VL2
+extern bool ps2xRdForceClassic(); // FIX-VL2
+
+bool ps2xVblankLatchEnabled() // FIX-VL3
 {
-    static const bool s_enabled = []() {
-        const char *e = std::getenv("PS2X_VBLANK_LATCH");
-        if (e && std::strcmp(e, "0") == 0) return false;
-        return true;
+    static const int s_mode = []() -> int { // FIX-VL2: 0=env off, 1=always on, 2=takeover skip-from-start
+        if (const char *e = std::getenv("PS2X_VBLANK_LATCH")) // FIX-VL2
+        {
+            if (std::strcmp(e, "0") == 0) // FIX-VL2
+                return 0; // FIX-VL2
+            ps2xSafeLog("[vl2] vblank latch: on\n"); // FIX-VL2
+            return 1; // FIX-VL2
+        }
+        const bool skipFromStart = ps2xRdTakeoverOn(); // FIX-VL2
+        if (!skipFromStart) // FIX-VL2
+        {
+            ps2xSafeLog("[vl2] vblank latch: on\n"); // FIX-VL2
+            return 1; // FIX-VL2
+        }
+        ps2xSafeLog("[vl2] vblank latch: skipped from start (takeover)\n"); // FIX-VL2
+        return 2; // FIX-VL2
     }();
-    return s_enabled;
+    if (s_mode == 0) // FIX-VL2
+        return false; // FIX-VL2
+    if (s_mode == 1) // FIX-VL2
+        return true; // FIX-VL2
+    static std::atomic<bool> s_sticky{false}; // FIX-VL2
+    if (s_sticky.load(std::memory_order_acquire)) // FIX-VL2
+        return true; // FIX-VL2
+    if (ps2xRdForceClassic()) // FIX-VL2
+    {
+        if (!s_sticky.exchange(true, std::memory_order_acq_rel)) // FIX-VL2
+            ps2xSafeLog("[vl2] classic forced -> latch ON (sticky)\n"); // FIX-VL2
+        return true; // FIX-VL2
+    }
+    return false; // FIX-VL2
 }
 
 void EeScheduler::processEvent(const EeEvent &event)
@@ -2579,6 +2846,8 @@ void EeScheduler::processEvent(const EeEvent &event)
         completeVSync(m_vsyncTick);
         ps2xSpu2GuestVblank(); // FIX-AU4
         ps2xCid1Vblank(); // FIX-AU5
+        if (semaLogOn()) // PROBE-T2
+            semaLogThreadsPerSec(m_vsyncTick, m_threads); // PROBE-T2
         if (aw2ProbeOn()) // PROBE-AW2
         { // PROBE-AW2
             static uint64_t s_aw2Vbl = 0; // PROBE-AW2
@@ -2614,7 +2883,7 @@ void EeScheduler::processEvent(const EeEvent &event)
             } // PROBE-AW3
         } // PROBE-AW2
 
-        if (isVblankLatchEnabled())
+        if (ps2xVblankLatchEnabled()) // FIX-VL3
         {
             extern std::atomic<uint64_t> g_gsFrameKicks;
             static uint64_t s_lastLatchKicks = ~0ull;

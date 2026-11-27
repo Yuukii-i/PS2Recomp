@@ -15,6 +15,16 @@
 
 extern void ps2xSafeLog(const char *fmt, ...);
 
+#if defined(PS2X_HAS_SDL3) // SDL-FE
+extern bool ps2xSdlActive();
+extern bool ps2xSdlAudioStart(void (*fill)(void *buffer, unsigned frames));
+extern void ps2xSdlAudioStop();
+#else
+inline bool ps2xSdlActive() { return false; }
+inline bool ps2xSdlAudioStart(void (*)(void *, unsigned)) { return false; }
+inline void ps2xSdlAudioStop() {}
+#endif
+
 namespace ps2x::iop
 {
     // PERF-AU2: Local declarations for ps2xIOP SPU2 mixer bridge (header-rule safe).
@@ -408,7 +418,15 @@ namespace ps2x::audio
         } // PROBE-AU3D
 
 #if !defined(PLATFORM_VITA)
-        if (IsAudioDeviceReady())
+        if (ps2xSdlActive()) // SDL-FE
+        {
+            if (ps2xSdlAudioStart(raylibAudioCallback))
+            {
+                g_spu2Audio.hasStream = true;
+                g_spu2Audio.streamActive.store(true, std::memory_order_relaxed);
+            }
+        }
+        else if (IsAudioDeviceReady())
         {
             g_spu2Audio.stream = LoadAudioStream(kSampleRate, 16u, 2u);
             if (IsAudioStreamValid(g_spu2Audio.stream))
@@ -424,7 +442,8 @@ namespace ps2x::audio
         g_spu2Audio.running.store(true, std::memory_order_release);
         g_spu2Audio.mixerThread = std::thread(mixerThreadMain);
 
-        ::ps2xSafeLog("[spu2] mixer started (48kHz stereo, raylib AudioStream=%s, muted=%d)\n",
+        ::ps2xSafeLog("[spu2] mixer started (48kHz stereo, %s=%s, muted=%d)\n", // SDL-FE
+                      ps2xSdlActive() ? "SDL audio" : "raylib AudioStream",
                       g_spu2Audio.hasStream ? "on" : "off",
                       g_spu2Audio.muted.load(std::memory_order_relaxed) ? 1 : 0);
     }
@@ -445,7 +464,15 @@ namespace ps2x::audio
         } // PROBE-AU3D
 
 #if !defined(PLATFORM_VITA)
-        if (g_spu2Audio.hasStream)
+        if (ps2xSdlActive()) // SDL-FE
+        {
+            if (g_spu2Audio.hasStream)
+            {
+                ps2xSdlAudioStop();
+                g_spu2Audio.hasStream = false;
+            }
+        }
+        else if (g_spu2Audio.hasStream)
         {
             StopAudioStream(g_spu2Audio.stream);
             UnloadAudioStream(g_spu2Audio.stream);

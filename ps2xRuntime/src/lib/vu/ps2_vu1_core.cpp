@@ -3572,6 +3572,7 @@ template <class T> static T rpGet(const uint8_t *&p)
 #include "vu1_func.inc" // Task F1: functional VU1 engine (PS2X_VU1_FUNC=1 / PS2X_VU1_REPLAY_FUNC=1)
 
 extern float g_rdAspectK; // FEAT-RD16
+extern int g_ps2xWsMode; // FIX-WS2
 
 void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint8_t *vuData, uint32_t dataSize,
@@ -3592,7 +3593,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         static float s_lastOrig998[4][4] = {};
         static float s_lastK = 1.0f;
         static bool s_hasScaled998 = false;
-        const float k = g_rdAspectK;
+        const float k = (g_ps2xWsMode != 2) ? g_rdAspectK : 1.0f;
         if (k > 1.0f)
         {
             const bool memChanged = !s_hasScaled998 || std::memcmp(vuData + 998u * 16u, s_lastScaled998, sizeof(s_lastScaled998)) != 0;
@@ -3615,6 +3616,8 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         }
         else
         {
+            if (s_hasScaled998 && std::memcmp(vuData + 998u * 16u, s_lastScaled998, sizeof(s_lastScaled998)) == 0)
+                std::memcpy(vuData + 998u * 16u, s_lastOrig998, sizeof(s_lastOrig998));
             s_hasScaled998 = false;
         }
     }

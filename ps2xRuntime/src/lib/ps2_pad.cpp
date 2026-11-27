@@ -4,6 +4,14 @@
 
 extern void ps2xSafeLog(const char *fmt, ...);
 
+#if defined(PS2X_HAS_SDL3) // SDL-FE
+extern bool ps2xSdlActive();
+extern bool ps2xSdlReadPad(uint16_t *btnsActiveLow, uint8_t *sticks);
+#else
+inline bool ps2xSdlActive() { return false; }
+inline bool ps2xSdlReadPad(uint16_t *, uint8_t *) { return false; }
+#endif
+
 namespace
 {
     constexpr uint8_t kPadAnalogMarker = 0x73;
@@ -38,6 +46,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     data[2] = 0xFF;
     data[3] = 0xFF;
     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
+
+    if (ps2xSdlActive()) // SDL-FE
+    {
+        uint16_t b = 0xFFFF;
+        uint8_t s[4] = {0x80, 0x80, 0x80, 0x80};
+        ps2xSdlReadPad(&b, s);
+        data[4] = s[0];
+        data[5] = s[1];
+        data[6] = s[2];
+        data[7] = s[3];
+        data[2] = static_cast<uint8_t>(b & 0xFF);
+        data[3] = static_cast<uint8_t>(b >> 8);
+        return true;
+    }
 
     uint16_t btns = 0xFFFFu;
     // PERF-JG: first connected pad of the 4 raylib slots (was slot 0 only), logged when it changes

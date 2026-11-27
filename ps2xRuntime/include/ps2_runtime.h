@@ -240,6 +240,9 @@ inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t wat
 
 extern "C" void ps2x_probeBadStore(uint32_t addr, uint64_t lo, uint64_t hi, uint32_t pc, uint32_t ra);
 
+extern uint32_t g_ps2wwBase, g_ps2wwLen; // PROBE-WW1
+extern void ps2xGuestWriteHit(uint32_t addr, uint32_t size, uint64_t val); // PROBE-WW1
+
 inline void ps2TraceGuestWrite(uint8_t *rdram,
                                uint32_t guestAddr,
                                uint32_t size,
@@ -252,6 +255,8 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
     (void)size;
     (void)valueHi;
 #if !defined(PS2X_TRACE_GUEST_WRITES)
+    if ((guestAddr & 0x01FFFFFFu) - g_ps2wwBase < g_ps2wwLen) // PROBE-WW1
+        ps2xGuestWriteHit(guestAddr & 0x01FFFFFFu, size, valueLo); // PROBE-WW1
     // PERF-IH: these debug watches ran inside every guest store of the generated code. Define PS2X_TRACE_GUEST_WRITES to restore.
     (void)guestAddr;
     (void)valueLo;

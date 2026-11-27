@@ -1280,20 +1280,20 @@ namespace
 
     static constexpr uint32_t kVpEventCap = 65536;
     static VpEvent vpEventRing[kVpEventCap];
-    static std::atomic<uint32_t> vpEventHead{0};
-    static std::atomic<uint32_t> vpEventTail{0};
-    static std::atomic<bool> vpConsumerWaiting{false};
+    alignas(64) static std::atomic<uint32_t> vpEventHead{0}; // PERF-EX4
+    alignas(64) static std::atomic<uint32_t> vpEventTail{0}; // PERF-EX4
+    alignas(64) static std::atomic<bool> vpConsumerWaiting{false}; // PERF-EX4
     static std::mutex vpConsumerMutex;
     static std::condition_variable vpConsumerCv;
-    static std::atomic<bool> vpProducerWaiting{false};
+    alignas(64) static std::atomic<bool> vpProducerWaiting{false}; // PERF-EX4
     static std::mutex vpProducerMutex;
     static std::condition_variable vpProducerCv;
 
     static constexpr uint32_t kVpRecCap = 262144; // smaller rings (16K/64K) filled constantly and the full-ring spin cost more than it saved (A/B mh3)
     static VpRec vpRecRing[kVpRecCap];
-    static std::atomic<uint32_t> vpRecHead{0};
-    static std::atomic<uint32_t> vpRecTail{0};
-    static std::atomic<bool> vpRecProducerWaiting{false};
+    alignas(64) static std::atomic<uint32_t> vpRecHead{0}; // PERF-EX4
+    alignas(64) static std::atomic<uint32_t> vpRecTail{0}; // PERF-EX4
+    alignas(64) static std::atomic<bool> vpRecProducerWaiting{false}; // PERF-EX4
     static std::mutex vpRecProducerMutex;
     static std::condition_variable vpRecProducerCv;
 
@@ -1340,12 +1340,12 @@ namespace
         return g_vpDualOn;
     }
 
-    static std::atomic<uint32_t> vpEventHead1{0};
-    static std::atomic<bool> vpConsumer1Waiting{false};
+    alignas(64) static std::atomic<uint32_t> vpEventHead1{0}; // PERF-EX4
+    alignas(64) static std::atomic<bool> vpConsumer1Waiting{false}; // PERF-EX4
     static std::mutex vpConsumer1Mutex;
     static std::condition_variable vpConsumer1Cv;
 
-    static std::atomic<uint32_t> vpRecHead1{0};
+    alignas(64) static std::atomic<uint32_t> vpRecHead1{0}; // PERF-EX4
 
     alignas(64) static uint8_t s_vpShadow[PS2_VU1_DATA_SIZE];
 
@@ -2065,34 +2065,36 @@ namespace
         vpVerifyDone.store(k + 1u, std::memory_order_release);
     }
 
-    static void vpPushEvent(const VpEvent &ev)
+    static uint32_t s_vpEventHeadCache = 0; // PERF-PF1: producer-local head cache for vpEventRing
+
+    static void vpPushEventWait(uint32_t tail, bool dual) // PERF-PF1
     {
-        if (ev.kind != VP_WRITES) // PERF-V1H
-            vpFlushPendingWrites();
-        const bool dual = vpDualOn();
-        const uint32_t tail = vpEventTail.load(std::memory_order_seq_cst);
+        const uint32_t lag = vpEventLag(tail, dual);
+        s_vpEventHeadCache = tail - lag;
+        if (lag < kVpEventCap)
+            return;
+        const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
+        for (int spin = 0; spin < vpSpinLimit(); ++spin)
+        {
+            if (vpEventLag(tail, dual) < kVpEventCap)
+                break;
+            _mm_pause();
+        }
         if (vpEventLag(tail, dual) >= kVpEventCap)
         {
-            const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
-            for (int spin = 0; spin < vpSpinLimit(); ++spin)
-            {
-                if (vpEventLag(tail, dual) < kVpEventCap)
-                    break;
-                _mm_pause();
-            }
-            if (vpEventLag(tail, dual) >= kVpEventCap)
-            {
-                std::unique_lock<std::mutex> lock(vpProducerMutex);
-                vpProducerWaiting.store(true, std::memory_order_seq_cst);
-                vpProducerCv.wait(lock, [&]() {
-                    return vpEventLag(tail, dual) < kVpEventCap;
-                });
-                vpProducerWaiting.store(false, std::memory_order_seq_cst);
-            }
-            if (vwT) vwBlk(false, vwT); // PROBE-VW
+            std::unique_lock<std::mutex> lock(vpProducerMutex);
+            vpProducerWaiting.store(true, std::memory_order_seq_cst);
+            vpProducerCv.wait(lock, [&]() {
+                return vpEventLag(tail, dual) < kVpEventCap;
+            });
+            vpProducerWaiting.store(false, std::memory_order_seq_cst);
         }
-        vpEventRing[tail & (kVpEventCap - 1)] = ev;
-        vpEventTail.store(tail + 1, std::memory_order_seq_cst);
+        s_vpEventHeadCache = tail - vpEventLag(tail, dual);
+        if (vwT) vwBlk(false, vwT); // PROBE-VW
+    }
+
+    static void vpNotifyConsumers(bool dual) // PERF-PF1
+    {
         if (vpConsumerWaiting.load(std::memory_order_seq_cst))
         {
             std::lock_guard<std::mutex> lock(vpConsumerMutex);
@@ -2105,17 +2107,47 @@ namespace
         }
     }
 
+    static inline void vpPushEvent(const VpEvent &ev)
+    {
+        if (ev.kind != VP_WRITES) // PERF-V1H
+            vpFlushPendingWrites();
+        const bool dual = vpDualOn();
+        const uint32_t tail = vpEventTail.load(std::memory_order_relaxed); // PERF-PF1
+        if (tail - s_vpEventHeadCache >= kVpEventCap) // PERF-PF1
+            vpPushEventWait(tail, dual);
+        vpEventRing[tail & (kVpEventCap - 1)] = ev;
+        vpEventTail.store(tail + 1, std::memory_order_seq_cst);
+        if (vpConsumerWaiting.load(std::memory_order_seq_cst) ||
+            (dual && vpConsumer1Waiting.load(std::memory_order_seq_cst)))
+            vpNotifyConsumers(dual);
+    }
+
+    // PERF-EX4: write only kind/a/b directly into the ring for VP_WRITES (exec only reads those three fields)
+    static inline void vpPushWritesEvent(uint32_t firstRecIndex, uint32_t recCount)
+    {
+        const bool dual = vpDualOn();
+        const uint32_t tail = vpEventTail.load(std::memory_order_relaxed);
+        if (tail - s_vpEventHeadCache >= kVpEventCap)
+            vpPushEventWait(tail, dual);
+        VpEvent &slot = vpEventRing[tail & (kVpEventCap - 1)];
+        slot.kind = VP_WRITES;
+        slot.a = firstRecIndex;
+        slot.b = recCount;
+        vpEventTail.store(tail + 1, std::memory_order_seq_cst);
+        if (vpConsumerWaiting.load(std::memory_order_seq_cst) ||
+            (dual && vpConsumer1Waiting.load(std::memory_order_seq_cst)))
+            vpNotifyConsumers(dual);
+    }
+
     // PERF-V1H: flush coalesced VP_WRITES run before any other event, wait/drain, cap, or job end
     static inline void vpFlushPendingWrites()
     {
         if (s_vpPendingCount == 0u)
             return;
-        VpEvent ev{};
-        ev.kind = VP_WRITES;
-        ev.a = s_vpPendingFirst;
-        ev.b = s_vpPendingCount;
+        const uint32_t first = s_vpPendingFirst; // PERF-EX4
+        const uint32_t count = s_vpPendingCount; // PERF-EX4
         s_vpPendingCount = 0u;
-        vpPushEvent(ev);
+        vpPushWritesEvent(first, count); // PERF-EX4
     }
 
     // PERF-V1H: coalesce contiguous UNPACK record runs into one VP_WRITES event (disabled in dual/verify mode)
@@ -2125,11 +2157,7 @@ namespace
             return;
         if (vpDualOn())
         {
-            VpEvent ev{};
-            ev.kind = VP_WRITES;
-            ev.a = firstRecIndex;
-            ev.b = recCount;
-            vpPushEvent(ev);
+            vpPushWritesEvent(firstRecIndex, recCount); // PERF-EX4
             return;
         }
         if (s_vpPendingCount != 0u &&
@@ -2148,35 +2176,37 @@ namespace
             vpFlushPendingWrites();
     }
 
-    static VpEvent vpPopEvent1()
+    static void vpPopEvent1Wait(uint32_t head) // PERF-EX4
+    {
+        for (int spin = 0; spin < vpSpinLimit(); ++spin)
+        {
+            if (head != vpEventTail.load(std::memory_order_seq_cst))
+                break;
+            _mm_pause();
+        }
+        if (head == vpEventTail.load(std::memory_order_seq_cst))
+        {
+            std::unique_lock<std::mutex> lock(vpConsumer1Mutex);
+            vpConsumer1Waiting.store(true, std::memory_order_seq_cst);
+            vpConsumer1Cv.wait(lock, [&]() {
+                return head != vpEventTail.load(std::memory_order_seq_cst);
+            });
+            vpConsumer1Waiting.store(false, std::memory_order_seq_cst);
+        }
+    }
+
+    static inline void vpPopEvent1(VpEvent &ev) // PERF-EX4
     {
         const uint32_t head = vpEventHead1.load(std::memory_order_seq_cst);
         if (head == vpEventTail.load(std::memory_order_seq_cst))
-        {
-            for (int spin = 0; spin < vpSpinLimit(); ++spin)
-            {
-                if (head != vpEventTail.load(std::memory_order_seq_cst))
-                    break;
-                _mm_pause();
-            }
-            if (head == vpEventTail.load(std::memory_order_seq_cst))
-            {
-                std::unique_lock<std::mutex> lock(vpConsumer1Mutex);
-                vpConsumer1Waiting.store(true, std::memory_order_seq_cst);
-                vpConsumer1Cv.wait(lock, [&]() {
-                    return head != vpEventTail.load(std::memory_order_seq_cst);
-                });
-                vpConsumer1Waiting.store(false, std::memory_order_seq_cst);
-            }
-        }
-        VpEvent ev = vpEventRing[head & (kVpEventCap - 1)];
+            vpPopEvent1Wait(head);
+        ev = vpEventRing[head & (kVpEventCap - 1)];
         vpEventHead1.store(head + 1, std::memory_order_seq_cst);
         if (vpProducerWaiting.load(std::memory_order_seq_cst))
         {
             std::lock_guard<std::mutex> lock(vpProducerMutex);
             vpProducerCv.notify_one();
         }
-        return ev;
     }
 
     // PROBE-MG: pipeline stats (PS2X_VIF1_PIPE_STAT=1): exec busy/spin ticks, sleeps, drains, producer full-waits
@@ -2186,38 +2216,40 @@ namespace
     {
         return g_vpStatOn;
     }
-    static VpEvent vpPopEvent()
+    static void vpPopEventWait(uint32_t head) // PERF-EX4
+    {
+        const uint64_t spT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
+        struct SpinAcct { uint64_t t0; ~SpinAcct() { if (t0) s_vpStSpin.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); } } spinAcct{spT0};
+        for (int spin = 0; spin < vpSpinLimit(); ++spin)
+        {
+            if (head != vpEventTail.load(std::memory_order_seq_cst))
+                break;
+            _mm_pause();
+        }
+        if (head == vpEventTail.load(std::memory_order_seq_cst))
+        {
+            if (vpStatOn()) s_vpStSleeps.fetch_add(1, std::memory_order_relaxed); // PROBE-MG
+            std::unique_lock<std::mutex> lock(vpConsumerMutex);
+            vpConsumerWaiting.store(true, std::memory_order_seq_cst);
+            vpConsumerCv.wait(lock, [&]() {
+                return head != vpEventTail.load(std::memory_order_seq_cst);
+            });
+            vpConsumerWaiting.store(false, std::memory_order_seq_cst);
+        }
+    }
+
+    static inline void vpPopEvent(VpEvent &ev) // PERF-EX4
     {
         const uint32_t head = vpEventHead.load(std::memory_order_seq_cst);
         if (head == vpEventTail.load(std::memory_order_seq_cst))
-        {
-            const uint64_t spT0 = vpStatOn() ? __rdtsc() : 0ull; // PROBE-MG
-            struct SpinAcct { uint64_t t0; ~SpinAcct() { if (t0) s_vpStSpin.fetch_add(__rdtsc() - t0, std::memory_order_relaxed); } } spinAcct{spT0};
-            for (int spin = 0; spin < vpSpinLimit(); ++spin)
-            {
-                if (head != vpEventTail.load(std::memory_order_seq_cst))
-                    break;
-                _mm_pause();
-            }
-            if (head == vpEventTail.load(std::memory_order_seq_cst))
-            {
-                if (vpStatOn()) s_vpStSleeps.fetch_add(1, std::memory_order_relaxed); // PROBE-MG
-                std::unique_lock<std::mutex> lock(vpConsumerMutex);
-                vpConsumerWaiting.store(true, std::memory_order_seq_cst);
-                vpConsumerCv.wait(lock, [&]() {
-                    return head != vpEventTail.load(std::memory_order_seq_cst);
-                });
-                vpConsumerWaiting.store(false, std::memory_order_seq_cst);
-            }
-        }
-        VpEvent ev = vpEventRing[head & (kVpEventCap - 1)];
+            vpPopEventWait(head);
+        ev = vpEventRing[head & (kVpEventCap - 1)];
         vpEventHead.store(head + 1, std::memory_order_seq_cst);
         if (vpProducerWaiting.load(std::memory_order_seq_cst))
         {
             std::lock_guard<std::mutex> lock(vpProducerMutex);
             vpProducerCv.notify_one();
         }
-        return ev;
     }
 
     static std::vector<std::vector<uint8_t>> s_vpKeep; // PERF-MG: parser-owned packets referenced by queued VP_GIF2 events (inner buffers never move)
@@ -2324,74 +2356,50 @@ namespace
     // PERF-V1J: shared producer-local head cache and bulk record reservation for vpRecRing
     static uint32_t s_vpRecHeadCache = 0; // parser thread only
 
+    static void vpReserveRecsSlow(uint32_t tail, uint32_t count, bool dual) // PERF-PF1
+    {
+        const uint32_t lag = vpRecLag(tail, dual);
+        s_vpRecHeadCache = tail - lag;
+        if (lag + count <= kVpRecCap)
+            return;
+        vpFlushPendingWrites(); // PERF-V1H: publish pending writes before waiting on consumer to prevent deadlock
+        const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
+        struct VwG { uint64_t t; ~VwG() { if (t) vwBlk(false, t); } } vwG{vwT}; // PROBE-VW
+        for (int spin = 0; spin < vpSpinLimit(); ++spin)
+        {
+            if (vpRecLag(tail, dual) + count <= kVpRecCap)
+                break;
+            _mm_pause();
+        }
+        if (vpRecLag(tail, dual) + count > kVpRecCap)
+        {
+            if (vpStatOn()) s_vpStFull.fetch_add(1, std::memory_order_relaxed); // PROBE-MG
+            std::unique_lock<std::mutex> lock(vpRecProducerMutex);
+            vpRecProducerWaiting.store(true, std::memory_order_seq_cst);
+            vpRecProducerCv.wait(lock, [&]() {
+                return vpRecLag(tail, dual) + count <= kVpRecCap;
+            });
+            vpRecProducerWaiting.store(false, std::memory_order_seq_cst);
+        }
+        s_vpRecHeadCache = tail - vpRecLag(tail, dual);
+    }
+
     static inline uint32_t vpReserveRecs(uint32_t count, bool dual)
     {
         const uint32_t tail = vpRecTail.load(std::memory_order_relaxed);
         if ((tail - s_vpRecHeadCache) + count > kVpRecCap)
-        {
-            const uint32_t lag = vpRecLag(tail, dual);
-            s_vpRecHeadCache = tail - lag;
-            if (lag + count > kVpRecCap)
-            {
-                vpFlushPendingWrites(); // PERF-V1H: publish pending writes before waiting on consumer to prevent deadlock
-                const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
-                struct VwG { uint64_t t; ~VwG() { if (t) vwBlk(false, t); } } vwG{vwT}; // PROBE-VW
-                for (int spin = 0; spin < vpSpinLimit(); ++spin)
-                {
-                    if (vpRecLag(tail, dual) + count <= kVpRecCap)
-                        break;
-                    _mm_pause();
-                }
-                if (vpRecLag(tail, dual) + count > kVpRecCap)
-                {
-                    if (vpStatOn()) s_vpStFull.fetch_add(1, std::memory_order_relaxed); // PROBE-MG
-                    std::unique_lock<std::mutex> lock(vpRecProducerMutex);
-                    vpRecProducerWaiting.store(true, std::memory_order_seq_cst);
-                    vpRecProducerCv.wait(lock, [&]() {
-                        return vpRecLag(tail, dual) + count <= kVpRecCap;
-                    });
-                    vpRecProducerWaiting.store(false, std::memory_order_seq_cst);
-                }
-                s_vpRecHeadCache = tail - vpRecLag(tail, dual);
-            }
-        }
+            vpReserveRecsSlow(tail, count, dual);
         return tail;
     }
 
-    static void vpPushRec(const VpRec &rec)
+    static inline void vpPushRec(const VpRec &rec)
     {
         // PERF-MG2: the exec thread never reads vpRecTail (records are published by the VP_WRITES event's seq_cst store), so the tail is a
         // relaxed producer-local counter, and the consumer head is only re-read when the cached value says the ring is full.
         const bool dual = vpDualOn();
         const uint32_t tail = vpRecTail.load(std::memory_order_relaxed);
         if (tail - s_vpRecHeadCache >= kVpRecCap)
-        {
-            const uint32_t lag = vpRecLag(tail, dual);
-            s_vpRecHeadCache = tail - lag;
-        }
-        if (tail - s_vpRecHeadCache >= kVpRecCap)
-        {
-            vpFlushPendingWrites(); // PERF-V1H: publish pending writes before waiting on consumer to prevent deadlock
-            const uint64_t vwT = vw::on() ? __rdtsc() : 0ull; // PROBE-VW
-            struct VwG { uint64_t t; ~VwG() { if (t) vwBlk(false, t); } } vwG{vwT}; // PROBE-VW
-            for (int spin = 0; spin < vpSpinLimit(); ++spin)
-            {
-                if (vpRecLag(tail, dual) < kVpRecCap)
-                    break;
-                _mm_pause();
-            }
-            if (vpRecLag(tail, dual) >= kVpRecCap)
-            {
-                if (vpStatOn()) s_vpStFull.fetch_add(1, std::memory_order_relaxed); // PROBE-MG
-                std::unique_lock<std::mutex> lock(vpRecProducerMutex);
-                vpRecProducerWaiting.store(true, std::memory_order_seq_cst);
-                vpRecProducerCv.wait(lock, [&]() {
-                    return vpRecLag(tail, dual) < kVpRecCap;
-                });
-                vpRecProducerWaiting.store(false, std::memory_order_seq_cst);
-            }
-            s_vpRecHeadCache = tail - vpRecLag(tail, dual);
-        }
+            vpReserveRecsSlow(tail, 1u, dual);
         vpRecRing[tail & (kVpRecCap - 1)] = rec;
         vpRecTail.store(tail + 1, std::memory_order_relaxed);
     }
@@ -2412,7 +2420,8 @@ namespace
         for (;;)
         {
             const uint64_t vxA = vxOn ? __rdtsc() : 0ull; // PROBE-VX
-            VpEvent ev = vpPopEvent();
+            VpEvent ev; // PERF-EX4
+            vpPopEvent(ev); // PERF-EX4
             const uint64_t vxB = vxOn ? __rdtsc() : 0ull; // PROBE-VX
             if (vxOn) ::ps2xVxIdle(vxB - vxA); // PROBE-VX
             const uint64_t buT0 = statOn ? __rdtsc() : 0ull; // PROBE-MG // PERF-V1G
@@ -2557,7 +2566,8 @@ namespace
         ps2_gs_async_batch(true);
         for (;;)
         {
-            VpEvent ev = vpPopEvent1();
+            VpEvent ev; // PERF-EX4
+            vpPopEvent1(ev); // PERF-EX4
             switch (ev.kind)
             {
             case VP_WRITES:
@@ -2659,6 +2669,21 @@ namespace
         }
         std::printf("%s", msg);
     }
+    // PERF-PF1: hoist per-call/per-VIFcode env checks out of processVIF1Data loops
+    static std::atomic<int8_t> s_aw23ProbeCache{-1};
+    static inline bool aw23ProbeOn()
+    {
+        int8_t v = s_aw23ProbeCache.load(std::memory_order_relaxed);
+        if (v < 0)
+        {
+            const char *e = std::getenv("PS2X_AW2_PROBE");
+            v = (e && e[0] == '1') ? 1 : 0;
+            s_aw23ProbeCache.store(v, std::memory_order_relaxed);
+        }
+        return v != 0;
+    }
+    static std::vector<uint8_t> s_verifySavedBefore; // PERF-V1J
+    static std::vector<uint8_t> s_verifyFastResult;  // PERF-V1J
 } // namespace
 
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
@@ -2776,6 +2801,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     uint16_t axStallImm = 0; // FIX-AX
     uint8_t axStallOp = 0; // FIX-AX
 
+    const bool aw23Probe = aw23ProbeOn(); // PERF-PF1
     while (pos + 4 <= sizeBytes)
     {
         if (axStallNext) // FIX-AX
@@ -2861,8 +2887,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
         vif1_regs.num = num;
-        static const bool s_aw3Probe = []() { const char *e = std::getenv("PS2X_AW2_PROBE"); return e && e[0] == '1'; }(); // PROBE-AW3
-        if (s_aw3Probe) g_aw3LastVifCode.store(cmd, std::memory_order_relaxed); // PROBE-AW3
+        if (aw23Probe) g_aw3LastVifCode.store(cmd, std::memory_order_relaxed); // PROBE-AW3 // PERF-PF1
         if (irq)
         {
             if (axActive) // FIX-AX
@@ -2952,8 +2977,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (!ps2_vif1_on_worker()) // PERF-HN: m_ioRegisters is an unsynchronised map; the MARK read uses vif1_regs.mark
                 m_ioRegisters[0x10003C30u] = imm;
             publishVif1MarkAndStat(vif1_regs.mark, vif1_regs.stat); // PERF-V1K
-            static const bool s_aw2Probe = []() { const char *e = std::getenv("PS2X_AW2_PROBE"); return e && e[0] == '1'; }(); // PROBE-AW2
-            if (s_aw2Probe && imm == 0x2000u) { // PROBE-AW3
+            if (aw23Probe && imm == 0x2000u) { // PROBE-AW3 // PERF-PF1
                 g_aw2Mark2000.fetch_add(1, std::memory_order_relaxed); // PROBE-AW2
                 g_aw3SawMark2000.store(true, std::memory_order_relaxed); // PROBE-AW3
             } // PROBE-AW3
@@ -3649,8 +3673,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 };
 
                 bool executeGeneric = true;
-                static std::vector<uint8_t> s_verifySavedBefore; // PERF-V1J
-                static std::vector<uint8_t> s_verifyFastResult;  // PERF-V1J
                 std::vector<uint8_t> &savedBefore = s_verifySavedBefore;
                 std::vector<uint8_t> &fastResult = s_verifyFastResult;
                 size_t verifyRangeBytes = 0;

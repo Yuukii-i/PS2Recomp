@@ -4,6 +4,7 @@
 #include "ps2_log.h"
 #include "runtime/ee_scheduler.h"
 
+#include <atomic> // FIX-WS3
 #include <unordered_set>
 #include "Kernel/Syscalls/Helpers/State.h"
 #include "Kernel/Stubs/CD.h"
@@ -14,12 +15,45 @@
 #include "imgui.h"
 #include "rlImGui.h"
 #include "raylib.h"
+// FIX-DBG1C
+extern bool ps2xSdlActive();
+extern bool ps2xSdlImGuiInit();
+extern void ps2xSdlImGuiNewFrame();
+extern void ps2xSdlImGuiEndFrame();
+extern void ps2xSdlImGuiShutdown();
+extern bool ps2xSdlKeyPressedEdge(int sdlScancode);
+extern std::atomic<bool> g_ps2xF1Pressed; // FIX-WS3
+// FIX-P3
+extern int ps2xGfxGetAspectMode();
+extern void ps2xGfxSetAspectMode(int);
+extern float ps2xGfxGetAspectMax();
+extern void ps2xGfxSetAspectMax(float);
+extern float ps2xGfxGetHudSafeAspect();
+extern void ps2xGfxSetHudSafeAspect(float);
+extern bool ps2xGfxSaveIni(int renderScalePct, int vsyncMode, int fullscreen);
+extern bool ps2xSdlGetFullscreen();
+extern void ps2xSdlSetFullscreen(bool);
+extern int ps2xSdlGetPresentMode();
+extern void ps2xSdlSetPresentMode(int);
+extern bool ps2xSdlPresentModeSupported(int);
+extern void ps2xSdlGetWindowPixelSize(int *w, int *h);
+namespace rdgfx_vk
+{
+    int getRenderScalePercent();
+    void setRenderScalePercent(int);
+}
+namespace rdgfx
+{
+    void getBackbufferSize(int &rw, int &rh);
+}
 #endif
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -2174,6 +2208,160 @@ namespace
         }
     }
 
+    // FIX-P3
+    static void drawGraphicsTab()
+    {
+        if (!ps2xSdlActive())
+        {
+            ImGui::TextUnformatted("Graphics controls need the SDL/Vulkan frontend (PS2X_FRONTEND=sdl)");
+            return;
+        }
+
+        int aspect = ps2xGfxGetAspectMode();
+        const char *aspectItems[] = { "4:3 original (black bars)", "Widescreen (shows more)", "16:9 (stretched)", "16:10 (stretched)", "Raw pixels (unscaled shape)" }; // FIX-WS3
+        if (ImGui::Combo("Aspect", &aspect, aspectItems, IM_ARRAYSIZE(aspectItems)))
+        {
+            ps2xGfxSetAspectMode(aspect);
+        }
+
+        const float capValues[] = { 0.0f, 16.0f / 9.0f, 21.0f / 9.0f, 32.0f / 9.0f };
+        const char *capItems[] = { "none", "16:9", "21:9", "32:9" };
+        float curCap = ps2xGfxGetAspectMax();
+        int capIdx = 0;
+        if (curCap > 0.0f)
+        {
+            float bestDiff = 1e9f;
+            for (int i = 1; i < 4; ++i)
+            {
+                float diff = std::abs(curCap - capValues[i]);
+                if (diff < bestDiff)
+                {
+                    bestDiff = diff;
+                    capIdx = i;
+                }
+            }
+        }
+        if (ImGui::Combo("Widest widescreen", &capIdx, capItems, IM_ARRAYSIZE(capItems))) // FIX-WS3
+        {
+            ps2xGfxSetAspectMax(capValues[capIdx]);
+        }
+
+        const float hudValues[] = { 0.0f, 21.0f / 9.0f, 16.0f / 9.0f, 4.0f / 3.0f };
+        const char *hudItems[] = { "screen corners", "within 21:9", "within 16:9", "within 4:3" }; // FIX-WS3
+        float curHud = ps2xGfxGetHudSafeAspect();
+        int hudIdx = 0;
+        if (curHud > 0.0f)
+        {
+            float bestDiff = 1e9f;
+            for (int i = 1; i < 4; ++i)
+            {
+                float diff = std::abs(curHud - hudValues[i]);
+                if (diff < bestDiff)
+                {
+                    bestDiff = diff;
+                    hudIdx = i;
+                }
+            }
+        }
+        if (ImGui::Combo("HUD position", &hudIdx, hudItems, IM_ARRAYSIZE(hudItems))) // FIX-WS3
+        {
+            ps2xGfxSetHudSafeAspect(hudValues[hudIdx]);
+        }
+
+        int scale = rdgfx_vk::getRenderScalePercent();
+        if (ImGui::SliderInt("Render scale", &scale, 25, 400, "%d%%"))
+        {
+            rdgfx_vk::setRenderScalePercent(scale);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("50%"))
+        {
+            rdgfx_vk::setRenderScalePercent(50);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("100%"))
+        {
+            rdgfx_vk::setRenderScalePercent(100);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("150%"))
+        {
+            rdgfx_vk::setRenderScalePercent(150);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("200%"))
+        {
+            rdgfx_vk::setRenderScalePercent(200);
+        }
+
+        bool fullscreen = ps2xSdlGetFullscreen();
+        if (ImGui::Checkbox("Fullscreen (F11)", &fullscreen))
+        {
+            ps2xSdlSetFullscreen(fullscreen);
+        }
+
+        int curPresent = ps2xSdlGetPresentMode();
+        const char *presentNames[] = { "On (FIFO)", "Mailbox", "Off (Immediate)", "Relaxed" };
+        const char *previewPresent = (curPresent >= 0 && curPresent < 4) ? presentNames[curPresent] : "Unknown";
+        if (ImGui::BeginCombo("VSync", previewPresent))
+        {
+            for (int i = 0; i < 4; ++i)
+            {
+                bool supported = ps2xSdlPresentModeSupported(i);
+                bool isSelected = (curPresent == i);
+                if (!supported)
+                {
+                    ImGui::BeginDisabled();
+                }
+                if (ImGui::Selectable(presentNames[i], isSelected) && supported)
+                {
+                    ps2xSdlSetPresentMode(i);
+                }
+                if (isSelected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+                if (!supported)
+                {
+                    ImGui::EndDisabled();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        int winW = 0, winH = 0;
+        ps2xSdlGetWindowPixelSize(&winW, &winH);
+        ImGui::Text("Window pixels: %dx%d", winW, winH);
+
+        int rtW = 0, rtH = 0;
+        rdgfx::getBackbufferSize(rtW, rtH);
+        ImGui::Text("Render target pixels: %dx%d", rtW, rtH);
+
+        const char *msaaEnv = std::getenv("PS2X_MSAA");
+        ImGui::Text("MSAA: %s (restart to change)", (msaaEnv && *msaaEnv) ? msaaEnv : "off");
+
+        static double s_saveTime = -10.0;
+        static bool s_saveOk = false;
+        if (ImGui::Button("Save to ps2x.ini"))
+        {
+            s_saveOk = ps2xGfxSaveIni(rdgfx_vk::getRenderScalePercent(), ps2xSdlGetPresentMode(), ps2xSdlGetFullscreen() ? 1 : 0);
+            s_saveTime = ImGui::GetTime();
+        }
+        if (ImGui::GetTime() - s_saveTime < 3.0)
+        {
+            ImGui::SameLine();
+            if (s_saveOk)
+            {
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "saved");
+            }
+            else
+            {
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "FAILED");
+            }
+        }
+
+        ImGui::TextDisabled("Aspect/cap/HUD apply to the new renderer; classic frames (intro, FMV) use a 4:3 box except 16:9/16:10/native.");
+    }
 #endif
 }
 void PS2DebugPanel::initialize()
@@ -2181,8 +2369,15 @@ void PS2DebugPanel::initialize()
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
     if (!m_initialized)
     {
-        rlImGuiSetup(true);
-        m_initialized = true;
+        if (ps2xSdlActive()) // DBG1
+        {
+            m_initialized = ps2xSdlImGuiInit();
+        }
+        else
+        {
+            rlImGuiSetup(true);
+            m_initialized = true;
+        }
     }
 #endif
 }
@@ -2192,7 +2387,14 @@ void PS2DebugPanel::shutdown()
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
     if (m_initialized)
     {
-        rlImGuiShutdown();
+        if (ps2xSdlActive()) // DBG1
+        {
+            ps2xSdlImGuiShutdown();
+        }
+        else
+        {
+            rlImGuiShutdown();
+        }
         m_initialized = false;
     }
 #endif
@@ -2206,7 +2408,7 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
         return;
     }
 
-    if (IsKeyPressed(KEY_F1))
+    if (ps2xSdlActive() ? g_ps2xF1Pressed.exchange(false) : IsKeyPressed(KEY_F1)) // FIX-WS3
     {
         toggleVisible();
     }
@@ -2216,9 +2418,26 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
         return;
     }
 
-    rlImGuiBegin();
+    if (ps2xSdlActive()) // DBG1
+    {
+        ps2xSdlImGuiNewFrame();
+    }
+    else
+    {
+        rlImGuiBegin();
+    }
 
     ImGui::SetNextWindowSize(ImVec2(780.0f, 620.0f), ImGuiCond_FirstUseEver);
+    // FIX-P3b
+    static const bool s_panelOpen = []() {
+        const char *e = std::getenv("PS2X_PANEL_OPEN");
+        return e && (e[0] == '1' || std::strcmp(e, "true") == 0);
+    }();
+    if (s_panelOpen)
+    {
+        ImGui::SetNextWindowCollapsed(false, ImGuiCond_Once);
+        ImGui::SetNextWindowSize(ImVec2(520, 560), ImGuiCond_Once);
+    }
     if (ImGui::Begin("Runtime Debugger", &m_visible, ImGuiWindowFlags_MenuBar))
     {
         if (ImGui::BeginMenuBar())
@@ -2229,6 +2448,12 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
 
         if (ImGui::BeginTabBar("debug-tabs"))
         {
+            // FIX-P3
+            if (ImGui::BeginTabItem("Graphics"))
+            {
+                drawGraphicsTab();
+                ImGui::EndTabItem();
+            }
             if (ImGui::BeginTabItem("CPU"))
             {
                 drawCpuTab(runtime, m_showRegisters);
@@ -2303,7 +2528,14 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
     }
     ImGui::End();
 
-    rlImGuiEnd();
+    if (ps2xSdlActive()) // DBG1
+    {
+        ps2xSdlImGuiEndFrame();
+    }
+    else
+    {
+        rlImGuiEnd();
+    }
 #else
     (void)runtime;
 #endif

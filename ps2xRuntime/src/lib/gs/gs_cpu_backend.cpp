@@ -24,8 +24,21 @@ namespace probe_ae {
 
 #include <chrono>
 #include <intrin.h>
+#include <unordered_map> // PROBE-IP2b
 
 extern std::atomic<uint64_t> g_presTicks[8]; // PERF-JD, defined in gs_frontend.cpp
+namespace GSMem // FIX-RD74
+{
+    const uint16_t *ExportPageTable(int idx, size_t *entries); // FIX-RD74
+}
+extern void ps2xSafeLog(const char *fmt, ...); // FIX-RD74
+static const bool s_rtt0LogOn = []() { // PROBE-RTT0
+    const char *e = std::getenv("PS2X_RD_RTTLOG");
+    return e && e[0] == '1';
+}();
+extern "C" void ps2x_rtt0_record_l2h(uint32_t sbp, uint32_t sbw, uint8_t spsm, uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh); // PROBE-RTT0
+extern "C" void ps2x_rtt0_record_l2l(uint32_t sbp, uint32_t sbw, uint8_t spsm, uint32_t dbp, uint32_t dbw, uint8_t dpsm,
+                                      uint32_t ssax, uint32_t ssay, uint32_t dsax, uint32_t dsay, uint32_t rrw, uint32_t rrh); // PROBE-RTT0
 std::atomic<uint64_t> g_profGsUs{0};
 std::atomic<uint64_t> g_profXferUs{0};
 std::atomic<uint64_t> g_profPrims{0};
@@ -926,6 +939,71 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
                            1u << batch.state.context.tex0.tw, 1u << batch.state.context.tex0.th);
 }
 
+// PROBE-TN1: ring buffer of last 8 CLUT load attempts (including skipped)
+namespace
+{
+struct Tn1ClutLoadRec
+{
+    uint64_t seq = 0;
+    uint32_t cld = 0;
+    uint32_t cbp = 0;
+    uint32_t cpsm = 0;
+    uint32_t csm = 0;
+    uint32_t csa = 0;
+    uint32_t psm = 0;
+    uint32_t entryCount = 0;
+    uint32_t firstEntryWritten = 0;
+    uint32_t firstEntryColor = 0;
+    char status[40] = {};
+};
+static std::mutex s_tn1ClutHistMutex;
+static Tn1ClutLoadRec s_tn1ClutHist[8];
+static uint64_t s_tn1ClutSeq = 0;
+
+static void tn1RecordClutLoad(uint32_t cld, uint32_t cbp, uint32_t cpsm, uint32_t csm,
+                              uint32_t csa, uint32_t psm, uint32_t entryCount,
+                              uint32_t firstEntryWritten, uint32_t firstEntryColor,
+                              const char *status)
+{
+    std::lock_guard<std::mutex> lk(s_tn1ClutHistMutex);
+    const uint64_t seq = ++s_tn1ClutSeq;
+    Tn1ClutLoadRec &r = s_tn1ClutHist[(seq - 1u) & 7u];
+    r.seq = seq;
+    r.cld = cld;
+    r.cbp = cbp;
+    r.cpsm = cpsm;
+    r.csm = csm;
+    r.csa = csa;
+    r.psm = psm;
+    r.entryCount = entryCount;
+    r.firstEntryWritten = firstEntryWritten;
+    r.firstEntryColor = firstEntryColor;
+    std::snprintf(r.status, sizeof(r.status), "%s", status ? status : "ok");
+}
+} // namespace
+
+void ps2xTn1DumpClutHistory() // PROBE-TN1
+{
+    extern void ps2xSafeLog(const char *fmt, ...);
+    Tn1ClutLoadRec copy[8];
+    uint64_t total = 0;
+    {
+        std::lock_guard<std::mutex> lk(s_tn1ClutHistMutex);
+        total = s_tn1ClutSeq;
+        const uint64_t start = (total > 8u) ? (total - 8u) : 0u;
+        for (uint64_t i = start; i < total; ++i)
+            copy[i - start] = s_tn1ClutHist[i & 7u];
+    }
+    const uint64_t count = (total > 8u) ? 8u : total;
+    for (uint64_t i = 0; i < count; ++i)
+    {
+        const auto &r = copy[i];
+        ps2xSafeLog("[clutload] seq=%llu cld=%u cbp=0x%04x cpsm=0x%x csm=%u csa=%u psm=0x%02x entryCount=%u firstEntryWritten=%u firstEntryColor=0x%08x %s\n",
+                    static_cast<unsigned long long>(r.seq), r.cld, r.cbp, r.cpsm, r.csm, r.csa,
+                    r.psm, r.entryCount, r.firstEntryWritten, r.firstEntryColor, r.status);
+    }
+}
+
 void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -938,7 +1016,12 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
     case 0u:
     case 6u:
     case 7u:
+    {
+        char msg[32];
+        std::snprintf(msg, sizeof(msg), "skipped(cld=%u)", static_cast<unsigned>(tex0.cld)); // PROBE-TN1
+        tn1RecordClutLoad(tex0.cld, tex0.cbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, msg); // PROBE-TN1
         return;
+    }
     case 1u:
         break;
     case 2u:
@@ -949,12 +1032,18 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
         break;
     case 4u:
         if (m_clutCbp[0] == tex0.cbp)
+        {
+            tn1RecordClutLoad(tex0.cld, tex0.cbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, "skipped(cld=4,cbp same)"); // PROBE-TN1
             return;
+        }
         m_clutCbp[0] = tex0.cbp;
         break;
     case 5u:
         if (m_clutCbp[1] == tex0.cbp)
+        {
+            tn1RecordClutLoad(tex0.cld, tex0.cbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, "skipped(cld=5,cbp same)"); // PROBE-TN1
             return;
+        }
         m_clutCbp[1] = tex0.cbp;
         break;
     default:
@@ -968,13 +1057,19 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
 {
     const uint32_t effectiveCbp = (tex0.cbp != 0u) ? tex0.cbp : m_clutCbp[0];
     if (effectiveCbp == 0u)
+    {
+        tn1RecordClutLoad(tex0.cld, tex0.cbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, "skipped(effectiveCbp==0)"); // PROBE-TN1
         return;
+    }
 
     const bool fourBit = isFourBitIndexedPsm(tex0.psm);
     const bool sixteenBit = tex0.cpsm == GS_PSM_CT16 || tex0.cpsm == GS_PSM_CT16S;
     const bool thirtyTwoBit = tex0.cpsm == GS_PSM_CT32 || tex0.cpsm == GS_PSM_CT24;
     if (!sixteenBit && !thirtyTwoBit)
+    {
+        tn1RecordClutLoad(tex0.cld, effectiveCbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm, 0u, 0u, 0u, "skipped(unsupported_cpsm)"); // PROBE-TN1
         return;
+    }
 
     const uint32_t entryCount = fourBit ? 16u : 256u;
     const uint32_t csaMask = sixteenBit ? 0x1Fu : 0x0Fu;
@@ -1049,6 +1144,18 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
     std::memcpy(s_savedClut, m_clut.data(), sizeof(s_savedClut));
     s_savedClutCbp[0] = m_clutCbp[0];
     s_savedClutCbp[1] = m_clutCbp[1];
+    { // PROBE-TN1
+        const uint32_t writtenCount = (firstEntry < entryCount) ? (entryCount - firstEntry) : 0u;
+        const uint32_t firstWritten = (writtenCount > 0u)
+            ? ((loadCsm1Suffix ? firstEntry : destinationBase + firstEntry) & (sixteenBit ? 0x1FFu : 0x0FFu))
+            : 0u;
+        const uint32_t firstColor = (writtenCount > 0u)
+            ? (sixteenBit ? static_cast<uint32_t>(m_clut[firstWritten])
+                          : (static_cast<uint32_t>(m_clut[firstWritten]) | (static_cast<uint32_t>(m_clut[firstWritten + 256u]) << 16u)))
+            : 0u;
+        tn1RecordClutLoad(tex0.cld, effectiveCbp, tex0.cpsm, tex0.csm, tex0.csa, tex0.psm,
+                          writtenCount, firstWritten, firstColor, "ok");
+    }
 }
 
 void GSCpuBackend::Flush()
@@ -4339,6 +4446,174 @@ static void flushCurrentUploadDump()
     s_currentUploadPayload.clear();
 }
 
+// PROBE-IP2 / PROBE-IP2b: HOST->LOCAL upload log (PS2X_UPLOAD_LOG=1|2)
+static const int s_ip2UploadLog = []() {
+    const char *e = std::getenv("PS2X_UPLOAD_LOG");
+    if (!e)
+        return 0;
+    if (e[0] == '2')
+        return 2;
+    if (e[0] == '1')
+        return 1;
+    return 0;
+}();
+
+struct Ip2UploadState
+{
+    bool active = false;
+    GSTransferCommand cmd{};
+    uint32_t bytes = 0u;
+    uint32_t sum = 0u;
+    bool nonzero = false;
+};
+
+struct Ip2UploadClassKey // PROBE-IP2b
+{
+    uint32_t dbp = 0u;
+    uint8_t psm = 0u;
+    uint32_t w = 0u;
+    uint32_t h = 0u;
+    bool operator==(const Ip2UploadClassKey &o) const
+    {
+        return dbp == o.dbp && psm == o.psm && w == o.w && h == o.h;
+    }
+};
+
+struct Ip2UploadClassHash // PROBE-IP2b
+{
+    size_t operator()(const Ip2UploadClassKey &k) const
+    {
+        size_t h = std::hash<uint32_t>{}(k.dbp);
+        h ^= std::hash<uint8_t>{}(k.psm) + 0x9e3779b9u + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(k.w) + 0x9e3779b9u + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(k.h) + 0x9e3779b9u + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+static Ip2UploadState s_ip2Cur{};
+static uint32_t s_ip2Seq = 0u;
+static uint32_t s_ip2Lines = 0u;
+static uint64_t s_ip2TotalBytes = 0ull;
+static uint32_t s_ip2ZeroUploads = 0u;
+static const std::chrono::steady_clock::time_point s_ip2ProcStart = std::chrono::steady_clock::now(); // PROBE-IP2b
+static std::chrono::steady_clock::time_point s_ip2LastSum = s_ip2ProcStart;
+static std::unordered_map<Ip2UploadClassKey, uint32_t, Ip2UploadClassHash> s_ip2SkippedClasses; // PROBE-IP2b
+static uint32_t s_ip2SkippedTotal = 0u; // PROBE-IP2b
+
+static void ip2Accumulate(const uint8_t *data, uint32_t len)
+{
+    for (uint32_t i = 0u; i < len; ++i)
+    {
+        const uint8_t b = data[i];
+        s_ip2Cur.sum = (s_ip2Cur.sum + b) ^ (static_cast<uint32_t>(b) << (((s_ip2Cur.bytes + i) & 3u) * 8u));
+        if (b != 0u)
+            s_ip2Cur.nonzero = true;
+    }
+    s_ip2Cur.bytes += len;
+}
+
+static void ip2FinishUpload()
+{
+    const uint32_t seq = ++s_ip2Seq;
+    const uint32_t dbp = s_ip2Cur.cmd.bitbltbuf.dbp;
+    const uint8_t dpsm = s_ip2Cur.cmd.bitbltbuf.dpsm;
+    const uint32_t rrw = s_ip2Cur.cmd.trxreg.rrw;
+    const uint32_t rrh = s_ip2Cur.cmd.trxreg.rrh;
+    const uint32_t bytes = s_ip2Cur.bytes;
+    s_ip2TotalBytes += bytes;
+    if (!s_ip2Cur.nonzero)
+        ++s_ip2ZeroUploads;
+
+    const uint32_t startTbp = dbp;
+    const uint32_t endTbp = dbp + (bytes > 0u ? ((bytes - 1u) >> 8) : 0u);
+    const bool preview = (startTbp <= 0x3040u && endTbp >= 0x2e40u) ||
+                         (startTbp <= 0x3440u && endTbp >= 0x3240u) ||
+                         (startTbp <= 0x3740u && endTbp >= 0x3640u);
+
+    const auto now = std::chrono::steady_clock::now();
+    const long long hostMs = static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - s_ip2ProcStart).count()); // PROBE-IP2b
+
+    if (s_ip2UploadLog == 2) // PROBE-IP2b
+    {
+        const bool smallBlock = (rrw == 16u && rrh == 16u) || (rrw == 8u && rrh == 2u);
+        const bool large = (rrw >= 128u && rrh >= 128u);
+        const bool shouldPrint = preview || (!smallBlock && large);
+        if (shouldPrint && s_ip2Lines < 3000u)
+        {
+            ++s_ip2Lines;
+            ps2xSafeLog("ms=%lld [upload] seq=%u dbp=0x%04x dpsm=0x%02x dbw=%u pos=(%u,%u) size=%ux%u bytes=%u sum=0x%08x nonzero=%d%s\n",
+                        hostMs, seq, dbp, static_cast<unsigned>(dpsm), s_ip2Cur.cmd.bitbltbuf.dbw,
+                        s_ip2Cur.cmd.trxpos.dsax, s_ip2Cur.cmd.trxpos.dsay,
+                        rrw, rrh,
+                        bytes, s_ip2Cur.sum, s_ip2Cur.nonzero ? 1 : 0,
+                        preview ? " *** PREVIEW-RANGE" : "");
+        }
+        else
+        {
+            ++s_ip2SkippedClasses[Ip2UploadClassKey{dbp, dpsm, rrw, rrh}];
+            ++s_ip2SkippedTotal;
+        }
+    }
+    else if (s_ip2Lines < 800u)
+    {
+        ++s_ip2Lines;
+        ps2xSafeLog("[upload] seq=%u dbp=0x%04x dpsm=0x%02x dbw=%u pos=(%u,%u) size=%ux%u bytes=%u sum=0x%08x nonzero=%d%s\n",
+                    seq, dbp, static_cast<unsigned>(dpsm), s_ip2Cur.cmd.bitbltbuf.dbw,
+                    s_ip2Cur.cmd.trxpos.dsax, s_ip2Cur.cmd.trxpos.dsay,
+                    rrw, rrh,
+                    bytes, s_ip2Cur.sum, s_ip2Cur.nonzero ? 1 : 0,
+                    preview ? " *** PREVIEW-RANGE" : "");
+    }
+
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_ip2LastSum).count() >= 2000)
+    {
+        s_ip2LastSum = now;
+        if (s_ip2UploadLog == 2) // PROBE-IP2b
+        {
+            std::vector<std::pair<Ip2UploadClassKey, uint32_t>> items(
+                s_ip2SkippedClasses.begin(), s_ip2SkippedClasses.end());
+            std::sort(items.begin(), items.end(), [](const auto &a, const auto &b) {
+                return a.second > b.second;
+            });
+            char buf[960];
+            int pos = std::snprintf(buf, sizeof(buf),
+                                    "ms=%lld [upload-sum2] n=%u bytes=%llu zeroUploads=%u skipped=%u",
+                                    hostMs, s_ip2Seq, static_cast<unsigned long long>(s_ip2TotalBytes),
+                                    s_ip2ZeroUploads, s_ip2SkippedTotal);
+            size_t shown = 0u;
+            for (const auto &it : items)
+            {
+                if (pos < 0 || static_cast<size_t>(pos) + 48u >= sizeof(buf))
+                    break;
+                const int w = std::snprintf(buf + pos, sizeof(buf) - static_cast<size_t>(pos),
+                                            " 0x%04x/%02x/%ux%u=%u",
+                                            it.first.dbp, static_cast<unsigned>(it.first.psm),
+                                            it.first.w, it.first.h, it.second);
+                if (w < 0)
+                    break;
+                pos += w;
+                ++shown;
+            }
+            if (shown < items.size() && pos > 0 && static_cast<size_t>(pos) + 24u < sizeof(buf))
+            {
+                std::snprintf(buf + pos, sizeof(buf) - static_cast<size_t>(pos),
+                              " (+%zu)", items.size() - shown);
+            }
+            ps2xSafeLog("%s\n", buf);
+            s_ip2SkippedClasses.clear();
+            s_ip2SkippedTotal = 0u;
+        }
+        else
+        {
+            ps2xSafeLog("[upload-sum] n=%u bytes=%llu zeroUploads=%u\n",
+                        s_ip2Seq, static_cast<unsigned long long>(s_ip2TotalBytes), s_ip2ZeroUploads);
+        }
+    }
+    s_ip2Cur.active = false;
+}
+
 void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
 {
     if (s_uploadDump == -1)
@@ -4364,6 +4639,18 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
     m_transferState.copiedPixels = 0u;
     m_transferState.direction = command.direction;
     m_transferState.localToHostPendingBytes = 0u;
+
+    if (s_ip2UploadLog) // PROBE-IP2
+    {
+        if (s_ip2Cur.active && s_ip2Cur.bytes > 0u)
+            ip2FinishUpload();
+        s_ip2Cur = {};
+        if (command.direction == 0u)
+        {
+            s_ip2Cur.active = true;
+            s_ip2Cur.cmd = command;
+        }
+    }
 
     if (command.direction == 2u)
         PerformLocalToLocalTransfer();
@@ -4454,6 +4741,13 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
         if (s_uploadDump == 1 && s_inUpload && m_transferState.direction == 3u)
         {
             flushCurrentUploadDump();
+        }
+        if (s_ip2UploadLog && s_ip2Cur.active) // PROBE-IP2
+        {
+            if (offset > 0u)
+                ip2Accumulate(data, offset);
+            if (m_transferState.direction == 3u)
+                ip2FinishUpload();
         }
     };
 
@@ -4590,6 +4884,10 @@ void GSCpuBackend::PerformLocalToLocalTransfer()
         m_transferState.direction = 3u;
         return;
     }
+    if (s_rtt0LogOn) // PROBE-RTT0
+        ps2x_rtt0_record_l2l(m_transfer.bitbltbuf.sbp, std::max<uint32_t>(m_transfer.bitbltbuf.sbw, 1u), m_transfer.bitbltbuf.spsm,
+                             m_transfer.bitbltbuf.dbp, std::max<uint32_t>(m_transfer.bitbltbuf.dbw, 1u), m_transfer.bitbltbuf.dpsm,
+                             m_transfer.trxpos.ssax, m_transfer.trxpos.ssay, m_transfer.trxpos.dsax, m_transfer.trxpos.dsay, rrw, rrh);
 
     for (uint32_t pixel = 0; pixel < total; ++pixel)
     {
@@ -4617,6 +4915,106 @@ void GSCpuBackend::PerformLocalToLocalTransfer()
     m_transferState.direction = 3u;
 }
 
+template <uint32_t PW, uint32_t PH, uint32_t BYTES>
+static void l2hReadRowTiled(const uint16_t *table, const uint8_t *vram, uint32_t sbp, uint32_t sbw,
+                            uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh, uint8_t *dst) // FIX-RD74
+{
+    const uint32_t blockIdx = sbp & 31u;
+    const uint32_t basePage = sbp >> 5u;
+    const uint32_t pagesPerRow = (sbw * 64u) / PW;
+    for (uint32_t y = 0u; y < rrh; ++y)
+    {
+        const uint32_t sy = ssay + y;
+        const uint32_t rowBasePage = basePage + (sy / PH) * pagesPerRow;
+        const uint16_t *trow = &table[(static_cast<size_t>(blockIdx) * PH + (sy % PH)) * PW];
+        uint32_t x = 0u;
+        while (x < rrw)
+        {
+            const uint32_t sx = ssax + x;
+            const uint32_t page = (rowBasePage + (sx / PW)) & 511u;
+            const uint8_t *pagePtr = vram + static_cast<size_t>(page) * 8192u;
+            const uint32_t px0 = sx % PW;
+            const uint32_t span = std::min<uint32_t>(PW - px0, rrw - x);
+            const uint16_t *tspan = trow + px0;
+            if constexpr (BYTES == 4u)
+            {
+                for (uint32_t k = 0u; k < span; ++k)
+                {
+                    std::memcpy(dst, pagePtr + static_cast<size_t>(tspan[k]) * 4u, 4u);
+                    dst += 4;
+                }
+            }
+            else if constexpr (BYTES == 3u)
+            {
+                for (uint32_t k = 0u; k < span; ++k)
+                {
+                    std::memcpy(dst, pagePtr + static_cast<size_t>(tspan[k]) * 4u, 3u);
+                    dst += 3;
+                }
+            }
+            else if constexpr (BYTES == 2u)
+            {
+                for (uint32_t k = 0u; k < span; ++k)
+                {
+                    std::memcpy(dst, pagePtr + static_cast<size_t>(tspan[k]) * 2u, 2u);
+                    dst += 2;
+                }
+            }
+            else
+            {
+                for (uint32_t k = 0u; k < span; ++k)
+                    *dst++ = pagePtr[tspan[k]];
+            }
+            x += span;
+        }
+    }
+}
+
+static bool l2hTransferBulk(const uint8_t *vram, size_t vramSize, uint8_t spsm, uint32_t sbp, uint32_t sbw,
+                            uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh,
+                            std::vector<uint8_t> &outBuf) // FIX-RD74
+{
+    if (vramSize != GSMem::MEMORY_SIZE || rrw == 0u || rrh == 0u)
+        return false;
+    size_t entries = 0;
+    static const uint16_t *s_tblC32 = GSMem::ExportPageTable(0, &entries);
+    static const uint16_t *s_tblC16 = GSMem::ExportPageTable(2, &entries);
+    static const uint16_t *s_tblC16S = GSMem::ExportPageTable(3, &entries);
+    static const uint16_t *s_tblP8 = GSMem::ExportPageTable(6, &entries);
+
+    const size_t total = static_cast<size_t>(rrw) * rrh;
+    switch (spsm)
+    {
+    case GS_PSM_CT32:
+        if (!s_tblC32) return false;
+        outBuf.resize(total * 4u);
+        l2hReadRowTiled<64u, 32u, 4u>(s_tblC32, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    case GS_PSM_CT24:
+        if (!s_tblC32) return false;
+        outBuf.resize(total * 3u);
+        l2hReadRowTiled<64u, 32u, 3u>(s_tblC32, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    case GS_PSM_CT16:
+        if (!s_tblC16) return false;
+        outBuf.resize(total * 2u);
+        l2hReadRowTiled<64u, 64u, 2u>(s_tblC16, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    case GS_PSM_CT16S:
+        if (!s_tblC16S) return false;
+        outBuf.resize(total * 2u);
+        l2hReadRowTiled<64u, 64u, 2u>(s_tblC16S, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    case GS_PSM_T8:
+        if (!s_tblP8) return false;
+        outBuf.resize(total);
+        l2hReadRowTiled<128u, 64u, 1u>(s_tblP8, vram, sbp, sbw, ssax, ssay, rrw, rrh, outBuf.data());
+        return true;
+    default:
+        return false;
+    }
+}
+
 void GSCpuBackend::PerformLocalToHostTransfer()
 {
     m_localToHostBuffer.clear();
@@ -4628,59 +5026,190 @@ void GSCpuBackend::PerformLocalToHostTransfer()
     const uint32_t rrh = m_transfer.trxreg.rrh;
     const uint32_t sbw = std::max<uint32_t>(m_transfer.bitbltbuf.sbw, 1u);
     const uint8_t spsm = m_transfer.bitbltbuf.spsm;
+    const uint32_t sbp = m_transfer.bitbltbuf.sbp;
+    const uint32_t ssax = m_transfer.trxpos.ssax;
+    const uint32_t ssay = m_transfer.trxpos.ssay;
     const uint32_t bpp = static_cast<uint32_t>(GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(spsm)));
     const uint32_t total = rrw * rrh;
-    m_localToHostBuffer.reserve((static_cast<size_t>(total) * bpp + 7u) / 8u);
+    if (s_rtt0LogOn && total > 0u) // PROBE-RTT0
+        ps2x_rtt0_record_l2h(sbp, sbw, spsm, ssax, ssay, rrw, rrh);
 
-    for (uint32_t pixel = 0u; pixel < total; ++pixel)
-    {
-        const uint32_t x = pixel % rrw;
-        const uint32_t y = pixel / rrw;
-        const uint32_t value = ReadVramUnlocked(spsm,
-                                                m_transfer.bitbltbuf.sbp,
-                                                sbw,
-                                                x + m_transfer.trxpos.ssax,
-                                                y + m_transfer.trxpos.ssay);
+    static const bool s_l2hFast = []() { // FIX-RD74
+        const char *e = std::getenv("PS2X_GS_L2H_FAST");
+        return !(e && e[0] == '0');
+    }();
+    static const bool s_l2hVerify = []() { // FIX-RD74
+        const char *e = std::getenv("PS2X_GS_L2H_VERIFY");
+        return e && e[0] == '1';
+    }();
+
+    auto runOld = [&](std::vector<uint8_t> &outBuf) {
+        outBuf.clear();
+        outBuf.reserve((static_cast<size_t>(total) * bpp + 7u) / 8u);
+        for (uint32_t pixel = 0u; pixel < total; ++pixel)
+        {
+            const uint32_t x = pixel % rrw;
+            const uint32_t y = pixel / rrw;
+            const uint32_t value = ReadVramUnlocked(spsm, sbp, sbw, x + ssax, y + ssay);
+            switch (bpp)
+            {
+            case 32:
+                outBuf.push_back(static_cast<uint8_t>(value));
+                outBuf.push_back(static_cast<uint8_t>(value >> 8u));
+                outBuf.push_back(static_cast<uint8_t>(value >> 16u));
+                outBuf.push_back(static_cast<uint8_t>(value >> 24u));
+                break;
+            case 24:
+                outBuf.push_back(static_cast<uint8_t>(value));
+                outBuf.push_back(static_cast<uint8_t>(value >> 8u));
+                outBuf.push_back(static_cast<uint8_t>(value >> 16u));
+                break;
+            case 16:
+                outBuf.push_back(static_cast<uint8_t>(value));
+                outBuf.push_back(static_cast<uint8_t>(value >> 8u));
+                break;
+            case 8:
+                outBuf.push_back(static_cast<uint8_t>(value));
+                break;
+            case 4:
+            {
+                if ((pixel & 1u) != 0u)
+                    break;
+                uint32_t next = 0u;
+                if (pixel + 1u < total)
+                {
+                    const uint32_t nextPixel = pixel + 1u;
+                    const uint32_t nextX = nextPixel % rrw;
+                    const uint32_t nextY = nextPixel / rrw;
+                    next = ReadVramUnlocked(spsm, sbp, sbw, nextX + ssax, nextY + ssay);
+                }
+                outBuf.push_back(static_cast<uint8_t>((value & 0x0Fu) | ((next & 0x0Fu) << 4u)));
+                break;
+            }
+            default:
+                break;
+            }
+        }
+    };
+
+    auto runFast = [&](std::vector<uint8_t> &outBuf) { // FIX-RD74
+        if (l2hTransferBulk(m_vram, m_vramSize, spsm, sbp, sbw, ssax, ssay, rrw, rrh, outBuf))
+            return;
+
+        size_t byteSize = 0u;
         switch (bpp)
         {
-        case 32:
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 8u));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 16u));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 24u));
-            break;
-        case 24:
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 8u));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 16u));
-            break;
-        case 16:
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value));
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value >> 8u));
-            break;
-        case 8:
-            m_localToHostBuffer.push_back(static_cast<uint8_t>(value));
-            break;
-        case 4:
+        case 32: byteSize = static_cast<size_t>(total) * 4u; break;
+        case 24: byteSize = static_cast<size_t>(total) * 3u; break;
+        case 16: byteSize = static_cast<size_t>(total) * 2u; break;
+        case 8:  byteSize = static_cast<size_t>(total); break;
+        case 4:  byteSize = (static_cast<size_t>(total) + 1u) / 2u; break;
+        default: outBuf.clear(); return;
+        }
+        outBuf.resize(byteSize);
+        if (byteSize == 0u)
+            return;
+
+        uint8_t *dst = outBuf.data();
+        if (bpp == 4u)
         {
-            if ((pixel & 1u) != 0u)
-                break;
-            uint32_t next = 0u;
-            if (pixel + 1u < total)
+            uint32_t x = 0u;
+            uint32_t y = 0u;
+            for (uint32_t pixel = 0u; pixel < total; pixel += 2u)
             {
-                const uint32_t nextPixel = pixel + 1u;
-                const uint32_t nextX = nextPixel % rrw;
-                const uint32_t nextY = nextPixel / rrw;
-                next = ReadVramUnlocked(spsm, m_transfer.bitbltbuf.sbp, sbw,
-                                        nextX + m_transfer.trxpos.ssax,
-                                        nextY + m_transfer.trxpos.ssay);
+                const uint32_t v0 = ReadVramUnlocked(spsm, sbp, sbw, x + ssax, y + ssay);
+                if (++x == rrw) { x = 0u; ++y; }
+                uint32_t v1 = 0u;
+                if (pixel + 1u < total)
+                {
+                    v1 = ReadVramUnlocked(spsm, sbp, sbw, x + ssax, y + ssay);
+                    if (++x == rrw) { x = 0u; ++y; }
+                }
+                *dst++ = static_cast<uint8_t>((v0 & 0x0Fu) | ((v1 & 0x0Fu) << 4u));
             }
-            m_localToHostBuffer.push_back(static_cast<uint8_t>((value & 0x0Fu) | ((next & 0x0Fu) << 4u)));
-            break;
+            return;
         }
-        default:
-            break;
+
+        for (uint32_t y = 0u; y < rrh; ++y)
+        {
+            const uint32_t sy = y + ssay;
+            for (uint32_t x = 0u; x < rrw; ++x)
+            {
+                const uint32_t value = ReadVramUnlocked(spsm, sbp, sbw, x + ssax, sy);
+                switch (bpp)
+                {
+                case 32:
+                    dst[0] = static_cast<uint8_t>(value);
+                    dst[1] = static_cast<uint8_t>(value >> 8u);
+                    dst[2] = static_cast<uint8_t>(value >> 16u);
+                    dst[3] = static_cast<uint8_t>(value >> 24u);
+                    dst += 4;
+                    break;
+                case 24:
+                    dst[0] = static_cast<uint8_t>(value);
+                    dst[1] = static_cast<uint8_t>(value >> 8u);
+                    dst[2] = static_cast<uint8_t>(value >> 16u);
+                    dst += 3;
+                    break;
+                case 16:
+                    dst[0] = static_cast<uint8_t>(value);
+                    dst[1] = static_cast<uint8_t>(value >> 8u);
+                    dst += 2;
+                    break;
+                case 8:
+                    *dst++ = static_cast<uint8_t>(value);
+                    break;
+                default:
+                    break;
+                }
+            }
         }
+    };
+
+    if (s_l2hVerify) // FIX-RD74
+    {
+        thread_local std::vector<uint8_t> t_oldBuf;
+        runOld(t_oldBuf);
+        runFast(m_localToHostBuffer);
+
+        static std::atomic<uint64_t> s_ok{0ull};
+        static std::atomic<uint64_t> s_bad{0ull};
+        static std::atomic<uint32_t> s_mismatchLogs{0u};
+        static auto s_lastLog = std::chrono::steady_clock::now();
+
+        const bool match = (t_oldBuf.size() == m_localToHostBuffer.size()) &&
+                           (t_oldBuf.empty() || std::memcmp(t_oldBuf.data(), m_localToHostBuffer.data(), t_oldBuf.size()) == 0);
+        if (match)
+        {
+            s_ok.fetch_add(1ull, std::memory_order_relaxed);
+        }
+        else
+        {
+            s_bad.fetch_add(1ull, std::memory_order_relaxed);
+            if (s_mismatchLogs.fetch_add(1u, std::memory_order_relaxed) < 20u)
+            {
+                ps2xSafeLog("[l2h] MISMATCH spsm=%u rrw=%u rrh=%u sbw=%u sbp=%u ssax=%u ssay=%u\n",
+                            static_cast<unsigned>(spsm), rrw, rrh, sbw, sbp, ssax, ssay);
+            }
+            m_localToHostBuffer.swap(t_oldBuf);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastLog).count() >= 5)
+        {
+            s_lastLog = now;
+            ps2xSafeLog("[l2h] ok=%llu bad=%llu\n",
+                        static_cast<unsigned long long>(s_ok.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(s_bad.load(std::memory_order_relaxed)));
+        }
+    }
+    else if (!s_l2hFast) // FIX-RD74
+    {
+        runOld(m_localToHostBuffer);
+    }
+    else
+    {
+        runFast(m_localToHostBuffer);
     }
 
     m_transferState.copiedPixels = total;

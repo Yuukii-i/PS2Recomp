@@ -4,11 +4,55 @@
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
 #include "trace_logger.h"
+#include <chrono> // FIX-T4
+
+void ps2xSafeLog(const char *fmt, ...); // FIX-T4
+uint64_t ps2xCid1DriveBusyUntilVbl(); // FIX-T4
+uint64_t ps2xRegisterCid1VblankBlock(EeScheduler *sched, uint64_t dueVbl, int tid); // FIX-T4
 
 namespace ps2_stubs
 {
     namespace
     {
+        static inline bool isCdRpcBlockEnabled() noexcept // FIX-T4
+        { // FIX-T4
+            static const bool s_enabled = []() -> bool { // FIX-T4
+                const char *env = std::getenv("PS2X_RPC_BLOCK"); // FIX-T4
+                return env && std::strcmp(env, "1") == 0; // FIX-T4
+            }(); // FIX-T4
+            return s_enabled; // FIX-T4
+        } // FIX-T4
+
+        static void maybeBlockOnCid1Drive(R5900Context *ctx, PS2Runtime *runtime, const char *fnName, int32_t readyResult) // FIX-T4
+        { // FIX-T4
+            (void)ctx; // FIX-T4
+            if (!isCdRpcBlockEnabled() || runtime == nullptr) // FIX-T4
+                return; // FIX-T4
+            const uint64_t untilVbl = ps2xCid1DriveBusyUntilVbl(); // FIX-T4
+            if (untilVbl == 0u) // FIX-T4
+                return; // FIX-T4
+            EeScheduler &sched = runtime->eeScheduler(); // FIX-T4
+            if (!sched.isExecutingGuest()) // FIX-T4
+                return; // FIX-T4
+            GuestThread *self = sched.currentThread(); // FIX-T4
+            if (!self) // FIX-T4
+                return; // FIX-T4
+            const int tid = self->id; // FIX-T4
+            const auto startHost = std::chrono::steady_clock::now(); // FIX-T4
+            const uint64_t token = ps2xRegisterCid1VblankBlock(&sched, untilVbl, tid); // FIX-T4
+            sched.waitExternal( // FIX-T4
+                EeWaitReason::External, // FIX-T4
+                0x52504342u, // FIX-T4
+                token, // FIX-T4
+                [fnName, tid, untilVbl, startHost, readyResult](R5900Context &parentCtx) // FIX-T4
+                { // FIX-T4
+                    setReturnS32(&parentCtx, readyResult); // FIX-T4
+                    const double blockedMs = std::chrono::duration<double, std::milli>( // FIX-T4
+                        std::chrono::steady_clock::now() - startHost).count(); // FIX-T4
+                    ps2xSafeLog("[cdblock] fn=%s tid=%d untilVbl=%llu blockedMs=%.1f\n", // FIX-T4
+                                fnName, tid, static_cast<unsigned long long>(untilVbl), blockedMs); // FIX-T4
+                }); // FIX-T4
+        } // FIX-T4
         static bool isDcProbeEnabled()
         {
             static const bool s_enabled = []() {
@@ -255,6 +299,7 @@ namespace ps2_stubs
     void sceCdSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         push_trace("ps2_stubs::sceCdSync");
+        maybeBlockOnCid1Drive(ctx, runtime, "sceCdSync", 0); // FIX-T4
         const int32_t mode = static_cast<int32_t>(getRegU32(ctx, 4));
         fprintf(stderr, "[sceCdSync] mode=%d -> 0\n", mode);
         fflush(stderr);
@@ -304,6 +349,7 @@ namespace ps2_stubs
     void sceCdDiskReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         push_trace("ps2_stubs::sceCdDiskReady");
+        maybeBlockOnCid1Drive(ctx, runtime, "sceCdDiskReady", 2); // FIX-T4
         const int32_t mode = static_cast<int32_t>(getRegU32(ctx, 4));
         fprintf(stderr, "[sceCdDiskReady] mode=%d -> 2\n", mode);
         fflush(stderr);
@@ -384,6 +430,7 @@ namespace ps2_stubs
 
     void sceCdNcmdDiskReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        maybeBlockOnCid1Drive(ctx, runtime, "sceCdNcmdDiskReady", 2); // FIX-T4
         setReturnS32(ctx, 2);
     }
 
@@ -595,6 +642,7 @@ namespace ps2_stubs
     void sceCdStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         push_trace("ps2_stubs::sceCdStatus");
+        maybeBlockOnCid1Drive(ctx, runtime, "sceCdStatus", 2); // FIX-T4
         fprintf(stderr, "[sceCdStatus] -> 2\n");
         fflush(stderr);
         setReturnS32(ctx, 2);
@@ -933,6 +981,7 @@ namespace ps2_stubs
     void sceCdSyncS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         push_trace("ps2_stubs::sceCdSyncS");
+        maybeBlockOnCid1Drive(ctx, runtime, "sceCdSyncS", 0); // FIX-T4
         setReturnS32(ctx, 0);
     }
 

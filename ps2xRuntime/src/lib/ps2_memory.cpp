@@ -8,12 +8,125 @@
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
+#include <chrono> // PROBE-IP1
+#include <cstdio> // PROBE-IP1
 #include <string>
 #include <vector>
 // PERF-KL: cached pointer to the GIF_STAT entry of m_ioRegisters (advanceEeTimers cleared its FQC bits with a hash lookup on every cycle-accounting call)
 static uint32_t *s_gifStatPtr = nullptr;
 static const void *s_gifStatOwner = nullptr;
 void ps2xSafeLog(const char *fmt, ...);
+
+static inline bool ipuProbeOn() // PROBE-IP1
+{ // PROBE-IP1
+    static const bool s_on = []() { const char *e = std::getenv("PS2X_IPU_LOG"); return e && e[0] == '1'; }(); // PROBE-IP1
+    return s_on; // PROBE-IP1
+} // PROBE-IP1
+
+namespace // PROBE-IP1
+{ // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeSeq{0u}; // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeLines{0u}; // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeCalls{0u}; // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeCmds{0u}; // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeDma3{0u}; // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeDma4{0u}; // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeZeroOut{0u}; // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeCmdOfmMask{0u}; // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeFifoInCount{0u}; // PROBE-IP1
+    std::atomic<uint32_t> g_ipuProbeFifoOutCount{0u}; // PROBE-IP1
+    std::mutex g_ipuProbeSummaryMutex; // PROBE-IP1
+    auto g_ipuProbeLastSummary = std::chrono::steady_clock::now(); // PROBE-IP1
+
+    bool ipuProbeTryLine() // PROBE-IP1
+    { // PROBE-IP1
+        const uint32_t prev = g_ipuProbeLines.load(std::memory_order_relaxed); // PROBE-IP1
+        if (prev >= 600u) // PROBE-IP1
+            return false; // PROBE-IP1
+        return g_ipuProbeLines.fetch_add(1u, std::memory_order_relaxed) < 600u; // PROBE-IP1
+    } // PROBE-IP1
+
+    uint32_t ipuProbeNextSeq() // PROBE-IP1
+    { // PROBE-IP1
+        return g_ipuProbeSeq.fetch_add(1u, std::memory_order_relaxed) + 1u; // PROBE-IP1
+    } // PROBE-IP1
+
+    const char *ipuCmdName(uint32_t cmd) // PROBE-IP1
+    { // PROBE-IP1
+        switch (cmd) // PROBE-IP1
+        { // PROBE-IP1
+        case 0u: return "BCLR"; // PROBE-IP1
+        case 2u: return "IDEC"; // PROBE-IP1
+        case 3u: return "BDEC"; // PROBE-IP1
+        case 4u: return "VDEC"; // PROBE-IP1
+        case 5u: return "FDEC"; // PROBE-IP1
+        case 6u: return "SETIQ"; // PROBE-IP1
+        case 7u: return "SETVQ"; // PROBE-IP1
+        case 8u: return "CSC"; // PROBE-IP1
+        case 9u: return "PACK"; // PROBE-IP1
+        case 10u: return "SETTH"; // PROBE-IP1
+        default: return "UNK"; // PROBE-IP1
+        } // PROBE-IP1
+    } // PROBE-IP1
+
+    void ipuProbeMaybeSummary(uint32_t ra) // PROBE-IP1
+    { // PROBE-IP1
+        const auto now = std::chrono::steady_clock::now(); // PROBE-IP1
+        std::unique_lock<std::mutex> lock(g_ipuProbeSummaryMutex, std::try_to_lock); // PROBE-IP1
+        if (!lock.owns_lock()) // PROBE-IP1
+            return; // PROBE-IP1
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_ipuProbeLastSummary).count() < 2000) // PROBE-IP1
+            return; // PROBE-IP1
+        g_ipuProbeLastSummary = now; // PROBE-IP1
+        if (!ipuProbeTryLine()) // PROBE-IP1
+            return; // PROBE-IP1
+        const uint32_t mask = g_ipuProbeCmdOfmMask.load(std::memory_order_relaxed); // PROBE-IP1
+        char pairs[192]; // PROBE-IP1
+        size_t pos = 0; // PROBE-IP1
+        pairs[0] = '\0'; // PROBE-IP1
+        for (uint32_t i = 0; i < 32u && pos + 16 < sizeof(pairs); ++i) // PROBE-IP1
+        { // PROBE-IP1
+            if (mask & (1u << i)) // PROBE-IP1
+            { // PROBE-IP1
+                const int n = std::snprintf(pairs + pos, sizeof(pairs) - pos, "%s(%u,%u)", // PROBE-IP1
+                                            pos ? "," : "", i >> 1, i & 1u); // PROBE-IP1
+                if (n > 0) pos += static_cast<size_t>(n); // PROBE-IP1
+            } // PROBE-IP1
+        } // PROBE-IP1
+        ps2xSafeLog("[ipu-sum] seq=%u ra=0x%08x calls=%u cmds=%u dma3=%u dma4=%u zeroOut=%u pairs=[%s]\n", // PROBE-IP1
+                    ipuProbeNextSeq(), ra, // PROBE-IP1
+                    g_ipuProbeCalls.load(std::memory_order_relaxed), // PROBE-IP1
+                    g_ipuProbeCmds.load(std::memory_order_relaxed), // PROBE-IP1
+                    g_ipuProbeDma3.load(std::memory_order_relaxed), // PROBE-IP1
+                    g_ipuProbeDma4.load(std::memory_order_relaxed), // PROBE-IP1
+                    g_ipuProbeZeroOut.load(std::memory_order_relaxed), // PROBE-IP1
+                    pairs); // PROBE-IP1
+    } // PROBE-IP1
+
+    void ipuProbeLogFifo(const char *op, uint32_t addr, uint64_t lo, uint64_t hi) // PROBE-IP1
+    { // PROBE-IP1
+        const bool isIn = (addr == 0x10007010u); // PROBE-IP1
+        const uint32_t count = (isIn ? g_ipuProbeFifoInCount : g_ipuProbeFifoOutCount).fetch_add(1u, std::memory_order_relaxed) + 1u; // PROBE-IP1
+        ipuProbeMaybeSummary(0u); // PROBE-IP1
+        if (count == 1u && ipuProbeTryLine()) // PROBE-IP1
+        { // PROBE-IP1
+            ps2xSafeLog("[ipu-mmio] seq=%u ra=0x00000000 %s %s count=%u first_qw=0x%016llx_%016llx\n", // PROBE-IP1
+                        ipuProbeNextSeq(), op, isIn ? "IPU_in_FIFO" : "IPU_out_FIFO", count, // PROBE-IP1
+                        static_cast<unsigned long long>(hi), static_cast<unsigned long long>(lo)); // PROBE-IP1
+        } // PROBE-IP1
+    } // PROBE-IP1
+} // PROBE-IP1
+
+void ipuProbeLogCall(uint32_t ra, const char *fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t ret) // PROBE-IP1
+{ // PROBE-IP1
+    g_ipuProbeCalls.fetch_add(1u, std::memory_order_relaxed); // PROBE-IP1
+    ipuProbeMaybeSummary(ra); // PROBE-IP1
+    if (ipuProbeTryLine()) // PROBE-IP1
+    { // PROBE-IP1
+        ps2xSafeLog("[ipu] seq=%u ra=0x%08x fn=%s a0=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x ret=0x%08x\n", // PROBE-IP1
+                    ipuProbeNextSeq(), ra, fn ? fn : "?", a0, a1, a2, a3, ret); // PROBE-IP1
+    } // PROBE-IP1
+} // PROBE-IP1
 
 std::atomic<uint64_t> g_gsFrameKicks{0};
 std::atomic<uint64_t> g_aw2Mark2000{0}, g_aw2C5Raised{0}, g_aw2C5Delivered{0}; // PROBE-AW2
@@ -1394,21 +1507,27 @@ void PS2Memory::resetEeTimers() noexcept
 
 uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
 {
-    if (eeCycles == 0u)
+    if (eeCycles == 0u) [[unlikely]]
     {
         return 0u;
     }
 
     constexpr uint32_t kGifStat = 0x10003020u;
     constexpr uint32_t kGifFqcMask = 0x1F000000u;
-    if (s_gifStatOwner != this || s_gifStatPtr == nullptr) // PERF-KL: unordered_map elements are node-stable; the only invalidation is clear() (reset above)
+    if (s_gifStatOwner != this || s_gifStatPtr == nullptr) [[unlikely]] // PERF-KL: unordered_map elements are node-stable; the only invalidation is clear() (reset above)
     {
         auto gifStatIt = m_ioRegisters.find(kGifStat);
         s_gifStatOwner = this;
         s_gifStatPtr = gifStatIt != m_ioRegisters.end() ? &gifStatIt->second : nullptr;
     }
-    if (s_gifStatPtr)
+    if (s_gifStatPtr) [[likely]]
         *s_gifStatPtr &= ~kGifFqcMask;
+
+    // PERF-EX1: hoist loop-invariant eeCycles / kEeClockHz and eeCycles % kEeClockHz out of the timer loop,
+    // with a fast path when eeCycles < kEeClockHz (virtually all calls).
+    const bool subSecond = eeCycles < kEeClockHz;
+    const uint64_t wholeSeconds = subSecond ? 0u : (eeCycles / kEeClockHz);
+    const uint64_t remainingCycles = subSecond ? eeCycles : (eeCycles % kEeClockHz);
 
     uint32_t interruptMask = 0u;
     for (size_t index = 0; index < m_eeTimers.size(); ++index)
@@ -1420,11 +1539,10 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
         }
 
         const uint64_t clockHz = kEeTimerClockHz[timer.mode & kEeTimerModeClksMask];
-        const uint64_t wholeSeconds = eeCycles / kEeClockHz;
-        const uint64_t remainingCycles = eeCycles % kEeClockHz;
         const uint64_t scaled = remainingCycles * clockHz + timer.clockRemainder;
-        const uint64_t ticks = wholeSeconds * clockHz + scaled / kEeClockHz;
-        timer.clockRemainder = scaled % kEeClockHz;
+        const uint64_t scaledTicks = scaled / kEeClockHz; // PERF-EX1: single divide for quotient & remainder
+        const uint64_t ticks = wholeSeconds * clockHz + scaledTicks;
+        timer.clockRemainder = scaled - scaledTicks * kEeClockHz;
         if (ticks == 0u)
         {
             continue;
@@ -1855,6 +1973,10 @@ __m128i PS2Memory::read128(uint32_t address)
 
     // 128-bit reads are primarily for quad-word loads in the EE, which are only valid for RAM areas
     // Return zeroes for unsupported areas
+    if (ipuProbeOn() && !scratch && (physAddr == 0x10007000u || physAddr == 0x10007010u)) // PROBE-IP1
+    { // PROBE-IP1
+        ipuProbeLogFifo("R128", physAddr, 0ull, 0ull); // PROBE-IP1
+    } // PROBE-IP1
     return _mm_setzero_si128();
 }
 
@@ -2099,6 +2221,12 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         processVIF1Data(fifoData, sizeof(fifoData));
         return;
     }
+    if (ipuProbeOn() && !scratch && (physAddr == 0x10007000u || physAddr == 0x10007010u)) // PROBE-IP1
+    { // PROBE-IP1
+        const uint64_t lo = static_cast<uint64_t>(_mm_extract_epi64(value, 0)); // PROBE-IP1
+        const uint64_t hi = static_cast<uint64_t>(_mm_extract_epi64(value, 1)); // PROBE-IP1
+        ipuProbeLogFifo("W128", physAddr, lo, hi); // PROBE-IP1
+    } // PROBE-IP1
 
     if (scratch)
     {
@@ -2136,6 +2264,158 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         write64(address + 8, hi);
     }
 }
+
+static inline bool blurDmaProbeOn() // PROBE-E6b
+{ // PROBE-E6b
+    static const bool s_on = []() { // PROBE-E6b
+        const char *e = std::getenv("PS2X_BLURPKT"); // PROBE-E6b
+        return e && e[0] == '1'; // PROBE-E6b
+    }(); // PROBE-E6b
+    return s_on; // PROBE-E6b
+} // PROBE-E6b
+
+static void probeE6bScanDmaBlock(uint32_t tagAddr, uint32_t dataAddr, uint32_t qwc, const uint8_t *data, uint32_t maxAvailQw = 4096u) // PROBE-E6b
+{ // PROBE-E6b
+    if (!data || qwc == 0u || maxAvailQw == 0u) // PROBE-E6b
+        return; // PROBE-E6b
+    const uint32_t scanQw = std::min(qwc, std::min(4096u, maxAvailQw)); // PROBE-E6b
+    int tex0Index = -1; // PROBE-E6b
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6b
+    { // PROBE-E6b
+        uint64_t w0 = 0, w1 = 0; // PROBE-E6b
+        std::memcpy(&w0, data + q * 16u, sizeof(uint64_t)); // PROBE-E6b
+        std::memcpy(&w1, data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6b
+        if (w0 == 0x0000000664020E00ULL || w1 == 0x0000000664020E00ULL) // PROBE-E6b
+        { // PROBE-E6b
+            tex0Index = static_cast<int>(q); // PROBE-E6b
+            break; // PROBE-E6b
+        } // PROBE-E6b
+    } // PROBE-E6b
+    if (tex0Index < 0) // PROBE-E6b
+        return; // PROBE-E6b
+ // PROBE-E6b
+    uint32_t fix = 0xFFu; // PROBE-E6b
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6b
+    { // PROBE-E6b
+        uint64_t words[2]; // PROBE-E6b
+        std::memcpy(&words[0], data + q * 16u, sizeof(uint64_t)); // PROBE-E6b
+        std::memcpy(&words[1], data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6b
+        bool foundAlpha = false; // PROBE-E6b
+        for (int k = 0; k < 2; ++k) // PROBE-E6b
+        { // PROBE-E6b
+            uint64_t w = words[k]; // PROBE-E6b
+            if ((w & 0xFFULL) == 0x64ULL && ((w >> 8ULL) & 0x00FFFFFFULL) == 0ULL) // PROBE-E6b
+            { // PROBE-E6b
+                fix = static_cast<uint32_t>((w >> 32ULL) & 0xFFULL); // PROBE-E6b
+                foundAlpha = true; // PROBE-E6b
+                break; // PROBE-E6b
+            } // PROBE-E6b
+        } // PROBE-E6b
+        if (foundAlpha) // PROBE-E6b
+            break; // PROBE-E6b
+    } // PROBE-E6b
+ // PROBE-E6b
+    static std::atomic<int64_t> s_lastLogUs{0}; // PROBE-E6b
+    const auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>( // PROBE-E6b
+        std::chrono::steady_clock::now().time_since_epoch()).count(); // PROBE-E6b
+    int64_t prevUs = s_lastLogUs.load(std::memory_order_relaxed); // PROBE-E6b
+    if (nowUs - prevUs >= 25000) // at most 40 lines/s // PROBE-E6b
+    { // PROBE-E6b
+        s_lastLogUs.store(nowUs, std::memory_order_relaxed); // PROBE-E6b
+        const uint32_t dataPhysAddr = (dataAddr >= PS2_RAM_SIZE) ? (dataAddr & PS2_RAM_MASK) : dataAddr; // PROBE-E6b
+        const uint32_t off = static_cast<uint32_t>(tex0Index) * 16u; // PROBE-E6b
+        ps2xSafeLog("[blurdma] tagaddr=0x%08x dataaddr=0x%08x qwc=%u off=%u fixbyte=0x%02x\n", // PROBE-E6b
+                    tagAddr, dataPhysAddr, qwc, off, fix); // PROBE-E6b
+    } // PROBE-E6b
+} // PROBE-E6b
+ // PROBE-E6c
+static inline bool blurVifProbeOn() // PROBE-E6c
+{ // PROBE-E6c
+    static const bool s_on = []() { // PROBE-E6c
+        const char *e = std::getenv("PS2X_BLURPKT"); // PROBE-E6c
+        return e && e[0] == '1'; // PROBE-E6c
+    }(); // PROBE-E6c
+    return s_on; // PROBE-E6c
+} // PROBE-E6c
+ // PROBE-E6c
+extern "C" void ps2_getEeDebugRegs(uint32_t *pc, uint32_t *ra, uint32_t *sp, uint32_t *gp); // PROBE-E8a
+static void probeE6cScanVifBlock(uint32_t tagAddr, uint32_t dataAddr, uint32_t qwc, const uint8_t *data, uint32_t maxAvailQw = 8192u, uint32_t srcPhys = 0u) // PROBE-E6c
+{ // PROBE-E6c
+    if (!data || qwc == 0u || maxAvailQw == 0u) // PROBE-E6c
+        return; // PROBE-E6c
+    const uint32_t scanQw = std::min(qwc, std::min(8192u, maxAvailQw)); // PROBE-E6c
+    int matchQw = -1; // PROBE-E6c
+    uint32_t matchHalf = 0u; // PROBE-E6c
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6c
+    { // PROBE-E6c
+        uint64_t w0 = 0, w1 = 0; // PROBE-E6c
+        std::memcpy(&w0, data + q * 16u, sizeof(uint64_t)); // PROBE-E6c
+        std::memcpy(&w1, data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6c
+        if (w0 == 0x0000000664020E00ULL) // PROBE-E6c
+        { // PROBE-E6c
+            matchQw = static_cast<int>(q); // PROBE-E6c
+            matchHalf = 0u; // PROBE-E6c
+            break; // PROBE-E6c
+        } // PROBE-E6c
+        if (w1 == 0x0000000664020E00ULL) // PROBE-E6c
+        { // PROBE-E6c
+            matchQw = static_cast<int>(q); // PROBE-E6c
+            matchHalf = 1u; // PROBE-E6c
+            break; // PROBE-E6c
+        } // PROBE-E6c
+    } // PROBE-E6c
+    if (matchQw < 0) // PROBE-E6c
+        return; // PROBE-E6c
+ // PROBE-E6c
+    static std::atomic<int64_t> s_lastLogUs{0}; // PROBE-E6c
+    const auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>( // PROBE-E6c
+        std::chrono::steady_clock::now().time_since_epoch()).count(); // PROBE-E6c
+    int64_t prevUs = s_lastLogUs.load(std::memory_order_relaxed); // PROBE-E6c
+    if (nowUs - prevUs >= 25000) // at most 40 lines/s // PROBE-E6c
+    { // PROBE-E6c
+        s_lastLogUs.store(nowUs, std::memory_order_relaxed); // PROBE-E6c
+        const uint32_t dataPhysAddr = (ps2IsScratchpadAddress(dataAddr)) ? dataAddr : ((dataAddr >= PS2_RAM_SIZE) ? (dataAddr & PS2_RAM_MASK) : dataAddr); // PROBE-E6c
+        const uint32_t off = static_cast<uint32_t>(matchQw) * 16u + matchHalf * 8u; // PROBE-E6c
+        uint8_t before[4] = {0}; // PROBE-E6c
+        if (off >= 4u) // PROBE-E6c
+        { // PROBE-E6c
+            std::memcpy(before, data + off - 4u, 4u); // PROBE-E6c
+        } // PROBE-E6c
+        else if (srcPhys + off >= 4u) // PROBE-E6c
+        { // PROBE-E6c
+            std::memcpy(before, data + off - 4u, 4u); // PROBE-E6c
+        } // PROBE-E6c
+        uint8_t after[8] = {0}; // PROBE-E6c
+        const uint32_t totalAvailBytes = maxAvailQw * 16u; // PROBE-E6c
+        if (off + 8u + 8u <= totalAvailBytes) // PROBE-E6c
+        { // PROBE-E6c
+            std::memcpy(after, data + off + 8u, 8u); // PROBE-E6c
+        } // PROBE-E6c
+        else if (off + 8u < totalAvailBytes) // PROBE-E6c
+        { // PROBE-E6c
+            std::memcpy(after, data + off + 8u, totalAvailBytes - (off + 8u)); // PROBE-E6c
+        } // PROBE-E6c
+        ps2xSafeLog("[blurvif] tagaddr=0x%08x dataaddr=0x%08x qwc=%u off=%u ctx=%02x%02x%02x%02x_%02x%02x%02x%02x%02x%02x%02x%02x\n", // PROBE-E6c
+                    tagAddr, dataPhysAddr, qwc, off, // PROBE-E6c
+                    before[0], before[1], before[2], before[3], // PROBE-E6c
+                    after[0], after[1], after[2], after[3], after[4], after[5], after[6], after[7]); // PROBE-E6c
+        uint32_t eePc = 0, eeRa = 0, eeSp = 0, eeGp = 0; // PROBE-E8a
+        ps2_getEeDebugRegs(&eePc, &eeRa, &eeSp, &eeGp); // PROBE-E8a
+        const uint8_t fixByte = (off + 0x44u < totalAvailBytes) ? data[off + 0x44u] : 0u; // PROBE-E8a
+        const uint32_t pktAddr = dataPhysAddr + off; // PROBE-E8a
+        ps2xSafeLog("[blurwho] pc=0x%08x ra=0x%08x sp=0x%08x gp=0x%08x fix=0x%02x pktaddr=0x%08x\n", // PROBE-E8a
+                    eePc, eeRa, eeSp, eeGp, static_cast<unsigned int>(fixByte), pktAddr); // PROBE-E8a
+        const uint32_t rawStart = (off >= 0x30u) ? (off - 0x30u) : 0u; // PROBE-E8a
+        char rawHex[208 * 2 + 1]; // PROBE-E8a
+        for (uint32_t i = 0; i < 208u; ++i) // PROBE-E8a
+        { // PROBE-E8a
+            const uint8_t b = (rawStart + i < totalAvailBytes) ? data[rawStart + i] : 0u; // PROBE-E8a
+            std::snprintf(rawHex + i * 2, 3, "%02x", b); // PROBE-E8a
+        } // PROBE-E8a
+        rawHex[208 * 2] = '\0'; // PROBE-E8a
+        ps2xSafeLog("[blurraw] %s\n", rawHex); // PROBE-E8a
+    } // PROBE-E6c
+} // PROBE-E6c
 
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
@@ -2196,6 +2476,46 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (address >= 0x10002000 && address <= 0x10002030)
     {
+        if (ipuProbeOn()) // PROBE-IP1
+        { // PROBE-IP1
+            if (address == 0x10002000u) // PROBE-IP1
+            { // PROBE-IP1
+                const uint32_t cmd = (value >> 28) & 0xFu; // PROBE-IP1
+                const uint32_t ofm = (value >> 27) & 0x1u; // PROBE-IP1
+                const uint32_t dte = (value >> 26) & 0x1u; // PROBE-IP1
+                const uint32_t sgn = (value >> 25) & 0x1u; // PROBE-IP1
+                const uint32_t dtd = (value >> 24) & 0x1u; // PROBE-IP1
+                const uint32_t qsc = (value >> 16) & 0x1Fu; // PROBE-IP1
+                const uint32_t fb = value & 0x3Fu; // PROBE-IP1
+                const uint32_t recOfm = (cmd == 2u || cmd == 8u) ? ofm : 0u; // PROBE-IP1
+                g_ipuProbeCmds.fetch_add(1u, std::memory_order_relaxed); // PROBE-IP1
+                if (cmd < 16u) // PROBE-IP1
+                    g_ipuProbeCmdOfmMask.fetch_or(1u << ((cmd << 1) | recOfm), std::memory_order_relaxed); // PROBE-IP1
+                ipuProbeMaybeSummary(0u); // PROBE-IP1
+                if (ipuProbeTryLine()) // PROBE-IP1
+                { // PROBE-IP1
+                    if (cmd == 2u || cmd == 8u) // PROBE-IP1
+                    { // PROBE-IP1
+                        ps2xSafeLog("[ipu-mmio] seq=%u ra=0x00000000 W IPU_CMD val=0x%08x cmd=%s(%u) ofm=%u dte=%u sgn=%u dtd=%u qsc=%u fb=%u\n", // PROBE-IP1
+                                    ipuProbeNextSeq(), value, ipuCmdName(cmd), cmd, ofm, dte, sgn, dtd, qsc, fb); // PROBE-IP1
+                    } // PROBE-IP1
+                    else // PROBE-IP1
+                    { // PROBE-IP1
+                        ps2xSafeLog("[ipu-mmio] seq=%u ra=0x00000000 W IPU_CMD val=0x%08x cmd=%s(%u)\n", // PROBE-IP1
+                                    ipuProbeNextSeq(), value, ipuCmdName(cmd), cmd); // PROBE-IP1
+                    } // PROBE-IP1
+                } // PROBE-IP1
+            } // PROBE-IP1
+            else if (address == 0x10002010u) // PROBE-IP1
+            { // PROBE-IP1
+                ipuProbeMaybeSummary(0u); // PROBE-IP1
+                if (ipuProbeTryLine()) // PROBE-IP1
+                { // PROBE-IP1
+                    ps2xSafeLog("[ipu-mmio] seq=%u ra=0x00000000 W IPU_CTRL val=0x%08x\n", // PROBE-IP1
+                                ipuProbeNextSeq(), value); // PROBE-IP1
+                } // PROBE-IP1
+            } // PROBE-IP1
+        } // PROBE-IP1
         if (address == 0x10002010)
         {
             m_ioRegisters[address] = value & ~(1u << 31);
@@ -2238,6 +2558,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     }
 
     m_ioRegisters[address] = value;
+
+    if (ipuProbeOn() && (address == 0x10007000u || address == 0x10007010u)) // PROBE-IP1
+    { // PROBE-IP1
+        ipuProbeLogFifo("W32", address, value, 0ull); // PROBE-IP1
+    } // PROBE-IP1
 
     if (address >= 0x10003C00u && address < 0x10003E00u)
     {
@@ -2370,6 +2695,57 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t channelBase = address & 0xFFFFFF00;
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
+            if (ipuProbeOn() && (channelBase == 0x1000B000u || channelBase == 0x1000B400u)) // PROBE-IP1
+            { // PROBE-IP1
+                const uint32_t tadr = m_ioRegisters[channelBase + 0x30]; // PROBE-IP1
+                const uint32_t qwc16 = qwc & 0xFFFFu; // PROBE-IP1
+                auto getPtr = [&](uint32_t addr, uint32_t &avail) -> const uint8_t * { // PROBE-IP1
+                    avail = 0u; // PROBE-IP1
+                    const uint32_t phys = translateAddress(addr); // PROBE-IP1
+                    if (isScratchpad(addr) && phys < PS2_SCRATCHPAD_SIZE) { avail = PS2_SCRATCHPAD_SIZE - phys; return m_scratchpad + phys; } // PROBE-IP1
+                    if (phys < PS2_RAM_SIZE) { avail = PS2_RAM_SIZE - phys; return m_rdram + phys; } // PROBE-IP1
+                    return nullptr; // PROBE-IP1
+                }; // PROBE-IP1
+                if (channelBase == 0x1000B400u) // PROBE-IP1
+                { // PROBE-IP1
+                    g_ipuProbeDma4.fetch_add(1u, std::memory_order_relaxed); // PROBE-IP1
+                    const uint32_t srcAddr = (((value >> 2) & 3u) == 1u && madr == 0u) ? tadr : madr; // PROBE-IP1
+                    uint32_t avail = 0u; // PROBE-IP1
+                    const uint8_t *src = getPtr(srcAddr, avail); // PROBE-IP1
+                    char hex[65]; // PROBE-IP1
+                    hex[0] = '\0'; // PROBE-IP1
+                    const uint32_t n = std::min<uint32_t>(avail, 32u); // PROBE-IP1
+                    for (uint32_t i = 0; i < n; ++i) std::snprintf(hex + i * 2, 3, "%02x", src[i]); // PROBE-IP1
+                    const bool mpegStart = (n >= 4u && src[0] == 0x00 && src[1] == 0x00 && src[2] == 0x01); // PROBE-IP1
+                    const uint32_t sc = (n >= 4u) ? src[3] : 0u; // PROBE-IP1
+                    if (ipuProbeTryLine()) // PROBE-IP1
+                    { // PROBE-IP1
+                        ps2xSafeLog("[ipu-dma] seq=%u ra=0x00000000 ch=4 madr=0x%08x qwc=%u chcr=0x%08x tadr=0x%08x mpeg=%d(0x%02x) src32=%s\n", // PROBE-IP1
+                                    ipuProbeNextSeq(), madr, qwc16, value, tadr, mpegStart ? 1 : 0, sc, hex); // PROBE-IP1
+                    } // PROBE-IP1
+                } // PROBE-IP1
+                else // PROBE-IP1
+                { // PROBE-IP1
+                    g_ipuProbeDma3.fetch_add(1u, std::memory_order_relaxed); // PROBE-IP1
+                    const uint32_t sizeBytes = qwc16 * 16u; // PROBE-IP1
+                    uint32_t avail = 0u; // PROBE-IP1
+                    const uint8_t *dst = getPtr(madr, avail); // PROBE-IP1
+                    char hex[33]; // PROBE-IP1
+                    hex[0] = '\0'; // PROBE-IP1
+                    const uint32_t n16 = std::min<uint32_t>(avail, 16u); // PROBE-IP1
+                    for (uint32_t i = 0; i < n16; ++i) std::snprintf(hex + i * 2, 3, "%02x", dst[i]); // PROBE-IP1
+                    const uint32_t checkN = std::min<uint32_t>(avail, sizeBytes ? sizeBytes : 16u); // PROBE-IP1
+                    bool allZero = (dst != nullptr && checkN > 0u); // PROBE-IP1
+                    for (uint32_t i = 0; i < checkN && allZero; ++i) { if (dst[i] != 0u) allZero = false; } // PROBE-IP1
+                    if (allZero) g_ipuProbeZeroOut.fetch_add(1u, std::memory_order_relaxed); // PROBE-IP1
+                    if (ipuProbeTryLine()) // PROBE-IP1
+                    { // PROBE-IP1
+                        ps2xSafeLog("[ipu-dma] seq=%u ra=0x00000000 ch=3 madr=0x%08x qwc=%u chcr=0x%08x tadr=0x%08x dst=0x%08x size=%u allZero=%d first16=%s\n", // PROBE-IP1
+                                    ipuProbeNextSeq(), madr, qwc16, value, tadr, madr, sizeBytes, allZero ? 1 : 0, hex); // PROBE-IP1
+                    } // PROBE-IP1
+                } // PROBE-IP1
+                ipuProbeMaybeSummary(0u); // PROBE-IP1
+            } // PROBE-IP1
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
             {
                 // Task FU: first sighting of each (channel, MOD, direction, TTE) DMA combination + periodic counts
@@ -2666,6 +3042,33 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                     if (transferTagData)
                                         appendVifTagData(currentTagAddr);
 
+                                    if (blurDmaProbeOn() && channelBase == 0x1000A000u && hasPayload) // PROBE-E6b
+                                    { // PROBE-E6b
+                                        uint32_t src = 0; // PROBE-E6b
+                                        try { src = translateAddress(dataAddr); } catch (...) {} // PROBE-E6b
+                                        const bool scratch = isScratchpad(dataAddr); // PROBE-E6b
+                                        const uint8_t *base2 = scratch ? m_scratchpad : m_rdram; // PROBE-E6b
+                                        const uint32_t maxSz2 = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE; // PROBE-E6b
+                                        if (base2 && src < maxSz2) // PROBE-E6b
+                                        { // PROBE-E6b
+                                            const uint32_t availQw = (maxSz2 - src) / 16u; // PROBE-E6b
+                                            probeE6bScanDmaBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw); // PROBE-E6b
+                                        } // PROBE-E6b
+                                    } // PROBE-E6b
+                                    if (blurVifProbeOn() && channelBase == 0x10009000u && hasPayload) // PROBE-E6c
+                                    { // PROBE-E6c
+                                        uint32_t src = 0; // PROBE-E6c
+                                        try { src = translateAddress(dataAddr); } catch (...) {} // PROBE-E6c
+                                        const bool scratch = isScratchpad(dataAddr); // PROBE-E6c
+                                        const uint8_t *base2 = scratch ? m_scratchpad : m_rdram; // PROBE-E6c
+                                        const uint32_t maxSz2 = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE; // PROBE-E6c
+                                        if (base2 && src < maxSz2) // PROBE-E6c
+                                        { // PROBE-E6c
+                                            const uint32_t availQw = (maxSz2 - src) / 16u; // PROBE-E6c
+                                            probeE6cScanVifBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw, src); // PROBE-E6c
+                                        } // PROBE-E6c
+                                    } // PROBE-E6c
+
                                     if (hasPayload)
                                         appendData(dataAddr, tagQwc);
 
@@ -2790,7 +3193,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 const uint32_t initialTagAddr = tagAddr;
                                 const bool scanOnly = t_vif1ScanOnly;
                                 const bool probeEnabled = !scanOnly && probe_ae::isEnabled();
-                                static const bool s_fkOn = []() { const char *v = std::getenv("PS2X_PROBE_VU3D"); return v && v[0] == '1'; }();
+                                static std::atomic<int8_t> s_fkOnCache{-1}; // PERF-PF1
+                                int8_t fkV = s_fkOnCache.load(std::memory_order_relaxed);
+                                if (fkV < 0) { const char *v = std::getenv("PS2X_PROBE_VU3D"); fkV = (v && v[0] == '1') ? 1 : 0; s_fkOnCache.store(fkV, std::memory_order_relaxed); }
+                                const bool s_fkOn = (fkV != 0);
                                 const bool isVif1 = (channelBase == 0x10009000u);
                                 const bool needSpans = !scanOnly && isVif1 && (probeEnabled || probe_ae::isMovieHleActive() || probe_ae::isMovieHleVerify() || s_fkOn);
 
@@ -3026,6 +3432,17 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                             base2 = scratch ? m_scratchpad : m_rdram;
                                             maxSz2 = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
                                         }
+
+                                        if (blurDmaProbeOn() && channelBase == 0x1000A000u && base2 && src < maxSz2) // PROBE-E6b
+                                        { // PROBE-E6b
+                                            const uint32_t availQw = (maxSz2 - src) / 16u; // PROBE-E6b
+                                            probeE6bScanDmaBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw); // PROBE-E6b
+                                        } // PROBE-E6b
+                                        if (blurVifProbeOn() && channelBase == 0x10009000u && base2 && src < maxSz2) // PROBE-E6c
+                                        { // PROBE-E6c
+                                            const uint32_t availQw = (maxSz2 - src) / 16u; // PROBE-E6c
+                                            probeE6cScanVifBlock(currentTagAddr, dataAddr, tagQwc, base2 + src, availQw, src); // PROBE-E6c
+                                        } // PROBE-E6c
 
                                         if (src < maxSz2 && bytes <= maxSz2 - src)
                                         {
@@ -3834,6 +4251,7 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
 {
     if (m_path3Masked || m_path3MaskedFifo.empty())
         return;
+    // PROBE-E6b: submit sites without guest address (flushMaskedPath3Packets/emit) are skipped
 
     auto emit = [&](const uint8_t *packetData, uint32_t packetSize)
     {
@@ -3892,10 +4310,93 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     probe_ae::onBhSubmitGifEnd();
 }
 
+static inline bool blurPktProbeOn() // PROBE-E6a
+{ // PROBE-E6a
+    static const bool s_on = []() { // PROBE-E6a
+        const char *e = std::getenv("PS2X_BLURPKT"); // PROBE-E6a
+        return e && e[0] == '1'; // PROBE-E6a
+    }(); // PROBE-E6a
+    return s_on; // PROBE-E6a
+} // PROBE-E6a
+
+static void probeE6aScanGifPacket(uint32_t srcPhysAddr, const uint8_t *data, uint32_t scanQw, uint32_t totalQw) // PROBE-E6a
+{ // PROBE-E6a
+    if (!data || scanQw == 0u) // PROBE-E6a
+        return; // PROBE-E6a
+    int tex0Index = -1; // PROBE-E6a
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6a
+    { // PROBE-E6a
+        uint64_t w0 = 0, w1 = 0; // PROBE-E6a
+        std::memcpy(&w0, data + q * 16u, sizeof(uint64_t)); // PROBE-E6a
+        std::memcpy(&w1, data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6a
+        if (w0 == 0x0000000664020E00ULL || w1 == 0x0000000664020E00ULL) // PROBE-E6a
+        { // PROBE-E6a
+            tex0Index = static_cast<int>(q); // PROBE-E6a
+            break; // PROBE-E6a
+        } // PROBE-E6a
+    } // PROBE-E6a
+    if (tex0Index < 0) // PROBE-E6a
+        return; // PROBE-E6a
+
+    uint32_t fix = 0; // PROBE-E6a
+    for (uint32_t q = 0; q < scanQw; ++q) // PROBE-E6a
+    { // PROBE-E6a
+        uint64_t words[2]; // PROBE-E6a
+        std::memcpy(&words[0], data + q * 16u, sizeof(uint64_t)); // PROBE-E6a
+        std::memcpy(&words[1], data + q * 16u + 8u, sizeof(uint64_t)); // PROBE-E6a
+        bool foundAlpha = false; // PROBE-E6a
+        for (int k = 0; k < 2; ++k) // PROBE-E6a
+        { // PROBE-E6a
+            uint64_t w = words[k]; // PROBE-E6a
+            if ((w & 0xFFULL) == 0x64ULL && ((w >> 8ULL) & 0x00FFFFFFULL) == 0ULL) // PROBE-E6a
+            { // PROBE-E6a
+                fix = static_cast<uint32_t>((w >> 32ULL) & 0xFFULL); // PROBE-E6a
+                foundAlpha = true; // PROBE-E6a
+                break; // PROBE-E6a
+            } // PROBE-E6a
+        } // PROBE-E6a
+        if (foundAlpha) // PROBE-E6a
+            break; // PROBE-E6a
+    } // PROBE-E6a
+
+    static std::atomic<int64_t> s_lastLogUs{0}; // PROBE-E6a
+    const auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>( // PROBE-E6a
+        std::chrono::steady_clock::now().time_since_epoch()).count(); // PROBE-E6a
+    int64_t prevUs = s_lastLogUs.load(std::memory_order_relaxed); // PROBE-E6a
+    if (nowUs - prevUs >= 16666) // at most 60 lines/s // PROBE-E6a
+    { // PROBE-E6a
+        s_lastLogUs.store(nowUs, std::memory_order_relaxed); // PROBE-E6a
+        ps2xSafeLog("[blurpkt] src=0x%08x qw=%u fix=0x%02x pktIndexOfTex0=%u\n", // PROBE-E6a
+                    srcPhysAddr, totalQw, fix, static_cast<uint32_t>(tex0Index)); // PROBE-E6a
+    } // PROBE-E6a
+
+    static std::atomic<uint32_t> s_hexHitCount{0}; // PROBE-E6a
+    const uint32_t hitIdx = s_hexHitCount.fetch_add(1, std::memory_order_relaxed); // PROBE-E6a
+    if (hitIdx < 5u) // PROBE-E6a
+    { // PROBE-E6a
+        const uint32_t dumpQw = std::min(scanQw, 6u); // PROBE-E6a
+        for (uint32_t i = 0; i < dumpQw; ++i) // PROBE-E6a
+        { // PROBE-E6a
+            uint64_t lo = 0, hi = 0; // PROBE-E6a
+            std::memcpy(&lo, data + i * 16u, sizeof(uint64_t)); // PROBE-E6a
+            std::memcpy(&hi, data + i * 16u + 8u, sizeof(uint64_t)); // PROBE-E6a
+            ps2xSafeLog("[blurpkt-hex] hit=%u qw%u: %016llx %016llx\n", // PROBE-E6a
+                        hitIdx, i, static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi)); // PROBE-E6a
+        } // PROBE-E6a
+    } // PROBE-E6a
+} // PROBE-E6a
+
 void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
 {
     if (!m_rdram || qwCount == 0)
         return;
+    if (blurPktProbeOn()) // PROBE-E6a
+    { // PROBE-E6a
+        uint32_t phys = (srcPhysAddr >= PS2_RAM_SIZE) ? (srcPhysAddr & PS2_RAM_MASK) : srcPhysAddr; // PROBE-E6a
+        uint32_t availQw = (phys < PS2_RAM_SIZE) ? ((PS2_RAM_SIZE - phys) / 16u) : 0u; // PROBE-E6a
+        uint32_t scanQw = std::min(qwCount, std::min(4096u, availQw)); // PROBE-E6a
+        probeE6aScanGifPacket(srcPhysAddr, m_rdram + phys, scanQw, qwCount); // PROBE-E6a
+    } // PROBE-E6a
     const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
     uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
     uint32_t bytesLeft = sizeBytes;
@@ -3920,6 +4421,12 @@ void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
 
 void PS2Memory::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    if (blurPktProbeOn() && data && sizeBytes >= 16u) // PROBE-E6a
+    { // PROBE-E6a
+        uint32_t qwCount = sizeBytes / 16u; // PROBE-E6a
+        uint32_t scanQw = std::min(qwCount, 4096u); // PROBE-E6a
+        probeE6aScanGifPacket(0u, data, scanQw, qwCount); // PROBE-E6a
+    } // PROBE-E6a
     if (m_gifArbiter)
         submitGifPacket(GifPathId::Path3, data, sizeBytes);
     else if (m_gifPacketCallback && data && sizeBytes >= 16)
@@ -4193,6 +4700,10 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
     const uint8_t *payload = nullptr;
     if (!resolveContiguous(tadr + 16u, payloadBytes, payload))
         return false;
+    if (blurDmaProbeOn()) // PROBE-E6b
+    { // PROBE-E6b
+        probeE6bScanDmaBlock(tadr, tadr + 16u, tag.qwc, payload, tag.qwc); // PROBE-E6b
+    } // PROBE-E6b
     ps2_gs_async_fence(); // PERF-GK
     if (!gs.processNativePackedGIFPacket(payload, payloadBytes))
         return false;
@@ -4283,6 +4794,16 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
             val = 0;
             break;
         }
+        if (ipuProbeOn() && (address == 0x10002000u || address == 0x10002010u || address == 0x10002030u)) // PROBE-IP1
+        { // PROBE-IP1
+            const char *regName = (address == 0x10002000u) ? "IPU_CMD" : (address == 0x10002010u) ? "IPU_CTRL" : "IPU_TOP"; // PROBE-IP1
+            ipuProbeMaybeSummary(0u); // PROBE-IP1
+            if (ipuProbeTryLine()) // PROBE-IP1
+            { // PROBE-IP1
+                ps2xSafeLog("[ipu-mmio] seq=%u ra=0x00000000 R %s val=0x%08x\n", // PROBE-IP1
+                            ipuProbeNextSeq(), regName, val); // PROBE-IP1
+            } // PROBE-IP1
+        } // PROBE-IP1
         return val;
     }
 
@@ -4366,12 +4887,12 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
     }
 
     auto it = m_ioRegisters.find(address);
-    if (it != m_ioRegisters.end())
-    {
-        return it->second;
-    }
-
-    return 0;
+    const uint32_t retVal = (it != m_ioRegisters.end()) ? it->second : 0u; // PROBE-IP1
+    if (ipuProbeOn() && (address == 0x10007000u || address == 0x10007010u)) // PROBE-IP1
+    { // PROBE-IP1
+        ipuProbeLogFifo("R32", address, retVal, 0ull); // PROBE-IP1
+    } // PROBE-IP1
+    return retVal;
 }
 
 void PS2Memory::registerCodeRegion(uint32_t start, uint32_t end)

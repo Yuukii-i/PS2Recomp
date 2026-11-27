@@ -355,6 +355,133 @@ static std::mutex s_cid1LatMutex;
 static std::deque<PendingCid1Reply> s_cid1PendingReplies;
 static uint64_t s_cid1VblankCounter = 0;
 
+// FEAT-E8c: Check if PS2 DVD load timing emulation is enabled (PS2X_LOAD_TIMING=fast disables; default ON)
+static inline bool isLoadTimingEnabled() noexcept
+{
+    static const bool s_enabled = []() -> bool {
+        const char *env = std::getenv("PS2X_LOAD_TIMING");
+        if (env && std::strcmp(env, "fast") == 0)
+            return false;
+        return true;
+    }();
+    return s_enabled;
+}
+
+// FEAT-E8c: PS2 DVD drive timing model
+static double getDvdRateIn() noexcept
+{
+    static const double s_val = []() -> double {
+        const char *env = std::getenv("PS2X_DVD_RATE_IN");
+        if (env && env[0] != '\0')
+        {
+            char *end = nullptr;
+            double v = std::strtod(env, &end);
+            if (end != env && v > 0.0) return v;
+        }
+        return 2.4e6;
+    }();
+    return s_val;
+}
+
+static double getDvdRateOut() noexcept
+{
+    static const double s_val = []() -> double {
+        const char *env = std::getenv("PS2X_DVD_RATE_OUT");
+        if (env && env[0] != '\0')
+        {
+            char *end = nullptr;
+            double v = std::strtod(env, &end);
+            if (end != env && v > 0.0) return v;
+        }
+        return 5.4e6;
+    }();
+    return s_val;
+}
+
+static double getDvdSeekMinMs() noexcept
+{
+    static const double s_val = []() -> double {
+        const char *env = std::getenv("PS2X_DVD_SEEK_MIN_MS");
+        if (env && env[0] != '\0')
+        {
+            char *end = nullptr;
+            double v = std::strtod(env, &end);
+            if (end != env && v >= 0.0) return v;
+        }
+        return 30.0;
+    }();
+    return s_val;
+}
+
+static double getDvdSeekMaxMs() noexcept
+{
+    static const double s_val = []() -> double {
+        const char *env = std::getenv("PS2X_DVD_SEEK_MAX_MS");
+        if (env && env[0] != '\0')
+        {
+            char *end = nullptr;
+            double v = std::strtod(env, &end);
+            if (end != env && v >= 0.0) return v;
+        }
+        return 150.0;
+    }();
+    return s_val;
+}
+
+struct Cid1DriveModel
+{
+    std::mutex mtx;
+    uint32_t lastEndLsn = 0;
+    double busyUntilVbl = 0.0;
+
+    double advance(uint32_t lsn, uint64_t bytes, uint64_t curVbl, uint64_t *outDueVbl = nullptr)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        double rIn = getDvdRateIn();
+        double rOut = getDvdRateOut();
+        double lsnClamped = static_cast<double>(std::min<uint32_t>(lsn, 2295104u));
+        double rate = rIn + (rOut - rIn) * (lsnClamped / 2295104.0);
+        if (rate <= 0.0) rate = 2.4e6;
+
+        double seekMin = getDvdSeekMinMs();
+        double seekMax = getDvdSeekMaxMs();
+        double seekMs = 0.0;
+        if (lsn != lastEndLsn)
+        {
+            uint32_t absDiff = (lsn > lastEndLsn) ? (lsn - lastEndLsn) : (lastEndLsn - lsn);
+            double diffClamped = static_cast<double>(std::min<uint32_t>(absDiff, 2295104u));
+            seekMs = seekMin + (seekMax - seekMin) * (diffClamped / 2295104.0);
+        }
+
+        double costMs = seekMs + (static_cast<double>(bytes) / rate) * 1000.0 + 1.0;
+
+        uint32_t sectors = static_cast<uint32_t>((bytes + 2047ull) / 2048ull);
+        lastEndLsn = lsn + sectors;
+
+        double curVblD = static_cast<double>(curVbl);
+        double start = std::max(busyUntilVbl, curVblD);
+        busyUntilVbl = start + (costMs / 16.683);
+
+        if (outDueVbl)
+        {
+            uint64_t due = static_cast<uint64_t>(std::ceil(busyUntilVbl));
+            if (due <= curVbl)
+                due = curVbl + 1;
+            *outDueVbl = due;
+        }
+
+        return costMs;
+    }
+};
+static Cid1DriveModel s_cid1DriveModel;
+
+// FEAT-E8c: Burst tracking state and DVD log rate limiter
+static uint32_t s_cid1PendingLoadReads = 0;
+static uint32_t s_cid1BurstReads = 0;
+static uint64_t s_cid1BurstBytes = 0;
+static uint64_t s_cid1BurstStartVbl = 0;
+static std::atomic<uint32_t> s_dvdLogCount{0};
+
 static uint64_t getCid1LatVbl() noexcept
 {
     static const uint64_t s_lat = []() -> uint64_t {
@@ -400,12 +527,43 @@ static void flushAllCid1Pending()
 {
     std::deque<PendingCid1Reply> toDeliver;
     uint64_t vbl = 0;
+    bool logBurst = false;
+    uint32_t bReads = 0;
+    uint64_t bBytes = 0;
+    uint64_t bSpan = 0;
     {
         std::lock_guard<std::mutex> lock(s_cid1LatMutex);
         if (s_cid1PendingReplies.empty())
             return;
         vbl = s_cid1VblankCounter;
         toDeliver.swap(s_cid1PendingReplies);
+        for (const auto &item : toDeliver)
+        {
+            uint32_t cmd = *reinterpret_cast<const uint32_t *>(item.replyBytes);
+            if ((cmd == 0x06u || cmd == 0x0Bu) && s_cid1PendingLoadReads > 0)
+            {
+                --s_cid1PendingLoadReads;
+            }
+        }
+        if (s_cid1PendingLoadReads == 0 && s_cid1BurstReads > 0)
+        {
+            logBurst = true;
+            bReads = s_cid1BurstReads;
+            bBytes = s_cid1BurstBytes;
+            bSpan = (vbl >= s_cid1BurstStartVbl) ? (vbl - s_cid1BurstStartVbl) : 0ull;
+            s_cid1BurstReads = 0;
+            s_cid1BurstBytes = 0;
+        }
+    }
+    if (logBurst)
+    {
+        if (s_dvdLogCount.fetch_add(1, std::memory_order_relaxed) < 200u)
+        {
+            ps2xSafeLog("[dvd-burst] reads=%u bytes=%llu span=%llu vbl\n",
+                        bReads,
+                        static_cast<unsigned long long>(bBytes),
+                        static_cast<unsigned long long>(bSpan));
+        }
     }
     deliverCid1Batch(toDeliver, vbl, 0u);
 }
@@ -415,18 +573,150 @@ static void onCid1Vblank()
     std::deque<PendingCid1Reply> toDeliver;
     uint64_t vbl = 0;
     uint32_t remaining = 0;
+    bool logBurst = false;
+    uint32_t bReads = 0;
+    uint64_t bBytes = 0;
+    uint64_t bSpan = 0;
     {
         std::lock_guard<std::mutex> lock(s_cid1LatMutex);
         vbl = ++s_cid1VblankCounter;
-        while (!s_cid1PendingReplies.empty() && s_cid1PendingReplies.front().dueVbl <= vbl)
+        // FEAT-E8c: Scan whole deque, deliver all items with dueVbl <= vbl while keeping relative order of remaining items
+        std::deque<PendingCid1Reply> remainingReplies;
+        for (auto &item : s_cid1PendingReplies)
         {
-            toDeliver.push_back(s_cid1PendingReplies.front());
-            s_cid1PendingReplies.pop_front();
+            if (item.dueVbl <= vbl)
+            {
+                uint32_t cmd = *reinterpret_cast<const uint32_t *>(item.replyBytes);
+                if ((cmd == 0x06u || cmd == 0x0Bu) && s_cid1PendingLoadReads > 0)
+                {
+                    --s_cid1PendingLoadReads;
+                }
+                toDeliver.push_back(std::move(item));
+            }
+            else
+            {
+                remainingReplies.push_back(std::move(item));
+            }
         }
+        s_cid1PendingReplies = std::move(remainingReplies);
         remaining = static_cast<uint32_t>(s_cid1PendingReplies.size());
+
+        // FEAT-E8c: When drive goes idle after a burst (no pending 0x06/0x0B items left), log burst
+        if (s_cid1PendingLoadReads == 0 && s_cid1BurstReads > 0)
+        {
+            logBurst = true;
+            bReads = s_cid1BurstReads;
+            bBytes = s_cid1BurstBytes;
+            bSpan = (vbl >= s_cid1BurstStartVbl) ? (vbl - s_cid1BurstStartVbl) : 0ull;
+            s_cid1BurstReads = 0;
+            s_cid1BurstBytes = 0;
+        }
+    }
+    if (logBurst)
+    {
+        if (s_dvdLogCount.fetch_add(1, std::memory_order_relaxed) < 200u)
+        {
+            ps2xSafeLog("[dvd-burst] reads=%u bytes=%llu span=%llu vbl\n",
+                        bReads,
+                        static_cast<unsigned long long>(bBytes),
+                        static_cast<unsigned long long>(bSpan));
+        }
     }
     deliverCid1Batch(toDeliver, vbl, remaining);
 }
+
+// FIX-T3: Synchronous SifCallRpc blocking against modelled CID1/IOP completion time (PS2X_RPC_BLOCK=1).
+static constexpr uint32_t kRpcBlockExternalType = 0x52504342u; // 'RPCB' // FIX-T3
+struct PendingRpcBlock // FIX-T3
+{ // FIX-T3
+    uint64_t token = 0; // FIX-T3
+    EeScheduler *sched = nullptr; // FIX-T3
+    uint64_t dueVbl = 0; // FIX-T3
+    uint64_t deadlineEeCycle = 0; // FIX-T3
+    int tid = 0; // FIX-T3
+    uint32_t sid = 0; // FIX-T3
+    uint32_t fno = 0; // FIX-T3
+}; // FIX-T3
+static std::mutex s_rpcBlockMutex; // FIX-T3
+static std::vector<PendingRpcBlock> s_pendingRpcBlocks; // FIX-T3
+static std::atomic<bool> s_hasPendingRpcBlocks{false}; // FIX-T3
+static std::atomic<uint64_t> s_nextRpcBlockToken{1}; // FIX-T3
+
+static inline bool isRpcBlockEnabled() noexcept // FIX-T3
+{ // FIX-T3
+    static const bool s_enabled = []() -> bool { // FIX-T3
+        const char *env = std::getenv("PS2X_RPC_BLOCK"); // FIX-T3
+        return env && std::strcmp(env, "1") == 0; // FIX-T3
+    }(); // FIX-T3
+    return s_enabled; // FIX-T3
+} // FIX-T3
+
+static void deliverRpcBlocks(uint64_t vbl) // FIX-T3
+{ // FIX-T3
+    if (!s_hasPendingRpcBlocks.load(std::memory_order_acquire)) // FIX-T3
+        return; // FIX-T3
+    std::vector<PendingRpcBlock> ready; // FIX-T3
+    { // FIX-T3
+        std::lock_guard<std::mutex> lock(s_rpcBlockMutex); // FIX-T3
+        auto it = s_pendingRpcBlocks.begin(); // FIX-T3
+        while (it != s_pendingRpcBlocks.end()) // FIX-T3
+        { // FIX-T3
+            if (it->dueVbl <= vbl) // FIX-T3
+            { // FIX-T3
+                ready.push_back(*it); // FIX-T3
+                it = s_pendingRpcBlocks.erase(it); // FIX-T3
+            } // FIX-T3
+            else // FIX-T3
+            { // FIX-T3
+                ++it; // FIX-T3
+            } // FIX-T3
+        } // FIX-T3
+        s_hasPendingRpcBlocks.store(!s_pendingRpcBlocks.empty(), std::memory_order_release); // FIX-T3
+    } // FIX-T3
+    for (const auto &entry : ready) // FIX-T3
+    { // FIX-T3
+        if (entry.sched) // FIX-T3
+        { // FIX-T3
+            entry.sched->completeExternalWait(kRpcBlockExternalType, entry.token, 0); // FIX-T3
+        } // FIX-T3
+    } // FIX-T3
+} // FIX-T3
+
+static void checkRpcBlockTimeouts(EeScheduler *sched, uint64_t eeCycle) // FIX-T3
+{ // FIX-T3
+    if (!sched || !s_hasPendingRpcBlocks.load(std::memory_order_acquire)) // FIX-T3
+        return; // FIX-T3
+    constexpr uint64_t kMaxBlockCycles = 10ull * EeScheduler::kEeClockHz; // FIX-T3
+    std::vector<PendingRpcBlock> timedOut; // FIX-T3
+    { // FIX-T3
+        std::lock_guard<std::mutex> lock(s_rpcBlockMutex); // FIX-T3
+        auto it = s_pendingRpcBlocks.begin(); // FIX-T3
+        while (it != s_pendingRpcBlocks.end()) // FIX-T3
+        { // FIX-T3
+            if (it->sched == sched) // FIX-T3
+            { // FIX-T3
+                if (it->deadlineEeCycle == 0u) // FIX-T3
+                { // FIX-T3
+                    it->deadlineEeCycle = eeCycle + kMaxBlockCycles; // FIX-T3
+                } // FIX-T3
+                else if (eeCycle >= it->deadlineEeCycle) // FIX-T3
+                { // FIX-T3
+                    timedOut.push_back(*it); // FIX-T3
+                    it = s_pendingRpcBlocks.erase(it); // FIX-T3
+                    continue; // FIX-T3
+                } // FIX-T3
+            } // FIX-T3
+            ++it; // FIX-T3
+        } // FIX-T3
+        s_hasPendingRpcBlocks.store(!s_pendingRpcBlocks.empty(), std::memory_order_release); // FIX-T3
+    } // FIX-T3
+    for (const auto &entry : timedOut) // FIX-T3
+    { // FIX-T3
+        ps2xSafeLog("[rpcblock] timeout tid=%d sid=0x%08x fno=0x%x\n", // FIX-T3
+                    entry.tid, entry.sid, entry.fno); // FIX-T3
+        entry.sched->completeExternalWait(kRpcBlockExternalType, entry.token, 0); // FIX-T3
+    } // FIX-T3
+} // FIX-T3
 
 
     namespace
@@ -1372,7 +1662,7 @@ uint64_t vblDiff = 0;
 
     void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        std::lock_guard<std::recursive_mutex> rpcCallLock(g_sif_call_rpc_mutex);
+        std::unique_lock<std::recursive_mutex> rpcCallLock(g_sif_call_rpc_mutex); // FIX-T3
 
         const uint32_t clientPtr = getRegU32(ctx, 4);
         const uint32_t rpcNum = getRegU32(ctx, 5);
@@ -1847,6 +2137,60 @@ uint64_t vblDiff = 0;
             };
             runtime->eeScheduler().invokeCurrent(std::move(invocation));
         }
+        if (isRpcBlockEnabled() && // FIX-T3
+            (mode & kSifRpcModeNowait) == 0u && // FIX-T3
+            runtime != nullptr) // FIX-T3
+        { // FIX-T3
+            EeScheduler &sched = runtime->eeScheduler(); // FIX-T3
+            if (sched.isExecutingGuest()) // FIX-T3
+            { // FIX-T3
+                if (GuestThread *self = sched.currentThread()) // FIX-T3
+                { // FIX-T3
+                    uint64_t curVbl = 0; // FIX-T3
+                    uint64_t dueVbl = 0; // FIX-T3
+                    { // FIX-T3
+                        std::lock_guard<std::mutex> lock(s_cid1LatMutex); // FIX-T3
+                        curVbl = s_cid1VblankCounter; // FIX-T3
+                        for (const auto &item : s_cid1PendingReplies) // FIX-T3
+                        { // FIX-T3
+                            if (item.dueVbl > dueVbl) // FIX-T3
+                                dueVbl = item.dueVbl; // FIX-T3
+                        } // FIX-T3
+                    } // FIX-T3
+                    { // FIX-T3
+                        std::lock_guard<std::mutex> lock(s_cid1DriveModel.mtx); // FIX-T3
+                        const uint64_t modelDue = static_cast<uint64_t>(std::ceil(s_cid1DriveModel.busyUntilVbl)); // FIX-T3
+                        if (modelDue > dueVbl) // FIX-T3
+                            dueVbl = modelDue; // FIX-T3
+                    } // FIX-T3
+                    if (dueVbl > curVbl) // FIX-T3
+                    { // FIX-T3
+                        const int tid = self->id; // FIX-T3
+                        const int dueDeltaVbl = static_cast<int>(dueVbl - curVbl); // FIX-T3
+                        const auto startHost = std::chrono::steady_clock::now(); // FIX-T3
+                        const uint64_t token = s_nextRpcBlockToken.fetch_add(1, std::memory_order_relaxed); // FIX-T3
+                        { // FIX-T3
+                            std::lock_guard<std::mutex> lock(s_rpcBlockMutex); // FIX-T3
+                            s_pendingRpcBlocks.push_back(PendingRpcBlock{token, &sched, dueVbl, 0u, tid, sid, rpcNum}); // FIX-T3
+                            s_hasPendingRpcBlocks.store(true, std::memory_order_release); // FIX-T3
+                        } // FIX-T3
+                        rpcCallLock.unlock(); // FIX-T3
+                        sched.waitExternal( // FIX-T3
+                            EeWaitReason::External, // FIX-T3
+                            kRpcBlockExternalType, // FIX-T3
+                            token, // FIX-T3
+                            [finishCall, tid, sid, rpcNum, mode, dueDeltaVbl, startHost](R5900Context &parentCtx) mutable // FIX-T3
+                            { // FIX-T3
+                                finishCall(nullptr, parentCtx); // FIX-T3
+                                const double blockedMs = std::chrono::duration<double, std::milli>( // FIX-T3
+                                    std::chrono::steady_clock::now() - startHost).count(); // FIX-T3
+                                ps2xSafeLog("[rpcblock] tid=%d sid=0x%08x fno=0x%x mode=0x%x dueVbl=+%d blockedMs=%.1f\n", // FIX-T3
+                                            tid, sid, rpcNum, mode, dueDeltaVbl, blockedMs); // FIX-T3
+                            }); // FIX-T3
+                    } // FIX-T3
+                } // FIX-T3
+            } // FIX-T3
+        } // FIX-T3
         finishCall(nullptr, *ctx);
     }
 
@@ -2248,7 +2592,8 @@ uint64_t vblDiff = 0;
             reply.isDone = 1;
 
             // FIX-AU5: Flush pending op 0x07 replies FIFO before any non-0x07 CID1 command.
-            if (opcode != 0x07u)
+            // FEAT-E8c: Only flush when load timing is disabled (PS2X_LOAD_TIMING=fast), so 0x06/0x0B load replies complete on their due vblank.
+            if (!isLoadTimingEnabled() && opcode != 0x07u)
             {
                 flushAllCid1Pending();
             }
@@ -2423,6 +2768,7 @@ uint64_t vblDiff = 0;
                     }
                     else
                     {
+                        uint64_t curFileOffset = slot.offset; // FEAT-E8c
                         if (toRead > 0)
                         {
                             ps2x::vfi::VfiArchive::instance().readFileData(slot.entry, slot.offset, toRead, rdram + eeDst); ps2xProbeCid1Note(eeDst, (uint32_t)toRead, opcode);
@@ -2443,6 +2789,46 @@ uint64_t vblDiff = 0;
 
                         ps2xSafeLog( "[CID1:ReadFd] fd=%u eeDst=0x%08x req=%u read=%llu (newOff=%llu CRC32=0x%08X)\n",
                                      fd, eeDst, reqSize, (unsigned long long)toRead, (unsigned long long)slot.offset, crc);
+
+                        // FEAT-E8c: Defer SIF reply using drive model timing
+                        if (isLoadTimingEnabled() && toRead > 0)
+                        {
+                            uint32_t lsn = slot.entry.startSector + static_cast<uint32_t>(curFileOffset / 2048ull);
+                            uint64_t curVbl = 0;
+                            uint64_t dueVbl = 0;
+                            double costMs = 0.0;
+                            {
+                                std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+                                curVbl = s_cid1VblankCounter;
+                                costMs = s_cid1DriveModel.advance(lsn, toRead, curVbl, &dueVbl);
+
+                                PendingCid1Reply pending{};
+                                std::memcpy(pending.replyBytes, &reply, sizeof(reply));
+                                pending.slotPtr = 0u;
+                                pending.slotOffset = 0u;
+                                pending.dueVbl = dueVbl;
+                                pending.rdram = rdram;
+                                pending.runtime = runtime;
+                                s_cid1PendingReplies.push_back(pending);
+
+                                if (s_cid1PendingLoadReads == 0)
+                                {
+                                    s_cid1BurstStartVbl = curVbl;
+                                    s_cid1BurstReads = 0;
+                                    s_cid1BurstBytes = 0;
+                                }
+                                s_cid1PendingLoadReads++;
+                                s_cid1BurstReads++;
+                                s_cid1BurstBytes += toRead;
+                            }
+                            deferReply = true;
+                            if (s_dvdLogCount.fetch_add(1, std::memory_order_relaxed) < 200u)
+                            {
+                                ps2xSafeLog("[dvd] op=%x lsn=%u bytes=%llu cost=%.1fms due=+%llu vbl\n",
+                                            opcode, lsn, static_cast<unsigned long long>(toRead),
+                                            costMs, static_cast<unsigned long long>(dueVbl - curVbl));
+                            }
+                        }
                     }
                 }
                 else
@@ -2594,7 +2980,16 @@ uint64_t vblDiff = 0;
                     reply.result = static_cast<uint32_t>(toRead);
                     reply.isDone = 1;
 
+                    // FEAT-E8c: Advance drive model if load timing enabled (op 0x07 keeps current dueVbl)
+                    uint32_t lsn07 = 0;
+                    double costMs07 = 0.0;
+                    bool doDvdLog07 = false;
                     const uint64_t cid1LatVbl = getCid1LatVbl(); // FIX-AU5
+                    if (isLoadTimingEnabled() && toRead > 0)
+                    {
+                        lsn07 = slot.entry.startSector + static_cast<uint32_t>(startFileOff / 2048ull);
+                    }
+
                     if (cid1LatVbl == 0)
                     {
                         // Direct writeback to slot descriptor to guarantee completion flag
@@ -2606,11 +3001,22 @@ uint64_t vblDiff = 0;
                                 *reinterpret_cast<uint32_t *>(slotMem + 0x0C) = static_cast<uint32_t>(slot.offset);
                             }
                         }
+                        if (isLoadTimingEnabled() && toRead > 0)
+                        {
+                            std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+                            costMs07 = s_cid1DriveModel.advance(lsn07, toRead, s_cid1VblankCounter, nullptr);
+                            doDvdLog07 = true;
+                        }
                     }
                     else
                     {
                         // FIX-AU5: Defer slot done-bit writeback and SIF reply until due vblank.
                         std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+                        if (isLoadTimingEnabled() && toRead > 0)
+                        {
+                            costMs07 = s_cid1DriveModel.advance(lsn07, toRead, s_cid1VblankCounter, nullptr);
+                            doDvdLog07 = true;
+                        }
                         PendingCid1Reply pending{};
                         static_assert(sizeof(reply) == sizeof(pending.replyBytes), "reply size mismatch");
                         std::memcpy(pending.replyBytes, &reply, sizeof(reply));
@@ -2621,6 +3027,15 @@ uint64_t vblDiff = 0;
                         pending.runtime = runtime;
                         s_cid1PendingReplies.push_back(pending);
                         deferReply = true;
+                    }
+                    if (doDvdLog07)
+                    {
+                        if (s_dvdLogCount.fetch_add(1, std::memory_order_relaxed) < 200u)
+                        {
+                            ps2xSafeLog("[dvd] op=%x lsn=%u bytes=%llu cost=%.1fms due=+%llu vbl\n",
+                                        opcode, lsn07, static_cast<unsigned long long>(toRead),
+                                        costMs07, static_cast<unsigned long long>(cid1LatVbl));
+                        }
                     }
 
 
@@ -2882,6 +3297,46 @@ uint64_t vblDiff = 0;
 
                         ps2xSafeLog( "[CID1:ReadPath] '%s' off=%u reqSize=%u -> read %llu bytes to 0x%08x (CRC32=0x%08X)\n",
                                      path.c_str(), fileOffset, reqSize, (unsigned long long)toRead, eeDst, crc);
+
+                        // FEAT-E8c: Defer SIF reply using drive model timing
+                        if (isLoadTimingEnabled() && toRead > 0)
+                        {
+                            uint32_t lsn = entry->startSector + fileOffset / 2048u;
+                            uint64_t curVbl = 0;
+                            uint64_t dueVbl = 0;
+                            double costMs = 0.0;
+                            {
+                                std::lock_guard<std::mutex> lock(s_cid1LatMutex);
+                                curVbl = s_cid1VblankCounter;
+                                costMs = s_cid1DriveModel.advance(lsn, toRead, curVbl, &dueVbl);
+
+                                PendingCid1Reply pending{};
+                                std::memcpy(pending.replyBytes, &reply, sizeof(reply));
+                                pending.slotPtr = 0u;
+                                pending.slotOffset = 0u;
+                                pending.dueVbl = dueVbl;
+                                pending.rdram = rdram;
+                                pending.runtime = runtime;
+                                s_cid1PendingReplies.push_back(pending);
+
+                                if (s_cid1PendingLoadReads == 0)
+                                {
+                                    s_cid1BurstStartVbl = curVbl;
+                                    s_cid1BurstReads = 0;
+                                    s_cid1BurstBytes = 0;
+                                }
+                                s_cid1PendingLoadReads++;
+                                s_cid1BurstReads++;
+                                s_cid1BurstBytes += toRead;
+                            }
+                            deferReply = true;
+                            if (s_dvdLogCount.fetch_add(1, std::memory_order_relaxed) < 200u)
+                            {
+                                ps2xSafeLog("[dvd] op=%x lsn=%u bytes=%llu cost=%.1fms due=+%llu vbl\n",
+                                            opcode, lsn, static_cast<unsigned long long>(toRead),
+                                            costMs, static_cast<unsigned long long>(dueVbl - curVbl));
+                            }
+                        }
                     }
                 }
                 break;
@@ -3140,9 +3595,39 @@ extern "C" void ps2_dumpDkCid1State(const uint8_t *rdram)
     }
 }
 
+void ps2xRpcBlockCheckTimeout(EeScheduler *sched, uint64_t eeCycle) // FIX-T3
+{ // FIX-T3
+    ps2_syscalls::checkRpcBlockTimeouts(sched, eeCycle); // FIX-T3
+} // FIX-T3
+
+uint64_t ps2xCid1DriveBusyUntilVbl() // FIX-T4
+{ // FIX-T4
+    uint64_t curVbl = 0; // FIX-T4
+    { // FIX-T4
+        std::lock_guard<std::mutex> lock(ps2_syscalls::s_cid1LatMutex); // FIX-T4
+        curVbl = ps2_syscalls::s_cid1VblankCounter; // FIX-T4
+    } // FIX-T4
+    uint64_t modelDue = 0; // FIX-T4
+    { // FIX-T4
+        std::lock_guard<std::mutex> lock(ps2_syscalls::s_cid1DriveModel.mtx); // FIX-T4
+        modelDue = static_cast<uint64_t>(std::ceil(ps2_syscalls::s_cid1DriveModel.busyUntilVbl)); // FIX-T4
+    } // FIX-T4
+    return (modelDue > curVbl) ? modelDue : 0u; // FIX-T4
+} // FIX-T4
+
+uint64_t ps2xRegisterCid1VblankBlock(EeScheduler *sched, uint64_t dueVbl, int tid) // FIX-T4
+{ // FIX-T4
+    const uint64_t token = ps2_syscalls::s_nextRpcBlockToken.fetch_add(1, std::memory_order_relaxed); // FIX-T4
+    std::lock_guard<std::mutex> lock(ps2_syscalls::s_rpcBlockMutex); // FIX-T4
+    ps2_syscalls::s_pendingRpcBlocks.push_back(ps2_syscalls::PendingRpcBlock{token, sched, dueVbl, 0u, tid, 0u, 0u}); // FIX-T4
+    ps2_syscalls::s_hasPendingRpcBlocks.store(true, std::memory_order_release); // FIX-T4
+    return token; // FIX-T4
+} // FIX-T4
+
 void ps2xCid1Vblank() // FIX-AU5
 {
     ps2_syscalls::onCid1Vblank();
+    ps2_syscalls::deliverRpcBlocks(ps2_syscalls::s_cid1VblankCounter); // FIX-T3
     static const bool s_au11Enabled = []() { // PROBE-AU11
         const char *env = std::getenv("PS2X_AU11_PROBE"); // PROBE-AU11
         return env && std::strcmp(env, "1") == 0; // PROBE-AU11

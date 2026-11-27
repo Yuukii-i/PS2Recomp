@@ -8,6 +8,7 @@
 // whenever a lane of the result or of the product leaves the exponent window [2,253]. (vu1_hot_ops.h itself cannot be included in this TU: its fmacR
 // touches private VU1Interpreter members and needs `#define private public`.)
 #include <cfloat>
+#include <cstdarg> // PROBE-M9
 #include <cmath> // FEAT-RD40
 #include <cstdlib> // PERF-V1G
 #include <filesystem> // PERF-SA
@@ -18,6 +19,7 @@
 
 extern void ps2xSafeLog(const char *fmt, ...);
 #include <atomic>
+#include <mutex> // PROBE-M5
 extern std::atomic<uint64_t> g_hostPresentSeq; // PERF-SA: per presented frame (gs_frontend.cpp)
 
 struct RdVert // FEAT-RD1
@@ -25,7 +27,9 @@ struct RdVert // FEAT-RD1
     float pos[4];
     uint8_t rgba[4];
     float uv[2]; // FEAT-RD3
+    float fog;   // FIX-E1b
 };
+static_assert(sizeof(RdVert) == 32, "RdVert size"); // FIX-E1b
 struct RdBatch // FEAT-RD2 // FEAT-RD14
 {
     uint32_t first;
@@ -44,9 +48,12 @@ struct RdBatch // FEAT-RD2 // FEAT-RD14
     float vpS[2]; // FEAT-RD21
     float vpO[2]; // FEAT-RD21
     uint32_t camHash; // PROBE-RD26
+    uint32_t fogcol; // FIX-E1c
 };
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern bool ps2xRdActive(); // FEAT-RD49
+extern float g_rdAspectK; // FIX-WS1
+extern int g_ps2xWsMode; // FIX-WS2
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
 extern void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD14
 extern std::atomic<uint32_t> g_rdKickSerial; // FEAT-RD5
@@ -59,6 +66,7 @@ extern bool ps2xRdFastGeomOn(); // FEAT-RD40
 extern bool ps2xRdIsDisplayFbp(uint32_t fbp); // FEAT-RD40
 extern bool ps2xRdHasDisplayFbp(); // FEAT-RD40
 extern bool ps2xRdForceClassic(); // FEAT-RD48
+extern void ps2xRdSpikeNoteVu1Bad(uint32_t kickSerial, uint32_t nVerts); // PROBE-M7
 
 static inline bool rdSerialsCanMerge(uint32_t s0, uint32_t s1) // FEAT-RD17
 {
@@ -739,6 +747,45 @@ inline bool leanKickOn() // FEAT-RD42
     }();
     return v && ::ps2xRdActive(); // FEAT-RD48 // FEAT-RD49
 }
+inline bool rdWrapOn() // FIX-M11 // FIX-M12
+{
+    static const bool v = []() {
+        const char *e = std::getenv("PS2X_RD_WRAP");
+        return (e && e[0] == '1');
+    }();
+    return v;
+}
+inline std::atomic<uint32_t> g_rdWrapCount{0u}; // FIX-M11
+inline float wrapRdCoord(float x) // FIX-M11
+{
+    if (std::isnan(x))
+        return 0.0f;
+    const float xi = x * 16.0f;
+    if (xi >= 2147483648.0f)
+        return 4095.9375f;
+    if (xi <= -2147483648.0f)
+        return 0.0f;
+    return x - 4096.0f * std::floor(x / 4096.0f);
+}
+inline __m128 wrapRdPos(__m128 pos) // FIX-M11
+{
+    if (!rdWrapOn())
+        return pos;
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 v4096 = _mm_set1_ps(4096.0f);
+    const __m128 inRange = _mm_and_ps(_mm_cmpge_ps(pos, zero), _mm_cmplt_ps(pos, v4096));
+    const int mask = _mm_movemask_ps(inRange);
+    if ((mask & 0x3) == 0x3)
+        return pos;
+    alignas(16) float p[4];
+    _mm_store_ps(p, pos);
+    if (!(mask & 0x1))
+        p[0] = wrapRdCoord(p[0]);
+    if (!(mask & 0x2))
+        p[1] = wrapRdCoord(p[1]);
+    g_rdWrapCount.fetch_add(1u, std::memory_order_relaxed);
+    return _mm_load_ps(p);
+}
 inline void leanSkinNoteDraw(bool isLean, bool mismatch, bool isLeanKick = false) // FEAT-RD40 // FEAT-RD42
 {
     struct Stat
@@ -836,7 +883,7 @@ struct SceneVertex // 80 bytes
 };
 static_assert(sizeof(SceneVertex) == 80u, "SceneVertex size");
 
-struct SceneDraw // 128 bytes
+struct SceneDraw // 144 bytes // FEAT-V2
 {
     uint32_t handlerPc;
     uint32_t mscalIndex;
@@ -849,8 +896,41 @@ struct SceneDraw // 128 bytes
     float objMatrix[16];
     float vpScale[4];
     float vpOffset[4];
+    uint32_t firstLight;   // FEAT-V2
+    uint32_t lightCount;   // FEAT-V2
+    uint32_t globalsIndex; // FEAT-V2
+    uint32_t firstBone;    // FEAT-V2
 };
-static_assert(sizeof(SceneDraw) == 128u, "SceneDraw size");
+static_assert(sizeof(SceneDraw) == 144u, "SceneDraw size"); // FEAT-V2
+
+struct SceneLight // 160 bytes // FEAT-V2
+{
+    uint32_t type;
+    uint32_t pad[3];
+    float dirOrPos[4][4];
+    float colour[4][4];
+    float params[4];
+};
+static_assert(sizeof(SceneLight) == 160u, "SceneLight size"); // FEAT-V2
+
+struct SceneGlobals // 144 bytes // FEAT-V2
+{
+    float viewProj[16];
+    float vpScale[4];
+    float vpOffset[4];
+    float ambient[4];
+    float lightScale[4];
+    float fogParams[4];
+};
+static_assert(sizeof(SceneGlobals) == 144u, "SceneGlobals size"); // FEAT-V2
+
+struct SceneBinSectionHeader // 12 bytes // FEAT-V2
+{
+    uint32_t magic;
+    uint32_t count;
+    uint32_t stride;
+};
+static_assert(sizeof(SceneBinSectionHeader) == 12u, "SceneBinSectionHeader size"); // FEAT-V2
 
 struct SceneBinHeader // 32 bytes
 {
@@ -878,6 +958,7 @@ struct SceneGs // FEAT-RD2
     uint32_t fba;
     uint32_t ownTex0;
     uint32_t kickSerial; // FEAT-RD5
+    uint32_t fogcol; // FIX-E1c
 };
 
 struct GsShadow // FEAT-RD2
@@ -895,6 +976,7 @@ struct GsShadow // FEAT-RD2
     uint64_t xyoffset[2] = {}; // FEAT-RD40
     uint64_t texa = 0;
     uint64_t texclut = 0;
+    uint32_t fogcol = 0; // FIX-E1c
 };
 
 struct SceneFrame
@@ -905,6 +987,8 @@ struct SceneFrame
     std::vector<SceneDraw> draws;
     std::vector<SceneGs> gs; // FEAT-RD2
     std::vector<SceneVertex> vertices;
+    std::vector<SceneLight> lights;     // FEAT-V2
+    std::vector<SceneGlobals> globals;  // FEAT-V2
     std::vector<::RdVert> rdVerts;    // FEAT-RD14
     std::vector<uint32_t> rdIndices;  // FEAT-RD14
     std::vector<::RdBatch> rdBatches; // FEAT-RD14
@@ -925,6 +1009,8 @@ struct SceneFrame
         draws.clear();
         gs.clear(); // FEAT-RD2
         vertices.clear();
+        lights.clear();   // FEAT-V2
+        globals.clear();  // FEAT-V2
         rdVerts.clear();   // FEAT-RD14
         rdIndices.clear(); // FEAT-RD14
         rdBatches.clear(); // FEAT-RD14
@@ -964,6 +1050,17 @@ struct SceneState
     uint64_t totalFallbacks = 0; // FEAT-RD2
     uint64_t mismatchByHandler[4] = {}; // 0:1EE0, 1:1EF0, 2:2440, 3:2900
     std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point lastLightLog = std::chrono::steady_clock::now(); // FEAT-V2
+    uint32_t nextDrawLight = 0u;           // FEAT-V2
+    uint32_t mscalGlobalsIdx = UINT32_MAX; // FEAT-V2
+    size_t mscalLight0 = 0;                // FEAT-V2
+    size_t mscalGlob0 = 0;                 // FEAT-V2
+    uint32_t slDraws = 0u;                 // FEAT-V2
+    uint32_t slLights = 0u;                // FEAT-V2
+    uint32_t slMaxLights = 0u;             // FEAT-V2
+    bool slHasFirst = false;               // FEAT-V2
+    float slAmb0[3] = {};                  // FEAT-V2
+    float slScale0[3] = {};                // FEAT-V2
     bool dumped = false;
 };
 
@@ -989,6 +1086,7 @@ inline void applyAD(uint64_t data, uint8_t reg) // FEAT-RD2
     }
     case 0x1Cu: g.texclut = data; break;
     case 0x3Bu: g.texa = data; break;
+    case 0x3Du: g.fogcol = static_cast<uint32_t>(data & 0x00FFFFFFull); break; // FIX-E1c
     case 0x40u: case 0x41u: g.scissor[reg - 0x40u] = data; break; // FEAT-RD40
     case 0x42u: case 0x43u: g.alpha[reg - 0x42u] = data; break;
     case 0x47u: case 0x48u: g.test[reg - 0x47u] = data; break;
@@ -1100,6 +1198,9 @@ inline void beginMscal(const uint8_t *vu, size_t &d0, size_t &v0)
 {
     const SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
     t_scene.curBoneCount = 0;
+    t_scene.mscalGlobalsIdx = UINT32_MAX; // FEAT-V2
+    t_scene.mscalLight0 = f.lights.size(); // FEAT-V2
+    t_scene.mscalGlob0 = f.globals.size(); // FEAT-V2
     if (leanRdOn()) // FEAT-RD14
     {
         d0 = f.rdBatches.size();
@@ -1132,6 +1233,10 @@ inline void commitMscal(uint32_t gifBytes)
 inline void rollbackMscal(size_t d0, size_t v0)
 {
     SceneFrame &f = t_scene.bufs[t_scene.writeIdx];
+    f.lights.resize(t_scene.mscalLight0);  // FEAT-V2
+    f.globals.resize(t_scene.mscalGlob0);  // FEAT-V2
+    if (t_scene.nextDrawLight > static_cast<uint32_t>(t_scene.mscalLight0)) // FEAT-V2
+        t_scene.nextDrawLight = static_cast<uint32_t>(t_scene.mscalLight0); // FEAT-V2
     if (leanRdOn()) // FEAT-RD14
     {
         f.rdBatches.resize(d0);
@@ -1144,6 +1249,692 @@ inline void rollbackMscal(size_t d0, size_t v0)
     f.vertices.resize(v0);
 }
 } // namespace scene
+
+namespace watch // PROBE-M5
+{
+inline bool spikeOn() // PROBE-M7
+{
+    static const bool s_spikeOn = []() {
+        const char *e = std::getenv("PS2X_SPIKE_WATCH");
+        return e && e[0] == '1';
+    }();
+    return s_spikeOn;
+}
+
+inline bool on()
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_VU1_WATCH");
+        return e && e[0] == '1';
+    }();
+    return s_on || spikeOn(); // PROBE-M7
+}
+
+static std::atomic<uint64_t> s_vbl{0}; // local host counter, no externs that may not link
+
+struct BoneTrace
+{
+    static constexpr int kMaxBones = 64;
+    static constexpr int kMaxVerts = 512;
+    int boneCount = 0;
+    float bones[kMaxBones][16];
+    int16_t vertBone[kMaxVerts];
+    void reset()
+    {
+        boneCount = 0;
+        std::memset(vertBone, -1, sizeof(vertBone));
+    }
+};
+static thread_local BoneTrace t_bones;
+
+inline void recordBone(const uint8_t *vu, uint16_t vi3, uint16_t vi2)
+{
+    const int bi = t_bones.boneCount;
+    if (bi < BoneTrace::kMaxBones)
+    {
+        for (int r = 0; r < 4; ++r)
+            _mm_storeu_ps(t_bones.bones[bi] + r * 4, ldq(vu, 978u + static_cast<uint32_t>(r)));
+        ++t_bones.boneCount;
+    }
+    const int16_t tag = (bi < BoneTrace::kMaxBones) ? static_cast<int16_t>(bi) : static_cast<int16_t>(-1);
+    for (uint16_t k = 0; k < vi2; ++k)
+    {
+        const uint32_t idx = static_cast<uint32_t>(vi3) + k;
+        if (idx < BoneTrace::kMaxVerts)
+            t_bones.vertBone[idx] = tag;
+    }
+}
+
+struct SumKey
+{
+    uint16_t handler = 0;
+    uint16_t mscal = 0;
+    uint32_t badDraws = 0;
+};
+
+struct RingEntry
+{
+    uint16_t handler = 0;
+    uint16_t mscal = 0;
+    uint32_t gifOffset = 0;
+    uint32_t nVerts = 0;
+    uint32_t badVerts = 0;
+    float maxVal = 0.0f;
+    uint32_t firstBadIdx = 0;
+    bool used = false;
+};
+
+struct WatchState
+{
+    std::mutex mtx;
+    uint32_t printedLines = 0;
+    uint32_t totalBadDraws = 0;
+    bool printedRing100 = false;
+    uint32_t draws = 0;
+    uint32_t badDraws = 0;
+    uint32_t badVerts = 0;
+    static constexpr size_t kMaxKeys = 64;
+    SumKey keys[kMaxKeys] = {};
+    size_t numKeys = 0;
+    static constexpr size_t kRingSize = 8;
+    RingEntry ring[kRingSize] = {};
+    size_t ringHead = 0;
+    std::chrono::steady_clock::time_point lastSum = std::chrono::steady_clock::now();
+};
+static WatchState s_ws;
+
+inline void checkDraw(const uint8_t *vu, uint16_t handler, uint16_t mscal, uint32_t gifOffset,
+                      uint32_t nVerts, bool skinned, uint32_t s2base, uint32_t s3base,
+                      const int32_t *idxs, const __m128 *rigidPs, const int32_t *rigidWd)
+{
+    // Unit: clip-space homogeneous XYZ(W) in VU memory (636+idx) before perspective divide (1/w) and before viewport scaling (1002/1003).
+    uint32_t bad = 0;
+    uint32_t firstBad = 0;
+    float maxAbs = 0.0f;
+    bool hasNonFinite = false;
+    float firstPos[4] = {};
+
+    for (uint32_t v = 0; v < nVerts; ++v)
+    {
+        __m128 vp;
+        if (skinned)
+            vp = ldq(vu, static_cast<uint32_t>(636 + idxs[v]) & 0x3FFu);
+        else
+            vp = rigidPs[v];
+        alignas(16) float p[4];
+        _mm_store_ps(p, vp);
+
+        bool vBad = false;
+        for (int c = 0; c < 4; ++c)
+        {
+            if (!std::isfinite(p[c]))
+            {
+                vBad = true;
+                hasNonFinite = true;
+            }
+            else
+            {
+                const float av = std::fabs(p[c]);
+                if (av > maxAbs)
+                    maxAbs = av;
+                if (c < 3 && av > 1.0e5f)
+                    vBad = true;
+            }
+        }
+        if (vBad)
+        {
+            if (bad == 0)
+            {
+                firstBad = v;
+                std::memcpy(firstPos, p, sizeof(firstPos));
+            }
+            ++bad;
+        }
+    }
+
+    const float reportMax = hasNonFinite ? INFINITY : maxAbs;
+    const auto now = std::chrono::steady_clock::now();
+
+    std::lock_guard<std::mutex> lk(s_ws.mtx);
+    ++s_ws.draws;
+
+    if (bad > 0)
+    {
+        if (spikeOn()) // PROBE-M7
+        {
+            const uint32_t ks = scene::t_scene.curKickSerial & 0x3FFFFFFFu;
+            if (ks != 0u)
+                ::ps2xRdSpikeNoteVu1Bad(ks, nVerts);
+        }
+        ++s_ws.badDraws;
+        s_ws.badVerts += bad;
+        ++s_ws.totalBadDraws;
+
+        bool foundKey = false;
+        for (size_t i = 0; i < s_ws.numKeys; ++i)
+        {
+            if (s_ws.keys[i].handler == handler && s_ws.keys[i].mscal == mscal)
+            {
+                ++s_ws.keys[i].badDraws;
+                foundKey = true;
+                break;
+            }
+        }
+        if (!foundKey && s_ws.numKeys < WatchState::kMaxKeys)
+            s_ws.keys[s_ws.numKeys++] = SumKey{handler, mscal, 1u};
+
+        bool distinctInRing = true;
+        for (size_t i = 0; i < WatchState::kRingSize; ++i)
+        {
+            if (s_ws.ring[i].used && s_ws.ring[i].handler == handler &&
+                s_ws.ring[i].mscal == mscal && s_ws.ring[i].gifOffset == gifOffset)
+            {
+                distinctInRing = false;
+                break;
+            }
+        }
+        if (distinctInRing)
+        {
+            s_ws.ring[s_ws.ringHead] = RingEntry{handler, mscal, gifOffset, nVerts, bad, reportMax, firstBad, true};
+            s_ws.ringHead = (s_ws.ringHead + 1u) % WatchState::kRingSize;
+        }
+
+        if (s_ws.printedLines < 200u)
+        {
+            ++s_ws.printedLines;
+            alignas(16) float obj[16];
+            for (int r = 0; r < 4; ++r)
+                _mm_store_ps(obj + r * 4, ldq(vu, 978u + static_cast<uint32_t>(r)));
+
+            int boneIdx = -1;
+            if (skinned)
+            {
+                const int32_t vIdx = idxs[firstBad];
+                if (vIdx >= 0 && vIdx < BoneTrace::kMaxVerts)
+                    boneIdx = t_bones.vertBone[vIdx];
+            }
+
+            char boneStr[256];
+            if (skinned && boneIdx >= 0 && boneIdx < t_bones.boneCount)
+            {
+                const float *bm = t_bones.bones[boneIdx];
+                std::snprintf(boneStr, sizeof(boneStr),
+                              "%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g",
+                              bm[0], bm[1], bm[2], bm[3], bm[4], bm[5],
+                              bm[6], bm[7], bm[8], bm[9], bm[10], bm[11]);
+            }
+            else
+            {
+                std::snprintf(boneStr, sizeof(boneStr), "-");
+            }
+
+            const uint64_t vbl = s_vbl.load(std::memory_order_relaxed);
+            const uint32_t kickSerial = scene::t_scene.curKickSerial & 0x3FFFFFFFu; // PROBE-M7: common 30-bit serial matching RdBatch.kickSerial
+            ::ps2xSafeLog("[vu1bad] handler=0x%04x mscal=0x%04x gifOffset=%u n=%u bad=%u max=%g firstBadIdx=%u pos=(%g,%g,%g,%g) "
+                          "obj=[%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g] bone0=[%s] boneIdx=%d vbl=%llu kickSerial=%u\n",
+                          handler, mscal, gifOffset, nVerts, bad, reportMax, firstBad,
+                          firstPos[0], firstPos[1], firstPos[2], firstPos[3],
+                          obj[0], obj[1], obj[2], obj[3], obj[4], obj[5], obj[6], obj[7],
+                          obj[8], obj[9], obj[10], obj[11], obj[12], obj[13], obj[14], obj[15],
+                          boneStr, boneIdx, static_cast<unsigned long long>(vbl), kickSerial);
+
+            if (skinned)
+            {
+                const int32_t idx = idxs[firstBad];
+                alignas(16) float q636[4], q716[4], q796[4], q556[4], qs2[4], qs3[4];
+                _mm_store_ps(q636, ldq(vu, static_cast<uint32_t>(636 + idx) & 0x3FFu));
+                _mm_store_ps(q716, ldq(vu, static_cast<uint32_t>(716 + idx) & 0x3FFu));
+                _mm_store_ps(q796, ldq(vu, static_cast<uint32_t>(796 + idx) & 0x3FFu));
+                _mm_store_ps(q556, ldq(vu, static_cast<uint32_t>(556 + idx) & 0x3FFu));
+                _mm_store_ps(qs2, ldq(vu, (s2base + firstBad) & 0x3FFu));
+                _mm_store_ps(qs3, ldq(vu, (s3base + firstBad) & 0x3FFu));
+                ::ps2xSafeLog("[vu1bad-skin] idx=%d 636=(%g,%g,%g,%g) 716=(%g,%g,%g,%g) 796=(%g,%g,%g,%g) 556=(%g,%g,%g,%g) s2=(%g,%g,%g,%g) s3=(%g,%g,%g,%g)\n",
+                              idx,
+                              q636[0], q636[1], q636[2], q636[3],
+                              q716[0], q716[1], q716[2], q716[3],
+                              q796[0], q796[1], q796[2], q796[3],
+                              q556[0], q556[1], q556[2], q556[3],
+                              qs2[0], qs2[1], qs2[2], qs2[3],
+                              qs3[0], qs3[1], qs3[2], qs3[3]);
+                if (boneIdx >= 0 && boneIdx < t_bones.boneCount)
+                {
+                    const float *bm = t_bones.bones[boneIdx];
+                    ::ps2xSafeLog("[vu1bad-bone] boneIdx=%d r0=(%g,%g,%g,%g) r1=(%g,%g,%g,%g) r2=(%g,%g,%g,%g) r3=(%g,%g,%g,%g)\n",
+                                  boneIdx,
+                                  bm[0], bm[1], bm[2], bm[3], bm[4], bm[5], bm[6], bm[7],
+                                  bm[8], bm[9], bm[10], bm[11], bm[12], bm[13], bm[14], bm[15]);
+                }
+            }
+            (void)rigidWd;
+        }
+
+        if (!s_ws.printedRing100 && s_ws.totalBadDraws >= 100u)
+        {
+            s_ws.printedRing100 = true;
+            ::ps2xSafeLog("[vu1bad-ring100] last 8 distinct bad draws:\n");
+            for (size_t k = 0; k < WatchState::kRingSize; ++k)
+            {
+                const RingEntry &e = s_ws.ring[(s_ws.ringHead + k) % WatchState::kRingSize];
+                if (!e.used)
+                    continue;
+                ::ps2xSafeLog("  [%zu] handler=0x%04x mscal=0x%04x gifOffset=%u n=%u bad=%u max=%g firstBadIdx=%u\n",
+                              k, e.handler, e.mscal, e.gifOffset, e.nVerts, e.badVerts, e.maxVal, e.firstBadIdx);
+            }
+        }
+    }
+
+    if (std::chrono::duration<double>(now - s_ws.lastSum).count() >= 5.0)
+    {
+        char topBuf[512];
+        int pos = 0;
+        bool used[WatchState::kMaxKeys] = {};
+        for (int t = 0; t < 6; ++t)
+        {
+            size_t best = WatchState::kMaxKeys;
+            for (size_t i = 0; i < s_ws.numKeys; ++i)
+            {
+                if (!used[i] && (best == WatchState::kMaxKeys || s_ws.keys[i].badDraws > s_ws.keys[best].badDraws))
+                    best = i;
+            }
+            if (best == WatchState::kMaxKeys)
+                break;
+            used[best] = true;
+            pos += std::snprintf(topBuf + pos, sizeof(topBuf) - static_cast<size_t>(pos),
+                                 "%shandler=0x%04x mscal=0x%04x n=%u",
+                                 t == 0 ? "" : " ; ",
+                                 s_ws.keys[best].handler, s_ws.keys[best].mscal, s_ws.keys[best].badDraws);
+        }
+        if (pos == 0)
+            std::snprintf(topBuf, sizeof(topBuf), "none");
+        ::ps2xSafeLog("[vu1bad-sum] draws=%u badDraws=%u badVerts=%u top: %s\n",
+                      s_ws.draws, s_ws.badDraws, s_ws.badVerts, topBuf);
+        s_ws.draws = 0;
+        s_ws.badDraws = 0;
+        s_ws.badVerts = 0;
+        s_ws.numKeys = 0;
+        s_ws.lastSum = now;
+    }
+}
+
+struct M8DrawEntry // PROBE-M8
+{
+    uint32_t serial = 0u;
+    uint16_t handlerPc = 0u;
+    uint16_t mscal = 0u;
+    uint32_t gifOffset = 0u;
+    uint8_t clipRan = 0u;
+    uint32_t nVertsIn = 0u;
+    uint32_t nVertsOut = 0u;
+    float minW = 0.0f;
+    float maxW = 0.0f;
+    float maxAbsXY = 0.0f;
+    static constexpr uint32_t kMaxGifVerts = 256u;
+    uint32_t nGifVerts = 0u;
+    int16_t gifX[kMaxGifVerts] = {};
+    int16_t gifY[kMaxGifVerts] = {};
+};
+
+static constexpr size_t kM8RingSize = 4096u; // PROBE-M8
+static M8DrawEntry s_m8Ring[kM8RingSize] = {}; // PROBE-M8
+static std::mutex s_m8Mtx; // PROBE-M8
+static thread_local uint16_t t_m8Mscal = 0u; // PROBE-M8
+static thread_local uint16_t t_m8Handler = 0u; // PROBE-M8
+
+inline void m8ParseGifXyz(const uint8_t *gifData, uint32_t gifBytes, M8DrawEntry &e) // PROBE-M8
+{
+    e.nGifVerts = 0u;
+    if (!gifData || gifBytes < 16u)
+        return;
+    uint32_t off = 0u;
+    while (off + 16u <= gifBytes)
+    {
+        uint64_t tagLo = 0ull, tagHi = 0ull;
+        std::memcpy(&tagLo, gifData + off, 8);
+        std::memcpy(&tagHi, gifData + off + 8u, 8);
+        off += 16u;
+        const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFull);
+        const bool eop = ((tagLo >> 15) & 1ull) != 0ull;
+        const uint32_t flg = static_cast<uint32_t>((tagLo >> 58) & 3ull);
+        uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFull);
+        if (nreg == 0u)
+            nreg = 16u;
+        if (flg == 0u) // PACKED
+        {
+            for (uint32_t l = 0u; l < nloop; ++l)
+            {
+                for (uint32_t r = 0u; r < nreg; ++r)
+                {
+                    if (off + 16u > gifBytes)
+                        return;
+                    const uint8_t reg = static_cast<uint8_t>((tagHi >> (r * 4u)) & 0xFu);
+                    if ((reg == 0x04u || reg == 0x05u) && e.nGifVerts < M8DrawEntry::kMaxGifVerts)
+                    {
+                        uint32_t xw = 0u, yw = 0u;
+                        std::memcpy(&xw, gifData + off + 0u, 4);
+                        std::memcpy(&yw, gifData + off + 4u, 4);
+                        e.gifX[e.nGifVerts] = static_cast<int16_t>(xw & 0xFFFFu);
+                        e.gifY[e.nGifVerts] = static_cast<int16_t>(yw & 0xFFFFu);
+                        ++e.nGifVerts;
+                    }
+                    off += 16u;
+                }
+            }
+        }
+        else if (flg == 1u) // REGLIST
+        {
+            for (uint32_t l = 0u; l < nloop; ++l)
+            {
+                for (uint32_t r = 0u; r < nreg; ++r)
+                {
+                    if (off + 8u > gifBytes)
+                        return;
+                    const uint8_t reg = static_cast<uint8_t>((tagHi >> (r * 4u)) & 0xFu);
+                    if ((reg == 0x04u || reg == 0x05u) && e.nGifVerts < M8DrawEntry::kMaxGifVerts)
+                    {
+                        uint64_t qw = 0ull;
+                        std::memcpy(&qw, gifData + off, 8);
+                        e.gifX[e.nGifVerts] = static_cast<int16_t>(qw & 0xFFFFull);
+                        e.gifY[e.nGifVerts] = static_cast<int16_t>((qw >> 16) & 0xFFFFull);
+                        ++e.nGifVerts;
+                    }
+                    off += 8u;
+                }
+            }
+            if ((nloop * nreg) & 1u)
+                off += 8u;
+        }
+        else if (flg == 2u) // IMAGE
+        {
+            off += nloop * 16u;
+        }
+        else
+        {
+            break;
+        }
+        if (eop)
+            break;
+    }
+}
+
+inline void m8RecordKick(uint32_t serial, uint16_t handlerPc, uint16_t mscal, uint32_t gifOffset,
+                         const uint8_t *gifData, uint32_t gifBytes) // PROBE-M8
+{
+    if (!spikeOn() || serial == 0u)
+        return;
+    M8DrawEntry e{};
+    e.serial = serial;
+    e.handlerPc = handlerPc;
+    e.mscal = mscal;
+    e.gifOffset = gifOffset;
+    m8ParseGifXyz(gifData, gifBytes, e);
+    std::lock_guard<std::mutex> lk(s_m8Mtx);
+    s_m8Ring[serial & (kM8RingSize - 1u)] = e;
+}
+
+inline void m8EnrichDraw(uint32_t serial, uint16_t handlerPc, uint8_t clipRan, uint32_t nVertsIn,
+                         uint32_t nVertsOut, float minW, float maxW, float maxAbsXY) // PROBE-M8
+{
+    if (!spikeOn() || serial == 0u)
+        return;
+    std::lock_guard<std::mutex> lk(s_m8Mtx);
+    M8DrawEntry &e = s_m8Ring[serial & (kM8RingSize - 1u)];
+    if (e.serial != serial)
+        return;
+    e.handlerPc = handlerPc;
+    e.clipRan = clipRan;
+    e.nVertsIn = nVertsIn;
+    e.nVertsOut = nVertsOut;
+    e.minW = minW;
+    e.maxW = maxW;
+    e.maxAbsXY = maxAbsXY;
+}
+
+inline void m8AccumVert(__m128 vp, bool &first, float &minW, float &maxW, float &maxAbsXY) // PROBE-M8
+{
+    alignas(16) float p[4];
+    _mm_store_ps(p, vp);
+    if (first)
+    {
+        minW = maxW = p[3];
+        first = false;
+    }
+    else
+    {
+        if (p[3] < minW) minW = p[3];
+        if (p[3] > maxW) maxW = p[3];
+    }
+    const float ax = std::fabs(p[0]);
+    const float ay = std::fabs(p[1]);
+    if (ax > maxAbsXY) maxAbsXY = ax;
+    if (ay > maxAbsXY) maxAbsXY = ay;
+}
+
+struct M9PlaneTrace // PROBE-M9
+{
+    int planeIdx = 0;
+    int32_t vin = 0;
+    int32_t vout = 0;
+    char sides[20] = {};
+    char tList[128] = {};
+};
+
+struct M9State // PROBE-M9
+{
+    std::mutex mtx;
+    uint32_t printedLines = 0u;
+    uint32_t clipCalls = 0u;
+    uint32_t badCalls = 0u;
+    uint32_t byForm[4] = {};
+    bool init = false;
+    std::chrono::steady_clock::time_point lastSum{};
+};
+
+inline M9State &m9State() // PROBE-M9
+{
+    static M9State s_m9;
+    return s_m9;
+}
+
+inline const char *m9FormName(uint32_t clipMode, bool copyS) // PROBE-M9
+{
+    static constexpr const char *kForms[4] = {
+        "m0_c0_-Z+Z-X+X-Y+Y",
+        "m0_c1_-Z+Z-X+X-Y+Y",
+        "m1_c0_-Z+Z-X+X-Y+Y",
+        "m1_c1_-Z+Z-X+X-Y+Y",
+    };
+    return kForms[((clipMode & 1u) << 1) | (copyS ? 1u : 0u)];
+}
+
+inline void m9RecordAndMaybeSummary(uint32_t clipMode, bool copyS, bool isBad) // PROBE-M9
+{
+    M9State &st = m9State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    ++st.clipCalls;
+    if (isBad)
+    {
+        ++st.badCalls;
+        ++st.byForm[((clipMode & 1u) << 1) | (copyS ? 1u : 0u)];
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!st.init)
+    {
+        st.init = true;
+        st.lastSum = now;
+        return;
+    }
+    if (std::chrono::duration<double>(now - st.lastSum).count() < 5.0)
+        return;
+    char formBuf[256];
+    int pos = 0;
+    formBuf[0] = '\0';
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        if (st.byForm[i] == 0u)
+            continue;
+        pos += std::snprintf(formBuf + pos, sizeof(formBuf) - static_cast<size_t>(pos),
+                             "%s%s=%u", pos ? " " : "", m9FormName(i >> 1, (i & 1u) != 0u), st.byForm[i]);
+    }
+    if (pos == 0)
+        std::snprintf(formBuf, sizeof(formBuf), "none=0");
+    ::ps2xSafeLog("[clipbad-sum] clipCalls=%u badCalls=%u byForm: %s\n", st.clipCalls, st.badCalls, formBuf);
+    st.lastSum = now;
+}
+
+inline void m9DumpBad(uint32_t serial, uint16_t mscal, uint32_t clipMode, bool copyS, int32_t vi7, int32_t vout, // PROBE-M9
+                      const __m128 inPos[3], const __m128 inCol[3], const __m128 inTex[3], const uint32_t inFlags[3], const float inFog[3],
+                      const __m128 outPos[16], const __m128 outCol[16], const __m128 outTex[16], const float outFog[16],
+                      const char outSrc[16][64], int32_t unsetSlot, const M9PlaneTrace planes[6], int nPlanes)
+{
+    static constexpr const char *kPlaneNames[6] = {"-Z", "+Z", "-X", "+X", "-Y", "+Y"};
+    M9State &st = m9State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    auto emit = [&](const char *fmt, ...) {
+        if (st.printedLines >= 40u)
+            return;
+        ++st.printedLines;
+        char buf[512];
+        va_list ap;
+        va_start(ap, fmt);
+        std::vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        ::ps2xSafeLog("%s\n", buf);
+    };
+    emit("[clipbad] serial=%u mscal=0x%04x form=%s vin=3 vout=%u",
+         serial, static_cast<unsigned>(mscal), m9FormName(clipMode, copyS), static_cast<unsigned>(vout));
+    for (int i = 0; i < 3; ++i)
+    {
+        alignas(16) float p[4], c[4], t[4];
+        _mm_store_ps(p, inPos[i]);
+        _mm_store_ps(c, inCol[i]);
+        _mm_store_ps(t, inTex[i]);
+        const int adc = (i == 2) ? ((vi7 >> 15) & 1) : 0;
+        emit("  in[%d] pos=(%g,%g,%g,%g) clipflags=0x%x adc=%d tex=(%g,%g,%g) col=(%g,%g,%g,%g) fog=%g",
+             i, p[0], p[1], p[2], p[3], inFlags[i], adc, t[0], t[1], t[2], c[0], c[1], c[2], c[3], inFog[i]);
+    }
+    for (int32_t j = 0; j < vout && j < 16; ++j)
+    {
+        alignas(16) float p[4], c[4], t[4];
+        _mm_store_ps(p, outPos[j]);
+        _mm_store_ps(c, outCol[j]);
+        _mm_store_ps(t, outTex[j]);
+        emit("  out[%d] pos=(%g,%g,%g,%g) tex=(%g,%g,%g) col=(%g,%g,%g,%g) fog=%g src=%s",
+             j, p[0], p[1], p[2], p[3], t[0], t[1], t[2], c[0], c[1], c[2], c[3], outFog[j], outSrc[j]);
+    }
+    for (int p = 0; p < nPlanes; ++p)
+    {
+        emit("  plane[%d](%s): vin=%d vout=%d sides=%s t=[%s]",
+             planes[p].planeIdx, kPlaneNames[planes[p].planeIdx], planes[p].vin, planes[p].vout, planes[p].sides, planes[p].tList);
+    }
+    if (unsetSlot >= 0)
+        emit("  note: unset-output-slot=%d", unsetSlot);
+}
+
+inline bool clipbadDumpOn() // PROBE-CB1
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_CLIPBAD_DUMP");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+
+struct Cb1State // PROBE-CB1
+{
+    std::mutex mtx;
+    uint32_t calls = 0u;
+    uint32_t dumps = 0u;
+    uint32_t inputNaNOrHuge = 0u;
+    uint32_t inputSane = 0u;
+    bool atexitReg = false;
+};
+
+inline Cb1State &cb1State() // PROBE-CB1
+{
+    static Cb1State s_cb1;
+    return s_cb1;
+}
+
+inline void cb1PrintSummary() // PROBE-CB1
+{
+    Cb1State &st = cb1State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    ::ps2xSafeLog("[clipbad-in] summary: inputNaNOrHuge=%u inputSane=%u\n", st.inputNaNOrHuge, st.inputSane);
+}
+
+inline uint32_t cb1NextCall() // PROBE-CB1
+{
+    Cb1State &st = cb1State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    if (!st.atexitReg)
+    {
+        st.atexitReg = true;
+        std::atexit(cb1PrintSummary);
+    }
+    return ++st.calls;
+}
+
+inline void cb1DumpBad(uint32_t serial, uint16_t mscal, uint32_t callNum, // PROBE-CB1
+                       const __m128 inPos[3], const uint32_t inFlags[3],
+                       const __m128 outPos[16], int32_t vout,
+                       __m128 c1v, __m128 c2v, __m128 c5v,
+                       uint16_t vi13, int32_t vi5, int32_t vi6, int32_t vi7, int32_t vi8, int32_t vi9, int32_t vi10,
+                       uint32_t clipMode, bool copyS)
+{
+    bool badInput = false;
+    alignas(16) float ip[3][4]{};
+    uint32_t ib[3][4]{};
+    for (int i = 0; i < 3; ++i)
+    {
+        _mm_store_ps(ip[i], inPos[i]);
+        for (int c = 0; c < 4; ++c)
+        {
+            std::memcpy(&ib[i][c], &ip[i][c], sizeof(uint32_t));
+            const float v = ip[i][c];
+            if (std::isnan(v) || std::isinf(v) || std::fpclassify(v) == FP_SUBNORMAL || std::fabs(v) > 1e6f)
+                badInput = true;
+        }
+    }
+    Cb1State &st = cb1State();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    if (badInput)
+        ++st.inputNaNOrHuge;
+    else
+        ++st.inputSane;
+    if (st.dumps >= 40u)
+        return;
+    ++st.dumps;
+    ::ps2xSafeLog("[clipbad-in] serial=%u mscal=0x%04x call#=%u\n",
+                  serial, static_cast<unsigned>(mscal), callNum);
+    for (int i = 0; i < 3; ++i)
+    {
+        ::ps2xSafeLog("  in[%d] xyzw=(%g,%g,%g,%g) bits=(%08x %08x %08x %08x) clipflags=0x%x\n",
+                      i, ip[i][0], ip[i][1], ip[i][2], ip[i][3],
+                      ib[i][0], ib[i][1], ib[i][2], ib[i][3], inFlags[i]);
+    }
+    const int32_t nOut = (vout < 16) ? vout : 16;
+    for (int32_t j = 0; j < nOut; ++j)
+    {
+        alignas(16) float op[4];
+        uint32_t ob[4];
+        _mm_store_ps(op, outPos[j]);
+        for (int c = 0; c < 4; ++c)
+            std::memcpy(&ob[c], &op[c], sizeof(uint32_t));
+        ::ps2xSafeLog("  out[%d] xyzw=(%g,%g,%g,%g) bits=(%08x %08x %08x %08x)\n",
+                      j, op[0], op[1], op[2], op[3], ob[0], ob[1], ob[2], ob[3]);
+    }
+    alignas(16) float fc1[4], fc2[4], fc5[4];
+    _mm_store_ps(fc1, c1v);
+    _mm_store_ps(fc2, c2v);
+    _mm_store_ps(fc5, c5v);
+    ::ps2xSafeLog("  consts: c1v=(%g,%g,%g,%g) c2v=(%g,%g,%g,%g) c5v=(%g,%g,%g,%g)\n",
+                  fc1[0], fc1[1], fc1[2], fc1[3],
+                  fc2[0], fc2[1], fc2[2], fc2[3],
+                  fc5[0], fc5[1], fc5[2], fc5[3]);
+    ::ps2xSafeLog("  vi: vi5=%d vi6=%d vi7=0x%x vi8=%d vi9=%d vi10=%d vi13=0x%x clipMode=%u copyS=%d\n",
+                  vi5, vi6, static_cast<unsigned>(vi7), vi8, vi9, vi10, static_cast<unsigned>(vi13), clipMode, copyS ? 1 : 0);
+}
+} // namespace watch
 
 // Handler 00A8: matrix setup (00A8..0150) + table transform loop (0158..0180), docs/VU1_HANDLER_FORMS.md sections 1, 2 (verified bit-exact there).
 // Loop memory order inside one pass: SQI vf31 (0158), LQ.xy (0160), SQI vf6 (0168), LQI.zw (0170); the vf5 that pass k multiplies holds the xy/zw
@@ -1171,6 +1962,8 @@ static bool handler00A8(Regs &R, uint8_t *vu)
     vf1 = fmacV<2>(vf7, bc<2>(vf8), acc); // R0
     if (scene::on()) // PERF-SA
         scene::setObjMatrix(vf1, vf2, vf3, vf4);
+    if (watch::on()) // PROBE-M5
+        watch::recordBone(vu, vi3, vi2);
     uint16_t vi5 = static_cast<uint16_t>(vi3 + 636u), vi1 = static_cast<uint16_t>(vi3 + 476u);
     const __m128 vf25 = ldq(vu, vi1++);
     vf5 = ldq(vu, vi1++);
@@ -1367,6 +2160,12 @@ static bool kick(const uint8_t *vu, uint32_t addr, std::vector<std::pair<uint32_
             std::memcpy(gif.data() + start + i * 16u, vu + (((q0 + i) & 0x3FFu) << 4), 16);
     }
     kicks.emplace_back(start, total);
+    if (watch::spikeOn() && scene::on() && ::ps2xRdActive()) // PROBE-M8
+    {
+        const uint32_t ks = scene::t_scene.curKickSerial & 0x3FFFFFFFu;
+        watch::m8RecordKick(ks, watch::t_m8Handler, watch::t_m8Mscal, start,
+                            leanTag ? nullptr : (gif.data() + start), leanTag ? 0u : total);
+    }
     if (scene::on()) // FEAT-RD2
     {
         scene::RecScope rs(scene::kRpParse); // FEAT-RD32
@@ -1427,6 +2226,8 @@ inline void stqi(uint8_t *vu, uint32_t q, __m128i v) { stq(vu, q, _mm_castsi128_
 
 inline uint32_t clipBitsV(__m128 v) // lbClipBits (CLIP.xyz against |w|)
 {
+    if (::ps2xRdActive() && ::g_rdAspectK > 1.0f && ::g_ps2xWsMode != 1) // FIX-WS1
+        v = _mm_mul_ps(v, _mm_set_ps(1.0f, 1.0f, 1.0f, 1.0f / ::g_rdAspectK));
     uint32_t w[4];
     _mm_storeu_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(v));
     const int32_t limit = (w[3] & 0x7F800000u) != 0u ? static_cast<int32_t>(w[3] & 0x7FFFFFFFu) : 0x007FFFFF;
@@ -1541,7 +2342,7 @@ inline void dumpSceneFrame(const SceneFrame &f)
     {
         SceneBinHeader hdr{};
         hdr.magic = 0x314E4353u; // 'SCN1'
-        hdr.version = 1u;
+        hdr.version = 2u; // FEAT-V2
         hdr.frameIndex = static_cast<uint32_t>(f.frameIndex);
         hdr.drawCount = static_cast<uint32_t>(f.draws.size());
         hdr.vertexCount = static_cast<uint32_t>(f.vertices.size());
@@ -1550,6 +2351,14 @@ inline void dumpSceneFrame(const SceneFrame &f)
             std::fwrite(f.draws.data(), sizeof(SceneDraw), f.draws.size(), fb);
         if (!f.vertices.empty())
             std::fwrite(f.vertices.data(), sizeof(SceneVertex), f.vertices.size(), fb);
+        const SceneBinSectionHeader lightSec{0x5448474Cu, static_cast<uint32_t>(f.lights.size()), sizeof(SceneLight)}; // 'LGHT' // FEAT-V2
+        std::fwrite(&lightSec, sizeof(lightSec), 1u, fb); // FEAT-V2
+        if (!f.lights.empty()) // FEAT-V2
+            std::fwrite(f.lights.data(), sizeof(SceneLight), f.lights.size(), fb); // FEAT-V2
+        const SceneBinSectionHeader globSec{0x424F4C47u, static_cast<uint32_t>(f.globals.size()), sizeof(SceneGlobals)}; // 'GLOB' // FEAT-V2
+        std::fwrite(&globSec, sizeof(globSec), 1u, fb); // FEAT-V2
+        if (!f.globals.empty()) // FEAT-V2
+            std::fwrite(f.globals.data(), sizeof(SceneGlobals), f.globals.size(), fb); // FEAT-V2
         std::fclose(fb);
     }
 
@@ -1685,10 +2494,7 @@ inline void onFlush()
         float vpOffsetZ = 0.0f;   // FEAT-RD11
         const auto toRdVert = [](const SceneVertex &sv) -> ::RdVert {
             ::RdVert rv;
-            rv.pos[0] = sv.pos[0];
-            rv.pos[1] = sv.pos[1];
-            rv.pos[2] = sv.pos[2];
-            rv.pos[3] = sv.pos[3];
+            _mm_storeu_ps(rv.pos, wrapRdPos(_mm_loadu_ps(sv.pos))); // FIX-M11
             for (int c = 0; c < 4; ++c)
                 rv.rgba[c] = static_cast<uint8_t>(std::min<uint32_t>(sv.rgba[c], 255u));
             const float q = sv.stq[2]; // FEAT-RD3
@@ -1702,6 +2508,8 @@ inline void onFlush()
                 rv.uv[0] = 0.0f;
                 rv.uv[1] = 0.0f;
             }
+            const uint32_t fByte = (sv.adc >> 4) & 0xFFu; // FIX-E1b
+            rv.fog = static_cast<float>(fByte) / 255.0f;  // FIX-E1b
             return rv;
         };
         for (size_t di = 0; di < cur.draws.size(); ++di) // FEAT-RD2
@@ -1749,6 +2557,7 @@ inline void onFlush()
                     last.alpha == g.alpha && last.test == g.test && last.frame == g.frame && last.zbuf == g.zbuf &&
                     last.prim == g.prim && last.tex0 == g.tex0 && last.clamp == g.clamp && last.tex1 == g.tex1 &&
                     last.texa == g.texa &&
+                    last.fogcol == g.fogcol && // FIX-E1c
                     last.vpS[0] == d.vpScale[0] && last.vpS[1] == d.vpScale[1] && last.vpO[0] == d.vpOffset[0] && last.vpO[1] == d.vpOffset[1]) // FEAT-RD3 // FEAT-RD17 // FEAT-RD21
                 {
                     if (last.kickSerial != g.kickSerial) // FEAT-RD17
@@ -1759,17 +2568,48 @@ inline void onFlush()
             }
             t_rdBatches.push_back(::RdBatch{batchFirst, batchCount, 0u, g.alpha, g.test, g.frame, g.zbuf, g.prim, g.tex0,
                                             g.clamp, g.tex1, g.texa, g.kickSerial,
-                                            {d.vpScale[0], d.vpScale[1]}, {d.vpOffset[0], d.vpOffset[1]}}); // FEAT-RD3 // FEAT-RD5 // FEAT-RD14 // FEAT-RD21
+                                            {d.vpScale[0], d.vpScale[1]}, {d.vpOffset[0], d.vpOffset[1]}, 0u, g.fogcol}); // FEAT-RD3 // FEAT-RD5 // FEAT-RD14 // FEAT-RD21 // FIX-E1c
         }
         ::ps2xRdPublish(t_rdTris.data(), t_rdTris.size(), t_rdBatches.data(), t_rdBatches.size(), skippedDraws, maskedDraws, vpScaleZ, vpOffsetZ); // FEAT-RD11
     }
 
+    t_scene.slDraws += static_cast<uint32_t>(cur.draws.size()); // FEAT-V2
+    t_scene.slLights += static_cast<uint32_t>(cur.lights.size()); // FEAT-V2
+    for (const SceneDraw &d : cur.draws) // FEAT-V2
+    {
+        if (d.lightCount > t_scene.slMaxLights)
+            t_scene.slMaxLights = d.lightCount;
+        if (!t_scene.slHasFirst && d.globalsIndex < cur.globals.size())
+        {
+            const SceneGlobals &g = cur.globals[d.globalsIndex];
+            t_scene.slAmb0[0] = g.ambient[0]; t_scene.slAmb0[1] = g.ambient[1]; t_scene.slAmb0[2] = g.ambient[2];
+            t_scene.slScale0[0] = g.lightScale[0]; t_scene.slScale0[1] = g.lightScale[1]; t_scene.slScale0[2] = g.lightScale[2];
+            t_scene.slHasFirst = true;
+        }
+    }
+
     t_scene.writeIdx ^= 1u;
     t_scene.bufs[t_scene.writeIdx].clear();
+    t_scene.nextDrawLight = 0u; // FEAT-V2
     t_scene.mscalIndex = 0u;
     t_scene.frameGifBytes = 0u;
 
     const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - t_scene.lastLightLog).count() >= 1000) // FEAT-V2
+    {
+        t_scene.lastLightLog = now;
+        ::ps2xSafeLog("[scenelight] draws=%u lights=%u maxLightsPerDraw=%u ambient0=(%f,%f,%f) lightScale0=(%f,%f,%f)\n",
+                      t_scene.slDraws, t_scene.slLights, t_scene.slMaxLights,
+                      t_scene.slAmb0[0], t_scene.slAmb0[1], t_scene.slAmb0[2],
+                      t_scene.slScale0[0], t_scene.slScale0[1], t_scene.slScale0[2]);
+        t_scene.slDraws = 0u;
+        t_scene.slLights = 0u;
+        t_scene.slMaxLights = 0u;
+        t_scene.slHasFirst = false;
+        t_scene.slAmb0[0] = t_scene.slAmb0[1] = t_scene.slAmb0[2] = 0.0f;
+        t_scene.slScale0[0] = t_scene.slScale0[1] = t_scene.slScale0[2] = 0.0f;
+        ::ps2xSafeLog("[rdwrap] wrapped=%u/s\n", g_rdWrapCount.exchange(0u, std::memory_order_relaxed)); // FIX-M11
+    }
     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - t_scene.lastLog).count() >= 5000)
     {
         t_scene.lastLog = now;
@@ -1788,8 +2628,47 @@ inline void onFlush()
     }
 }
 
-inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t gifLen, uint32_t count, uint32_t boneCount, uint32_t flags, __m128 c1v, __m128 c2v)
+inline void recordLight1(uint32_t pc, __m128 d0, __m128 d1, __m128 c0, __m128 params) // FEAT-V2
 {
+    SceneLight l{};
+    l.type = pc;
+    _mm_storeu_ps(l.dirOrPos[0], d0);
+    _mm_storeu_ps(l.dirOrPos[1], d1);
+    _mm_storeu_ps(l.colour[0], c0);
+    _mm_storeu_ps(l.params, params);
+    t_scene.bufs[t_scene.writeIdx].lights.push_back(l);
+}
+
+inline void recordLight4(uint32_t pc, __m128 d0, __m128 d1, __m128 d2, __m128 c0, __m128 c1, __m128 c2, __m128 c3, __m128 params) // FEAT-V2
+{
+    SceneLight l{};
+    l.type = pc;
+    _mm_storeu_ps(l.dirOrPos[0], d0);
+    _mm_storeu_ps(l.dirOrPos[1], d1);
+    _mm_storeu_ps(l.dirOrPos[2], d2);
+    _mm_storeu_ps(l.colour[0], c0);
+    _mm_storeu_ps(l.colour[1], c1);
+    _mm_storeu_ps(l.colour[2], c2);
+    _mm_storeu_ps(l.colour[3], c3);
+    _mm_storeu_ps(l.params, params);
+    t_scene.bufs[t_scene.writeIdx].lights.push_back(l);
+}
+
+inline SceneDraw &pushDraw(const uint8_t *vu, SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t gifLen, uint32_t count, uint32_t boneCount, uint32_t flags, __m128 c1v, __m128 c2v) // FEAT-V2
+{
+    if (t_scene.mscalGlobalsIdx == UINT32_MAX) // FEAT-V2
+    {
+        SceneGlobals g{};
+        for (uint32_t r = 0u; r < 4u; ++r)
+            _mm_storeu_ps(g.viewProj + r * 4u, ldq(vu, 998u + r));
+        _mm_storeu_ps(g.vpScale, ldq(vu, 1002u));
+        _mm_storeu_ps(g.vpOffset, ldq(vu, 1003u));
+        _mm_storeu_ps(g.ambient, ldq(vu, 1014u));
+        _mm_storeu_ps(g.lightScale, ldq(vu, 1013u));
+        _mm_storeu_ps(g.fogParams, ldq(vu, 1016u));
+        t_scene.mscalGlobalsIdx = static_cast<uint32_t>(f.globals.size());
+        f.globals.push_back(g);
+    }
     SceneDraw d{};
     d.handlerPc = pc;
     d.mscalIndex = t_scene.mscalIndex;
@@ -1802,6 +2681,11 @@ inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t
     std::memcpy(d.objMatrix, t_scene.curObjMatrix, sizeof(d.objMatrix));
     _mm_storeu_ps(d.vpScale, c1v);
     _mm_storeu_ps(d.vpOffset, c2v);
+    d.firstLight = t_scene.nextDrawLight; // FEAT-V2
+    d.lightCount = static_cast<uint32_t>(f.lights.size()) - t_scene.nextDrawLight; // FEAT-V2
+    d.globalsIndex = t_scene.mscalGlobalsIdx; // FEAT-V2
+    d.firstBone = 0u; // FEAT-V2
+    t_scene.nextDrawLight = static_cast<uint32_t>(f.lights.size()); // FEAT-V2
     f.draws.push_back(d);
     const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull); // FEAT-RD2
     SceneGs g{};
@@ -1818,6 +2702,7 @@ inline SceneDraw &pushDraw(SceneFrame &f, uint32_t pc, uint32_t gifOff, uint32_t
     g.fba = static_cast<uint32_t>(t_scene.gs.fba[ctxt] & 1ull);
     g.ownTex0 = t_scene.curOwnTex0 ? 1u : 0u;
     g.kickSerial = t_scene.curKickSerial; // FEAT-RD5
+    g.fogcol = t_scene.gs.fogcol; // FIX-E1c
     f.gs.push_back(g);
     return f.draws.back();
 }
@@ -1834,10 +2719,10 @@ inline void markGeometryKick(std::vector<uint8_t> &gif, uint32_t gifOff) // FEAT
     }
 }
 
-inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba) // FEAT-RD14
+inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba, float fog = 1.0f) // FEAT-RD14 // FIX-E1b
 {
     ::RdVert rv;
-    _mm_storeu_ps(rv.pos, pos);
+    _mm_storeu_ps(rv.pos, wrapRdPos(pos)); // FIX-M11
     const __m128i clamped = _mm_min_epu32(rgba, _mm_set1_epi32(255));
     const __m128i p16 = _mm_packus_epi32(clamped, clamped);
     const __m128i p8 = _mm_packus_epi16(p16, p16);
@@ -1848,6 +2733,7 @@ inline ::RdVert makeRdVert(__m128 pos, __m128 stq, __m128i rgba) // FEAT-RD14
     const __m128 d = _mm_div_ps(stq, q);
     const __m128 nz = _mm_cmpneq_ps(q, _mm_setzero_ps());
     _mm_storel_pi(reinterpret_cast<__m64 *>(rv.uv), _mm_and_ps(d, nz));
+    rv.fog = fog; // FIX-E1b
     return rv;
 }
 
@@ -1909,12 +2795,14 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
     const uint64_t zbuf = t_scene.gs.zbuf[ctxt];
     const uint64_t texa = t_scene.gs.texa;
     const uint32_t kickSerial = t_scene.curKickSerial;
+    const uint32_t fogcol = t_scene.gs.fogcol; // FIX-E1c
     if (!f.rdBatches.empty())
     {
         ::RdBatch &last = f.rdBatches.back();
         if (rdSerialsCanMerge(last.kickSerial, kickSerial) &&
             last.alpha == alpha && last.test == test && last.frame == frame && last.zbuf == zbuf &&
             last.prim == prim && last.tex0 == tex0 && last.clamp == clamp && last.tex1 == tex1 && last.texa == texa &&
+            last.fogcol == fogcol && // FIX-E1c
             last.vpS[0] == f.curVpS[0] && last.vpS[1] == f.curVpS[1] && last.vpO[0] == f.curVpO[0] && last.vpO[1] == f.curVpO[1] && last.camHash == f.curCamHash) // FEAT-RD17 // FEAT-RD21 // PROBE-RD26
         {
             if (last.kickSerial != kickSerial) // FEAT-RD17
@@ -1924,7 +2812,7 @@ inline void pushLeanBatch(SceneFrame &f, uint32_t firstIndex, uint32_t indexCoun
         }
     }
     f.rdBatches.push_back(::RdBatch{firstIndex, indexCount, 0u, alpha, test, frame, zbuf, prim, tex0, clamp, tex1, texa, kickSerial,
-                                    {f.curVpS[0], f.curVpS[1]}, {f.curVpO[0], f.curVpO[1]}, f.curCamHash}); // FEAT-RD21 // PROBE-RD26
+                                    {f.curVpS[0], f.curVpS[1]}, {f.curVpO[0], f.curVpO[1]}, f.curCamHash, fogcol}); // FEAT-RD21 // PROBE-RD26 // FIX-E1c
 }
 
 inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, __m128 c1v, __m128 c2v, uint32_t gifOff, uint32_t gifLen, std::vector<uint8_t> &gif)
@@ -1942,10 +2830,13 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
         for (int32_t k = 0; k < polyCount; ++k)
         {
             const uint32_t qOut = 877u + 4u * static_cast<uint32_t>(k);
+            const uint32_t w3 = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
+            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f; // FIX-E1b
             f.rdVerts[v0 + static_cast<size_t>(k)] = makeRdVert(
                 ldq(vu, 918u + 3u * static_cast<uint32_t>(k)),
                 ldq(vu, qOut + 1u),
-                ldqi(vu, qOut + 2u));
+                ldqi(vu, qOut + 2u),
+                fog); // FIX-E1b
         }
         if (polyCount >= 3)
         {
@@ -1961,7 +2852,7 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
         pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
         return;
     }
-    const SceneDraw &d = pushDraw(f, 0x2900u, gifOff, gifLen, static_cast<uint32_t>(polyCount), 0u, 4u | (copyS ? 2u : 0u), c1v, c2v);
+    const SceneDraw &d = pushDraw(vu, f, 0x2900u, gifOff, gifLen, static_cast<uint32_t>(polyCount), 0u, 4u | (copyS ? 2u : 0u), c1v, c2v); // FEAT-V2
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(polyCount));
     for (int32_t k = 0; k < polyCount; ++k)
@@ -2001,13 +2892,16 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
         for (int32_t j = 0; j < N; ++j)
         {
             const uint32_t qOut = (e7 + 1u + 4u * static_cast<uint32_t>(j)) & 0x3FFu;
+            const uint32_t w3 = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
+            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f; // FIX-E1b
             f.rdVerts[v0 + static_cast<size_t>(j)] = makeRdVert(
                 Ps[j],
                 ldq(vu, (qOut + 1u) & 0x3FFu),
-                ldqi(vu, (qOut + 2u) & 0x3FFu));
+                ldqi(vu, (qOut + 2u) & 0x3FFu),
+                fog); // FIX-E1b
             if (j >= 2)
             {
-                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u);
+                const uint32_t adc = w3; // FIX-E1b
                 if (!(adc & 0x8000u))
                 {
                     f.rdIndices.push_back(base + static_cast<uint32_t>(j - 2));
@@ -2019,7 +2913,7 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
         pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
         return;
     }
-    const SceneDraw &d = pushDraw(f, 0x2440u, gifOff, gifLen, static_cast<uint32_t>(N), 0u, copyS ? 2u : 0u, c1v, c2v);
+    const SceneDraw &d = pushDraw(vu, f, 0x2440u, gifOff, gifLen, static_cast<uint32_t>(N), 0u, copyS ? 2u : 0u, c1v, c2v); // FEAT-V2
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(N));
     for (int32_t j = 0; j < N; ++j)
@@ -2080,13 +2974,16 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
         {
             const uint32_t qOut = ubase + 1u + 4u * static_cast<uint32_t>(v);
             const int32_t idx = static_cast<int16_t>(ilw(vu, (i4base + static_cast<uint32_t>(v)) & 0x3FFu, 0u));
+            const uint32_t w3 = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
+            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f; // FIX-E1b
             f.rdVerts[v0 + static_cast<size_t>(v)] = makeRdVert(
                 ldq(vu, (636u + static_cast<uint32_t>(idx)) & 0x3FFu),
                 ldq(vu, qOut + 1u),
-                ldqi(vu, qOut + 2u));
+                ldqi(vu, qOut + 2u),
+                fog); // FIX-E1b
             if (v >= 2)
             {
-                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FEAT-RD27
+                const uint32_t adc = w3; // FEAT-RD27 // FIX-E1b
                 if (!(adc & 0x8000u))
                 {
                     f.rdIndices.push_back(base + static_cast<uint32_t>(v - 2));
@@ -2098,7 +2995,7 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
         pushLeanBatch(f, static_cast<uint32_t>(i0), static_cast<uint32_t>(f.rdIndices.size() - i0));
         return;
     }
-    const SceneDraw &d = pushDraw(f, vi10 ? 0x1EF0u : 0x1EE0u, gifOff, gifLen, static_cast<uint32_t>(N), t_scene.curBoneCount, 1u | (vi10 ? 2u : 0u), c1v, c2v);
+    const SceneDraw &d = pushDraw(vu, f, vi10 ? 0x1EF0u : 0x1EE0u, gifOff, gifLen, static_cast<uint32_t>(N), t_scene.curBoneCount, 1u | (vi10 ? 2u : 0u), c1v, c2v); // FEAT-V2
     const size_t v0 = f.vertices.size();
     f.vertices.resize(v0 + static_cast<size_t>(N));
     for (int32_t v = 0; v < N; ++v)
@@ -2121,6 +3018,21 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
         checkDraw(d, f.vertices.data() + v0);
 }
 } // namespace scene
+
+static inline __m128 vuSat4(__m128 v) // FIX-M10
+{
+    const __m128 maxV = _mm_set1_ps(FLT_MAX);
+    const __m128 minV = _mm_set1_ps(-FLT_MAX);
+    const __m128 signBit = _mm_and_ps(v, _mm_castsi128_ps(_mm_set1_epi32(static_cast<int>(0x80000000u))));
+    const __m128 isNan = _mm_cmpunord_ps(v, v);
+    const __m128 clamped = _mm_min_ps(_mm_max_ps(v, minV), maxV);
+    return _mm_blendv_ps(clamped, signBit, isNan);
+}
+
+static inline float vuSat(float v) // FIX-M10
+{
+    return _mm_cvtss_f32(vuSat4(_mm_set_ss(v)));
+}
 
 // Task F4: Sutherland-Hodgman 6-plane frustum clipper (2900..2F68), called from rigid2440 when no trivial-reject FCOR mask matches.
 // Reproduces every context/spill/buffer/GIF store to VU memory (1020..1022, 918..959, 876..) and kicks 1023 + 876; returns to 24F8/2720 via JR vi12.
@@ -2183,10 +3095,46 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
 
     int32_t polyCount = 3;
     __m128 vf19_last = zero;
+    const bool cb1On = watch::clipbadDumpOn(); // PROBE-CB1
+    const uint32_t cb1Call = cb1On ? watch::cb1NextCall() : 0u; // PROBE-CB1
+    __m128 cb1InPos[3]{}; // PROBE-CB1
+    uint32_t cb1InFlags[3]{}; // PROBE-CB1
+    if (cb1On) // PROBE-CB1
+    {
+        cb1InPos[0] = vf28;
+        cb1InPos[1] = vf29;
+        cb1InPos[2] = vf10;
+        for (int i = 0; i < 3; ++i)
+            cb1InFlags[i] = clipBitsV(cb1InPos[i]);
+    }
+    const bool m9On = watch::spikeOn(); // PROBE-M9
+    __m128 m9InPos[3]{}, m9InCol[3]{}, m9InTex[3]{}; // PROBE-M9
+    uint32_t m9InFlags[3]{}; // PROBE-M9
+    float m9InFog[3]{}; // PROBE-M9
+    char m9SrcA[16][64]{}, m9SrcB[16][64]{}; // PROBE-M9
+    watch::M9PlaneTrace m9Planes[6]{}; // PROBE-M9
+    int m9NPlanes = 0; // PROBE-M9
+    int32_t m9UnsetSlot = -1; // PROBE-M9
+    if (m9On) // PROBE-M9
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            m9InPos[i] = ldq(vu, 918u + static_cast<uint32_t>(i) * 3u);
+            m9InCol[i] = ldq(vu, 919u + static_cast<uint32_t>(i) * 3u);
+            m9InTex[i] = ldq(vu, 920u + static_cast<uint32_t>(i) * 3u);
+            m9InFlags[i] = clipBitsV(m9InPos[i]);
+            const __m128 tv = fmacV<2>(c2v, bc<3>(m9InPos[i]), fmacV<4>(c1v, m9InPos[i], zero));
+            const float iq = divQ2(1.0f, _mm_cvtss_f32(bc<3>(tv)));
+            const __m128 fw = miniV(maxV(fmacV<2>(bc<3>(c5v), _mm_set1_ps(iq), fmacV<4>(vf0, bc<2>(c5v), zero)), zero), _mm_set1_ps(255.0f));
+            m9InFog[i] = _mm_cvtss_f32(bc<3>(fw));
+            std::snprintf(m9SrcA[i], sizeof(m9SrcA[i]), "copy of in[%d]", i);
+        }
+    }
     for (int p = 0; p < 6; ++p)
     {
         const PlaneSpec &pl = kPlanes[p];
-        const __m128 sgnV = _mm_set1_ps(pl.sgn);
+        const float effSgn = (pl.axis == 0 && ::ps2xRdActive() && ::g_rdAspectK > 1.0f && ::g_ps2xWsMode != 1) ? (pl.sgn * ::g_rdAspectK) : pl.sgn; // FIX-WS1
+        const __m128 sgnV = _mm_set1_ps(effSgn);
         __m128 vf17 = ldq(vu, pl.inBase + 0u);
         __m128 vf18 = ldq(vu, pl.inBase + 1u);
         __m128 vf23 = ldq(vu, pl.inBase + 2u);
@@ -2195,6 +3143,17 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
         __m128 vf22 = ldq(vu, inPtr++);
         uint32_t outPtr = pl.outBase;
         int32_t outCount = 0;
+        bool m9OutWritten[16]{}; // PROBE-M9
+        int m9TPos = 0; // PROBE-M9
+        if (m9On) // PROBE-M9
+        {
+            m9Planes[p].planeIdx = p;
+            m9Planes[p].vin = polyCount;
+            m9Planes[p].sides[0] = '\0';
+            m9Planes[p].tList[0] = '\0';
+            for (int32_t i = 0; i < 16; ++i)
+                std::snprintf(m9SrcB[i], sizeof(m9SrcB[i]), "UNSET");
+        }
 
         for (int32_t e = 0; e < polyCount; ++e)
         {
@@ -2204,9 +3163,19 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
             const __m128 vf25w = fmacV<4>(vf17, sgnV, zero);
             const __m128 vf26w = fmacV<4>(vf21, sgnV, zero);
             vf23 = ldq(vu, inPtr++);
+            if (m9On && e < 18) // PROBE-M9
+            {
+                m9Planes[p].sides[e] = out0 ? '1' : '0';
+                m9Planes[p].sides[e + 1] = '\0';
+            }
 
             if (!out0)
             {
+                if (m9On && outCount < 16) // PROBE-M9
+                {
+                    m9OutWritten[outCount] = true;
+                    std::snprintf(m9SrcB[outCount], sizeof(m9SrcB[outCount]), "%s", m9SrcA[e < 16 ? e : 15]);
+                }
                 stqRaw(vu, outPtr++, vf17);
                 stqRaw(vu, outPtr++, vf18);
                 stqRaw(vu, outPtr++, vf19);
@@ -2222,20 +3191,39 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
                     d0v = mr32(d0v);
                     d1v = mr32(d1v);
                 }
-                const __m128 d1n = fmacV<0>(zero, d1v, zero); // 2F00 ADDx.y vf24, vf0, vf26
-                const float den = _mm_cvtss_f32(fmacV<1>(d1v, d0v, zero));
-                const float q = divQ2(1.0f, den);
-                const float absD0 = _mm_cvtss_f32(absV(d0v));
-                const float absD1 = _mm_cvtss_f32(absV(d1n));
-                const float absQ = _mm_cvtss_f32(absV(_mm_set1_ps(normRes(q))));
-                const __m128 bD0 = _mm_set1_ps(absD0), bD1 = _mm_set1_ps(absD1), bQ = _mm_set1_ps(absQ);
+                const float d0 = _mm_cvtss_f32(d0v); // FIX-M10
+                const float d1 = _mm_cvtss_f32(d1v); // FIX-M10
+                const float den = vuSat(d0 - d1); // FIX-M10
+                float t; // FIX-M10
+                if (den == 0.0f) // FIX-M10
+                    t = (d0 == 0.0f) ? 0.0f : ((std::signbit(d0) != std::signbit(den)) ? -FLT_MAX : FLT_MAX); // FIX-M10
+                else // FIX-M10
+                    t = vuSat(d0 / den); // FIX-M10
+                const __m128 tv = _mm_set1_ps(t); // FIX-M10
 
-                const __m128 pos = fmacV<4>(fmacV<2>(vf21, bD0, fmacV<4>(vf17, bD1, zero)), bQ, zero);
-                const __m128 col = fmacV<0>(fmacV<4>(fmacV<2>(vf22, bD0, fmacV<4>(vf18, bD1, zero)), bQ, zero), _mm_set1_ps(0.001f), zero);
-                const __m128 st = fmacV<4>(fmacV<2>(vf23, bD0, fmacV<4>(vf19, bD1, zero)), bQ, zero);
+                const __m128 posDiff = vuSat4(_mm_sub_ps(vf21, vf17)); // FIX-M10
+                const __m128 pos = vuSat4(_mm_add_ps(vf17, vuSat4(_mm_mul_ps(tv, posDiff)))); // FIX-M10
+                const __m128 colDiff = vuSat4(_mm_sub_ps(vf22, vf18)); // FIX-M10
+                const __m128 colLerp = vuSat4(_mm_add_ps(vf18, vuSat4(_mm_mul_ps(tv, colDiff)))); // FIX-M10
+                const __m128 col = vuSat4(_mm_add_ps(colLerp, _mm_set1_ps(0.001f))); // FIX-M10
+                const __m128 stDiff = vuSat4(_mm_sub_ps(vf23, vf19)); // FIX-M10
+                const __m128 st = vuSat4(_mm_add_ps(vf19, vuSat4(_mm_mul_ps(tv, stDiff)))); // FIX-M10
                 const __m128 m1012 = ldq(vu, 1012u); // 2F18 + 2F40: SQ.yzw m1012, 876(vi0)
                 stqRaw(vu, 876u, _mm_blend_ps(ldq(vu, 876u), m1012, 0xE));
 
+                if (m9On) // PROBE-M9
+                {
+                    const float tVal = t; // FIX-M10
+                    m9TPos += std::snprintf(m9Planes[p].tList + m9TPos,
+                                            sizeof(m9Planes[p].tList) - static_cast<size_t>(m9TPos),
+                                            "%s%.5g", m9TPos ? "," : "", tVal);
+                    if (outCount < 16)
+                    {
+                        m9OutWritten[outCount] = true;
+                        std::snprintf(m9SrcB[outCount], sizeof(m9SrcB[outCount]),
+                                      "p%d:e%d(%d->%d,t=%.5g)", p, e, e, (e + 1) % polyCount, tVal);
+                    }
+                }
                 stqRaw(vu, outPtr++, pos);
                 stqRaw(vu, outPtr++, col);
                 stqRaw(vu, outPtr++, st);
@@ -2248,8 +3236,23 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
                 vf22 = ldq(vu, inPtr++);
         }
 
+        if (m9On) // PROBE-M9
+        {
+            m9Planes[p].vout = outCount;
+            m9NPlanes = p + 1;
+            for (int32_t j = 0; j < outCount && j < 16; ++j)
+            {
+                if (!m9OutWritten[j] && m9UnsetSlot < 0)
+                    m9UnsetSlot = j;
+                std::snprintf(m9SrcA[j], sizeof(m9SrcA[j]), "%s", m9SrcB[j]);
+            }
+        }
         if (outCount == 0)
+        {
+            if (m9On) // PROBE-M9
+                watch::m9RecordAndMaybeSummary(clipMode, copyS, false);
             return true; // 2E88 -> 2D50..2DA8: completely clipped out
+        }
 
         // 2E90..2EC0: wrap-around copy of vertex 0 + screen-space transform of v0 on last plane
         const __m128 w0 = ldq(vu, pl.outBase + 0u);
@@ -2300,6 +3303,62 @@ static bool clipPolygon(uint8_t *vu, uint16_t vi13, int32_t vi5, int32_t vi6, in
     }
     if (!kick(vu, 876u, kicks, gif))
         return false;
+    if (watch::spikeOn()) // PROBE-M8
+    {
+        float minW = 0.0f, maxW = 0.0f, maxAbsXY = 0.0f;
+        bool first = true;
+        bool m9Bad = (m9UnsetSlot >= 0); // PROBE-M9
+        __m128 m9OutPos[16]{}, m9OutCol[16]{}, m9OutTex[16]{}; // PROBE-M9
+        float m9OutFog[16]{}; // PROBE-M9
+        for (int32_t k = 0; k < polyCount; ++k)
+        {
+            const __m128 vp = ldq(vu, 918u + 3u * static_cast<uint32_t>(k));
+            watch::m8AccumVert(vp, first, minW, maxW, maxAbsXY);
+            if (k < 16) // PROBE-M9
+            {
+                m9OutPos[k] = vp;
+                m9OutCol[k] = ldq(vu, 919u + 3u * static_cast<uint32_t>(k));
+                m9OutTex[k] = ldq(vu, 920u + 3u * static_cast<uint32_t>(k));
+                const __m128 tv = fmacV<2>(c2v, bc<3>(vp), fmacV<4>(c1v, vp, zero));
+                const float oq = divQ2(1.0f, _mm_cvtss_f32(bc<3>(tv)));
+                const __m128 fw = miniV(maxV(fmacV<2>(bc<3>(c5v), _mm_set1_ps(oq), fmacV<4>(vf0, bc<2>(c5v), zero)), zero), _mm_set1_ps(255.0f));
+                m9OutFog[k] = _mm_cvtss_f32(bc<3>(fw));
+                alignas(16) float p[4];
+                _mm_store_ps(p, vp);
+                if (p[3] == 0.0f || (p[0] == 0.0f && p[1] == 0.0f && p[2] == 0.0f && p[3] == 0.0f))
+                    m9Bad = true;
+            }
+        }
+        const uint32_t serial30 = scene::t_scene.curKickSerial & 0x3FFFFFFFu;
+        watch::m8EnrichDraw(serial30, 0x2900u, 1u, 3u,
+                            static_cast<uint32_t>(polyCount), minW, maxW, maxAbsXY);
+        watch::m9RecordAndMaybeSummary(clipMode, copyS, m9Bad); // PROBE-M9
+        if (m9Bad) // PROBE-M9
+            watch::m9DumpBad(serial30, watch::t_m8Mscal, clipMode, copyS, vi7, polyCount,
+                             m9InPos, m9InCol, m9InTex, m9InFlags, m9InFog,
+                             m9OutPos, m9OutCol, m9OutTex, m9OutFog,
+                             m9SrcA, m9UnsetSlot, m9Planes, m9NPlanes);
+    }
+    if (cb1On) // PROBE-CB1
+    {
+        bool cb1Bad = (m9UnsetSlot >= 0);
+        __m128 cb1OutPos[16]{};
+        for (int32_t k = 0; k < polyCount && k < 16; ++k)
+        {
+            cb1OutPos[k] = ldq(vu, 918u + 3u * static_cast<uint32_t>(k));
+            alignas(16) float p[4];
+            _mm_store_ps(p, cb1OutPos[k]);
+            if (p[3] == 0.0f || (p[0] == 0.0f && p[1] == 0.0f && p[2] == 0.0f && p[3] == 0.0f))
+                cb1Bad = true;
+        }
+        if (cb1Bad)
+        {
+            const uint32_t serial30 = scene::t_scene.curKickSerial & 0x3FFFFFFFu;
+            watch::cb1DumpBad(serial30, watch::t_m8Mscal, cb1Call,
+                              cb1InPos, cb1InFlags, cb1OutPos, polyCount,
+                              c1v, c2v, c5v, vi13, vi5, vi6, vi7, vi8, vi9, vi10, clipMode, copyS);
+        }
+    }
     if (scene::on()) // PERF-SA
         scene::recordClipPolygon(vu, polyCount, copyS, c1v, c2v, kicks.back().first, kicks.back().second, gif);
     return true;
@@ -2435,6 +3494,17 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
     stqi(vu, 1023u, _mm_insert_epi32(_mm_insert_epi32(ldqi(vu, 1023u), static_cast<int>(e6), 2), static_cast<int>(e7), 3));
     if (!kick(vu, e7, kicks, gif))
         return fb1EE0(kFbRigidKick);
+    if (watch::spikeOn()) // PROBE-M8
+    {
+        float minW = 0.0f, maxW = 0.0f, maxAbsXY = 0.0f;
+        bool first = true;
+        for (int32_t j = 0; j < N; ++j)
+            watch::m8AccumVert(Ps[j], first, minW, maxW, maxAbsXY);
+        watch::m8EnrichDraw(scene::t_scene.curKickSerial & 0x3FFFFFFFu, 0x2440u, 0u,
+                            static_cast<uint32_t>(N), static_cast<uint32_t>(N), minW, maxW, maxAbsXY);
+    }
+    if (watch::on()) // PROBE-M5
+        watch::checkDraw(vu, 0x2440u, top, kicks.back().first, static_cast<uint32_t>(N), false, 0u, 0u, nullptr, Ps, Wd);
     if (scene::on()) // PERF-SA
         scene::recordRigid(vu, N, copyS, c1v, c2v, Ps, Wd, e7, kicks.back().first, kicks.back().second, gif);
     R.vi[12] = top; // XTOP vi12
@@ -2446,11 +3516,14 @@ static bool rigid2440(Regs &R, uint8_t *vu, uint16_t vi13, uint16_t top, int32_t
 // the caller restores the undo log) for every case lbFull declines or that it does not model: N outside 4..67, DIV by zero, any aliasing between the output
 // buffer and anything the real (software-pipelined) routine reads after its first stores, kick failure.
 // 1EE0 (vi10 = 0) and 1EF0 (vi10 = 1: reads S from 796+idx in both skinned 2210 and rigid 2670).
-static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t s2base, uint32_t s3base, const int32_t *idxs,
-                               __m128 vf2, __m128 vf16, const Fv8V &k2, const Fv8V &k16,
-                               ::RdVert *outVerts, uint32_t *outIndices, uint32_t baseIndex, uint32_t &outIdxCount) // FEAT-RD40
+template <bool VI10>
+static void buildLeanSkinVertsImpl(const uint8_t *vu, int32_t N, uint32_t s2base, uint32_t s3base, const int32_t *idxs,
+                                   __m128 vf1, __m128 vf2, __m128 vf3, __m128 vf4, __m128 vf16, __m128 accw, // FIX-E10a
+                                   const Fv8V &k1, const Fv8V &k2, const Fv8V &k3, const Fv8V &k4, const Fv8V &k16, const Fv8V &kaccw, // FIX-E10a
+                                   ::RdVert *outVerts, uint32_t *outIndices, uint32_t baseIndex, uint32_t &outIdxCount) // FEAT-RD40 // PERF-PF1
 {
     const __m128 zero = _mm_setzero_ps();
+    const __m256 z8v = _mm256_setzero_ps();
     const __m128i v255 = _mm_set1_epi32(255);
     uint32_t ic = 0u;
     for (int32_t t0 = 0; t0 < N; t0 += 8)
@@ -2464,24 +3537,57 @@ static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t
             gA[j] = ldq(vu, static_cast<uint32_t>(636 + idx));
             gB[j] = ldq(vu, static_cast<uint32_t>(716 + idx));
             gS3[j] = ldq(vu, s3base + static_cast<uint32_t>(s));
-            gS2[j] = vi10 ? ldq(vu, static_cast<uint32_t>(796 + idx)) : ldq(vu, s2base + static_cast<uint32_t>(s));
+            gS2[j] = VI10 ? ldq(vu, static_cast<uint32_t>(796 + idx)) : ldq(vu, s2base + static_cast<uint32_t>(s));
         }
-        Fv8V B = fv8FromRows(gB), S3 = fv8FromRows(gS3), S2 = fv8FromRows(gS2);
+        Fv8V A = fv8FromRows(gA), B = fv8FromRows(gB), S3 = fv8FromRows(gS3), S2 = fv8FromRows(gS2); // FIX-E10a
+        bool needWrap = false; // FIX-M11
+        if (scene::rdWrapOn()) // FIX-M11
+        {
+            const __m256 v4096_8 = _mm256_set1_ps(4096.0f);
+            const __m256 inX8 = _mm256_and_ps(_mm256_cmp_ps(A.c[0], z8v, _CMP_GE_OQ), _mm256_cmp_ps(A.c[0], v4096_8, _CMP_LT_OQ));
+            const __m256 inY8 = _mm256_and_ps(_mm256_cmp_ps(A.c[1], z8v, _CMP_GE_OQ), _mm256_cmp_ps(A.c[1], v4096_8, _CMP_LT_OQ));
+            needWrap = (_mm256_movemask_ps(_mm256_and_ps(inX8, inY8)) != 0xFF);
+        }
         for (int c = 0; c < 4; ++c)
         {
+            A.c[c] = fv8N(A.c[c]); // FIX-E10a
             B.c[c] = fv8N(B.c[c]);
             S3.c[c] = fv8N(S3.c[c]);
-            S2.c[c] = fv8N(S2.c[c]);
         }
+        // PERF-PF1: S2.c[3] is unused; compute UV = (S/Q, T/Q) in 8-wide AVX2 (bit-exact IEEE-754 div)
+        S2.c[0] = fv8N(S2.c[0]);
+        S2.c[1] = fv8N(S2.c[1]);
+        S2.c[2] = fv8N(S2.c[2]);
+        const __m256 nz8 = _mm256_cmp_ps(S2.c[2], z8v, _CMP_NEQ_OQ);
+        const __m256 u8 = _mm256_and_ps(_mm256_div_ps(S2.c[0], S2.c[2]), nz8);
+        const __m256 v8 = _mm256_and_ps(_mm256_div_ps(S2.c[1], S2.c[2]), nz8);
+        alignas(32) float uArr[8], vArr[8];
+        _mm256_store_ps(uArr, u8);
+        _mm256_store_ps(vArr, v8);
+
         Fv8V z8;
-        z8.c[0] = z8.c[1] = z8.c[2] = z8.c[3] = _mm256_setzero_ps();
+        z8.c[0] = z8.c[1] = z8.c[2] = z8.c[3] = z8v;
         __m256i bad = _mm256_setzero_si256();
+        const Fv8V mula = fv8Op<1, false>(k3, A, z8, bad); // FIX-E10a
+        const Fv8V t5 = fv8Op<1, true>(k4, Fv8V{{A.c[3], A.c[3], A.c[3], A.c[3]}}, mula, bad); // FIX-E10a
+        const __m256 den = fv8N(t5.c[3]); // FIX-E10a
+        bool fOk = !fv8Any(fv8IsZ(den)); // FIX-E10a
+        alignas(32) int32_t wArr[8]; // FIX-E10a
+        if (fOk) // FIX-E10a
+        {
+            const __m256 qv = fv8N(fv8N(_mm256_div_ps(_mm256_set1_ps(1.0f), den)));
+            const Fv8V Q{{qv, qv, qv, qv}};
+            const Fv8V w = fv8Op<1, true>(k1, Q, kaccw, bad);
+            if (!fv8Any(bad))
+                _mm256_store_si256(reinterpret_cast<__m256i *>(wArr), fv8FtoiS<16>(fv8ClampI(w.c[3])));
+            else
+                fOk = false;
+        }
         const Fv8V bv = fv8Op<15, false>(B, k16, z8, bad);
         const Fv8V in = fv8Op<15, true>(k2, k16, bv, bad);
         const Fv8V pr = fv8Op<15, false>(S3, in, z8, bad);
-        __m128 oPr[8], oS2[8];
-        fv8ToRows(S2, oS2);
-        if (!fv8Any(bad))
+        __m128 oPr[8];
+        if (fOk && !fv8Any(bad)) // FIX-E10a
         {
             Fv8V prOut;
             for (int c = 0; c < 4; ++c)
@@ -2496,7 +3602,25 @@ static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t
                 const __m128 sin = fmacV<2>(vf2, vf16, sbv);
                 const __m128 sprod = fmacV<4>(gS3[j], sin, zero);
                 oPr[j] = _mm_castsi128_ps(ftoiS<1>(clampI(sprod)));
+                const __m128 smula = fmacV<4>(vf3, gA[j], zero); // FIX-E10a
+                const __m128 sT5 = fmacV<2>(vf4, bc<3>(gA[j]), smula); // FIX-E10a
+                const float sden = nrm1(_mm_cvtss_f32(bc<3>(sT5))); // FIX-E10a
+                if (sden != 0.0f) // FIX-E10a
+                {
+                    const float sQ = normRes(normRes(1.0f / sden));
+                    const float sWraw = _mm_cvtss_f32(bc<3>(fmacV<2>(vf1, _mm_set1_ps(sQ), accw)));
+                    wArr[j] = _mm_cvtsi128_si32(ftoiS<16>(clampI(_mm_set1_ps(sWraw))));
+                }
+                else
+                {
+                    wArr[j] = 255 << 4;
+                }
             }
+        }
+        if (needWrap) // FIX-M11
+        {
+            for (int j = 0; j < n; ++j)
+                gA[j] = scene::wrapRdPos(gA[j]);
         }
         for (int j = 0; j < n; ++j)
         {
@@ -2508,10 +3632,9 @@ static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t
             const __m128i p8 = _mm_packus_epi16(p16, p16);
             const uint32_t packed = static_cast<uint32_t>(_mm_cvtsi128_si32(p8));
             std::memcpy(rv.rgba, &packed, 4);
-            const __m128 q = _mm_shuffle_ps(oS2[j], oS2[j], _MM_SHUFFLE(2, 2, 2, 2));
-            const __m128 d = _mm_div_ps(oS2[j], q);
-            const __m128 nz = _mm_cmpneq_ps(q, zero);
-            _mm_storel_pi(reinterpret_cast<__m64 *>(rv.uv), _mm_and_ps(d, nz));
+            rv.uv[0] = uArr[j];
+            rv.uv[1] = vArr[j];
+            rv.fog = static_cast<float>((static_cast<uint32_t>(wArr[j]) >> 4) & 0xFFu) / 255.0f; // FIX-E10a
             if (v >= 2 && !(static_cast<uint32_t>(idxs[v]) & 0x8000u))
             {
                 outIndices[ic++] = baseIndex + static_cast<uint32_t>(v - 2);
@@ -2521,6 +3644,17 @@ static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t
         }
     }
     outIdxCount = ic;
+}
+
+static void buildLeanSkinVerts(const uint8_t *vu, int32_t N, bool vi10, uint32_t s2base, uint32_t s3base, const int32_t *idxs,
+                               __m128 vf1, __m128 vf2, __m128 vf3, __m128 vf4, __m128 vf16, __m128 accw, // FIX-E10a
+                               const Fv8V &k1, const Fv8V &k2, const Fv8V &k3, const Fv8V &k4, const Fv8V &k16, const Fv8V &kaccw, // FIX-E10a
+                               ::RdVert *outVerts, uint32_t *outIndices, uint32_t baseIndex, uint32_t &outIdxCount) // FEAT-RD40
+{
+    if (vi10)
+        buildLeanSkinVertsImpl<true>(vu, N, s2base, s3base, idxs, vf1, vf2, vf3, vf4, vf16, accw, k1, k2, k3, k4, k16, kaccw, outVerts, outIndices, baseIndex, outIdxCount); // FIX-E10a
+    else
+        buildLeanSkinVertsImpl<false>(vu, N, s2base, s3base, idxs, vf1, vf2, vf3, vf4, vf16, accw, k1, k2, k3, k4, k16, kaccw, outVerts, outIndices, baseIndex, outIdxCount); // FIX-E10a
 }
 
 static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool vi10, std::vector<std::pair<uint32_t, uint32_t>> &kicks, std::vector<uint8_t> &gif)
@@ -2655,6 +3789,15 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
         const bool useLeanKick = scene::leanKickOn(); // FEAT-RD42
         if (!kick(vu, ubase, kicks, gif, useLeanKick))
             return fb1EE0(kFbSkinKick);
+        if (watch::spikeOn()) // PROBE-M8
+        {
+            float minW = 0.0f, maxW = 0.0f, maxAbsXY = 0.0f;
+            bool first = true;
+            for (int32_t v = 0; v < N; ++v)
+                watch::m8AccumVert(ldq(vu, static_cast<uint32_t>(636 + idxs[v]) & 0x3FFu), first, minW, maxW, maxAbsXY);
+            watch::m8EnrichDraw(scene::t_scene.curKickSerial & 0x3FFFFFFFu, vi10 ? 0x1EF0u : 0x1EE0u, 0u,
+                                static_cast<uint32_t>(N), static_cast<uint32_t>(N), minW, maxW, maxAbsXY);
+        }
         const uint64_t t2 = hp ? __rdtsc() : 0ull; // PROBE-RD41
         uint64_t vertsT = 0; // PROBE-RD41
         { scene::RecScope rm(scene::kRpMarker); scene::markGeometryKick(gif, kicks.back().first); }
@@ -2673,7 +3816,7 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
                 }
                 uint32_t ic = 0u;
                 const uint64_t tv0 = hp ? __rdtsc() : 0ull; // PROBE-RD41
-                buildLeanSkinVerts(vu, N, vi10, s2base, s3base, idxs, vf2, vf16, k2, k16,
+                buildLeanSkinVerts(vu, N, vi10, s2base, s3base, idxs, vf1, vf2, vf3, vf4, vf16, accw, k1, k2, k3, k4, k16, kaccw, // FIX-E10a
                                    f.rdVerts.data() + v0, N >= 3 ? f.rdIndices.data() + i0 : nullptr, static_cast<uint32_t>(v0), ic);
                 vertsT = hp ? (__rdtsc() - tv0) : 0ull; // PROBE-RD41
                 f.rdIndices.resize(i0 + ic);
@@ -2681,6 +3824,8 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
             }
         }
         const uint64_t t3 = hp ? __rdtsc() : 0ull; // PROBE-RD41
+        if (watch::on()) // PROBE-M5
+            watch::checkDraw(vu, vi10 ? 0x1EF0u : 0x1EE0u, top, kicks.back().first, static_cast<uint32_t>(N), true, s2base, s3base, idxs, nullptr, nullptr);
         scene::leanSkinNoteDraw(true, false, useLeanKick); // FEAT-RD42
         R.vi[12] = static_cast<uint16_t>(ilw(vu, (i4base + 1u) & 0x3FFu, 0));
         if (hp) // PROBE-RD41
@@ -2810,6 +3955,17 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
     const uint64_t tKick0 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     if (!kick(vu, ubase, kicks, gif)) // XGKICK vi6 (JR delay slot)
         return fb1EE0(kFbSkinKick);
+    if (watch::spikeOn()) // PROBE-M8
+    {
+        float minW = 0.0f, maxW = 0.0f, maxAbsXY = 0.0f;
+        bool first = true;
+        for (int32_t v = 0; v < N; ++v)
+            watch::m8AccumVert(ldq(vu, static_cast<uint32_t>(636 + idxs[v]) & 0x3FFu), first, minW, maxW, maxAbsXY);
+        watch::m8EnrichDraw(scene::t_scene.curKickSerial & 0x3FFFFFFFu, vi10 ? 0x1EF0u : 0x1EE0u, 0u,
+                            static_cast<uint32_t>(N), static_cast<uint32_t>(N), minW, maxW, maxAbsXY);
+    }
+    if (watch::on()) // PROBE-M5
+        watch::checkDraw(vu, vi10 ? 0x1EF0u : 0x1EE0u, top, kicks.back().first, static_cast<uint32_t>(N), true, s2base, s3base, idxs, nullptr, nullptr);
     const uint64_t tKick1 = hp ? __rdtsc() : 0ull; // PROBE-RD41
     if (scene::on()) // PERF-SA
     {
@@ -2825,7 +3981,7 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
                 ::RdVert chkVerts[kMaxSkinN];
                 uint32_t chkIdx[kMaxSkinN * 3u];
                 uint32_t chkIc = 0u;
-                buildLeanSkinVerts(vu, N, vi10, s2base, s3base, idxs, vf2, vf16, k2, k16,
+                buildLeanSkinVerts(vu, N, vi10, s2base, s3base, idxs, vf1, vf2, vf3, vf4, vf16, accw, k1, k2, k3, k4, k16, kaccw, // FIX-E10a
                                    chkVerts, chkIdx, static_cast<uint32_t>(v0Chk), chkIc);
                 if (chkIc != f.rdIndices.size() - i0Chk)
                     mism = true;
@@ -2842,6 +3998,37 @@ static bool handler1EE0(Regs &R, uint8_t *vu, uint16_t &vi13, uint16_t top, bool
                         if (std::fabs(a - b) > 1e-5f * std::max(std::fabs(b), 1e-6f))
                             mism = true;
                     }
+                }
+                struct LeanFogStat // FIX-E10a
+                {
+                    uint32_t n = 0u, mismatches = 0u;
+                    int32_t maxdiff = 0;
+                    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+                };
+                static thread_local LeanFogStat s_leanFog; // FIX-E10a
+                for (int32_t v = 0; v < N; ++v) // FIX-E10a
+                {
+                    const uint32_t qOut = (ubase + 1u + 4u * static_cast<uint32_t>(v)) & 0x3FFu;
+                    const int32_t refF = static_cast<int32_t>((ldw(vu, qOut, 3u) >> 4) & 0xFFu);
+                    const int32_t leanF = static_cast<int32_t>(std::lround(chkVerts[v].fog * 255.0f));
+                    const int32_t diffF = std::abs(leanF - refF);
+                    ++s_leanFog.n;
+                    if (diffF > s_leanFog.maxdiff)
+                        s_leanFog.maxdiff = diffF;
+                    if (diffF != 0)
+                    {
+                        ++s_leanFog.mismatches;
+                        mism = true;
+                    }
+                }
+                const auto now = std::chrono::steady_clock::now(); // FIX-E10a
+                if (std::chrono::duration<double>(now - s_leanFog.t0).count() >= 1.0) // FIX-E10a
+                {
+                    ::ps2xSafeLog("[leanfog] n=%u maxdiff=%d mismatches=%u\n", s_leanFog.n, s_leanFog.maxdiff, s_leanFog.mismatches);
+                    s_leanFog.n = 0u;
+                    s_leanFog.maxdiff = 0;
+                    s_leanFog.mismatches = 0u;
+                    s_leanFog.t0 = now;
                 }
             }
             scene::leanSkinNoteDraw(leanMainPass, mism);
@@ -3135,6 +4322,8 @@ static bool handler0840(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v1017 = ldq(vu, 1017);
     const __m128 hOff = fmacV<2>(m991, bc<2>(v1017), fmacV<2>(m990, bc<1>(v1017), fmacV<4>(m989, bc<0>(v1017), zero)));
     const __m128 coeffs = ldq(vu, 1015);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x0840u, cmdPos, zero, cmdCol, coeffs); // FEAT-V2
     logRange(vu, outBase, n);
     for (uint32_t j = 0; j < n; ++j)
     {
@@ -3176,6 +4365,8 @@ static bool handler0CC0(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 cmd2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
     const __m128 cmd3 = ldq(vu, static_cast<uint32_t>(vi13) + 3u);
     vi13 = static_cast<uint16_t>(vi13 + 4u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x0CC0u, cmd0, cmd2, cmd1, cmd3); // FEAT-V2
     const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v985 = ldq(vu, 985), v1010 = ldq(vu, 1010);
     const __m128 vf9 = fmacV<2>(m991, bc<2>(cmd0), fmacV<2>(m990, bc<1>(cmd0), fmacV<4>(m989, bc<0>(cmd0), zero)));
     const __m128 negCmd2 = fmacV<1>(zero, cmd2, zero);
@@ -3238,6 +4429,8 @@ static bool handler1090(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 cmd2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
     const __m128 cmd3 = ldq(vu, static_cast<uint32_t>(vi13) + 3u);
     vi13 = static_cast<uint16_t>(vi13 + 4u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x1090u, cmd0, cmd2, cmd1, cmd3); // FEAT-V2
     const __m128 m989 = ldq(vu, 989), m990 = ldq(vu, 990), m991 = ldq(vu, 991), v985 = ldq(vu, 985), v1017 = ldq(vu, 1017);
     const __m128 L = fmacV<2>(v985, one, fmacV<2>(m991, bc<2>(cmd0), fmacV<2>(m990, bc<1>(cmd0), fmacV<4>(m989, bc<0>(cmd0), zero))));
     const __m128 negCmd2 = fmacV<1>(zero, cmd2, zero);
@@ -3298,6 +4491,8 @@ static bool handler02E0(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 Ly = fmacV<2>(d2, bc<2>(m987), fmacV<2>(d1, bc<1>(m987), fmacV<4>(d0, bc<0>(m987), zero)));
     const __m128 Lz = fmacV<2>(d2, bc<2>(m988), fmacV<2>(d1, bc<1>(m988), fmacV<4>(d0, bc<0>(m988), zero)));
     const __m128 coeffs = ldq(vu, 1015);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight4(0x02E0u, d0, d1, d2, c0, c1, c2, c3, coeffs); // FEAT-V2
     logRange(vu, outBase, n);
     for (uint32_t j = 0; j < n; ++j)
     {
@@ -3344,6 +4539,8 @@ static bool handler0628(Regs &R, uint8_t *vu, uint16_t &vi13, bool prologue) // 
     const __m128 cmd0 = ldq(vu, vi13);
     const __m128 cmd1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
     vi13 = static_cast<uint16_t>(vi13 + 2u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x0628u, cmd0, zero, cmd1, zero); // FEAT-V2
     const __m128 m982 = ldq(vu, 982), m983 = ldq(vu, 983), m984 = ldq(vu, 984), v985 = ldq(vu, 985);
     const __m128 L = fmacV<0>(fmacV<2>(m984, bc<2>(cmd0), fmacV<2>(m983, bc<1>(cmd0), fmacV<4>(m982, bc<0>(cmd0), zero))), v985, zero);
     logRange(vu, outBase, n);
@@ -3383,6 +4580,8 @@ static bool handler1720(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 cmd1 = ldq(vu, static_cast<uint32_t>(vi13) + 1u);
     const __m128 cmd2 = ldq(vu, static_cast<uint32_t>(vi13) + 2u);
     vi13 = static_cast<uint16_t>(vi13 + 3u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight1(0x1720u, cmd0, zero, cmd1, cmd2); // FEAT-V2
     const __m128 m982 = ldq(vu, 982), m983 = ldq(vu, 983), m984 = ldq(vu, 984), v985 = ldq(vu, 985);
     const __m128 L = fmacV<0>(fmacV<2>(m984, bc<2>(cmd0), fmacV<2>(m983, bc<1>(cmd0), fmacV<4>(m982, bc<0>(cmd0), zero))), v985, zero);
     logRange(vu, outBase, n);
@@ -3468,6 +4667,8 @@ static bool handler0198(Regs &R, uint8_t *vu, uint16_t &vi13)
     const __m128 c2 = ldq(vu, static_cast<uint32_t>(vi13) + 5u);
     const __m128 c3 = ldq(vu, static_cast<uint32_t>(vi13) + 6u);
     vi13 = static_cast<uint16_t>(vi13 + 7u);
+    if (scene::on()) // FEAT-V2
+        scene::recordLight4(0x0198u, d0, d1, d2, c0, c1, c2, c3, zero); // FEAT-V2
     const __m128 m986 = ldq(vu, 986), m987 = ldq(vu, 987), m988 = ldq(vu, 988);
     const __m128 Lx = fmacV<2>(d2, bc<2>(m986), fmacV<2>(d1, bc<1>(m986), fmacV<4>(d0, bc<0>(m986), zero)));
     const __m128 Ly = fmacV<2>(d2, bc<2>(m987), fmacV<2>(d1, bc<1>(m987), fmacV<4>(d0, bc<0>(m987), zero)));
@@ -3826,6 +5027,8 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
     static const bool funcNewOn = []() { const char *e = std::getenv("PS2X_VU1_FUNC_NEW"); return !(e && e[0] == '0'); }(); // PERF-V1M: default ON (PERF-VNC); PS2X_VU1_FUNC_NEW=0 disables
     t_newN = 0; // PERF-VNC
     t_seqN = 0; // PROBE-BG
+    if (watch::on()) // PROBE-M5
+        watch::t_bones.reset();
     Regs R; // PERF-V1G: skip 560-byte memset; vfValid/viValid track exact live-in registers across handlers
     R.vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
     R.vi[0] = 0u;
@@ -3839,6 +5042,9 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
     vx::HScope vxHs; // PROBE-VX
     hprof::HScope hpHs; // PROBE-RD39
     const bool hpOn = hprof::on(); // PROBE-RD39
+    watch::t_m8Mscal = static_cast<uint16_t>(top); // PROBE-M8
+    watch::t_m8Handler = 0u; // PROBE-M8
+    uint16_t m8LastWork = 0u; // PROBE-M8
     for (uint32_t step = 0; step < 100000u; ++step)
     {
         vi13 = static_cast<uint16_t>(vi13 + 1u);                      // 0028 IADDIU vi13, vi13, 1
@@ -3856,6 +5062,14 @@ static bool vu1FuncRunInner(uint8_t *vu, uint32_t top, std::vector<std::pair<uin
         if (vxA) { if (h) vxHs.begin(vx::slotOf(h, vu), __rdtsc()); else vxHs.end(__rdtsc()); } // PROBE-VX
         if (hpOn) { if (h) { uint16_t hpc = static_cast<uint16_t>(h); if ((h == 0x1EE0u || h == 0x1EF0u) && static_cast<int16_t>(ilw(vu, 1011, 1)) < 0) hpc = 0x2440u; hpHs.begin(hpc); } else hpHs.end(); } // PROBE-RD39
         if (t_seqN < 64u) t_seq[t_seqN++] = static_cast<uint16_t>(h); // PROBE-BG
+        if (watch::spikeOn()) // PROBE-M8
+        {
+            if (h != 0u && h != 0x0050u && h != 0x0060u && h != 0x0070u && h != 0x0088u)
+                m8LastWork = static_cast<uint16_t>(h);
+            watch::t_m8Handler = (h == 0x0050u || h == 0x0088u)
+                                     ? (m8LastWork ? m8LastWork : static_cast<uint16_t>(h))
+                                     : static_cast<uint16_t>(h);
+        }
         switch (h)
         {
         case 0x0000u: // program end (E bit)
@@ -5014,6 +6228,8 @@ void ps2xVu1FlushPath1() // PERF-V1I
         vu1func::scene::onFlush();
     if (vu1func::hprof::on()) // PROBE-RD39
         ++vu1func::hprof::g_st.frames; // PROBE-RD39
+    if (vu1func::watch::on()) // PROBE-M5
+        vu1func::watch::s_vbl.fetch_add(1u, std::memory_order_relaxed);
 }
 
 // PROBE-VX: entry points used by vpExecThreadFunc (ps2_vif1_interpreter.cpp, declared extern there)
@@ -5068,4 +6284,39 @@ void ps2xVxEv(uint32_t kind, uint64_t ticks) // PROBE-VX
     fresh.t0 = now;
     fresh.tsc0 = tn;
     s = fresh;
+}
+
+// PROBE-M8: global-scope lookup entry points used by rd_view.cpp (declared extern there)
+bool ps2xVu1SpikeLookupDraw(uint32_t serial, uint16_t &handlerPc, uint16_t &mscal,
+                            uint8_t &clipRan, uint32_t &nVertsIn, uint32_t &nVertsOut,
+                            float &minW, float &maxW, float &maxAbsXY) // PROBE-M8
+{
+    if (!vu1func::watch::spikeOn() || serial == 0u)
+        return false;
+    std::lock_guard<std::mutex> lk(vu1func::watch::s_m8Mtx);
+    const vu1func::watch::M8DrawEntry &e = vu1func::watch::s_m8Ring[serial & (vu1func::watch::kM8RingSize - 1u)];
+    if (e.serial != serial)
+        return false;
+    handlerPc = e.handlerPc;
+    mscal = e.mscal;
+    clipRan = e.clipRan;
+    nVertsIn = e.nVertsIn;
+    nVertsOut = e.nVertsOut;
+    minW = e.minW;
+    maxW = e.maxW;
+    maxAbsXY = e.maxAbsXY;
+    return true;
+}
+
+bool ps2xVu1SpikeLookupGif16(uint32_t serial, uint32_t vertIdx, int32_t &outXpx, int32_t &outYpx) // PROBE-M8
+{
+    if (!vu1func::watch::spikeOn() || serial == 0u)
+        return false;
+    std::lock_guard<std::mutex> lk(vu1func::watch::s_m8Mtx);
+    const vu1func::watch::M8DrawEntry &e = vu1func::watch::s_m8Ring[serial & (vu1func::watch::kM8RingSize - 1u)];
+    if (e.serial != serial || vertIdx >= e.nGifVerts)
+        return false;
+    outXpx = static_cast<int32_t>(e.gifX[vertIdx]) / 16;
+    outYpx = static_cast<int32_t>(e.gifY[vertIdx]) / 16;
+    return true;
 }

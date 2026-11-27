@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <atomic>
 #include <cstdio>
+#include <cstring> // FIX-FXC3
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -228,6 +229,55 @@ namespace
 
 int main(int argc, char *argv[])
 {
+    const char *fe = std::getenv("PS2X_FRONTEND"); // FIX-FXC3
+    const bool sdlWanted = fe && std::strcmp(fe, "sdl") == 0; // FIX-FXC3
+    if (sdlWanted) // FIX-FXC3
+    {
+        const char *sdlRd = std::getenv("PS2X_SDL_RD"); // RDG3
+        const bool sdlRdOn = sdlRd && sdlRd[0] == '1'; // RDG3
+        auto setEnvIfUnset = [](const char *name, const char *val) { // RDG3
+            if (!std::getenv(name)) // RDG3
+            {
+#if defined(_WIN32)
+                _putenv_s(name, val);
+#else
+                setenv(name, val, 1);
+#endif
+            }
+        };
+#if defined(_WIN32)
+        _putenv_s("PS2X_NO_CONFIG", "1");
+#else
+        setenv("PS2X_NO_CONFIG", "1", 1);
+#endif
+        if (sdlRdOn) // RDG3
+        {
+            setEnvIfUnset("PS2X_RD_VIEW", "1"); // RDG3
+            setEnvIfUnset("PS2X_RD_TAKEOVER", "1"); // RDG3
+            setEnvIfUnset("PS2X_RD_2DFEEDBACK", "1"); // RDG3
+            setEnvIfUnset("PS2X_RD_2DLATE", "1"); // RDG3
+            setEnvIfUnset("PS2X_RD_FORCECLASSIC", "0"); // RDG3
+            setEnvIfUnset("PS2X_RD_FBTEX", "1"); // FIX-RDG4Q
+            setEnvIfUnset("PS2X_RD_SNAP", "0"); // FIX-RDG4Q
+        }
+        else // RDG3
+        {
+#if defined(_WIN32)
+            _putenv_s("PS2X_RD_VIEW", "0");
+            _putenv_s("PS2X_RD_TAKEOVER", "0");
+#else
+            setenv("PS2X_RD_VIEW", "0", 1);
+            setenv("PS2X_RD_TAKEOVER", "0", 1);
+#endif
+        }
+    }
+    { // PROBE-FXC2
+        auto envStr = [](const char *n) { const char *v = std::getenv(n); return v ? v : "(unset)"; }; // PROBE-FXC2
+        fprintf(stderr, "[sdl] rd env: VIEW=%s TAKEOVER=%s FBTEX=%s SNAP=%s 2DLATE=%s FORCECLASSIC=%s\n", // PROBE-FXC2
+                envStr("PS2X_RD_VIEW"), envStr("PS2X_RD_TAKEOVER"), envStr("PS2X_RD_FBTEX"), // PROBE-FXC2
+                envStr("PS2X_RD_SNAP"), envStr("PS2X_RD_2DLATE"), envStr("PS2X_RD_FORCECLASSIC")); // PROBE-FXC2
+        fflush(stderr); // PROBE-FXC2
+    } // PROBE-FXC2
     fprintf(stderr, "[boot] runner started\n");
     extern const uint32_t g_ps2RecompiledFunctionTableBase;
     extern const uint32_t g_ps2RecompiledFunctionTableEnd;

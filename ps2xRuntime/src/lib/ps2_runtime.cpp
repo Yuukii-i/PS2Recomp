@@ -6,23 +6,78 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 #include <io.h>
 #endif
 #include "ps2_runtime.h"
+void ps2xAn1DumpAll(); // PROBE-AN1c
 extern void ps2xEeGfxDecompInstall(PS2Runtime &); // DECOMP-BM
 extern void ps2xDevConsoleInstall(PS2Runtime &); // FEAT-DF
 extern bool ps2xRdViewOn(); // FEAT-RD1
 extern bool ps2xRdActive(); // FEAT-RD49
 extern bool ps2xRdTakeoverOn(); // FEAT-RD12
 extern bool ps2xRdDraw(float x, float y, float w, float h); // FEAT-RD1
+extern bool ps2xRdInterpActive(); // FEAT-FG4
+extern void ps2xRdInterpSetT(float t); // FEAT-FG4
+extern bool ps2xRdInterpCanExtraPresent(const char **reasonOut); // FEAT-FG4
+extern void ps2xRdFg4TakeUploadStats(double *msOut, uint64_t *vertsOut); // FIX-FG4c
+extern bool ps2xRdFg10ReplayAvailable(); // FIX-FG10b
+extern void ps2xRdFg10SetPrevOverrunSkipped(bool skipped); // FIX-FG10c
+extern bool ps2xRdFg10LastExtraReplayed(); // FIX-FG10b
+extern "C" void ps2xRdPace2Take(int64_t *out6); // PROBE-PACE2
 extern "C" __declspec(dllimport) void __stdcall glReadPixels(int, int, int, int, unsigned int, unsigned int, void *); // PROBE-RD35
 extern void ps2xRdSetPresentSize(uint32_t w, uint32_t h); // FEAT-RD8
 extern void ps2xRdGetPresentSize(uint32_t &w, uint32_t &h); // FEAT-RD12
 extern std::atomic<bool> g_rdFrameIsClassic; // FEAT-RD18
+extern std::atomic<bool> g_rdFrameIsFx; // FXC1
+extern bool ps2xRdGetPrevFrame(uint32_t &texId, int &w, int &h); // FXC1
 extern void ps2xPadMarker(); // PROBE-MK
 extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
+void ps2xDevToggleMcChoice(); // FIX-DK
 extern void ps2xMcInit(); // FEAT-DE
 extern "C" bool ps2_gt_enabled(); // PROBE-GT
 extern "C" void ps2_gt_count(int what, uint64_t n); // PROBE-GT
 extern "C" void ps2_gt_take_counts(uint64_t *out); // PROBE-GT
 extern "C" void ps2_gt_vk_take(double *outFrameAvg, double *outFrameMax, double *outPresAvg, double *outPresMax, double *outFenceMs, bool *outTsOk, double *outTsPeriodNs); // PROBE-GT
+#if defined(PS2X_HAS_SDL3) // SDL-FE
+#include "render/rd_gfx_vk.h" // RDG3
+extern bool ps2xSdlWanted();
+extern bool ps2xSdlInit(const char *title, int w, int h);
+extern bool ps2xSdlActive();
+extern bool ps2xSdlShouldClose();
+extern void ps2xSdlForcePoll(); // FIX-RDG4Q
+extern void ps2xSdlUploadFrame(const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t strideBytes);
+extern void ps2xSdlSetPresentRegion(uint32_t w, uint32_t h); // FIX-R5
+extern void ps2xSdlPresent();
+extern const uint8_t *ps2xSdlLastFrameRgba(uint32_t &w, uint32_t &h, uint32_t &strideBytes); // FXC1
+extern void ps2xSdlSetTitle(const char *t);
+extern void ps2xSdlShutdown();
+extern int ps2xSdlGetPresentMode(); // FEAT-FG4
+
+// PROBE-V3B: Pause composite timing probe
+namespace probe_v3b
+{
+    extern uint32_t n;
+    extern double aSum, aMax;
+    extern double bSum, bMax;
+    extern double cSum, cMax;
+    extern double dSum, dMax;
+    extern double eSum, eMax;
+    extern double fSum, fMax;
+    extern uint32_t waits;
+    extern double waitMs;
+    extern uint32_t allocs;
+} // PROBE-V3B
+#else
+inline bool ps2xSdlWanted() { return false; }
+inline bool ps2xSdlInit(const char *, int, int) { return false; }
+inline bool ps2xSdlActive() { return false; }
+inline bool ps2xSdlShouldClose() { return false; }
+inline void ps2xSdlForcePoll() {} // FIX-RDG4Q
+inline void ps2xSdlUploadFrame(const uint8_t *, uint32_t, uint32_t, uint32_t) {}
+inline void ps2xSdlSetPresentRegion(uint32_t, uint32_t) {} // FIX-R5
+inline void ps2xSdlPresent() {}
+inline const uint8_t *ps2xSdlLastFrameRgba(uint32_t &, uint32_t &, uint32_t &) { return nullptr; } // FXC1
+inline void ps2xSdlSetTitle(const char *) {}
+inline void ps2xSdlShutdown() {}
+inline int ps2xSdlGetPresentMode() { return 0; } // FEAT-FG4
+#endif
 #include "probe_ae.h"
 #include "probe_ae.cpp"
 #include "diag/DiagSampler.h"
@@ -89,6 +144,7 @@ namespace {
 #include <unordered_map>
 #include <sstream>
 #include <mutex>
+#include <condition_variable> // FEAT-FT3
 #include <set>
 #include <map>
 #include <cstdarg>
@@ -99,7 +155,417 @@ extern "C" void ps2_onDuPresent();
 // FEAT-BGWIN: manual decl, windows.h clashes with raylib names
 extern "C" __declspec(dllimport) int __stdcall SetWindowPos(void *hWnd, void *hWndInsertAfter, int X, int Y, int cx, int cy, unsigned int uFlags);
 static inline int ps2x_bgSetWindowPos(void *h, void *after, int x, int y, int cx, int cy, unsigned int f) { return SetWindowPos(h, after, x, y, cx, cy, f); } // FEAT-BGWIN
+extern "C" __declspec(dllimport) int __stdcall QueryPerformanceCounter(long long *lpPerformanceCount); // FEAT-FT3
+extern "C" __declspec(dllimport) int __stdcall QueryPerformanceFrequency(long long *lpFrequency); // FEAT-FT3
+extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void); // FEAT-FT3
+extern "C" __declspec(dllimport) short __stdcall GetAsyncKeyState(int vKey); // PROBE-AN1c
+extern "C" __declspec(dllimport) void *__stdcall CreateWaitableTimerExW(void *lpTimerAttributes, const wchar_t *lpTimerName, unsigned long dwFlags, unsigned long dwDesiredAccess); // FIX-PACE1
+extern "C" __declspec(dllimport) int __stdcall SetWaitableTimer(void *hTimer, const long long *lpDueTime, long lPeriod, void *pfnCompletionRoutine, void *lpArgToCompletionRoutine, int fResume); // FIX-PACE1
+extern "C" __declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void *hHandle, unsigned long dwMilliseconds); // FIX-PACE1
+extern "C" __declspec(dllimport) void __stdcall Sleep(unsigned long dwMilliseconds); // FIX-PACE1
+extern "C" __declspec(dllimport) unsigned int __stdcall timeBeginPeriod(unsigned int uPeriod); // FIX-V3F
+extern "C" __declspec(dllimport) void *__stdcall GetDC(void *hWnd); // FEAT-FG4
+extern "C" __declspec(dllimport) int __stdcall ReleaseDC(void *hWnd, void *hDC); // FEAT-FG4
+extern "C" __declspec(dllimport) int __stdcall GetDeviceCaps(void *hdc, int index); // FEAT-FG4
 #endif
+
+// FIX-PACE1 / FIX-PACE4: swap-time frame pacing & telemetry helpers
+static inline bool isPaceEnabled()
+{
+    static const bool s_pace = []() {
+        const char *e = std::getenv("PS2X_PACE");
+        return !(e && e[0] == '0'); // FIX-PACE4: default ON unless '0'
+    }();
+    return s_pace;
+}
+
+static inline double getPaceHz()
+{
+    static const double s_hz = []() {
+        const char *e = std::getenv("PS2X_PACE_HZ");
+        if (!e || !*e) return 60.0;
+        const double v = std::atof(e);
+        return (v > 1.0 && v <= 1000.0) ? v : 60.0;
+    }();
+    return s_hz;
+}
+
+static inline bool isPaceLogEnabled()
+{
+    static const bool s_log = []() {
+        const char *e = std::getenv("PS2X_PACE_LOG"); // FIX-PACE4: telemetry stays default off
+        return e && e[0] == '1';
+    }();
+    return s_log;
+}
+
+static inline bool isPaceNowaitEnabled() // PROBE-PACE5
+{
+    static const bool s_nowait = []() {
+        const char *e = std::getenv("PS2X_PACE_NOWAIT");
+        return e && e[0] == '1';
+    }();
+    return s_nowait;
+}
+
+static inline int getPaceRlFps() // PROBE-PACE5
+{
+    static const int s_rlfps = []() {
+        const char *e = std::getenv("PS2X_PACE_RLFPS");
+        if (!e || !*e) return 0;
+        const int v = std::atoi(e);
+        return (v > 0) ? v : 0;
+    }();
+    return s_rlfps;
+}
+
+static inline bool isPaceYieldEnabled() // PROBE-PACE5
+{
+    static const bool s_yield = []() {
+        const char *e = std::getenv("PS2X_PACE_YIELD");
+        return e && e[0] == '1';
+    }();
+    return s_yield;
+}
+
+static inline int64_t paceQpcNow()
+{
+#ifdef _WIN32
+    long long t = 0;
+    QueryPerformanceCounter(&t);
+    return static_cast<int64_t>(t);
+#else
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+}
+
+static inline int64_t paceQpcFreq()
+{
+    static const int64_t s_freq = []() -> int64_t {
+#ifdef _WIN32
+        long long f = 0;
+        QueryPerformanceFrequency(&f);
+        return (f > 0) ? static_cast<int64_t>(f) : 10000000LL;
+#else
+        return 1000000000LL;
+#endif
+    }();
+    return s_freq;
+}
+
+// PROBE-PACE2
+static inline bool isPace2Enabled()
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_PACE_LOG");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
+
+struct Pace2Scope
+{
+    int64_t *dst;
+    int64_t t0;
+    explicit Pace2Scope(int64_t &target, bool on) : dst(on ? &target : nullptr), t0(on ? paceQpcNow() : 0) {}
+    ~Pace2Scope()
+    {
+        if (dst)
+            *dst += (paceQpcNow() - t0);
+    }
+    Pace2Scope(const Pace2Scope &) = delete;
+    Pace2Scope &operator=(const Pace2Scope &) = delete;
+};
+
+// FIX-V3F: SDL branch frame pacer
+extern void ps2xSafeLog(const char *fmt, ...);
+extern std::atomic<int> g_ps2xPause;
+#if defined(_WIN32) || defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <immintrin.h>
+#endif
+
+static int64_t s_sdlNextSwapQpc = 0;
+static int64_t s_sdlPrevSwapStampQpc = 0;
+static int64_t s_sdlPaceLogLastQpc = 0;
+static std::vector<double> s_sdlPaceSwapMs;
+static std::vector<double> s_sdlPaceDrawMs;
+static double s_sdlPaceWaitSumMs = 0.0;
+static uint32_t s_sdlPaceWaitCount = 0;
+static uint32_t s_sdlPaceResyncs = 0;
+static uint32_t s_sdlPaceLate2ms = 0;
+static int64_t s_sdlPrevNextSwapQpc = 0;
+static int64_t s_sdlPeriodTicks = 0;
+static int64_t s_sdlMinAdvanceTicks = 0;
+static bool s_sdlSkipPace = false;
+static bool s_sdlHasNewFrame = false;
+
+static inline void paceBeforeSwapSdl(bool hasNewFrame, int64_t presT0Qpc)
+{
+    const bool paceOn = isPaceEnabled();
+    const bool paceLogOn = isPaceLogEnabled();
+    const bool isPaused = (g_ps2xPause.load(std::memory_order_relaxed) != 0);
+    const bool skipPace = isPaused;
+    s_sdlSkipPace = skipPace;
+    s_sdlHasNewFrame = hasNewFrame;
+
+    const int64_t qpcFreq = (paceOn || paceLogOn) ? paceQpcFreq() : 0;
+    const int64_t periodTicks = paceOn ? static_cast<int64_t>(std::llround(static_cast<double>(qpcFreq) / getPaceHz())) : 0;
+    const int64_t minAdvanceTicks = paceOn ? static_cast<int64_t>(std::llround(0.7 * static_cast<double>(qpcFreq) / getPaceHz())) : 0;
+    s_sdlPeriodTicks = periodTicks;
+    s_sdlMinAdvanceTicks = minAdvanceTicks;
+
+    int64_t prevNextSwapQpc = 0;
+    bool resyncedThisFrame = false;
+    double waitMsThisFrame = 0.0;
+
+    if (paceOn && !skipPace && hasNewFrame)
+    {
+        const bool paceNowait = isPaceNowaitEnabled();
+        const bool paceYield = isPaceYieldEnabled();
+        bool didWait = false;
+        int64_t nowQpc = paceQpcNow();
+        if (s_sdlNextSwapQpc == 0)
+        {
+            s_sdlNextSwapQpc = nowQpc;
+        }
+        else if (nowQpc > s_sdlNextSwapQpc + periodTicks)
+        {
+            s_sdlNextSwapQpc = nowQpc;
+            ++s_sdlPaceResyncs;
+            resyncedThisFrame = true;
+        }
+        else if (nowQpc < s_sdlNextSwapQpc)
+        {
+            if ((s_sdlNextSwapQpc - nowQpc) > periodTicks)
+                s_sdlNextSwapQpc = nowQpc + periodTicks;
+            if (!paceNowait)
+            {
+                didWait = true;
+                const int64_t waitStartQpc = nowQpc;
+                const int64_t coarseMarginTicks = qpcFreq / 1000;
+                const int64_t coarseTargetQpc = s_sdlNextSwapQpc - coarseMarginTicks;
+                if (nowQpc < coarseTargetQpc)
+                {
+#ifdef _WIN32
+                    static void *s_hiResTimer = []() -> void * {
+                        void *h = CreateWaitableTimerExW(nullptr, nullptr, 0x2u, 0x1F0003u);
+                        if (!h)
+                            timeBeginPeriod(1);
+                        return h;
+                    }();
+                    if (s_hiResTimer)
+                    {
+                        const double remSec = static_cast<double>(coarseTargetQpc - nowQpc) / static_cast<double>(qpcFreq);
+                        long long due100ns = -static_cast<long long>(remSec * 10000000.0);
+                        const unsigned long maxWaitMs = static_cast<unsigned long>((periodTicks * 1000LL) / qpcFreq) + 2ul;
+                        if (due100ns < 0 && SetWaitableTimer(s_hiResTimer, &due100ns, 0, nullptr, nullptr, 0))
+                            WaitForSingleObject(s_hiResTimer, maxWaitMs);
+                    }
+                    else
+                    {
+                        const unsigned long ms = static_cast<unsigned long>((coarseTargetQpc - nowQpc) * 1000LL / qpcFreq);
+                        if (ms > 0)
+                            Sleep(ms);
+                    }
+#else
+                    const auto targetTp = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(coarseTargetQpc));
+                    std::this_thread::sleep_until(targetTp);
+#endif
+                }
+                while (paceQpcNow() < s_sdlNextSwapQpc && (paceQpcNow() - waitStartQpc) < periodTicks)
+                {
+#if defined(_WIN32) || defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+                    _mm_pause();
+#else
+                    std::this_thread::yield();
+#endif
+                }
+                waitMsThisFrame = static_cast<double>(paceQpcNow() - waitStartQpc) * 1000.0 / static_cast<double>(qpcFreq);
+            }
+        }
+        if (paceYield && !didWait)
+        {
+#ifdef _WIN32
+            Sleep(1);
+#else
+            std::this_thread::yield();
+#endif
+        }
+        prevNextSwapQpc = s_sdlNextSwapQpc;
+    }
+    s_sdlPrevNextSwapQpc = prevNextSwapQpc;
+
+    if (paceLogOn)
+    {
+        const int64_t swapStampQpc = paceQpcNow();
+        if (s_sdlPaceLogLastQpc == 0)
+            s_sdlPaceLogLastQpc = swapStampQpc;
+        if (s_sdlPrevSwapStampQpc != 0)
+        {
+            const int64_t diffTicks = swapStampQpc - s_sdlPrevSwapStampQpc;
+            if (diffTicks > 0 && diffTicks <= qpcFreq)
+                s_sdlPaceSwapMs.push_back(static_cast<double>(diffTicks) * 1000.0 / static_cast<double>(qpcFreq));
+        }
+        s_sdlPrevSwapStampQpc = swapStampQpc;
+        const double drawMs = static_cast<double>(swapStampQpc - presT0Qpc) * 1000.0 / static_cast<double>(qpcFreq) - waitMsThisFrame;
+        s_sdlPaceDrawMs.push_back(drawMs > 0.0 ? drawMs : 0.0);
+        s_sdlPaceWaitSumMs += waitMsThisFrame;
+        ++s_sdlPaceWaitCount;
+        if (paceOn && !skipPace && hasNewFrame && !resyncedThisFrame && prevNextSwapQpc != 0)
+        {
+            const int64_t lateTicks = swapStampQpc - prevNextSwapQpc;
+            if (lateTicks > (2 * qpcFreq / 1000))
+                ++s_sdlPaceLate2ms;
+        }
+        if ((swapStampQpc - s_sdlPaceLogLastQpc) >= (5 * qpcFreq) && !s_sdlPaceSwapMs.empty())
+        {
+            std::vector<double> sv(s_sdlPaceSwapMs);
+            std::sort(sv.begin(), sv.end());
+            const auto sat = [&](double q) { return sv[std::min<size_t>(sv.size() - 1, static_cast<size_t>(q * static_cast<double>(sv.size())))]; };
+            double sum = 0.0;
+            for (double x : sv) sum += x;
+            const double mean = sum / static_cast<double>(sv.size());
+            double var = 0.0;
+            for (double x : sv) { const double d = x - mean; var += d * d; }
+            const double stdev = std::sqrt(var / static_cast<double>(sv.size()));
+            std::vector<double> dv(s_sdlPaceDrawMs);
+            std::sort(dv.begin(), dv.end());
+            const auto dat = [&](double q) { return dv[std::min<size_t>(dv.size() - 1, static_cast<size_t>(q * static_cast<double>(dv.size())))]; };
+            const double waitAvg = s_sdlPaceWaitCount ? (s_sdlPaceWaitSumMs / static_cast<double>(s_sdlPaceWaitCount)) : 0.0;
+            ps2xSafeLog("[pace] n=%u swap p50=%.2f p95=%.2f p99=%.2f max=%.2f ms stdev=%.2f | draw p50=%.2f p95=%.2f max=%.2f | waitAvg=%.2f resyncs=%u late>2ms=%u pace=%d\n",
+                        static_cast<unsigned>(sv.size()), sat(0.50), sat(0.95), sat(0.99), sv.back(), stdev,
+                        dat(0.50), dat(0.95), dv.back(), waitAvg, s_sdlPaceResyncs, s_sdlPaceLate2ms, paceOn ? 1 : 0);
+            s_sdlPaceSwapMs.clear();
+            s_sdlPaceDrawMs.clear();
+            s_sdlPaceWaitSumMs = 0.0;
+            s_sdlPaceWaitCount = 0;
+            s_sdlPaceResyncs = 0;
+            s_sdlPaceLate2ms = 0;
+            s_sdlPaceLogLastQpc = swapStampQpc;
+        }
+    }
+}
+
+// FEAT-FG4: display-rate pacing helpers for interpolation
+static inline uint32_t fg4GetRate()
+{
+    static const uint32_t s_rate = []() -> uint32_t {
+        const char *e = std::getenv("PS2X_RD_INTERP_RATE");
+        if (!e || !*e) return 2u;
+        const int v = std::atoi(e);
+        if (v < 2) return 2u;
+        if (v > 4) return 4u;
+        return static_cast<uint32_t>(v);
+    }();
+    return s_rate;
+}
+
+static inline int fg4GetDisplayHz()
+{
+#ifdef _WIN32
+    void *hdc = GetDC(nullptr);
+    if (hdc)
+    {
+        const int hz = GetDeviceCaps(hdc, 116); // VREFRESH
+        ReleaseDC(nullptr, hdc);
+        if (hz > 1)
+            return hz;
+    }
+#endif
+    return 60;
+}
+
+template <typename EarlyFn>
+static inline bool fg4WaitUntilQpc(int64_t targetQpc, int64_t maxWaitTicks, int64_t qpcFreq, EarlyFn &&earlyArrived,
+                                   int64_t *waitTicksOut = nullptr, int64_t *spinTicksOut = nullptr) // FIX-FG4c
+{
+    const int64_t entryQpc = paceQpcNow(); // FIX-FG4c
+    int64_t nowQpc = entryQpc;
+    if (nowQpc >= targetQpc)
+    {
+        if (waitTicksOut) *waitTicksOut = 0; // FIX-FG4c
+        if (spinTicksOut) *spinTicksOut = 0; // FIX-FG4c
+        return true;
+    }
+    const int64_t startQpc = nowQpc;
+    const int64_t coarseMarginTicks = (qpcFreq * 7) / 10000; // FIX-FG4c: ~0.7 ms before target
+    const int64_t maxSpinTicks = std::max<int64_t>(1, qpcFreq / 1000); // FIX-FG4c: never spin > 1 ms per wait
+    const int64_t coarseTargetQpc = targetQpc - coarseMarginTicks;
+    if (nowQpc < coarseTargetQpc && !earlyArrived())
+    {
+#ifdef _WIN32
+        static void *s_fg4Timer = []() -> void * {
+            void *h = CreateWaitableTimerExW(nullptr, nullptr, 0x2u, 0x1F0003u);
+            if (!h)
+                timeBeginPeriod(1);
+            return h;
+        }();
+        const int64_t remTicks = std::min(coarseTargetQpc - nowQpc, maxWaitTicks);
+        if (s_fg4Timer)
+        {
+            const double remSec = static_cast<double>(remTicks) / static_cast<double>(qpcFreq);
+            long long due100ns = -static_cast<long long>(remSec * 10000000.0);
+            const unsigned long maxWaitMs = static_cast<unsigned long>((maxWaitTicks * 1000LL) / qpcFreq) + 2ul;
+            if (due100ns < 0 && SetWaitableTimer(s_fg4Timer, &due100ns, 0, nullptr, nullptr, 0))
+                WaitForSingleObject(s_fg4Timer, maxWaitMs);
+        }
+        else
+        {
+            const unsigned long ms = static_cast<unsigned long>(remTicks * 1000LL / qpcFreq);
+            if (ms > 0)
+                Sleep(ms);
+        }
+#else
+        const int64_t remTicks = std::min(coarseTargetQpc - nowQpc, maxWaitTicks); // FIX-FG4c
+        const long long remNs = static_cast<long long>((static_cast<double>(remTicks) / static_cast<double>(qpcFreq)) * 1000000000.0); // FIX-FG4c
+        if (remNs > 0) // FIX-FG4c
+            std::this_thread::sleep_for(std::chrono::nanoseconds(remNs)); // FIX-FG4c
+#endif
+    }
+    const int64_t spinStartQpc = paceQpcNow(); // FIX-FG4c
+    bool early = false; // FIX-FG4c
+    while (true)
+    {
+        const int64_t curQpc = paceQpcNow(); // FIX-FG4c
+        if (curQpc >= targetQpc || (curQpc - startQpc) >= maxWaitTicks)
+            break;
+        if (earlyArrived())
+        {
+            early = true; // FIX-FG4c
+            break;
+        }
+        if ((curQpc - spinStartQpc) >= maxSpinTicks) // FIX-FG4c: cap spin at 1 ms per wait
+            break;
+#if defined(_WIN32) || defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+        _mm_pause();
+#else
+        std::this_thread::yield();
+#endif
+    }
+    const int64_t exitQpc = paceQpcNow(); // FIX-FG4c
+    if (waitTicksOut) *waitTicksOut = exitQpc - entryQpc; // FIX-FG4c
+    if (spinTicksOut) *spinTicksOut = exitQpc - spinStartQpc; // FIX-FG4c
+    return !early && !earlyArrived();
+}
+
+static inline void paceAfterSwapSdl()
+{
+    const bool paceOn = isPaceEnabled();
+    if (paceOn)
+    {
+        if (!s_sdlSkipPace && s_sdlHasNewFrame)
+        {
+            const int64_t afterSwapQpc = paceQpcNow();
+            const int64_t cand1 = s_sdlPrevNextSwapQpc + s_sdlPeriodTicks;
+            const int64_t cand2 = afterSwapQpc + s_sdlMinAdvanceTicks;
+            s_sdlNextSwapQpc = (cand1 > cand2) ? cand1 : cand2;
+        }
+        else
+        {
+            s_sdlNextSwapQpc = 0;
+        }
+    }
+}
 
 
 static std::mutex s_logMutex;
@@ -225,6 +691,32 @@ static std::array<uint32_t, 5> g_lastDistinctFns = {};
 extern "C" uint32_t probe_getNewestDistinctFn() {
     return g_lastDistinctFns[0];
 }
+static std::atomic<PS2Runtime*> s_activeRuntime{nullptr}; // PROBE-E8a
+extern "C" void ps2_getEeDebugRegs(uint32_t *pc, uint32_t *ra, uint32_t *sp, uint32_t *gp) // PROBE-E8a
+{ // PROBE-E8a
+    PS2Runtime *rt = s_activeRuntime.load(std::memory_order_relaxed); // PROBE-E8a
+    uint32_t curPc = 0, curRa = 0, curSp = 0, curGp = 0; // PROBE-E8a
+    if (rt) // PROBE-E8a
+    { // PROBE-E8a
+        curPc = rt->m_debugPc.load(std::memory_order_relaxed); // PROBE-E8a
+        curRa = rt->m_debugRa.load(std::memory_order_relaxed); // PROBE-E8a
+        curSp = rt->m_debugSp.load(std::memory_order_relaxed); // PROBE-E8a
+        curGp = rt->m_debugGp.load(std::memory_order_relaxed); // PROBE-E8a
+        const uint32_t liveRa = static_cast<uint32_t>(_mm_extract_epi32(rt->cpu().r[31], 0)); // PROBE-E8a
+        const uint32_t liveSp = static_cast<uint32_t>(_mm_extract_epi32(rt->cpu().r[29], 0)); // PROBE-E8a
+        const uint32_t liveGp = static_cast<uint32_t>(_mm_extract_epi32(rt->cpu().r[28], 0)); // PROBE-E8a
+        if (liveRa) curRa = liveRa; // PROBE-E8a
+        if (liveSp) curSp = liveSp; // PROBE-E8a
+        if (liveGp) curGp = liveGp; // PROBE-E8a
+    } // PROBE-E8a
+    const uint32_t fn = probe_getNewestDistinctFn(); // PROBE-E8a
+    if (fn != 0u) // PROBE-E8a
+        curPc = fn; // PROBE-E8a
+    if (pc) *pc = curPc; // PROBE-E8a
+    if (ra) *ra = curRa; // PROBE-E8a
+    if (sp) *sp = curSp; // PROBE-E8a
+    if (gp) *gp = curGp; // PROBE-E8a
+} // PROBE-E8a
 static std::atomic<bool> g_mpegFunctionCalled{false};
 std::atomic<uint32_t> g_trackedCurScene{0};
 std::atomic<uint32_t> g_trackedCurVtable{0};
@@ -844,14 +1336,11 @@ namespace ps2_stubs
 }
 
 
-static bool isVblankLatchEnabled()
+extern bool ps2xVblankLatchEnabled(); // FIX-VL3
+
+static bool isVblankLatchEnabled() // FIX-VL3
 {
-    static const bool s_enabled = []() {
-        const char *e = std::getenv("PS2X_VBLANK_LATCH");
-        if (e && std::strcmp(e, "0") == 0) return false;
-        return true;
-    }();
-    return s_enabled;
+    return ps2xVblankLatchEnabled(); // FIX-VL3
 }
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight, uint64_t renderTick = 0u, bool skipLatch = false) // FEAT-RD18
@@ -1014,9 +1503,24 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                                                    &sourceFbp,
                                                    &usedPreferredDisplaySource))
     {
-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
-        UpdateTexture(tex, blank.data);
-        UnloadImage(blank);
+        if (ps2xSdlActive()) // SDL-FE
+        {
+            std::vector<uint8_t> magenta(static_cast<size_t>(FB_WIDTH) * FB_HEIGHT * 4u);
+            for (size_t i = 0; i < magenta.size(); i += 4u)
+            {
+                magenta[i + 0] = 255u;
+                magenta[i + 1] = 0u;
+                magenta[i + 2] = 255u;
+                magenta[i + 3] = 255u;
+            }
+            ps2xSdlUploadFrame(magenta.data(), FB_WIDTH, FB_HEIGHT, FB_WIDTH * 4u);
+        }
+        else
+        {
+            Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
+            UpdateTexture(tex, blank.data);
+            UnloadImage(blank);
+        }
         outWidth = FB_WIDTH;
         outHeight = DEFAULT_DISPLAY_HEIGHT;
         s_lastWidth = outWidth;
@@ -1234,7 +1738,10 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         }
     }
 
-    UpdateTexture(tex, s_uploadBuffer.data());
+    if (ps2xSdlActive()) // SDL-FE
+        ps2xSdlUploadFrame(s_uploadBuffer.data(), FB_WIDTH, FB_HEIGHT, FB_WIDTH * 4u);
+    else
+        UpdateTexture(tex, s_uploadBuffer.data());
     probe_ae::onBwFramePresented(width, height, s_uploadBuffer.data(), rt ? rt->memory().getRDRAM() : nullptr, rt);
     outWidth = width;
     outHeight = height;
@@ -1364,6 +1871,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
 extern void ps2xLoadConfig(); // FEAT-CFG
 PS2Runtime::PS2Runtime()
 {
+    s_activeRuntime.store(this, std::memory_order_release); // PROBE-E8a
     ps2xLoadConfig(); // FEAT-CFG
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
@@ -1478,6 +1986,7 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
 
 PS2Runtime::~PS2Runtime()
 {
+    s_activeRuntime.store(nullptr, std::memory_order_release); // PROBE-E8a
     try
     {
         requestStop();
@@ -1488,7 +1997,11 @@ PS2Runtime::~PS2Runtime()
         m_audioBackend.setAudioReady(false);
 #else
         ps2x::audio::stopSpu2Output(); // PERF-AU2
-        if (IsAudioDeviceReady())
+        if (ps2xSdlActive()) // SDL-FE
+        {
+            m_audioBackend.setAudioReady(false);
+        }
+        else if (IsAudioDeviceReady())
         {
             CloseAudioDevice();
             m_audioBackend.setAudioReady(false);
@@ -1500,7 +2013,11 @@ PS2Runtime::~PS2Runtime()
             m_debugUiInitialized = false;
         }
 
-        if (IsWindowReady())
+        if (ps2xSdlActive()) // SDL-FE
+        {
+            ps2xSdlShutdown();
+        }
+        else if (IsWindowReady())
         {
             CloseWindow();
         }
@@ -1747,29 +2264,10 @@ bool PS2Runtime::initialize(const char *title)
 
         probe_ae::bhInitStartup();
         ps2xMcInit(); // FEAT-DE
+        const bool sdlMode = ps2xSdlWanted(); // SDL-FE
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
-        const char *bgWinEnv = std::getenv("PS2X_WINDOW_BACKGROUND"); // FEAT-BGWIN
-        const bool bgWin = bgWinEnv && bgWinEnv[0] == '1';            // FEAT-BGWIN
-        if (bgWin)                                                    // FEAT-BGWIN
-        {
-            std::cerr << "[win] background window mode" << std::endl; // FEAT-BGWIN
-            SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_UNFOCUSED); // FEAT-BGWIN
-        }
-        else
-        {
-            SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-        }
-        { // FEAT-CFG
-            int msaaReq = 0;
-            if (const char *m = std::getenv("PS2X_MSAA"))
-                msaaReq = std::atoi(m);
-            const int msaaEff = (msaaReq >= 2) ? 4 : 0;
-            if (msaaEff)
-                SetConfigFlags(FLAG_MSAA_4X_HINT);
-            std::cerr << "[cfg] msaa requested=" << msaaReq << " effective=" << msaaEff << std::endl;
-        }
         int winW = HOST_WINDOW_WIDTH, winH = HOST_WINDOW_HEIGHT; // FEAT-CFG
         if (const char *ws = std::getenv("PS2X_WINDOW_SIZE"))    // FEAT-CFG
         {
@@ -1780,22 +2278,67 @@ bool PS2Runtime::initialize(const char *title)
                 winH = h;
             }
         }
-        InitWindow(winW, winH, title); // FEAT-CFG
-#ifdef _WIN32
-        if (bgWin) // FEAT-BGWIN
+        if (sdlMode) // SDL-FE
         {
-            void *const kBgHwndBottom = (void *)(intptr_t)1;
-            constexpr unsigned int kBgSwpNoSize = 0x0001u, kBgSwpNoMove = 0x0002u, kBgSwpNoActivate = 0x0010u;
-            ps2x_bgSetWindowPos(GetWindowHandle(), kBgHwndBottom, 0, 0, 0, 0,
-                                kBgSwpNoMove | kBgSwpNoSize | kBgSwpNoActivate); // FEAT-BGWIN
+            if (!ps2xSdlInit(title, winW, winH))
+                return false;
+#if defined(PS2X_HAS_SDL3) // RDG3
+            const char *sdlRd = std::getenv("PS2X_SDL_RD"); // RDG3
+            if (sdlRd && sdlRd[0] == '1') // RDG3
+            {
+                if (rdgfx_vk::init()) // RDG3
+                    std::printf("[rdvk] active\n"); // RDG3
+                else // RDG3
+                    std::printf("[rdvk] init failed, using classic\n"); // RDG3
+            }
+#endif // RDG3
+            m_audioBackend.setAudioReady(true);
+            ps2x::audio::startSpu2Output();
+        }
+        else
+        {
+            const char *bgWinEnv = std::getenv("PS2X_WINDOW_BACKGROUND"); // FEAT-BGWIN
+            const bool bgWin = bgWinEnv && bgWinEnv[0] == '1';            // FEAT-BGWIN
+            if (bgWin)                                                    // FEAT-BGWIN
+            {
+                std::cerr << "[win] background window mode" << std::endl; // FEAT-BGWIN
+                SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_UNFOCUSED); // FEAT-BGWIN
+            }
+            else
+            {
+                SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+            }
+            { // FEAT-CFG
+                int msaaReq = 0;
+                if (const char *m = std::getenv("PS2X_MSAA"))
+                    msaaReq = std::atoi(m);
+                const int msaaEff = (msaaReq >= 2) ? 4 : 0;
+                if (msaaEff)
+                    SetConfigFlags(FLAG_MSAA_4X_HINT);
+                std::cerr << "[cfg] msaa requested=" << msaaReq << " effective=" << msaaEff << std::endl;
+            }
+            InitWindow(winW, winH, title); // FEAT-CFG
+#ifdef _WIN32
+            if (bgWin) // FEAT-BGWIN
+            {
+                void *const kBgHwndBottom = (void *)(intptr_t)1;
+                constexpr unsigned int kBgSwpNoSize = 0x0001u, kBgSwpNoMove = 0x0002u, kBgSwpNoActivate = 0x0010u;
+                ps2x_bgSetWindowPos(GetWindowHandle(), kBgHwndBottom, 0, 0, 0, 0,
+                                    kBgSwpNoMove | kBgSwpNoSize | kBgSwpNoActivate); // FEAT-BGWIN
+            }
+#endif
+            InitAudioDevice();
+            m_audioBackend.setAudioReady(IsAudioDeviceReady());
+            ps2x::audio::startSpu2Output(); // PERF-AU2
         }
 #endif
-        InitAudioDevice();
-        m_audioBackend.setAudioReady(IsAudioDeviceReady());
-        ps2x::audio::startSpu2Output(); // PERF-AU2
-#endif
-        SetTargetFPS(60);
-        if (m_debugUiInitCallback)
+        if (!sdlMode) // SDL-FE
+        {
+            SetTargetFPS(isPaceEnabled() ? getPaceRlFps() : 60); // FIX-PACE1 // PROBE-PACE5
+        }
+        const char *sdlUi = sdlMode ? std::getenv("PS2X_SDL_UI") : nullptr; // DBG1
+        const bool debugUiWanted = !sdlMode || !(sdlUi && sdlUi[0] == '0'); // DBG1
+        if (debugUiWanted && m_debugUiInitCallback) // DBG1
         {
             m_debugUiInitCallback(*this, m_debugUiUserData);
             m_debugUiInitialized = true;
@@ -2047,6 +2590,7 @@ static void installBrProbe(PS2Runtime *rt) {
         }
     }
 }
+
 
 bool PS2Runtime::loadELF(const std::string &elfPath)
 {
@@ -2378,6 +2922,64 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     }
 
     ps2xEeGfxDecompInstall(*this); // DECOMP-BM
+
+    // FIX-UI5: tag game UI quads with their layer in PRIM's unused upper bits
+    if (const char *uiEnv = std::getenv("PS2X_UI_TAG"); !(uiEnv && uiEnv[0] == '0'))
+    {
+        static RecompiledFunction s_uiOrig = nullptr;
+        s_uiOrig = lookupFunction(0x003B7798u);
+        if (s_uiOrig)
+        {
+            registerFunction(0x003B7798u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+                if (GPR_U32(ctx, 31) == 0x00508D94u)
+                {
+                    auto host = [rdram](uint32_t a) -> uint8_t * { return rdram + (a & 0x01FFFFF8u) + (a & 7u); };
+                    uint32_t base = 0u;
+                    std::memcpy(&base, host(0x006AF340u), 4);
+                    const uint32_t s3 = GPR_U32(ctx, 19), s2 = GPR_U32(ctx, 18), end = GPR_U32(ctx, 5);
+                    const uint32_t layer = (s3 - base) / 0x20u;
+                    const uint32_t trailers = (*host(s2 + 1u) != 0 ? 1u : 0u) + ((*host(s2) & 1u) ? 1u : 0u);
+                    const uint32_t prim = end - 0x70u - 0x30u * trailers;
+                    uint64_t v = 0ull;
+                    std::memcpy(&v, host(prim), 8);
+                    if (layer < 35u && (v == 0x14Cull || v == 0x15Cull))
+                    {
+                        v |= static_cast<uint64_t>(0xA500u | layer) << 32;
+                        std::memcpy(host(prim), &v, 8);
+                    }
+                }
+                else if (GPR_U32(ctx, 31) == 0x001DF85Cu) // FIX-UI4
+                {
+                    auto host = [rdram](uint32_t a) -> uint8_t * { return rdram + (a & 0x01FFFFF8u) + (a & 7u); };
+                    const uint32_t end = GPR_U32(ctx, 5) & 0x01FFFFFFu;
+                    if (end >= 0x100000u)
+                    {
+                        const uint32_t floorA = (end >= 0x4000u ? (end - 0x4000u) : 0x100000u);
+                        const uint32_t minA = floorA > 0x100000u ? floorA : 0x100000u;
+                        for (uint32_t a = (end & ~0xFu) - 16u; a >= minA; a -= 16u)
+                        {
+                            uint64_t v = 0ull, g = 0ull;
+                            std::memcpy(&v, host(a), 8);
+                            std::memcpy(&g, host(a - 16u), 8);
+                            if (g == 0x6400000000008001ull)
+                            {
+                                if (v == 0x156ull)
+                                {
+                                    v |= (static_cast<uint64_t>(0xA5FEu) << 32);
+                                    std::memcpy(host(a), &v, 8);
+                                }
+                                else if (v == (0x156ull | (static_cast<uint64_t>(0xA5FEu) << 32)))
+                                {
+                                    break; // reached an already-tagged earlier run
+                                }
+                            }
+                        }
+                    }
+                }
+                s_uiOrig(rdram, ctx, runtime);
+            });
+        }
+    }
     ps2xDevConsoleInstall(*this); // FEAT-DF
 
     // 0x003703D4: Early exit check returning non-zero error code -> force return 0
@@ -4112,6 +4714,81 @@ struct EeProfilerScope {
 // EeScheduler::accountCycles merges g_acctPending into every other caller's count (so checkpoint/preemption, syscalls always see exact time);
 // the slow Load/Store paths flush before any IO-region access (timers, INTC, DMAC...).
 thread_local uint32_t g_acctPending = 0;
+bool g_fnReplayActive = false; // PROBE-FR1d
+bool g_fnReplaySuppressDcall = false; // PROBE-FR2
+uint32_t g_fnReplayStopPc = 0u; // PROBE-FR3
+bool g_fnReplayBlocked = false; // PROBE-FR3
+struct FnReplaySkipEntry // PROBE-FR5
+{
+    uint32_t pc;
+    uint64_t v0;
+};
+static constexpr size_t kFnReplayMaxSkip = 8u; // PROBE-FR5
+static FnReplaySkipEntry g_fnReplaySkips[kFnReplayMaxSkip]{}; // PROBE-FR5
+size_t g_fnReplaySkipCount = 0u; // PROBE-FR5
+static uint32_t g_fnReplayCurrentIter = 0u; // PROBE-FR6
+static uint32_t g_fnReplaySkipHitCount = 0u; // PROBE-FR6
+static uint8_t *g_fr7Ram = nullptr; // PROBE-FR7
+static uint32_t g_fr7VsyncAddr = 0x00649DE4u; // PROBE-FR7
+static void fr7SetVsyncWord() // PROBE-FR7
+{
+    if (!g_fr7Ram)
+        return;
+    const uint32_t one = 1u;
+    std::memcpy(g_fr7Ram + (g_fr7VsyncAddr & 0x01FFFFFFu), &one, sizeof(one));
+}
+static uint32_t g_fr7SkipRa[12]{}; // PROBE-FR7
+static uint32_t g_fr7SkipRaN[12]{}; // PROBE-FR7
+static uint32_t g_fr7SkipRaCount = 0u; // PROBE-FR7
+static uint32_t g_fr7SkipCtxLogs = 0u; // PROBE-FR7
+static uint32_t g_fr7Entries[8]{}; // PROBE-FR7
+static uint32_t g_fr7EntryCount = 0u; // PROBE-FR7
+bool ps2xFnReplayTrySkip(R5900Context *ctx, uint32_t targetPc) // PROBE-FR5 // PROBE-FR6
+{
+    const size_t count = g_fnReplaySkipCount;
+    for (size_t i = 0u; i < count; ++i)
+    {
+        if (g_fnReplaySkips[i].pc == targetPc)
+        {
+            fr7SetVsyncWord(); // PROBE-FR7
+            { // PROBE-FR7
+                const uint32_t ra7 =static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+                uint32_t k = 0u;
+                while (k < g_fr7SkipRaCount && g_fr7SkipRa[k] != ra7)
+                    ++k;
+                if (k == g_fr7SkipRaCount && k < 12u)
+                {
+                    g_fr7SkipRa[k] = ra7;
+                    g_fr7SkipRaN[k] = 0u;
+                    ++g_fr7SkipRaCount;
+                }
+                if (k < 12u)
+                    ++g_fr7SkipRaN[k];
+                if (g_fr7SkipCtxLogs < 3u)
+                {
+                    ++g_fr7SkipCtxLogs;
+                    ps2xSafeLog("[fnreplay] skipctx pc=0x%08x ra=0x%08x a0=0x%08x a1=0x%08x sp=0x%08x s0=0x%08x s1=0x%08x\n", targetPc, ra7,
+                                static_cast<uint32_t>(_mm_extract_epi32(ctx->r[4], 0)), static_cast<uint32_t>(_mm_extract_epi32(ctx->r[5], 0)),
+                                static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)), static_cast<uint32_t>(_mm_extract_epi32(ctx->r[16], 0)),
+                                static_cast<uint32_t>(_mm_extract_epi32(ctx->r[17], 0)));
+                }
+            }
+            if (g_fnReplaySkipHitCount < 5u) // PROBE-FR6
+            {
+                ps2xSafeLog("[fnreplay] skip hit pc=0x%08x iter=%u\n", targetPc, g_fnReplayCurrentIter);
+                ++g_fnReplaySkipHitCount;
+            }
+            ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(g_fnReplaySkips[i].v0));
+            ctx->pc = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+            return true;
+        }
+    }
+    return false;
+}
+static uint32_t g_fnReplayBlockedPc = 0u; // PROBE-FR3
+static uint64_t g_fnReplaySteps = 0u; // PROBE-FR3
+static std::chrono::steady_clock::time_point g_fnReplayIterStart{}; // PROBE-FR3
+static constexpr uint64_t kFnReplayMaxSteps = 50000000ull; // PROBE-FR3
 static EeScheduler *g_acctSched = nullptr;
 static inline bool acctBatchEnabled()
 {
@@ -4124,8 +4801,75 @@ static inline bool acctBatchEnabled()
     }();
     return s_on;
 }
+// PROBE-FR7: replay-virtual EE timer: advances PS2Memory EE timers deterministically, emulates timer1 overflow IRQ handler (RAM 0x6A2E20 += 1)
+static PS2Memory *g_fnReplayMem = nullptr; // PROBE-FR7
+static uint8_t *g_fnReplayRdram = nullptr; // PROBE-FR7
+static uint64_t g_fnReplayPendCycles = 0u; // PROBE-FR7
+static bool g_fnReplayOvfLogged = false; // PROBE-FR7
+static uint32_t g_fnReplayT1ReadLogs = 0u; // PROBE-FR7
+static uint64_t g_replayCycles = 0u; // PROBE-FR7
+static uint64_t g_fnReplayT1Reads = 0u; // PROBE-FR7
+static bool g_fnReplayOvfFlag = false; // PROBE-FR7
+static uint32_t g_fnReplayOvfLogs = 0u; // PROBE-FR7
+static void fnReplayTickTimers(uint64_t cycles) // PROBE-FR7: bypass virtual timer (count = cycles>>8)
+{
+    if (!g_fnReplayRdram || cycles == 0u)
+        return;
+    const uint64_t oldEpoch = g_replayCycles >> 24;
+    g_replayCycles += cycles;
+    const uint64_t newEpoch = g_replayCycles >> 24;
+    for (uint64_t e = oldEpoch; e < newEpoch; ++e)
+    {
+        uint64_t v = 0u;
+        std::memcpy(&v, g_fnReplayRdram + 0x006A2E20u, sizeof(v));
+        ++v;
+        std::memcpy(g_fnReplayRdram + 0x006A2E20u, &v, sizeof(v));
+        g_fnReplayOvfFlag = true;
+        if (g_fnReplayOvfLogs++ < 5u)
+            ps2xSafeLog("[fnreplay] timer1 ovf -> %llu\n", static_cast<unsigned long long>(v));
+    }
+}
+// PROBE-FR7: returns true and sets out if vaddr is a replay-served timer register read
+static bool fnReplayTimerRead(uint32_t vaddr, uint32_t &out)
+{
+    const uint32_t a = vaddr & 0x1FFFFFFFu;
+    if (a != 0x10001000u && a != 0x10001010u)
+        return false;
+    if (g_fnReplayPendCycles != 0u)
+    {
+        const uint64_t c = g_fnReplayPendCycles;
+        g_fnReplayPendCycles = 0u;
+        fnReplayTickTimers(c);
+    }
+    if (a == 0x10001000u)
+    {
+        static const uint64_t s_readTick = []() {
+            const char *e = std::getenv("PS2X_FNREPLAY_READTICK");
+            return e ? std::strtoull(e, nullptr, 10) : 20000ull;
+        }();
+        ++g_fnReplayT1Reads;
+        fnReplayTickTimers(s_readTick);
+        out =static_cast<uint32_t>((g_replayCycles >> 8) & 0xFFFFu);
+        if (g_fnReplayT1ReadLogs < 3u)
+        {
+            ++g_fnReplayT1ReadLogs;
+            ps2xSafeLog("[fnreplay] t1read=0x%x\n", out);
+        }
+    }
+    else
+    {
+        out = 0x0282u | (g_fnReplayOvfFlag ? 0x0800u : 0u);
+        g_fnReplayOvfFlag = false;
+    }
+    return true;
+}
 static inline void acctDispatch(EeScheduler *s)
 {
+    if (g_fnReplayActive) // PROBE-FR1d
+    {
+        g_fnReplayPendCycles += EeScheduler::kGuestDispatchCycles; // PROBE-FR7
+        return;
+    }
     if (acctBatchEnabled())
     {
         g_acctSched = s;
@@ -4144,6 +4888,11 @@ static inline void acctDispatch(EeScheduler *s)
 }
 static inline void acctFlushForIo(uint32_t vaddr)
 {
+    if (g_fnReplayActive) // PROBE-FR1d
+    {
+        g_acctPending = 0u;
+        return;
+    }
     if (g_acctPending != 0u && (vaddr & 0x1FFFFFFFu) >= 0x10000000u && g_acctSched)
     {
         const uint32_t p = g_acctPending;
@@ -4346,17 +5095,57 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      const char *debugName)
 {
     EeProfilerScope eeScope;
-    if (g_profCounts) // PROBE-IJ
+    if (g_profCounts) [[unlikely]] // PROBE-IJ, PERF-EX2
         ++g_pcDispatch[static_cast<int>(kind) % 5];
     ctx->pc = targetPc;
+    if (g_fnReplayActive) [[unlikely]] // PROBE-FR3
+    {
+        if (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && targetPc == g_fnReplayStopPc))
+            return false;
+        ++g_fnReplaySteps;
+        if (g_fnReplayCurrentIter == 1u && g_fr7EntryCount < 8u && (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall)) // PROBE-FR7
+        {
+            bool seen = false;
+            for (uint32_t q = 0u; q < g_fr7EntryCount; ++q)
+                seen = seen || g_fr7Entries[q] == targetPc;
+            if (!seen)
+                g_fr7Entries[g_fr7EntryCount++] = targetPc;
+        }
+        if (g_fnReplaySteps > kFnReplayMaxSteps ||
+            ((g_fnReplaySteps & 0x3FFu) == 0u &&
+             (std::chrono::steady_clock::now() - g_fnReplayIterStart) > std::chrono::seconds(20)))
+        {
+            g_fnReplayBlocked = true;
+            g_fnReplayBlockedPc = targetPc;
+            return false;
+        }
+    }
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+    if (g_fnReplayActive && ps2xFnReplayTrySkip(ctx, targetPc)) [[unlikely]] // PROBE-FR5
+    {
+        if (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc)
+            return false;
+        return isCall && (ctx->pc == fallthroughPc);
+    }
+    if (g_fnReplayActive && !g_fnReplaySuppressDcall && isCall) [[unlikely]] // PROBE-FR1e // PROBE-FR2
+    {
+        static uint32_t s_fnReplayDcallCount = 0u;
+        static const uint32_t s_fr8DcallMax = []() { const char *e = std::getenv("PS2X_FNREPLAY_DCALLMAX"); return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 400u; }(); // PROBE-FR8
+        if (s_fnReplayDcallCount < s_fr8DcallMax) // PROBE-FR8
+        {
+            ++s_fnReplayDcallCount;
+            const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
+            ps2xSafeLog("[fnreplay] dcall target=0x%08x ret=0x%08x sp=0x%08x from=0x%08x\n", // PROBE-FR8
+                        targetPc, fallthroughPc, sp, ctx ? ctx->pc : 0u); // PROBE-FR8
+        }
+    }
 
-    if (dispatchAnyProbeEnabled())
+    if (dispatchAnyProbeEnabled()) [[unlikely]] // PERF-EX2
         dispatchGuestBranchProbes(rdram, ctx, targetPc, sourcePc, isCall);
     // vf0 is hardwired {0,0,0,1}; contexts built via R5900Context() start with it zeroed. (Hack Ledger: HW-faithful backstop)
-    if (ctx)
+    if (ctx) [[likely]] // PERF-EX2
         ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
-    if (targetPc >= 0x00120000u && targetPc < 0x0013F800u)
+    if ((targetPc - 0x00120000u) < (0x0013F800u - 0x00120000u)) [[unlikely]] // PERF-EX2
     {
         static uint32_t s_range120kBranchHitCount = 0;
         s_range120kBranchHitCount++;
@@ -4455,6 +5244,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             {
                 while (!isStopRequested() && ctx->pc != 0u)
                 {
+                    if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
+                        return false;
                     const uint32_t currentPc = ctx->pc;
                     uint32_t s = 0u;
                     if (!generatedFunctionTableSlot(currentPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
@@ -4474,6 +5265,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             while (ctx->pc != fallthroughPc && !isStopRequested() && ctx->pc != 0u)
             {
                 const uint32_t nextPc = ctx->pc;
+                if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && nextPc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
+                    return false;
+                if (g_fnReplayActive && ps2xFnReplayTrySkip(ctx, nextPc)) [[unlikely]] // PROBE-FR5
+                    continue;
                 uint32_t s = 0u;
                 if (!generatedFunctionTableSlot(nextPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
                     break;
@@ -4487,7 +5282,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                     break;
             }
 
-            if (isStopRequested() || ctx->pc == 0u)
+            if (isStopRequested() || ctx->pc == 0u ||
+                (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc)))) // PROBE-FR3
                 return false;
             return ctx->pc == fallthroughPc;
         }
@@ -4538,6 +5334,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     {
         while (!isStopRequested() && ctx->pc != 0u && hasFunction(ctx->pc))
         {
+            if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
+                return false;
             const uint32_t currentPc = ctx->pc;
             RecompiledFunction fn = lookupFunction(currentPc);
             fn(rdram, ctx, this);
@@ -4559,6 +5357,14 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     uint32_t dispatchChainSteps = 0;
     while (ctx->pc != fallthroughPc && !isStopRequested() && ctx->pc != 0u && hasFunction(ctx->pc))
     {
+        if (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc))) [[unlikely]] // PROBE-FR3
+        {
+            return false;
+        }
+        if (g_fnReplayActive && ps2xFnReplayTrySkip(ctx, ctx->pc)) [[unlikely]] // PROBE-FR5
+        {
+            continue;
+        }
         if (++dispatchChainSteps > 1000)
         {
             // Safety bound against runaway dispatch chains
@@ -4577,7 +5383,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         }
     }
 
-    if (isStopRequested() || ctx->pc == 0u)
+    if (isStopRequested() || ctx->pc == 0u ||
+        (g_fnReplayActive && (g_fnReplayBlocked || (g_fnReplayStopPc != 0u && ctx->pc == g_fnReplayStopPc)))) // PROBE-FR3
     {
         return false;
     }
@@ -4607,6 +5414,14 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     uint8_t *const vu0Code = m_memory.getVU0Code();
     uint8_t *const vu0Data = m_memory.getVU0Data();
     const uint32_t startPC = address & ~0x7u;
+
+    // PROBE-M4: VU0 microprogram tracer + end-of-run register scan (PS2X_VU0_PROG=1)
+    static const bool s_vu0Prog = []() {
+        const char *e = std::getenv("PS2X_VU0_PROG");
+        return e && e[0] == '1';
+    }();
+    const char *m4Engine = "interp";
+    int32_t m4SizeEst = -1;
 
     const bool probeOn = isVu3dProbeEnabled();
     uint32_t vu0NonzeroWords = 0;
@@ -4699,6 +5514,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 
         if (funcCheckOn && funcHandler) // PERF-V0G
         {
+            if (s_vu0Prog) m4Engine = "func"; // PROBE-M4
             R5900Context funcCtx = *ctx;
             funcHandler(&funcCtx);
 
@@ -4722,6 +5538,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         }
         else if (funcOn && funcHandler) // PERF-V0G
         {
+            if (s_vu0Prog) m4Engine = "func"; // PROBE-M4
             extern bool ps2xV0ProfOn();
             extern void ps2xV0ProfRecordFunc(uint32_t, uint64_t);
             const bool v0pFunc = ps2xV0ProfOn();
@@ -4731,6 +5548,11 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         }
         else if (checkOn && fastProg)
         {
+            if (s_vu0Prog) // PROBE-M4
+            {
+                m4Engine = "fast";
+                m4SizeEst = static_cast<int32_t>(fastProg->numResolvedPairs ? fastProg->numResolvedPairs : fastProg->numOps);
+            }
             R5900Context fastCtx = *ctx;
             vu0fast::executeFast(*fastProg, &fastCtx);
 
@@ -4747,6 +5569,11 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         }
         else if (fastOn && fastProg)
         {
+            if (s_vu0Prog) // PROBE-M4
+            {
+                m4Engine = "fast";
+                m4SizeEst = static_cast<int32_t>(fastProg->numResolvedPairs ? fastProg->numResolvedPairs : fastProg->numOps);
+            }
             extern bool ps2xV0ProfOn();                                      // PROBE-V0P
             extern void ps2xV0ProfRecordFast(uint32_t, uint64_t);            // PROBE-V0P
             const bool v0pFast = ps2xV0ProfOn();                             // PROBE-V0P
@@ -4909,6 +5736,241 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
             }
         }
     }
+
+    // PROBE-M4: VU0 microprogram tracer + end-of-run register scan (PS2X_VU0_PROG=1)
+    if (s_vu0Prog)
+    {
+        struct M4CallEntry
+        {
+            uint32_t pc = 0;
+            uint32_t calls = 0;
+            bool used = false;
+            bool seenMap = false;
+        };
+        struct M4BadEntry
+        {
+            uint32_t pc = 0;
+            uint32_t count = 0;
+            int regIdx = 0;
+            int lane = 0;
+            float val = 0.0f;
+            float first[4]{};
+        };
+        static std::mutex s_m4Mutex;
+        static M4CallEntry s_m4Calls[256]{};
+        static M4BadEntry s_m4Bad[256]{};
+        static uint32_t s_m4TotalCalls = 0;
+        static uint32_t s_m4TotalBad = 0;
+        static uint32_t s_m4BadEvtPrinted = 0;
+        static auto s_m4LastPrint = std::chrono::steady_clock::now();
+        static const auto s_m4Start = s_m4LastPrint;
+
+        auto fmtRegName = [](int regIdx, char *buf, size_t sz) {
+            if (regIdx < 32)
+                std::snprintf(buf, sz, "vf%d", regIdx);
+            else if (regIdx == 32)
+                std::snprintf(buf, sz, "acc");
+            else if (regIdx == 33)
+                std::snprintf(buf, sz, "I");
+            else if (regIdx == 34)
+                std::snprintf(buf, sz, "Q");
+            else
+                std::snprintf(buf, sz, "P");
+        };
+
+        std::lock_guard<std::mutex> m4Lock(s_m4Mutex);
+        ++s_m4TotalCalls;
+
+        const uint32_t callHash = ((startPC >> 3) * 2654435761u) & 255u;
+        for (uint32_t p = 0; p < 256u; ++p)
+        {
+            M4CallEntry &ce = s_m4Calls[(callHash + p) & 255u];
+            if (!ce.used || ce.pc == startPC)
+            {
+                if (!ce.used)
+                {
+                    ce.used = true;
+                    ce.pc = startPC;
+                    ce.calls = 0;
+                    ce.seenMap = false;
+                }
+                ++ce.calls;
+                if (!ce.seenMap)
+                {
+                    ce.seenMap = true;
+                    char sizeBuf[24];
+                    if (m4SizeEst >= 0)
+                        std::snprintf(sizeBuf, sizeof(sizeBuf), "%d", m4SizeEst);
+                    else
+                        std::snprintf(sizeBuf, sizeof(sizeBuf), "?");
+                    std::fprintf(stderr, "[vu0prog-map] pc=0x%04x engine=%s size_estimate=%s\n",
+                                 startPC, m4Engine, sizeBuf);
+                }
+                break;
+            }
+        }
+
+        if (ctx)
+        {
+            auto isBadLane = [](float v) { return !std::isfinite(v) || std::fabs(v) > 1.0e7f; };
+            bool foundBad = false;
+            int badReg = 0;
+            int badLane = 0;
+            float badVal = 0.0f;
+            alignas(16) float badVec[4]{};
+
+            for (int r = 0; r < 32 && !foundBad; ++r)
+            {
+                alignas(16) float v[4];
+                _mm_storeu_ps(v, ctx->vu0_vf[r]);
+                for (int l = 0; l < 4; ++l)
+                {
+                    if (isBadLane(v[l]))
+                    {
+                        foundBad = true;
+                        badReg = r;
+                        badLane = l;
+                        badVal = v[l];
+                        std::memcpy(badVec, v, sizeof(badVec));
+                        break;
+                    }
+                }
+            }
+            if (!foundBad)
+            {
+                alignas(16) float v[4];
+                _mm_storeu_ps(v, ctx->vu0_acc);
+                for (int l = 0; l < 4; ++l)
+                {
+                    if (isBadLane(v[l]))
+                    {
+                        foundBad = true;
+                        badReg = 32;
+                        badLane = l;
+                        badVal = v[l];
+                        std::memcpy(badVec, v, sizeof(badVec));
+                        break;
+                    }
+                }
+            }
+            if (!foundBad)
+            {
+                const float scalars[3] = {ctx->vu0_i, ctx->vu0_q, ctx->vu0_p};
+                for (int s = 0; s < 3; ++s)
+                {
+                    if (isBadLane(scalars[s]))
+                    {
+                        foundBad = true;
+                        badReg = 33 + s;
+                        badLane = 0;
+                        badVal = scalars[s];
+                        badVec[0] = scalars[s];
+                        badVec[1] = 0.0f;
+                        badVec[2] = 0.0f;
+                        badVec[3] = 0.0f;
+                        break;
+                    }
+                }
+            }
+
+            if (foundBad)
+            {
+                ++s_m4TotalBad;
+                for (uint32_t p = 0; p < 256u; ++p)
+                {
+                    M4BadEntry &be = s_m4Bad[(callHash + p) & 255u];
+                    if (be.count == 0u)
+                    {
+                        be.pc = startPC;
+                        be.count = 1u;
+                        be.regIdx = badReg;
+                        be.lane = badLane;
+                        be.val = badVal;
+                        std::memcpy(be.first, badVec, sizeof(be.first));
+                        break;
+                    }
+                    if (be.pc == startPC)
+                    {
+                        ++be.count;
+                        break;
+                    }
+                }
+
+                if (s_m4BadEvtPrinted < 100u)
+                {
+                    ++s_m4BadEvtPrinted;
+                    char regBuf[16];
+                    fmtRegName(badReg, regBuf, sizeof(regBuf));
+                    const uint64_t vbl = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - s_m4Start).count());
+                    std::fprintf(stderr, "[vu0prog-bad-evt] startPc=0x%04x reg=%s (%g,%g,%g,%g) vbl=%llu\n",
+                                 startPC, regBuf, badVec[0], badVec[1], badVec[2], badVec[3],
+                                 static_cast<unsigned long long>(vbl));
+                }
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_m4LastPrint).count() >= 5)
+        {
+            s_m4LastPrint = now;
+
+            M4CallEntry topCalls[256];
+            uint32_t nCalls = 0;
+            for (const auto &ce : s_m4Calls)
+            {
+                if (ce.used && ce.calls > 0u)
+                    topCalls[nCalls++] = ce;
+            }
+            std::sort(topCalls, topCalls + nCalls,
+                      [](const M4CallEntry &a, const M4CallEntry &b) { return a.calls > b.calls; });
+
+            std::fprintf(stderr, "[vu0prog] n=%u top:", s_m4TotalCalls);
+            const uint32_t showCalls = nCalls < 8u ? nCalls : 8u;
+            for (uint32_t i = 0; i < showCalls; ++i)
+            {
+                std::fprintf(stderr, "%s pc=0x%04x calls=%u",
+                             (i == 0u) ? "" : " ;", topCalls[i].pc, topCalls[i].calls);
+            }
+            std::fprintf(stderr, "\n");
+
+            M4BadEntry topBad[256];
+            uint32_t nBad = 0;
+            for (const auto &be : s_m4Bad)
+            {
+                if (be.count > 0u)
+                    topBad[nBad++] = be;
+            }
+            std::sort(topBad, topBad + nBad,
+                      [](const M4BadEntry &a, const M4BadEntry &b) { return a.count > b.count; });
+
+            std::fprintf(stderr, "[vu0prog-bad] total=%u", s_m4TotalBad);
+            if (nBad > 0u)
+            {
+                std::fprintf(stderr, " top:");
+                const uint32_t showBad = nBad < 8u ? nBad : 8u;
+                for (uint32_t i = 0; i < showBad; ++i)
+                {
+                    char regBuf[16];
+                    fmtRegName(topBad[i].regIdx, regBuf, sizeof(regBuf));
+                    std::fprintf(stderr, "%s pc=0x%04x n=%u reg=%s lane=%d val=%g (vf=%g,%g,%g,%g)",
+                                 (i == 0u) ? "" : " ;",
+                                 topBad[i].pc, topBad[i].count, regBuf, topBad[i].lane, topBad[i].val,
+                                 topBad[i].first[0], topBad[i].first[1], topBad[i].first[2], topBad[i].first[3]);
+                }
+            }
+            std::fprintf(stderr, "\n");
+            std::fflush(stderr);
+
+            s_m4TotalCalls = 0;
+            for (auto &ce : s_m4Calls)
+                ce.calls = 0;
+            s_m4TotalBad = 0;
+            for (auto &be : s_m4Bad)
+                be = M4BadEntry{};
+        }
+    }
 }
 
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
@@ -4996,6 +6058,7 @@ extern std::vector<uint32_t> consumeCompletedIntcCauses();
 
 void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
 {
+    // PROBE-FR4: allow DMAC/INTC completion draining during fnreplay (scheduler switches/timers stay gated in eeCheckpointDue/acctDispatch)
     for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
     {
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
@@ -5588,6 +6651,7 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
     acctFlushForIo(vaddr); // PERF-LM
+    if (g_fnReplayActive) [[unlikely]] { uint32_t tv; if (fnReplayTimerRead(vaddr, tv)) return tv; } // PROBE-FR7
     if (sprFastAddr<uint32_t>(vaddr))
     {
         uint32_t v;
@@ -5628,12 +6692,12 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
-    if (g_profCounts) ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ
+    if (g_profCounts) [[unlikely]] ++g_pcSlowLd[pcRegion(vaddr)]; // PROBE-IJ // PERF-EX3
     acctFlushForIo(vaddr); // PERF-LM
-    if (vaddr & 15u) // PROBE-IZ: R5900 lq ignores the low 4 address bits
+    if (vaddr & 15u) [[unlikely]] // PROBE-IZ: R5900 lq ignores the low 4 address bits // PERF-EX3
     {
         static std::atomic<int> s_n{0};
-        if (s_n.fetch_add(1) < 5)
+        if (s_n.load(std::memory_order_relaxed) < 5 && s_n.fetch_add(1, std::memory_order_relaxed) < 5) // PERF-EX3
             std::fprintf(stderr, "[probe] lq unaligned vaddr=0x%08X pc=0x%X ra=0x%llX\n", vaddr, ctx->pc, (unsigned long long)_mm_cvtsi128_si64(ctx->r[31]));
         vaddr &= ~15u;
     }
@@ -5645,7 +6709,7 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     }
     {
         static std::atomic<int> s_q{0}; // PROBE-JB: first slow-path 128-bit loads (non-fast addresses only)
-        if (s_q.fetch_add(1) < 12)
+        if (s_q.load(std::memory_order_relaxed) < 12 && s_q.fetch_add(1, std::memory_order_relaxed) < 12) [[unlikely]] // PERF-EX3
             std::fprintf(stderr, "[probe] Load128 slow vaddr=0x%08X ctx=%p pc=0x%X this=%p\n", vaddr, (void *)ctx, ctx->pc, (void *)this);
     }
     try
@@ -5675,6 +6739,151 @@ extern "C" void ps2x_vu0_flags(R5900Context *ctx, __m128 res, int laneMask)
     ctx->vu0_mac_flags = (static_cast<uint32_t>(rv(sg)) << 4) | static_cast<uint32_t>(rv(zr));
     const uint32_t now = (zr ? 1u : 0u) | (sg ? 2u : 0u); // Z, S (U/O not modelled)
     ctx->vu0_status = static_cast<uint16_t>((ctx->vu0_status & ~0xFu) | now | (now << 6) | (ctx->vu0_status & 0xFC0u));
+
+    // PROBE-M3: VU0 result watchdog (PS2X_VU0_WATCH=1)
+    static const bool s_vu0Watch = []() {
+        const char *e = std::getenv("PS2X_VU0_WATCH");
+        return e && e[0] == '1';
+    }();
+    if (s_vu0Watch)
+    {
+        alignas(16) float v[4];
+        _mm_store_ps(v, res);
+        bool bad = false;
+        float maxAbs = 0.0f;
+        for (int i = 0; i < 4; ++i)
+        {
+            if ((laneMask & (1 << i)) == 0)
+                continue;
+            const float af = std::fabs(v[i]);
+            if (!std::isfinite(v[i]) || af > 1.0e7f)
+            {
+                bad = true;
+                if (!(af <= maxAbs))
+                    maxAbs = af;
+            }
+        }
+
+        static std::atomic<uint32_t> s_watchTicks{0};
+        const bool checkTimer = bad || ((s_watchTicks.fetch_add(1, std::memory_order_relaxed) & 0x3FFFu) == 0u);
+        if (checkTimer)
+        {
+            struct Vu0BadEntry
+            {
+                uint32_t pc;
+                uint32_t count;
+                float first[4];
+                float maxAbs;
+            };
+            static std::mutex s_watchMutex;
+            static Vu0BadEntry s_table[256]{};
+            static uint32_t s_totalBad = 0;
+            static uint32_t s_printedEvents = 0;
+            static uint32_t s_seenPcs[512]{};
+            static bool s_seenUsed[512]{};
+            static uint32_t s_newPrinted = 0;
+            static auto s_lastSumTime = std::chrono::steady_clock::now();
+            static const auto s_watchStart = s_lastSumTime;
+
+            std::lock_guard<std::mutex> lock(s_watchMutex);
+            if (bad)
+            {
+                const uint32_t pc = ctx->pc;
+                ++s_totalBad;
+
+                const uint32_t startIdx = ((pc >> 2) * 2654435761u) & 255u;
+                for (uint32_t probe = 0; probe < 256u; ++probe)
+                {
+                    Vu0BadEntry &e = s_table[(startIdx + probe) & 255u];
+                    if (e.count == 0)
+                    {
+                        e.pc = pc;
+                        e.count = 1;
+                        e.first[0] = v[0];
+                        e.first[1] = v[1];
+                        e.first[2] = v[2];
+                        e.first[3] = v[3];
+                        e.maxAbs = maxAbs;
+                        break;
+                    }
+                    if (e.pc == pc)
+                    {
+                        ++e.count;
+                        if (!(maxAbs <= e.maxAbs))
+                            e.maxAbs = maxAbs;
+                        break;
+                    }
+                }
+
+                const uint64_t vbl = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - s_watchStart).count());
+                if (s_printedEvents < 100u)
+                {
+                    ++s_printedEvents;
+                    std::fprintf(stderr, "[vu0bad] pc=0x%08x res=(%g,%g,%g,%g) mask=%d vbl=%llu\n",
+                                 pc, v[0], v[1], v[2], v[3], laneMask, static_cast<unsigned long long>(vbl));
+                }
+
+                if (s_newPrinted < 200u)
+                {
+                    const uint32_t seenStart = ((pc >> 2) * 2654435761u) & 511u;
+                    bool isNew = false;
+                    for (uint32_t probe = 0; probe < 512u; ++probe)
+                    {
+                        const uint32_t slot = (seenStart + probe) & 511u;
+                        if (!s_seenUsed[slot])
+                        {
+                            s_seenUsed[slot] = true;
+                            s_seenPcs[slot] = pc;
+                            isNew = true;
+                            break;
+                        }
+                        if (s_seenPcs[slot] == pc)
+                            break;
+                    }
+                    if (isNew)
+                    {
+                        ++s_newPrinted;
+                        std::fprintf(stderr, "[vu0bad-new] pc=0x%08x res=(%g,%g,%g,%g) mask=%d vbl=%llu\n",
+                                     pc, v[0], v[1], v[2], v[3], laneMask, static_cast<unsigned long long>(vbl));
+                    }
+                }
+            }
+
+            const auto nowTp = std::chrono::steady_clock::now();
+            if (nowTp - s_lastSumTime >= std::chrono::seconds(5))
+            {
+                s_lastSumTime = nowTp;
+                if (s_totalBad > 0)
+                {
+                    Vu0BadEntry entries[256];
+                    uint32_t nEntries = 0;
+                    for (const Vu0BadEntry &e : s_table)
+                    {
+                        if (e.count > 0)
+                            entries[nEntries++] = e;
+                    }
+                    std::sort(entries, entries + nEntries, [](const Vu0BadEntry &a, const Vu0BadEntry &b) {
+                        return a.count > b.count;
+                    });
+                    const uint32_t topN = std::min(nEntries, 8u);
+                    std::fprintf(stderr, "[vu0bad-sum] top pcs:");
+                    for (uint32_t i = 0; i < topN; ++i)
+                    {
+                        const Vu0BadEntry &e = entries[i];
+                        std::fprintf(stderr, "%s pc=0x%08x n=%u first=(%g,%g,%g,%g) max=%g",
+                                     (i == 0 ? "" : " ;"), e.pc, e.count,
+                                     e.first[0], e.first[1], e.first[2], e.first[3], e.maxAbs);
+                    }
+                    std::fprintf(stderr, "\n");
+                }
+                std::fprintf(stderr, "[vu0bad-sum] total=%u\n", s_totalBad);
+                std::memset(s_table, 0, sizeof(s_table));
+                s_totalBad = 0;
+            }
+        }
+    }
 }
 
 // C317: VU0 macro-mode Q operations with hardware semantics (PCSX2 _vuDIV/_vuSQRT/_vuRSQRT):
@@ -5691,7 +6900,44 @@ static float ps2xVu0Max(uint32_t signBits)
     std::memcpy(&f, &b, sizeof(f));
     return f;
 }
-extern "C" float ps2x_vu0_div(float fs, float ft)
+// PROBE-AN1: Q-operation events (div by 0, sqrt of negative, Q Inf/NaN/huge).
+static void ps2xAn1Q(int op, float fs, float ft, float q)
+{
+    uint32_t a, b, r;
+    std::memcpy(&a, &fs, 4);
+    std::memcpy(&b, &ft, 4);
+    std::memcpy(&r, &q, 4);
+    if (op != 1 && (b & 0x7F800000u) == 0u) // div / rsqrt by zero (or denormal)
+        ps2xAn1Ev(AN1_Q_DIV0, a, b, r);
+    if (op != 0 && (b & 0x80000000u) && (b & 0x7F800000u) != 0u) // sqrt/rsqrt of negative
+        ps2xAn1Ev(AN1_Q_SQRTNEG, a, b, r);
+    if (!std::isfinite(q) || std::fabs(q) > 1.0e9f)
+        ps2xAn1Ev(AN1_Q_BAD, a, b, r);
+    if ((a & 0x7F800000u) == 0x7F800000u || (b & 0x7F800000u) == 0x7F800000u)
+        ps2xAn1Ev(AN1_V_IN_NANHUGE, a, b, r);
+}
+static float ps2xVu0DivImpl(float fs, float ft);
+static float ps2xVu0SqrtImpl(float ft);
+static float ps2xVu0RsqrtImpl(float fs, float ft);
+extern "C" float ps2x_vu0_div(float fs, float ft) // PROBE-AN1 wrapper
+{
+    const float q = ps2xVu0DivImpl(fs, ft);
+    if (g_an1) [[unlikely]] ps2xAn1Q(0, fs, ft, q);
+    return q;
+}
+extern "C" float ps2x_vu0_sqrt(float ft) // PROBE-AN1 wrapper
+{
+    const float q = ps2xVu0SqrtImpl(ft);
+    if (g_an1) [[unlikely]] ps2xAn1Q(1, 0.0f, ft, q);
+    return q;
+}
+extern "C" float ps2x_vu0_rsqrt(float fs, float ft) // PROBE-AN1 wrapper
+{
+    const float q = ps2xVu0RsqrtImpl(fs, ft);
+    if (g_an1) [[unlikely]] ps2xAn1Q(2, fs, ft, q);
+    return q;
+}
+static float ps2xVu0DivImpl(float fs, float ft)
 {
     if (!ps2xVu0HwQ())
         return (ft != 0.0f) ? (fs / ft) : 0.0f;
@@ -5703,13 +6949,13 @@ extern "C" float ps2x_vu0_div(float fs, float ft)
     const float q = fs / ft;
     return std::isfinite(q) ? q : ps2xVu0Max(sb ^ tb);
 }
-extern "C" float ps2x_vu0_sqrt(float ft)
+static float ps2xVu0SqrtImpl(float ft)
 {
     if (!ps2xVu0HwQ())
         return std::sqrt(std::max(0.0f, ft));
     return std::sqrt(std::fabs(ft));
 }
-extern "C" float ps2x_vu0_rsqrt(float fs, float ft)
+static float ps2xVu0RsqrtImpl(float fs, float ft)
 {
     if (!ps2xVu0HwQ())
         return (ft > 0.0f) ? (fs / std::sqrt(ft)) : 0.0f;
@@ -5800,6 +7046,7 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
+    if (g_fnReplayActive) [[unlikely]] { const uint32_t pa = vaddr & 0x1FFFFFFFu; if (pa == 0x10001000u || pa == 0x10001010u || pa == 0x10001020u) return; } // PROBE-FR7
     if (g_profCounts) ++g_pcSlowSt[pcRegion(vaddr)]; // PROBE-IJ
     acctFlushForIo(vaddr); // PERF-LM
     if (sprFastAddr<uint32_t>(vaddr))
@@ -5931,16 +7178,20 @@ thread_local uint64_t g_ps2xCheckpointYields = 0;   // DECOMP-CT
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
-    if (g_ps2xSuppressCheckpoint) // DECOMP-CM
+    if (g_fnReplayActive) [[unlikely]] // PROBE-FR1d
+    {
+        return false;
+    }
+    if (g_ps2xSuppressCheckpoint) [[unlikely]] // DECOMP-CM // PERF-EX3
     {
         return false;
     }
     const bool due = m_eeScheduler ? m_eeScheduler->checkpointDue(cycles) : false;
-    if (due)
+    if (due) [[unlikely]] // PERF-EX3
     {
         ++g_ps2xCheckpointYields; // DECOMP-CT
     }
-    if (g_profCounts) // PROBE-IJ
+    if (g_profCounts) [[unlikely]] // PROBE-IJ // PERF-EX3
     {
         ++g_pcCkpt;
         g_pcCkptTrue += due ? 1u : 0u;
@@ -6073,8 +7324,972 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
     raiseCop0Exception(ctx, EXCEPTION_INTEGER_OVERFLOW);
 }
 
+// PROBE-RW1: generic EE-RAM range printer & wildcard scanner
+namespace
+{
+    struct Rw1Range
+    {
+        uint32_t addr = 0;
+        uint32_t len = 0;
+    };
+
+    struct Rw1ScanPat
+    {
+        std::array<uint8_t, 128> bytes{};
+        std::array<bool, 128> exact{};
+        size_t len = 0;
+        size_t firstConcrete = 0;
+        bool valid = false;
+    };
+
+    struct Rw1Config
+    {
+        std::array<Rw1Range, 8> ranges{};
+        size_t rangeCount = 0;
+        Rw1ScanPat scan{};
+        bool enabled = false;
+    };
+
+    int rw1HexVal(char c)
+    {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    }
+
+    Rw1Config parseRw1Config()
+    {
+        Rw1Config cfg;
+        constexpr uint32_t kEeRamSize = 32u * 1024u * 1024u;
+        constexpr uint32_t kMaxRangeLen = 1024u * 1024u;
+
+        if (const char *env = std::getenv("PS2X_RAMWATCH"); env && env[0] != '\0')
+        {
+            const char *p = env;
+            while (*p && cfg.rangeCount < cfg.ranges.size())
+            {
+                while (*p == ',' || *p == ' ' || *p == '\t')
+                    ++p;
+                if (!*p)
+                    break;
+                char *endAddr = nullptr;
+                unsigned long rawAddr = std::strtoul(p, &endAddr, 0);
+                if (endAddr == p || *endAddr != ':')
+                {
+                    while (*p && *p != ',')
+                        ++p;
+                    continue;
+                }
+                char *endLen = nullptr;
+                unsigned long rawLen = std::strtoul(endAddr + 1, &endLen, 0);
+                p = endLen;
+                if (endLen == endAddr + 1)
+                    continue;
+
+                uint32_t addr = static_cast<uint32_t>(rawAddr) & 0x1FFFFFFFu;
+                if (addr >= kEeRamSize || rawLen == 0)
+                    continue;
+                uint32_t len = (rawLen > kMaxRangeLen) ? kMaxRangeLen : static_cast<uint32_t>(rawLen);
+                if (len > kEeRamSize - addr)
+                    len = kEeRamSize - addr;
+                if (len > 0)
+                    cfg.ranges[cfg.rangeCount++] = {addr, len};
+            }
+        }
+
+        if (const char *scanEnv = std::getenv("PS2X_RAMWATCH_SCAN"); scanEnv && scanEnv[0] != '\0')
+        {
+            const char *p = scanEnv;
+            while (*p && cfg.scan.len < cfg.scan.bytes.size())
+            {
+                if (*p == ' ' || *p == '\t' || *p == ',')
+                {
+                    ++p;
+                    continue;
+                }
+                if (p[0] == '?')
+                {
+                    cfg.scan.bytes[cfg.scan.len] = 0;
+                    cfg.scan.exact[cfg.scan.len] = false;
+                    ++cfg.scan.len;
+                    p += (p[1] == '?') ? 2 : 1;
+                    continue;
+                }
+                int hi = rw1HexVal(p[0]);
+                int lo = p[1] ? rw1HexVal(p[1]) : -1;
+                if (hi < 0 || lo < 0)
+                {
+                    cfg.scan.len = 0;
+                    break;
+                }
+                cfg.scan.bytes[cfg.scan.len] = static_cast<uint8_t>((hi << 4) | lo);
+                cfg.scan.exact[cfg.scan.len] = true;
+                ++cfg.scan.len;
+                p += 2;
+            }
+            for (size_t i = 0; i < cfg.scan.len; ++i)
+            {
+                if (cfg.scan.exact[i])
+                {
+                    cfg.scan.firstConcrete = i;
+                    cfg.scan.valid = true;
+                    break;
+                }
+            }
+        }
+
+        cfg.enabled = (cfg.rangeCount > 0) || cfg.scan.valid;
+        return cfg;
+    }
+
+    void rw1Tick(const uint8_t *rdram, std::chrono::steady_clock::time_point now)
+    {
+        static const Rw1Config s_cfg = parseRw1Config();
+        if (!s_cfg.enabled || !rdram)
+            return;
+
+        static const auto s_t0 = now;
+        const unsigned long long tMs = static_cast<unsigned long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - s_t0).count());
+
+        for (size_t r = 0; r < s_cfg.rangeCount; ++r)
+        {
+            const uint32_t addr = s_cfg.ranges[r].addr;
+            const uint32_t len = s_cfg.ranges[r].len;
+            const uint8_t *ptr = rdram + addr;
+
+            uint32_t nonzero = 0;
+            uint32_t sum = 0;
+            uint8_t minB = 0xFFu;
+            uint8_t maxB = 0x00u;
+            for (uint32_t i = 0; i < len; ++i)
+            {
+                const uint8_t b = ptr[i];
+                if (b != 0)
+                    ++nonzero;
+                sum += b;
+                if (b < minB) minB = b;
+                if (b > maxB) maxB = b;
+            }
+
+            char hexBuf[32 * 3 + 4]{};
+            size_t pos = 0;
+            const uint32_t preview = (len < 32u) ? len : 32u;
+            for (uint32_t i = 0; i < preview; ++i)
+            {
+                int n = std::snprintf(hexBuf + pos, sizeof(hexBuf) - pos, i ? " %02x" : "%02x", ptr[i]);
+                if (n > 0)
+                    pos += static_cast<size_t>(n);
+            }
+
+            if (len > 32u)
+            {
+                ps2xSafeLog("[ramwatch] t=%llums addr=0x%08x len=%u nonzero=%u sum=0x%08x first32=%s min=0x%02x max=0x%02x\n",
+                            tMs, addr, len, nonzero, sum, hexBuf, minB, maxB);
+            }
+            else
+            {
+                ps2xSafeLog("[ramwatch] t=%llums addr=0x%08x len=%u nonzero=%u sum=0x%08x first32=%s\n",
+                            tMs, addr, len, nonzero, sum, hexBuf);
+            }
+        }
+
+        if (s_cfg.scan.valid)
+        {
+            static uint32_t s_scanDiv = 0;
+            if ((s_scanDiv++ & 1u) == 0u)
+            {
+                constexpr uint32_t kScanStart = 0x100000u;
+                constexpr uint32_t kScanEnd = 0x2000000u;
+                const size_t patLen = s_cfg.scan.len;
+                const size_t fc = s_cfg.scan.firstConcrete;
+                const uint8_t firstByte = s_cfg.scan.bytes[fc];
+
+                uint32_t hits = 0;
+                std::array<uint32_t, 8> hitAddrs{};
+                size_t hitShown = 0;
+
+                if (kScanEnd - kScanStart >= patLen)
+                {
+                    const auto scanT0 = std::chrono::steady_clock::now();
+                    uint32_t cur = kScanStart + static_cast<uint32_t>(fc);
+                    const uint32_t limit = kScanEnd - static_cast<uint32_t>(patLen - 1u - fc);
+                    uint32_t checks = 0;
+
+                    while (cur < limit)
+                    {
+                        const uint32_t chunkEnd = (limit - cur > 65536u) ? (cur + 65536u) : limit;
+                        const void *found = std::memchr(rdram + cur, firstByte, chunkEnd - cur);
+                        if (!found)
+                        {
+                            cur = chunkEnd;
+                            if (std::chrono::steady_clock::now() - scanT0 >= std::chrono::milliseconds(4))
+                                break;
+                            continue;
+                        }
+
+                        const uint32_t pos = static_cast<uint32_t>(static_cast<const uint8_t *>(found) - rdram);
+                        const uint32_t cand = pos - static_cast<uint32_t>(fc);
+                        bool match = true;
+                        for (size_t k = 0; k < patLen; ++k)
+                        {
+                            if (s_cfg.scan.exact[k] && rdram[cand + k] != s_cfg.scan.bytes[k])
+                            {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if (match)
+                        {
+                            ++hits;
+                            if (hitShown < hitAddrs.size())
+                                hitAddrs[hitShown++] = cand;
+                        }
+                        cur = pos + 1u;
+                        if ((++checks & 255u) == 0u &&
+                            std::chrono::steady_clock::now() - scanT0 >= std::chrono::milliseconds(4))
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                char hitBuf[128]{};
+                if (hitShown == 0)
+                {
+                    std::snprintf(hitBuf, sizeof(hitBuf), "none");
+                }
+                else
+                {
+                    size_t hp = 0;
+                    for (size_t i = 0; i < hitShown; ++i)
+                    {
+                        int n = std::snprintf(hitBuf + hp, sizeof(hitBuf) - hp, i ? ",0x%08x" : "0x%08x", hitAddrs[i]);
+                        if (n > 0)
+                            hp += static_cast<size_t>(n);
+                    }
+                }
+                ps2xSafeLog("[ramscan] hits=%u first=%s\n", hits, hitBuf);
+            }
+        }
+    }
+} // PROBE-RW1
+
+extern "C" void ps2_vif1_fence(); // PROBE-FR4
+
+// PROBE-FR1: single-function replay harness (PS2X_FNREPLAY=<spec_path>)
+static std::atomic<R5900Context *> g_fnReplayCtx{nullptr}; // PROBE-WW4
+static void ps2xFnReplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, const char *specPath)
+{
+    g_fnReplayCtx.store(ctx, std::memory_order_release); // PROBE-WW4
+    FILE *sf = std::fopen(specPath, "r");
+    if (!sf)
+    {
+        ps2xSafeLog("[fnreplay] ERROR: failed to open spec '%s'\n", specPath);
+        std::quick_exit(2);
+    }
+
+    std::memset(ctx, 0, sizeof(*ctx));
+
+    std::string ramPath;
+    std::string outRamPath;
+    std::string outRegsPath;
+    uint32_t pc = 0;
+    uint32_t ra = 0;
+    uint32_t stopPc = 0; // PROBE-FR3
+    FnReplaySkipEntry skipEntries[kFnReplayMaxSkip]{}; // PROBE-FR5
+    size_t skipCount = 0u; // PROBE-FR5
+    bool hasPc = false;
+
+    auto parseHex32 = [](const char *s) -> uint32_t {
+        return static_cast<uint32_t>(std::strtoul(s, nullptr, 16));
+    };
+    auto parseHex64 = [](const char *s) -> uint64_t { // PROBE-FR5
+        return static_cast<uint64_t>(std::strtoull(s, nullptr, 16));
+    };
+
+    char line[1024];
+    while (std::fgets(line, sizeof(line), sf))
+    {
+        size_t len = std::strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+        if (len == 0 || line[0] == '#')
+            continue;
+
+        char *saveptr = nullptr;
+#ifdef _WIN32
+        char *cmd = strtok_s(line, " \t", &saveptr);
+#else
+        char *cmd = strtok_r(line, " \t", &saveptr);
+#endif
+        if (!cmd)
+            continue;
+
+        auto nextTok = [&]() -> char * {
+#ifdef _WIN32
+            return strtok_s(nullptr, " \t", &saveptr);
+#else
+            return strtok_r(nullptr, " \t", &saveptr);
+#endif
+        };
+
+        if (std::strcmp(cmd, "ram") == 0)
+        {
+            if (char *p = nextTok())
+                ramPath = p;
+        }
+        else if (std::strcmp(cmd, "out_ram") == 0)
+        {
+            if (char *p = nextTok())
+                outRamPath = p;
+        }
+        else if (std::strcmp(cmd, "out_regs") == 0)
+        {
+            if (char *p = nextTok())
+                outRegsPath = p;
+        }
+        else if (std::strcmp(cmd, "pc") == 0)
+        {
+            if (char *p = nextTok())
+            {
+                pc = parseHex32(p);
+                hasPc = true;
+            }
+        }
+        else if (std::strcmp(cmd, "ra") == 0)
+        {
+            if (char *p = nextTok())
+            {
+                ra = parseHex32(p);
+                ctx->r[31] = _mm_set_epi32(0, 0, 0, static_cast<int32_t>(ra));
+            }
+        }
+        else if (std::strcmp(cmd, "stop_pc") == 0) // PROBE-FR3
+        {
+            if (char *p = nextTok())
+                stopPc = parseHex32(p);
+        }
+        else if (std::strcmp(cmd, "skip_pc") == 0) // PROBE-FR5
+        {
+            if (char *pPc = nextTok())
+            {
+                if (skipCount < kFnReplayMaxSkip)
+                {
+                    uint64_t v0 = 0ull;
+                    if (char *pV0 = nextTok())
+                        v0 = parseHex64(pV0);
+                    skipEntries[skipCount++] = { parseHex32(pPc), v0 };
+                }
+            }
+        }
+        else if (std::strcmp(cmd, "gpr") == 0)
+        {
+            char *ti = nextTok();
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (ti && t3 && t2 && t1 && t0)
+            {
+                int idx = std::atoi(ti);
+                if (idx >= 0 && idx < 32)
+                {
+                    ctx->r[idx] = _mm_set_epi32(
+                        static_cast<int32_t>(parseHex32(t3)),
+                        static_cast<int32_t>(parseHex32(t2)),
+                        static_cast<int32_t>(parseHex32(t1)),
+                        static_cast<int32_t>(parseHex32(t0)));
+                }
+            }
+        }
+        else if (std::strcmp(cmd, "hi") == 0)
+        {
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (t3 && t2 && t1 && t0)
+            {
+                ctx->hi = (static_cast<uint64_t>(parseHex32(t1)) << 32) | static_cast<uint64_t>(parseHex32(t0));
+                ctx->hi1 = (static_cast<uint64_t>(parseHex32(t3)) << 32) | static_cast<uint64_t>(parseHex32(t2));
+            }
+        }
+        else if (std::strcmp(cmd, "lo") == 0)
+        {
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (t3 && t2 && t1 && t0)
+            {
+                ctx->lo = (static_cast<uint64_t>(parseHex32(t1)) << 32) | static_cast<uint64_t>(parseHex32(t0));
+                ctx->lo1 = (static_cast<uint64_t>(parseHex32(t3)) << 32) | static_cast<uint64_t>(parseHex32(t2));
+            }
+        }
+        else if (std::strcmp(cmd, "fcr31") == 0)
+        {
+            if (char *p = nextTok())
+                ctx->fcr31 = parseHex32(p);
+        }
+        else if (std::strcmp(cmd, "fpr") == 0)
+        {
+            char *ti = nextTok();
+            char *tv = nextTok();
+            if (ti && tv)
+            {
+                int idx = std::atoi(ti);
+                if (idx >= 0 && idx < 32)
+                {
+                    uint32_t bits = parseHex32(tv);
+                    std::memcpy(&ctx->f[idx], &bits, sizeof(float));
+                }
+            }
+        }
+        else if (std::strcmp(cmd, "vf") == 0)
+        {
+            char *ti = nextTok();
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (ti && t3 && t2 && t1 && t0)
+            {
+                int idx = std::atoi(ti);
+                if (idx >= 0 && idx < 32)
+                {
+                    __m128i iv = _mm_set_epi32(
+                        static_cast<int32_t>(parseHex32(t3)),
+                        static_cast<int32_t>(parseHex32(t2)),
+                        static_cast<int32_t>(parseHex32(t1)),
+                        static_cast<int32_t>(parseHex32(t0)));
+                    ctx->vu0_vf[idx] = _mm_castsi128_ps(iv);
+                }
+            }
+        }
+        else if (std::strcmp(cmd, "acc") == 0)
+        {
+            char *t3 = nextTok();
+            char *t2 = nextTok();
+            char *t1 = nextTok();
+            char *t0 = nextTok();
+            if (t3 && t2 && t1 && t0)
+            {
+                __m128i iv = _mm_set_epi32(
+                    static_cast<int32_t>(parseHex32(t3)),
+                    static_cast<int32_t>(parseHex32(t2)),
+                    static_cast<int32_t>(parseHex32(t1)),
+                    static_cast<int32_t>(parseHex32(t0)));
+                ctx->vu0_acc = _mm_castsi128_ps(iv);
+            }
+        }
+    }
+    std::fclose(sf);
+
+    if (!hasPc || ramPath.empty())
+    {
+        ps2xSafeLog("[fnreplay] ERROR: spec missing pc or ram path\n");
+        std::quick_exit(2);
+    }
+
+    constexpr size_t kRamBytes = PS2_RAM_SIZE;
+    FILE *rf = std::fopen(ramPath.c_str(), "rb");
+    if (!rf)
+    {
+        ps2xSafeLog("[fnreplay] ERROR: failed to open ram '%s'\n", ramPath.c_str());
+        std::quick_exit(2);
+    }
+    size_t nread = std::fread(rdram, 1, kRamBytes, rf);
+    std::fclose(rf);
+    if (nread != kRamBytes)
+    {
+        ps2xSafeLog("[fnreplay] ERROR: short ram read %zu/%zu from '%s'\n", nread, kRamBytes, ramPath.c_str());
+        std::quick_exit(2);
+    }
+    ps2xSafeLog("[fnreplay] loaded ram=%s (%zu bytes) pc=0x%08x ra=0x%08x\n", ramPath.c_str(), nread, pc, ra);
+
+    ctx->pc = pc;
+    const R5900Context initialCtx = *ctx; // PROBE-FR2
+    PS2Runtime::RecompiledFunction fn = rt->lookupFunction(pc);
+    if (!fn)
+    {
+        ps2xSafeLog("[fnreplay] ERROR: lookupFunction(0x%08x) returned null\n", pc);
+        std::fprintf(stderr, "[fnreplay] ERROR: lookupFunction(0x%08x) returned null\n", pc);
+        std::quick_exit(2);
+    }
+
+    // PROBE-FR2: repeat count and watch address list
+    uint32_t repeatCount = 1u;
+    if (const char *repEnv = std::getenv("PS2X_FNREPLAY_REPEAT"))
+    {
+        long v = std::strtol(repEnv, nullptr, 10);
+        if (v < 1L)
+            v = 1L;
+        else if (v > 100000L)
+            v = 100000L;
+        repeatCount = static_cast<uint32_t>(v);
+    }
+    std::vector<uint32_t> watchAddrs;
+    if (const char *watchEnv = std::getenv("PS2X_FNREPLAY_WATCH"))
+    {
+        const char *p = watchEnv;
+        while (*p && watchAddrs.size() < 16u)
+        {
+            while (*p == ' ' || *p == '\t' || *p == ',')
+                ++p;
+            if (!*p)
+                break;
+            char *end = nullptr;
+            uint32_t addr = static_cast<uint32_t>(std::strtoul(p, &end, 16));
+            if (end == p)
+                break;
+            watchAddrs.push_back(addr);
+            p = end;
+        }
+    }
+
+    int64_t dumpIter = -1; // PROBE-FR3
+    if (const char *dumpEnv = std::getenv("PS2X_FNREPLAY_DUMPITER"))
+    {
+        if (*dumpEnv)
+        {
+            char *end = nullptr;
+            long v = std::strtol(dumpEnv, &end, 10);
+            if (end != dumpEnv && v >= 0L)
+                dumpIter = static_cast<int64_t>(v);
+        }
+    }
+
+    auto writeRamDump = [&](const std::string &path) { // PROBE-FR3
+        FILE *orf = std::fopen(path.c_str(), "wb");
+        if (!orf)
+        {
+            ps2xSafeLog("[fnreplay] ERROR: failed to open out_ram '%s'\n", path.c_str());
+            std::quick_exit(2);
+        }
+        size_t nwritten = std::fwrite(rdram, 1, kRamBytes, orf);
+        std::fclose(orf);
+        if (nwritten != kRamBytes)
+        {
+            ps2xSafeLog("[fnreplay] ERROR: short out_ram write %zu/%zu\n", nwritten, kRamBytes);
+            std::quick_exit(2);
+        }
+    };
+
+    // Replicate GameThread MXCSR round-toward-zero setup (C310/C316) before running guest code
+    {
+        const char *rtz = std::getenv("PS2X_EE_RTZ");
+        if (!(rtz && rtz[0] == '0'))
+            _mm_setcsr(_mm_getcsr() | 0x6000u);
+    }
+
+    g_acctPending = 0u; // PROBE-FR1d
+    g_fnReplayStopPc = stopPc; // PROBE-FR3
+    for (size_t i = 0u; i < skipCount; ++i) // PROBE-FR5
+        g_fnReplaySkips[i] = skipEntries[i];
+    g_fnReplaySkipCount = skipCount; // PROBE-FR5
+    g_fnReplaySkipHitCount = 0u; // PROBE-FR6
+    g_fnReplayActive = true; // PROBE-FR1d
+    const uint32_t entrySp = static_cast<uint32_t>(_mm_extract_epi32(initialCtx.r[29], 0)); // PROBE-FR1f // PROBE-FR2
+
+    // PROBE-FR6: install wrapper in g_ps2RecompiledFunctionTable for each skip_pc during replay
+    PS2Runtime::RecompiledFunction origSkipFns[kFnReplayMaxSkip]{};
+    uint32_t origSkipSlots[kFnReplayMaxSkip]{};
+    bool skipSlotValid[kFnReplayMaxSkip]{};
+    for (size_t i = 0u; i < skipCount; ++i)
+    {
+        uint32_t s = 0u;
+        if (generatedFunctionTableSlot(skipEntries[i].pc, s))
+        {
+            origSkipSlots[i] = s;
+            origSkipFns[i] = g_ps2RecompiledFunctionTable[s];
+            skipSlotValid[i] = true;
+            g_ps2RecompiledFunctionTable[s] = [](uint8_t *, R5900Context *c, PS2Runtime *) {
+                ps2xFnReplayTrySkip(c, c->pc);
+            };
+        }
+    }
+
+    for (uint32_t iter = 0u; iter < repeatCount; ++iter) // PROBE-FR2
+    {
+        g_fnReplayCurrentIter = iter; // PROBE-FR6
+        *ctx = initialCtx;
+        const bool logIterDetails = (iter == 0u);
+        static const uint32_t s_fr8DcallIter = []() { const char *e = std::getenv("PS2X_FNREPLAY_DCALLITER"); return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u; }(); // PROBE-FR8
+        g_fnReplaySuppressDcall = (iter != s_fr8DcallIter); // PROBE-FR8
+        g_fnReplayBlocked = false; // PROBE-FR3
+        g_fnReplayBlockedPc = 0u; // PROBE-FR3
+        g_fnReplaySteps = 0u; // PROBE-FR3
+        g_fnReplayIterStart = std::chrono::steady_clock::now(); // PROBE-FR3
+
+        // PROBE-FR7: advance virtual EE timers at iteration start
+        {
+            PS2Memory &tmem = rt->memory();
+            g_fnReplayT1ReadLogs = 0u;
+            if (iter == 0u)
+            {
+                if (const char *ve = std::getenv("PS2X_FNREPLAY_VSYNCWORD"))
+                    g_fr7VsyncAddr = static_cast<uint32_t>(std::strtoul(ve, nullptr, 16));
+                g_fr7Ram = rdram;
+                ps2xSafeLog("[fnreplay] vsyncword set addr=0x%x\n", g_fr7VsyncAddr);
+            }
+            fr7SetVsyncWord();
+            g_fnReplayMem = &tmem;
+            g_fnReplayRdram = rdram;
+            if (iter == 0u)
+            {
+                uint64_t base = 0u, ovfw = 0u;
+                std::memcpy(&base, rdram + 0x0072D490u, sizeof(base));
+                std::memcpy(&ovfw, rdram + 0x006A2E20u, sizeof(ovfw));
+                uint64_t seedAdd = 3080000ull;
+                if (const char *ce = std::getenv("PS2X_FNREPLAY_CYCLES"))
+                    seedAdd = std::strtoull(ce, nullptr, 10);
+                if (const char *se = std::getenv("PS2X_FNREPLAY_SEEDADD"))
+                    seedAdd = std::strtoull(se, nullptr, 10);
+                g_replayCycles = (base != 0u ? base : (ovfw << 24)) + seedAdd;
+                ps2xSafeLog("[fnreplay] seeded replay cycles=0x%llx\n", static_cast<unsigned long long>(g_replayCycles));
+            }
+            else
+            {
+                uint64_t cyc = 3080000ull;
+                if (const char *ce = std::getenv("PS2X_FNREPLAY_CYCLES"))
+                    cyc = std::strtoull(ce, nullptr, 10);
+                g_fnReplayPendCycles = 0u;
+                fnReplayTickTimers(cyc);
+            }
+            if (iter < 5u)
+            {
+                uint64_t ovf = 0u;
+                std::memcpy(&ovf, rdram + 0x006A2E20u, sizeof(ovf));
+                uint64_t baseNow = 0u;
+                std::memcpy(&baseNow, rdram + 0x0072D490u, sizeof(baseNow));
+                ps2xSafeLog("[fnreplay] iter=%u elapsed=%lld\n", iter, static_cast<long long>(g_replayCycles - baseNow));
+                ps2xSafeLog("[fnreplay] iter=%u timer1=0x%04x ovf=%llu\n", iter, static_cast<uint32_t>((g_replayCycles >> 8) & 0xFFFFu), static_cast<unsigned long long>(ovf));
+            }
+        }
+
+        // PROBE-FR6: log DMA CHCR values at the start of each iteration (first 5)
+        if (iter < 5u)
+        {
+            PS2Memory &mem = rt->memory();
+            auto getChcrVal = [&](uint32_t chBase) -> uint32_t {
+                auto it = mem.m_ioRegisters.find(chBase);
+                return (it != mem.m_ioRegisters.end()) ? it->second : 0u;
+            };
+            ps2xSafeLog("[fnreplay] iter %u CHCR 9000=0x%08x a000=0x%08x b400=0x%08x dstat=0x%08x\n",
+                        iter, getChcrVal(0x10009000u), getChcrVal(0x1000A000u), getChcrVal(0x1000B400u), getChcrVal(0x1000E010u));
+        }
+
+        if (logIterDetails)
+            ps2xSafeLog("[fnreplay] calling fn=0x%08x\n", pc);
+        if (!ps2xFnReplayTrySkip(ctx, pc)) // PROBE-FR5
+            fn(rdram, ctx, rt);
+        if (logIterDetails)
+            ps2xSafeLog("[fnreplay] returned from fn=0x%08x pc=0x%08x\n", pc, ctx->pc);
+
+        // PROBE-FR1b: emulate the runtime dispatch loop until ra, pc==0, or step cap
+        // PROBE-FR1c: trace steps (first 300 + final), log stop reason + last 8 dispatch PCs
+        uint32_t steps = 1u;
+        constexpr uint32_t kHangRepeatCap = 50000u; // PROBE-FR1f
+        uint32_t prevHangPc = 0u, prevHangSp = 0u, samePcSpCount = 0u; // PROBE-FR1f
+        uint32_t lastStepNum = 0u;
+        uint32_t lastPrePc = 0u, lastPreSp = 0u, lastPreRa = 0u, lastPostPc = 0u, lastPostSp = 0u;
+        auto isIterDone = [&]() -> bool { // PROBE-FR3
+            if (g_fnReplayStopPc != 0u)
+                return ctx->pc == g_fnReplayStopPc;
+            return ctx->pc == ra && static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) == entrySp;
+        };
+        auto logRecentDispatch8 = [&]() {
+            const DispatchHistory &h = g_dispatchHistory;
+            const uint32_t total = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
+            const uint32_t count = (total < 8u) ? total : 8u;
+            char buf[128] = {};
+            size_t pos = 0;
+            for (uint32_t i = 0u; i < count && pos + 12 < sizeof(buf); ++i)
+            {
+                const uint32_t idx = (h.next + static_cast<uint32_t>(h.pcs.size()) - count + i) % static_cast<uint32_t>(h.pcs.size());
+                int n = std::snprintf(buf + pos, sizeof(buf) - pos, "%s0x%08x", (i ? " -> " : ""), h.pcs[idx]);
+                if (n > 0)
+                    pos += static_cast<size_t>(n);
+            }
+            ps2xSafeLog("[fnreplay] recent8(%u): %s\n", count, count ? buf : "(empty)");
+        };
+        while (!g_fnReplayBlocked && !isIterDone() && ctx->pc != 0u && !rt->isStopRequested()) // PROBE-FR1f // PROBE-FR3
+        {
+            if (static_cast<uint64_t>(steps) + g_fnReplaySteps > kFnReplayMaxSteps) // PROBE-FR1f // PROBE-FR3
+            {
+                g_fnReplayBlocked = true;
+                g_fnReplayBlockedPc = ctx->pc;
+                break;
+            }
+            if ((steps & 0x3FFu) == 0u &&
+                (std::chrono::steady_clock::now() - g_fnReplayIterStart) > std::chrono::seconds(20)) // PROBE-FR3
+            {
+                g_fnReplayBlocked = true;
+                g_fnReplayBlockedPc = ctx->pc;
+                break;
+            }
+            const uint32_t nextPc = ctx->pc;
+            if (ps2xFnReplayTrySkip(ctx, nextPc)) [[unlikely]] // PROBE-FR5
+            {
+                ++steps;
+                continue;
+            }
+            uint32_t s = 0u;
+            if (!generatedFunctionTableSlot(nextPc, s) || g_ps2RecompiledFunctionTable[s] == nullptr)
+            {
+                ps2xSafeLog("[fnreplay] stop: no generated function at pc=0x%08x (slot_ok=%d)\n",
+                            nextPc, generatedFunctionTableSlot(nextPc, s) ? 1 : 0);
+                logRecentDispatch8();
+                break;
+            }
+            const uint32_t preSp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+            if (nextPc == prevHangPc && preSp == prevHangSp) // PROBE-FR1f
+            {
+                if (++samePcSpCount >= kHangRepeatCap)
+                {
+                    ps2xSafeLog("[fnreplay] hang at pc=0x%08x sp=0x%08x\n", nextPc, preSp);
+                    logRecentDispatch8();
+                    break;
+                }
+            }
+            else
+            {
+                prevHangPc = nextPc;
+                prevHangSp = preSp;
+                samePcSpCount = 1u;
+            }
+            const uint32_t preRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+            if (logIterDetails && steps <= 300u)
+                ps2xSafeLog("[fnreplay] step %u pc=0x%08x sp=0x%08x ra=0x%08x\n", steps, nextPc, preSp, preRa);
+            pushDispatchPc(nextPc);
+            g_ps2RecompiledFunctionTable[s](rdram, ctx, rt);
+            const uint32_t postSp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+            if (logIterDetails && steps <= 300u)
+                ps2xSafeLog("[fnreplay]   -> pc=0x%08x sp=0x%08x\n", ctx->pc, postSp);
+            lastStepNum = steps;
+            lastPrePc = nextPc;
+            lastPreSp = preSp;
+            lastPreRa = preRa;
+            lastPostPc = ctx->pc;
+            lastPostSp = postSp;
+            ++steps;
+        }
+        if (logIterDetails && lastStepNum > 300u)
+        {
+            ps2xSafeLog("[fnreplay] step %u pc=0x%08x sp=0x%08x ra=0x%08x\n", lastStepNum, lastPrePc, lastPreSp, lastPreRa);
+            ps2xSafeLog("[fnreplay]   -> pc=0x%08x sp=0x%08x\n", lastPostPc, lastPostSp);
+        }
+        const uint32_t finalSp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+        if (logIterDetails)
+        {
+            ps2xSafeLog("[fnreplay] finished pc=0x%08x sp=0x%08x steps=%u\n", ctx->pc, finalSp, steps); // PROBE-FR1c
+            const DispatchHistory &h = g_dispatchHistory; // PROBE-FR1e
+            const uint32_t cap = static_cast<uint32_t>(h.pcs.size());
+            const uint32_t start = h.wrapped ? h.next : 0u;
+            for (uint32_t i = 0u; i < cap; ++i)
+            {
+                const uint32_t idx = (start + i) % cap;
+                ps2xSafeLog("[fnreplay] hist i=%u pc=0x%08x\n", i, h.pcs[idx]);
+            }
+        }
+
+        if (!watchAddrs.empty()) // PROBE-FR2
+        {
+            char wbuf[1024];
+            int pos = std::snprintf(wbuf, sizeof(wbuf), "[fnreplay] iter %u w", iter);
+            for (size_t wi = 0; wi < watchAddrs.size() && pos > 0 && static_cast<size_t>(pos) < sizeof(wbuf); ++wi)
+            {
+                const uint32_t addr = watchAddrs[wi];
+                const uint32_t phys = addr & 0x1FFFFFFFu;
+                uint32_t raw = 0u;
+                float fval = 0.0f;
+                if (phys + sizeof(uint32_t) <= kRamBytes)
+                {
+                    std::memcpy(&raw, rdram + phys, sizeof(raw));
+                    std::memcpy(&fval, &raw, sizeof(fval));
+                }
+                int n = std::snprintf(wbuf + pos, sizeof(wbuf) - static_cast<size_t>(pos),
+                                      " 0x%x=%g(0x%08x)", addr, static_cast<double>(fval), raw);
+                if (n > 0)
+                    pos += n;
+            }
+            ps2xSafeLog("%s\n", wbuf);
+        }
+
+        if (dumpIter >= 0 && static_cast<uint32_t>(dumpIter) == iter && !outRamPath.empty()) // PROBE-FR3
+        {
+            const std::string iterRamPath = outRamPath + ".iter" + std::to_string(iter);
+            writeRamDump(iterRamPath);
+            ps2xSafeLog("[fnreplay] iter %u dumped %s\n", iter, iterRamPath.c_str());
+        }
+
+        if (g_fnReplayBlocked) // PROBE-FR3
+        {
+            ps2xSafeLog("[fnreplay] BLOCKED in 0x%08x\n", g_fnReplayBlockedPc ? g_fnReplayBlockedPc : ctx->pc);
+            ps2xSafeLog("[fnreplay] t1reads=%llu cycles=0x%llx\n", static_cast<unsigned long long>(g_fnReplayT1Reads), static_cast<unsigned long long>(g_replayCycles)); // PROBE-FR7
+            { // PROBE-FR7
+                const long long ms = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_fnReplayIterStart).count());
+                ps2xSafeLog("[fnreplay] blocked iter=%u limit=%s steps=%llu elapsed_ms=%lld\n", iter,
+                            (g_fnReplaySteps + steps > kFnReplayMaxSteps) ? "steps" : "timer20s",
+                            static_cast<unsigned long long>(g_fnReplaySteps + steps), ms);
+                const DispatchHistory &h7 = g_dispatchHistory;
+                const uint32_t n7 = static_cast<uint32_t>(h7.pcs.size());
+                const uint32_t tot7 = h7.wrapped ? n7 : h7.next;
+                char line[128];
+                size_t pos = 0u;
+                for (uint32_t i = 0u; i < tot7; ++i)
+                {
+                    const uint32_t idx = (h7.next + n7 - tot7 + i) % n7;
+                    pos += static_cast<size_t>(std::snprintf(line + pos, sizeof(line) - pos, "%08x ", h7.pcs[idx]));
+                    if ((i & 7u) == 7u || i + 1u == tot7)
+                    {
+                        ps2xSafeLog("[fnreplay] ring: %s\n", line);
+                        pos = 0u;
+                        line[0] = '\0';
+                    }
+                }
+                for (uint32_t k = 0u; k < g_fr7SkipRaCount; ++k)
+                    ps2xSafeLog("[fnreplay] skip ra=0x%08x n=%u\n", g_fr7SkipRa[k], g_fr7SkipRaN[k]);
+                for (uint32_t k = 0u; k < g_fr7EntryCount; ++k)
+                    ps2xSafeLog("[fnreplay] iter1 entry[%u]=0x%08x\n", k, g_fr7Entries[k]);
+            }
+            break;
+        }
+
+        if (!isIterDone()) // PROBE-FR2 // PROBE-FR3
+        {
+            ps2xSafeLog("[fnreplay] iter %u INCOMPLETE pc=0x%08x sp=0x%08x\n", iter, ctx->pc, finalSp);
+            break;
+        }
+        if (g_fnReplayStopPc != 0u) // PROBE-FR3
+        {
+            ps2xSafeLog("[fnreplay] iter %u reached stop_pc=0x%08x sp=0x%08x\n", iter, ctx->pc, finalSp);
+        }
+
+        { // PROBE-FR4: synchronously complete all pending DMA and drain VIF1/GIF queues between iterations
+            PS2Memory &mem = rt->memory();
+            uint32_t drained = static_cast<uint32_t>(
+                mem.m_pendingGifTransfers.size() +
+                mem.m_pendingVif0Transfers.size() +
+                mem.m_pendingVif1Transfers.size());
+            mem.processPendingTransfers();
+            ps2_vif1_fence();
+            (void)mem.readIORegister(0x10009000u);
+            if (mem.m_gifArbiter)
+                rt->gifArbiter().drain();
+            mem.m_pendingGifTransfers.clear();
+            mem.m_pendingVif0Transfers.clear();
+            mem.m_pendingVif1Transfers.clear();
+            mem.m_path3MaskedFifo.clear();
+            static constexpr uint32_t kDmaChannels[10] = {
+                0x10008000u, 0x10009000u, 0x1000A000u, 0x1000B000u, 0x1000B400u,
+                0x1000C000u, 0x1000C400u, 0x1000C800u, 0x1000D000u, 0x1000D400u
+            };
+            for (size_t ci = 0; ci < 10; ++ci)
+            {
+                auto it = mem.m_ioRegisters.find(kDmaChannels[ci]);
+                if (it != mem.m_ioRegisters.end()) // PROBE-FR6: unconditionally ensure bit 0x100 is clear in all DMA CHCR regs
+                {
+                    if ((it->second & 0x100u) != 0u)
+                    {
+                        it->second &= ~0x100u;
+                        mem.m_ioRegisters[kDmaChannels[ci] + 0x20u] = 0u;
+                        ++drained;
+                    }
+                }
+                mem.dma_regs[ci].chcr &= ~0x100u;
+                mem.dma_regs[ci].qwc = 0u;
+            }
+            mem.vif1_regs.stat &= ~0x1F000003u;
+            if (auto git = mem.m_ioRegisters.find(0x10003020u); git != mem.m_ioRegisters.end())
+                git->second &= ~0xC00u;
+            rt->drainCompletedDmacHandlers(rdram);
+            if (iter < 5u)
+                ps2xSafeLog("[fnreplay] dma drained n=%u\n", drained);
+        }
+    }
+    // PROBE-FR6: restore wrapped table functions
+    for (size_t i = 0u; i < skipCount; ++i)
+    {
+        if (skipSlotValid[i])
+            g_ps2RecompiledFunctionTable[origSkipSlots[i]] = origSkipFns[i];
+    }
+    g_fnReplaySuppressDcall = false; // PROBE-FR2
+    g_fnReplayStopPc = 0u; // PROBE-FR3
+    g_fnReplaySkipCount = 0u; // PROBE-FR5
+    g_fnReplayBlocked = false; // PROBE-FR3
+    g_fnReplayActive = false; // PROBE-FR2
+
+    if (!outRamPath.empty())
+    {
+        writeRamDump(outRamPath);
+    }
+
+    if (!outRegsPath.empty())
+    {
+        FILE *ogf = std::fopen(outRegsPath.c_str(), "w");
+        if (!ogf)
+        {
+            ps2xSafeLog("[fnreplay] ERROR: failed to open out_regs '%s'\n", outRegsPath.c_str());
+            std::quick_exit(2);
+        }
+        std::fprintf(ogf, "pc 0x%08X\n", ctx->pc);
+        for (int i = 0; i < 32; ++i)
+        {
+            std::fprintf(ogf, "gpr %d %08X %08X %08X %08X\n", i,
+                         static_cast<uint32_t>(_mm_extract_epi32(ctx->r[i], 3)),
+                         static_cast<uint32_t>(_mm_extract_epi32(ctx->r[i], 2)),
+                         static_cast<uint32_t>(_mm_extract_epi32(ctx->r[i], 1)),
+                         static_cast<uint32_t>(_mm_extract_epi32(ctx->r[i], 0)));
+        }
+        std::fprintf(ogf, "hi 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                     static_cast<uint32_t>(ctx->hi1 >> 32), static_cast<uint32_t>(ctx->hi1),
+                     static_cast<uint32_t>(ctx->hi >> 32), static_cast<uint32_t>(ctx->hi));
+        std::fprintf(ogf, "lo 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                     static_cast<uint32_t>(ctx->lo1 >> 32), static_cast<uint32_t>(ctx->lo1),
+                     static_cast<uint32_t>(ctx->lo >> 32), static_cast<uint32_t>(ctx->lo));
+        std::fprintf(ogf, "fcr31 0x%08X\n", ctx->fcr31);
+        for (int i = 0; i < 32; ++i)
+        {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &ctx->f[i], sizeof(bits));
+            std::fprintf(ogf, "fpr %d 0x%08x\n", i, bits);
+        }
+        for (int i = 0; i < 32; ++i)
+        {
+            __m128i iv = _mm_castps_si128(ctx->vu0_vf[i]);
+            std::fprintf(ogf, "vf %d %08X %08X %08X %08X\n", i,
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 3)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 2)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 1)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 0)));
+        }
+        {
+            __m128i iv = _mm_castps_si128(ctx->vu0_acc);
+            std::fprintf(ogf, "acc %08X %08X %08X %08X\n",
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 3)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 2)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 1)),
+                         static_cast<uint32_t>(_mm_extract_epi32(iv, 0)));
+        }
+        std::fprintf(ogf, "done pc=0x%08x\n", ctx->pc);
+        std::fclose(ogf);
+    }
+
+    ps2xSafeLog("[fnreplay] wrote outputs out_ram=%s out_regs=%s\n", outRamPath.c_str(), outRegsPath.c_str());
+    std::fflush(nullptr);
+} // PROBE-FR1
+
 void PS2Runtime::run()
 {
+    if (const char *spec = std::getenv("PS2X_FNREPLAY")) // PROBE-FR1
+    {
+        ps2xFnReplay(m_memory.getRDRAM(), &m_cpuContext, this, spec);
+        if (g_an1) ps2xAn1DumpAll(); // PROBE-AN1c
+        std::quick_exit(0);
+    } // PROBE-FR1
     m_stopRequested.store(false, std::memory_order_relaxed);
     ps2_stubs::resetSifState();
     resetIop();
@@ -6099,9 +8314,14 @@ void PS2Runtime::run()
 #endif
 
     // A blank image to use as a framebuffer
-    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
-    Texture2D frameTex = LoadTextureFromImage(blank);
-    UnloadImage(blank);
+    const bool sdlMode = ps2xSdlActive(); // SDL-FE
+    Texture2D frameTex{};                 // SDL-FE
+    if (!sdlMode)                         // SDL-FE
+    {
+        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+        frameTex = LoadTextureFromImage(blank);
+        UnloadImage(blank);
+    }
 
     ThreadNaming::SetCurrentThreadName("MainLoop"); // PERF-MB
 #ifdef _WIN32
@@ -6163,6 +8383,127 @@ void PS2Runtime::run()
         fprintf(stderr, "=== MAIN THREAD RUN LOOP STARTING ===\n");
         fflush(stderr);
     }
+    // FEAT-FT3: in-game frame-time recorder (PS2X_FT=<prefix>)
+    struct Ft3Entry { int64_t qpc; int64_t epochMs; uint8_t tag; uint64_t seq; uint64_t kicks; uint8_t phase; float seenGap; float work; float wait; float pres; float draw; float texDecMs; uint32_t texDecN; float b1Ms; float b2Ms; float b3Ms; float b4Ms; float b5Ms; float beginMs; float totalMs; uint64_t pub3d; uint64_t pub2d; uint32_t drawFlags; uint64_t gen3d; uint64_t gen2d; int32_t chosen2d; uint32_t coverFail; }; // PROBE-V3L // PROBE-V3N // PROBE-V3O
+    constexpr size_t kFt3Cap = 1u << 20;
+    static const char *s_ft3Env = std::getenv("PS2X_FT");
+    static const bool s_ft3On = (s_ft3Env && s_ft3Env[0] != '\0');
+    uint8_t ft3Tag = 0;
+    std::vector<Ft3Entry> ft3Ring;
+    std::atomic<uint64_t> ft3WriteCount{0};
+    std::mutex ft3Mutex;
+    std::condition_variable ft3Cv;
+    bool ft3Stop = false;
+    std::thread ft3Thread;
+    if (s_ft3On)
+    {
+        ft3Ring.resize(kFt3Cap);
+        std::string outPath = std::string(s_ft3Env) + "_presents.csv";
+        std::error_code ec;
+        std::filesystem::path p(outPath);
+        if (!p.parent_path().empty())
+            std::filesystem::create_directories(p.parent_path(), ec);
+        long long qpcFreq = 0;
+#ifdef _WIN32
+        QueryPerformanceFrequency(&qpcFreq);
+        const unsigned long pid = GetCurrentProcessId();
+#else
+        qpcFreq = 1000000000LL;
+        const unsigned long pid = 0;
+#endif
+        ft3Thread = std::thread([&ft3Ring, &ft3WriteCount, &ft3Mutex, &ft3Cv, &ft3Stop, outPath, qpcFreq, pid, kFt3Cap]() {
+            std::vector<Ft3Entry> snap;
+            snap.reserve(4096);
+            FILE *fp = std::fopen(outPath.c_str(), "w");
+            if (fp)
+            {
+                std::fprintf(fp, "Application,ProcessID,SwapChainAddress,TimeInSeconds,msBetweenPresents,Tag,EpochMs,Seq,Kicks,Phase,SeenGapMs,WorkMs,WaitMs,PresMs,DrawMs,TexDecMs,TexDecN,B1Ms,B2Ms,B3Ms,B4Ms,B5Ms,BeginMs,TotalMs,Pub3D,Pub2D,DrawFlags,Gen3D,Gen2D,Chosen,CoverFail\n"); // PROBE-V3L // PROBE-V3N // PROBE-V3O
+                std::fflush(fp);
+            }
+            uint64_t flushed = 0;
+            int64_t qpc0 = 0;
+            int64_t prevQpc = 0;
+            const double invFreqSec = (qpcFreq > 0) ? (1.0 / static_cast<double>(qpcFreq)) : 0.0;
+            const double invFreqMs = invFreqSec * 1000.0;
+            auto flushBatch = [&]() {
+                const uint64_t cur = ft3WriteCount.load(std::memory_order_acquire);
+                if (cur <= flushed || !fp)
+                    return;
+                uint64_t start = flushed;
+                if (cur - start > kFt3Cap)
+                    start = cur - kFt3Cap;
+                snap.clear();
+                for (uint64_t i = start; i < cur; ++i)
+                    snap.push_back(ft3Ring[static_cast<size_t>(i & (kFt3Cap - 1))]);
+                for (size_t idx = 0; idx < snap.size(); ++idx)
+                {
+                    const Ft3Entry &e = snap[idx];
+                    if (flushed == 0 && idx == 0)
+                    {
+                        qpc0 = e.qpc;
+                        prevQpc = e.qpc;
+                    }
+                    const double tSec = static_cast<double>(e.qpc - qpc0) * invFreqSec;
+                    const double dtMs = (flushed == 0 && idx == 0) ? 0.0 : static_cast<double>(e.qpc - prevQpc) * invFreqMs;
+                    prevQpc = e.qpc;
+                    std::fprintf(fp, "ApeEscape3.exe,%lu,0x1,%.6f,%.4f,%u,%lld,%llu,%llu,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%llu,%llu,%u,%llu,%llu,%d,%u\n", pid, tSec, dtMs, static_cast<unsigned>(e.tag), static_cast<long long>(e.epochMs), static_cast<unsigned long long>(e.seq), static_cast<unsigned long long>(e.kicks), static_cast<unsigned>(e.phase), e.seenGap, e.work, e.wait, e.pres, e.draw, e.texDecMs, static_cast<unsigned>(e.texDecN), e.b1Ms, e.b2Ms, e.b3Ms, e.b4Ms, e.b5Ms, e.beginMs, e.totalMs, static_cast<unsigned long long>(e.pub3d), static_cast<unsigned long long>(e.pub2d), static_cast<unsigned>(e.drawFlags), static_cast<unsigned long long>(e.gen3d), static_cast<unsigned long long>(e.gen2d), static_cast<int>(e.chosen2d), static_cast<unsigned>(e.coverFail)); // PROBE-V3L // PROBE-V3N // PROBE-V3O
+                }
+                std::fflush(fp);
+                flushed = cur;
+            };
+            for (;;)
+            {
+                std::unique_lock<std::mutex> lk(ft3Mutex);
+                ft3Cv.wait_for(lk, std::chrono::seconds(10), [&]() { return ft3Stop; });
+                const bool done = ft3Stop;
+                lk.unlock();
+                flushBatch();
+                if (done)
+                    break;
+            }
+            if (fp)
+                std::fclose(fp);
+        });
+    }
+    // PROBE-V3H: helper to compute phase bitmask and append Ft3Entry
+    // PROBE-V3I: stage timing helper and ft3Record taking 4 stage timing floats (ms)
+    struct Ft3Stages { float seenGap; float work; float wait; float pres; }; // PROBE-V3I
+    static int64_t s_ft3PrevSeenQpc = 0; // PROBE-V3I
+    auto calcFt3Stages = [&](int64_t tSeen, int64_t tWorkEnd, int64_t tWaitEnd, int64_t tPresEnd) -> Ft3Stages { // PROBE-V3I
+        const double qpcFreqD = static_cast<double>(paceQpcFreq());
+        const float seenGap = (s_ft3PrevSeenQpc != 0 && qpcFreqD > 0.0) ? static_cast<float>((tSeen - s_ft3PrevSeenQpc) * 1000.0 / qpcFreqD) : 0.0f;
+        s_ft3PrevSeenQpc = tSeen;
+        const float work = (qpcFreqD > 0.0) ? static_cast<float>((tWorkEnd - tSeen) * 1000.0 / qpcFreqD) : 0.0f;
+        const float wait = (qpcFreqD > 0.0) ? static_cast<float>((tWaitEnd - tWorkEnd) * 1000.0 / qpcFreqD) : 0.0f;
+        const float pres = (qpcFreqD > 0.0) ? static_cast<float>((tPresEnd - tWaitEnd) * 1000.0 / qpcFreqD) : 0.0f;
+        return {seenGap, work, wait, pres};
+    };
+    auto ft3Record = [&](uint8_t tag, uint64_t seq, uint64_t kicks, float seenGap = 0.0f, float work = 0.0f, float wait = 0.0f, float pres = 0.0f, float draw = 0.0f, float texDecMs = 0.0f, uint32_t texDecN = 0, float b1Ms = 0.0f, float b2Ms = 0.0f, float b3Ms = 0.0f, float b4Ms = 0.0f, float b5Ms = 0.0f, float beginMs = 0.0f, float totalMs = 0.0f, uint64_t pub3d = 0, uint64_t pub2d = 0, uint32_t drawFlags = 0, uint64_t gen3d = 0, uint64_t gen2d = 0, int32_t chosen2d = 0, uint32_t coverFail = 0) { // PROBE-V3L // PROBE-V3N // PROBE-V3O
+        if (!s_ft3On)
+            return;
+        long long qpcNow = 0;
+#ifdef _WIN32
+        QueryPerformanceCounter(&qpcNow);
+#else
+        qpcNow = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+        const int64_t epochMsNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        uint8_t phase = 0;
+        if (g_ps2xPause.load(std::memory_order_relaxed) != 0)
+            phase |= (1u << 0);
+        if (g_rdFrameIsFx.load(std::memory_order_relaxed))
+            phase |= (1u << 1);
+        if (probe_ae::isMovieActive(m_memory.getRDRAM()))
+            phase |= (1u << 2);
+        const auto nowSteady = std::chrono::steady_clock::now();
+        const auto diffMs = std::chrono::duration_cast<std::chrono::milliseconds>(nowSteady - g_lastSceneTransitionTime).count();
+        if (diffMs >= 0 && diffMs < 4000)
+            phase |= (1u << 3);
+
+        const uint64_t idx = ft3WriteCount.load(std::memory_order_relaxed);
+        ft3Ring[static_cast<size_t>(idx & (kFt3Cap - 1))] = Ft3Entry{static_cast<int64_t>(qpcNow), epochMsNow, tag, seq, kicks, phase, seenGap, work, wait, pres, draw, texDecMs, texDecN, b1Ms, b2Ms, b3Ms, b4Ms, b5Ms, beginMs, totalMs, pub3d, pub2d, drawFlags, gen3d, gen2d, chosen2d, coverFail}; // PROBE-V3L // PROBE-V3N // PROBE-V3O
+        ft3WriteCount.store(idx + 1, std::memory_order_release);
+    };
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
         tick++;
@@ -6330,27 +8671,17 @@ void PS2Runtime::run()
             }
         }
         // C312: F9 dumps all EE RAM (32 MB) to logs/ram_f9.bin for diffing against a PCSX2 save state
-        if (IsKeyPressed(KEY_F7)) ps2xPadMarker(); // PROBE-MK
-        if (IsKeyPressed(KEY_F8)) // FEAT-DE
+        if (s_ft3On) // FEAT-FT3
         {
-            int cur = g_mcPendingChoice.load(std::memory_order_relaxed);
-            int next = 0;
-            if (cur == 0 || cur == 1)
-            {
-                next = (cur == 0) ? 1 : 0;
-            }
-            else
-            {
-                uint32_t guestVal = 0;
-                if (const uint8_t *rdram = m_memory.getRDRAM())
-                {
-                    std::memcpy(&guestVal, rdram + 0x00649910u, sizeof(uint32_t));
-                }
-                next = (guestVal == 0u) ? 1 : 0;
-            }
-            g_mcPendingChoice.store(next, std::memory_order_relaxed);
-            ps2xSafeLog("[mc] pending=%s\n", (next == 0) ? "boy" : "girl");
+            if (IsKeyPressed(KEY_F1)) ft3Tag = 1;
+            else if (IsKeyPressed(KEY_F2)) ft3Tag = 2;
+            else if (IsKeyPressed(KEY_F3)) ft3Tag = 3;
+            else if (IsKeyPressed(KEY_F4)) ft3Tag = 4;
+            else if (IsKeyPressed(KEY_F5)) ft3Tag = 5;
+            else if (IsKeyPressed(KEY_F6)) ft3Tag = 6;
         }
+        if (IsKeyPressed(KEY_F7)) ps2xPadMarker(); // PROBE-MK
+        if (IsKeyPressed(KEY_F8)) ps2xDevToggleMcChoice(); // FEAT-DE // FIX-DK
         { // FEAT-DE2: detect game-set MC value and override with pending choice
             const int mcPend = g_mcPendingChoice.load(std::memory_order_relaxed);
             if (mcPend == 0 || mcPend == 1)
@@ -6370,6 +8701,37 @@ void PS2Runtime::run()
                 }
             }
         }
+        if (g_an1) // PROBE-AN1
+        {
+            extern void ps2xAn1Poll(bool f9, bool f10);
+            ps2xAn1Poll(IsKeyPressed(KEY_F9), IsKeyPressed(KEY_F10));
+        }
+        extern std::atomic<int> g_ps2xPause;      // FEAT-PA1
+        extern std::atomic<int> g_ps2xStepTokens; // FEAT-PA1
+        static const bool s_pauseKeysOn = []() {  // FEAT-PA1
+            const char *e = std::getenv("PS2X_PAUSE_KEYS");
+            return !(e && e[0] == '0');
+        }();
+        bool pauseToggled = false; // FEAT-PA1
+        if (s_pauseKeysOn) // FEAT-PA1
+        {
+            if (IsKeyPressed(KEY_F9))
+            {
+                const int next = (g_ps2xPause.load(std::memory_order_relaxed) == 0) ? 1 : 0;
+                g_ps2xPause.store(next, std::memory_order_release);
+                if (next == 0)
+                    g_ps2xStepTokens.store(0, std::memory_order_release);
+                pauseToggled = true;
+                ps2xSafeLog("[pause] %s\n", next ? "PAUSED" : "RESUMED");
+            }
+            if (IsKeyPressed(KEY_F10) && g_ps2xPause.load(std::memory_order_relaxed) != 0)
+            {
+                g_ps2xStepTokens.fetch_add(1, std::memory_order_acq_rel);
+                ps2xSafeLog("[pause] step 1 frame\n");
+            }
+        }
+        else
+        {
         if (IsKeyPressed(KEY_F9))
         {
             FILE *rf = std::fopen("logs/ram_f9.bin", "wb");
@@ -6415,6 +8777,7 @@ void PS2Runtime::run()
                 }
             }
         }
+        }
         // Sample real keyboard state from Raylib window thread
         uint16_t activeButtons = 0;
         if (IsKeyDown(KEY_ENTER)) activeButtons |= (1u << 3); // START
@@ -6448,9 +8811,9 @@ void PS2Runtime::run()
         const auto timeSinceLastPresent = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastPresentTime).count();
         const bool vblankLatchOn = isVblankLatchEnabled();
         constexpr int64_t kIdleRepresentMs = 250; // PERF-IR2: re-present an unchanged frame only every 250 ms (was 33 ms: ~25 redundant sync+de-swizzle presents/s at the title, kd)
-        const bool shouldPresent = vblankLatchOn
-            ? ((currentPresentSeq != s_lastPresentedSeq) || (timeSinceLastPresent >= kIdleRepresentMs))
-            : ((currentGsKicks != s_lastPresentedGsKicks) || (timeSinceLastPresent >= kIdleRepresentMs));
+        const bool hasNewFrame = vblankLatchOn ? (currentPresentSeq != s_lastPresentedSeq) : (currentGsKicks != s_lastPresentedGsKicks); // FIX-PACE1
+        const int64_t tSeen = paceQpcNow(); // PROBE-V3I
+        const bool shouldPresent = pauseToggled || hasNewFrame || (timeSinceLastPresent >= kIdleRepresentMs); // FEAT-PA1 // FIX-PACE1
 
         if (shouldPresent)
         {
@@ -6495,9 +8858,14 @@ void PS2Runtime::run()
             }
 
             const auto presT0 = std::chrono::steady_clock::now();
+            const int64_t presT0Qpc = (isPaceLogEnabled() || isPaceEnabled()) ? paceQpcNow() : 0; // FIX-PACE1
+            const bool pace2On = isPace2Enabled(); // PROBE-PACE2
+            int64_t pace2A = 0, pace2C = 0, pace2C1 = 0; // PROBE-PACE2
+            const int64_t pace2AStart = pace2On ? presT0Qpc : 0; // PROBE-PACE2
             uint32_t presentWidth = FB_WIDTH;
             uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
             bool rdClassic = false; // FEAT-RD18
+            bool rdFx = false; // PROBE-FXC2
             if (ps2xRdTakeoverOn()) // FEAT-RD12: skip UploadFrame / GS readback
             {
                 if (!vblankLatchOn)
@@ -6511,6 +8879,7 @@ void PS2Runtime::run()
                     }
                 }
                 rdClassic = g_rdFrameIsClassic.load(std::memory_order_acquire); // FEAT-RD18
+                rdFx = rdClassic && g_rdFrameIsFx.load(std::memory_order_acquire); // PROBE-FXC2
                 if (rdClassic) // FEAT-RD18: classic fallback for non-geometry frames
                 {
                     UploadFrame(frameTex, this, presentWidth, presentHeight, tick, true);
@@ -6529,7 +8898,10 @@ void PS2Runtime::run()
                     ps2xRdSetPresentSize(presentWidth, presentHeight);
             }
 
-            BeginDrawing();
+            std::chrono::steady_clock::time_point gtEd0{}; // SDL-FE
+            if (!ps2xSdlActive())                         // SDL-FE
+            {
+                BeginDrawing();
             ClearBackground(BLACK);
             const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
@@ -6547,6 +8919,26 @@ void PS2Runtime::run()
                 if (!std::strcmp(a, "fill")) return -1.0f;
                 return 0.0f;
             }();
+            static const float s_aspectMax = []() { // FIX-R6
+                const char *a = getenv("PS2X_ASPECT_MAX"); // FIX-R6
+                if (!a || !*a) return 21.0f / 9.0f; // FIX-R6
+                if (!std::strcmp(a, "21:9")) return 21.0f / 9.0f; // FIX-R6
+                if (!std::strcmp(a, "32:9")) return 32.0f / 9.0f; // FIX-R6
+                if (!std::strcmp(a, "16:9")) return 16.0f / 9.0f; // FIX-R6
+                if (!std::strcmp(a, "16:10")) return 1.6f; // FIX-R6
+                if (!std::strcmp(a, "4:3")) return 4.0f / 3.0f; // FIX-R6
+                if (!std::strcmp(a, "none") || !std::strcmp(a, "NONE")) return 0.0f; // FIX-R6
+                const char *colon = std::strchr(a, ':'); // FIX-R6
+                if (colon) { // FIX-R6
+                    float num = std::strtof(a, nullptr); // FIX-R6
+                    float den = std::strtof(colon + 1, nullptr); // FIX-R6
+                    if (num > 0.0f && den > 0.0f) return num / den; // FIX-R6
+                } // FIX-R6
+                char *end = nullptr; // FIX-R6
+                float v = std::strtof(a, &end); // FIX-R6
+                if (end != a && v > 0.0f) return v; // FIX-R6
+                return 21.0f / 9.0f; // FIX-R6
+            }(); // FIX-R6
             float dstWidth, dstHeight;
             extern float g_rdAspectK; // FEAT-RD16
             if (s_aspect > 0.0f || s_aspect < 0.0f)
@@ -6556,7 +8948,18 @@ void PS2Runtime::run()
                 float boxAspect = (s_aspect > 0.0f) ? s_aspect : winAspect;
                 if (s_aspect < 0.0f && ps2xRdTakeoverOn()) // FEAT-RD16
                 {
-                    if (k >= 1.0f)
+                    if (s_aspectMax > 0.0f && winAspect > s_aspectMax) // FIX-R6
+                    {
+                        boxAspect = s_aspectMax; // FIX-R6
+                        g_rdAspectK = s_aspectMax / (4.0f / 3.0f); // FIX-R6
+                        static bool s_aspectCapLogged = false; // FIX-R6
+                        if (!s_aspectCapLogged) // FIX-R6
+                        {
+                            s_aspectCapLogged = true; // FIX-R6
+                            ps2xSafeLog("[aspect] fill capped at %.2f (window %.2f)\n", s_aspectMax, winAspect); // FIX-R6
+                        }
+                    }
+                    else if (k >= 1.0f)
                     {
                         boxAspect = winAspect;
                         g_rdAspectK = k;
@@ -6601,6 +9004,7 @@ void PS2Runtime::run()
             if (ps2xRdActive() && (s_rdShow || ps2xRdTakeoverOn()) && !rdClassic) // FEAT-RD1 // FEAT-RD12 // FEAT-RD18 // FEAT-RD49
             {
                 rlClearScreenBuffers();
+                if (pace2On) pace2A = paceQpcNow() - pace2AStart; // PROBE-PACE2
                 if (!ps2xRdDraw(dstRect.x, dstRect.y, dstRect.width, dstRect.height))
                 {
                     DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
@@ -6611,54 +9015,737 @@ void PS2Runtime::run()
             }
             else
             {
+                if (pace2On) pace2A = paceQpcNow() - pace2AStart; // PROBE-PACE2
                 DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
                 rd35Path = rdClassic ? 'c' : 'd'; // PROBE-RD35
             }
-            if (ps2xRdActive()) // PROBE-RD35 // FEAT-RD49
+            { // PROBE-PACE2
+                Pace2Scope pace2CScope(pace2C, pace2On); // PROBE-PACE2
+                static const bool s_rdBlackProbe = []() { // FIX-PACE3
+                    const char *e = std::getenv("PS2X_RD_BLACKPROBE");
+                    return e && e[0] == '1';
+                }();
+                if (s_rdBlackProbe && ps2xRdActive()) // FIX-PACE3 // PROBE-RD35 // FEAT-RD49
+                {
+                    Pace2Scope pace2C1Scope(pace2C1, pace2On); // PROBE-PACE2
+                    extern void ps2xRd35Describe(char *buf, size_t cap);
+                    static uint32_t s_rb35Frames = 0u, s_rb35Black = 0u, s_rb35A = 0u, s_rb35B = 0u, s_rb35C = 0u, s_rb35Detail = 0u;
+                    static auto s_rb35Last = std::chrono::steady_clock::now();
+                    rlDrawRenderBatchActive();
+                    ++s_rb35Frames;
+                    if (rd35Path == 'a') ++s_rb35A; else if (rd35Path == 'b') ++s_rb35B; else if (rd35Path == 'c') ++s_rb35C;
+                    unsigned sum = 0u;
+                    unsigned maxv = 0u;
+                    for (int gy = 0; gy < 8; ++gy)
+                        for (int gx = 0; gx < 8; ++gx)
+                        {
+                            unsigned char px[4] = {0, 0, 0, 0};
+                            const int sx = static_cast<int>(dstRect.x + dstRect.width * ((static_cast<float>(gx) + 0.5f) / 8.0f));
+                            const int sy = static_cast<int>(screenHeight - (dstRect.y + dstRect.height * ((static_cast<float>(gy) + 0.5f) / 8.0f)));
+                            glReadPixels(sx, sy, 1, 1, 0x1908u, 0x1401u, px);
+                            sum += px[0] + px[1] + px[2];
+                            maxv = std::max<unsigned>(maxv, std::max<unsigned>(px[0], std::max<unsigned>(px[1], px[2])));
+                        }
+                    if (maxv < 12u)
+                    {
+                        ++s_rb35Black;
+                        if (s_rb35Frames > 600u && s_rb35Detail < 8u)
+                        {
+                            ++s_rb35Detail;
+                            char d[1024];
+                            ps2xRd35Describe(d, sizeof(d));
+                            ps2xSafeLog("[rdblack] #%u path=%c uploadFrame=%d classic=%d takeover=%d sum=%u max=%u frame=%u %s\n", s_rb35Black, rd35Path,
+                                        rd35Upload ? 1 : 0, rdClassic ? 1 : 0, ps2xRdTakeoverOn() ? 1 : 0, sum, maxv, s_rb35Frames, d);
+                        }
+                    }
+                    const auto nowRb = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(nowRb - s_rb35Last).count() >= 5000)
+                    {
+                        s_rb35Last = nowRb;
+                        ps2xSafeLog("[rdblack] frames=%u black=%u pathA=%u pathB=%u pathC=%u\n", s_rb35Frames, s_rb35Black, s_rb35A, s_rb35B, s_rb35C);
+                    }
+                }
+                if (m_debugUiInitialized && m_debugUiDrawCallback)
+                {
+                    m_debugUiDrawCallback(*this, m_debugUiUserData);
+                }
+                if (g_ps2xPause.load(std::memory_order_relaxed) != 0) // FEAT-PA1
+                {
+                    DrawRectangle(8, 8, 220, 28, Color{0, 0, 0, 180});
+                    DrawText("PAUSED (F10 = step)", 16, 14, 16, YELLOW);
+                }
+            } // PROBE-PACE2
+            // FIX-PACE1 / FIX-PACE4: swap-time frame pacing + real swap-interval telemetry
+            const bool paceOn = isPaceEnabled();
+            const bool paceLogOn = isPaceLogEnabled();
+            const bool isPaused = (g_ps2xPause.load(std::memory_order_relaxed) != 0);
+            const bool skipPace = isPaused || !IsWindowFocused() || IsWindowMinimized(); // FIX-PACE4
+            static int64_t s_nextSwapQpc = 0;
+            static int64_t s_prevSwapStampQpc = 0;
+            static int64_t s_paceLogLastQpc = 0;
+            static std::vector<double> s_paceSwapMs;
+            static std::vector<double> s_paceDrawMs;
+            static double s_paceWaitSumMs = 0.0;
+            static uint32_t s_paceWaitCount = 0;
+            static uint32_t s_paceResyncs = 0;
+            static uint32_t s_paceLate2ms = 0;
+            const int64_t qpcFreq = (paceOn || paceLogOn) ? paceQpcFreq() : 0;
+            const int64_t periodTicks = paceOn ? static_cast<int64_t>(std::llround(static_cast<double>(qpcFreq) / getPaceHz())) : 0;
+            const int64_t minAdvanceTicks = paceOn ? static_cast<int64_t>(std::llround(0.7 * static_cast<double>(qpcFreq) / getPaceHz())) : 0;
+            int64_t prevNextSwapQpc = 0;
+            bool resyncedThisFrame = false;
+            double waitMsThisFrame = 0.0;
+            if (paceOn && !skipPace && hasNewFrame) // FIX-PACE4
             {
-                extern void ps2xRd35Describe(char *buf, size_t cap);
-                static uint32_t s_rb35Frames = 0u, s_rb35Black = 0u, s_rb35A = 0u, s_rb35B = 0u, s_rb35C = 0u, s_rb35Detail = 0u;
-                static auto s_rb35Last = std::chrono::steady_clock::now();
+                const bool paceNowait = isPaceNowaitEnabled(); // PROBE-PACE5
+                const bool paceYield = isPaceYieldEnabled(); // PROBE-PACE5
+                bool didWait = false; // PROBE-PACE5
                 rlDrawRenderBatchActive();
-                ++s_rb35Frames;
-                if (rd35Path == 'a') ++s_rb35A; else if (rd35Path == 'b') ++s_rb35B; else if (rd35Path == 'c') ++s_rb35C;
-                unsigned sum = 0u;
-                unsigned maxv = 0u;
-                for (int gy = 0; gy < 8; ++gy)
-                    for (int gx = 0; gx < 8; ++gx)
-                    {
-                        unsigned char px[4] = {0, 0, 0, 0};
-                        const int sx = static_cast<int>(dstRect.x + dstRect.width * ((static_cast<float>(gx) + 0.5f) / 8.0f));
-                        const int sy = static_cast<int>(screenHeight - (dstRect.y + dstRect.height * ((static_cast<float>(gy) + 0.5f) / 8.0f)));
-                        glReadPixels(sx, sy, 1, 1, 0x1908u, 0x1401u, px);
-                        sum += px[0] + px[1] + px[2];
-                        maxv = std::max<unsigned>(maxv, std::max<unsigned>(px[0], std::max<unsigned>(px[1], px[2])));
-                    }
-                if (maxv < 12u)
+                int64_t nowQpc = paceQpcNow();
+                if (s_nextSwapQpc == 0)
                 {
-                    ++s_rb35Black;
-                    if (s_rb35Frames > 600u && s_rb35Detail < 8u)
+                    s_nextSwapQpc = nowQpc;
+                }
+                else if (nowQpc > s_nextSwapQpc + periodTicks)
+                {
+                    s_nextSwapQpc = nowQpc;
+                    ++s_paceResyncs;
+                    resyncedThisFrame = true;
+                }
+                else if (nowQpc < s_nextSwapQpc)
+                {
+                    if ((s_nextSwapQpc - nowQpc) > periodTicks) // FIX-PACE4: never block longer than one period
+                        s_nextSwapQpc = nowQpc + periodTicks;
+                    if (!paceNowait) // PROBE-PACE5
                     {
-                        ++s_rb35Detail;
-                        char d[1024];
-                        ps2xRd35Describe(d, sizeof(d));
-                        ps2xSafeLog("[rdblack] #%u path=%c uploadFrame=%d classic=%d takeover=%d sum=%u max=%u frame=%u %s\n", s_rb35Black, rd35Path,
-                                    rd35Upload ? 1 : 0, rdClassic ? 1 : 0, ps2xRdTakeoverOn() ? 1 : 0, sum, maxv, s_rb35Frames, d);
+                        didWait = true; // PROBE-PACE5
+                        const int64_t waitStartQpc = nowQpc;
+                        const int64_t coarseMarginTicks = qpcFreq / 1000;
+                        const int64_t coarseTargetQpc = s_nextSwapQpc - coarseMarginTicks;
+                        if (nowQpc < coarseTargetQpc)
+                        {
+#ifdef _WIN32
+                            static void *s_hiResTimer = []() -> void * {
+                                void *h = CreateWaitableTimerExW(nullptr, nullptr, 0x2u, 0x1F0003u);
+                                if (!h)
+                                    timeBeginPeriod(1);
+                                return h;
+                            }();
+                            if (s_hiResTimer)
+                            {
+                                const double remSec = static_cast<double>(coarseTargetQpc - nowQpc) / static_cast<double>(qpcFreq);
+                                long long due100ns = -static_cast<long long>(remSec * 10000000.0);
+                                const unsigned long maxWaitMs = static_cast<unsigned long>((periodTicks * 1000LL) / qpcFreq) + 2ul; // FIX-PACE4
+                                if (due100ns < 0 && SetWaitableTimer(s_hiResTimer, &due100ns, 0, nullptr, nullptr, 0))
+                                    WaitForSingleObject(s_hiResTimer, maxWaitMs); // FIX-PACE4
+                            }
+                            else
+                            {
+                                const unsigned long ms = static_cast<unsigned long>((coarseTargetQpc - nowQpc) * 1000LL / qpcFreq);
+                                if (ms > 0)
+                                    Sleep(ms);
+                            }
+#else
+                            const auto targetTp = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(coarseTargetQpc));
+                            std::this_thread::sleep_until(targetTp);
+#endif
+                        }
+                        while (paceQpcNow() < s_nextSwapQpc && (paceQpcNow() - waitStartQpc) < periodTicks) // FIX-PACE4
+                        {
+#if defined(_WIN32) || defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+                            _mm_pause();
+#else
+                            std::this_thread::yield();
+#endif
+                        }
+                        waitMsThisFrame = static_cast<double>(paceQpcNow() - waitStartQpc) * 1000.0 / static_cast<double>(qpcFreq);
                     }
                 }
-                const auto nowRb = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(nowRb - s_rb35Last).count() >= 5000)
+                if (paceYield && !didWait) // PROBE-PACE5
                 {
-                    s_rb35Last = nowRb;
-                    ps2xSafeLog("[rdblack] frames=%u black=%u pathA=%u pathB=%u pathC=%u\n", s_rb35Frames, s_rb35Black, s_rb35A, s_rb35B, s_rb35C);
+#ifdef _WIN32
+                    Sleep(1);
+#else
+                    std::this_thread::yield();
+#endif
                 }
+                prevNextSwapQpc = s_nextSwapQpc;
             }
-            if (m_debugUiInitialized && m_debugUiDrawCallback)
+            if (paceLogOn)
             {
-                m_debugUiDrawCallback(*this, m_debugUiUserData);
+                static std::array<std::vector<double>, 9> s_pace2Ms; // PROBE-PACE2
+                if (pace2On) // PROBE-PACE2
+                {
+                    int64_t b[6] = {};
+                    ps2xRdPace2Take(b);
+                    const int64_t bSum = b[1] + b[2] + b[3] + b[4] + b[5];
+                    const int64_t b6 = (b[0] > bSum) ? (b[0] - bSum) : 0;
+                    const double toMs = 1000.0 / static_cast<double>(qpcFreq);
+                    const int64_t ticks[9] = {pace2A, b[1], b[2], b[3], b[4], b[5], b6, pace2C, pace2C1};
+                    for (size_t i = 0; i < 9; ++i)
+                        s_pace2Ms[i].push_back(static_cast<double>(ticks[i]) * toMs);
+                }
+                const int64_t swapStampQpc = paceQpcNow();
+                if (s_paceLogLastQpc == 0)
+                    s_paceLogLastQpc = swapStampQpc;
+                if (s_prevSwapStampQpc != 0)
+                {
+                    const int64_t diffTicks = swapStampQpc - s_prevSwapStampQpc;
+                    if (diffTicks > 0 && diffTicks <= qpcFreq)
+                        s_paceSwapMs.push_back(static_cast<double>(diffTicks) * 1000.0 / static_cast<double>(qpcFreq));
+                }
+                s_prevSwapStampQpc = swapStampQpc;
+                const double drawMs = static_cast<double>(swapStampQpc - presT0Qpc) * 1000.0 / static_cast<double>(qpcFreq) - waitMsThisFrame;
+                s_paceDrawMs.push_back(drawMs > 0.0 ? drawMs : 0.0);
+                s_paceWaitSumMs += waitMsThisFrame;
+                ++s_paceWaitCount;
+                if (paceOn && !skipPace && hasNewFrame && !resyncedThisFrame && prevNextSwapQpc != 0) // FIX-PACE4
+                {
+                    const int64_t lateTicks = swapStampQpc - prevNextSwapQpc;
+                    if (lateTicks > (2 * qpcFreq / 1000))
+                        ++s_paceLate2ms;
+                }
+                if ((swapStampQpc - s_paceLogLastQpc) >= (5 * qpcFreq) && !s_paceSwapMs.empty())
+                {
+                    std::vector<double> sv(s_paceSwapMs);
+                    std::sort(sv.begin(), sv.end());
+                    const auto sat = [&](double q) { return sv[std::min<size_t>(sv.size() - 1, static_cast<size_t>(q * static_cast<double>(sv.size())))]; };
+                    double sum = 0.0;
+                    for (double x : sv) sum += x;
+                    const double mean = sum / static_cast<double>(sv.size());
+                    double var = 0.0;
+                    for (double x : sv) { const double d = x - mean; var += d * d; }
+                    const double stdev = std::sqrt(var / static_cast<double>(sv.size()));
+                    std::vector<double> dv(s_paceDrawMs);
+                    std::sort(dv.begin(), dv.end());
+                    const auto dat = [&](double q) { return dv[std::min<size_t>(dv.size() - 1, static_cast<size_t>(q * static_cast<double>(dv.size())))]; };
+                    const double waitAvg = s_paceWaitCount ? (s_paceWaitSumMs / static_cast<double>(s_paceWaitCount)) : 0.0;
+                    ps2xSafeLog("[pace] n=%u swap p50=%.2f p95=%.2f p99=%.2f max=%.2f ms stdev=%.2f | draw p50=%.2f p95=%.2f max=%.2f | waitAvg=%.2f resyncs=%u late>2ms=%u pace=%d\n",
+                                static_cast<unsigned>(sv.size()), sat(0.50), sat(0.95), sat(0.99), sv.back(), stdev,
+                                dat(0.50), dat(0.95), dv.back(), waitAvg, s_paceResyncs, s_paceLate2ms, paceOn ? 1 : 0);
+                    if (pace2On && !s_pace2Ms[0].empty()) // PROBE-PACE2
+                    {
+                        double p50[9] = {}, p95[9] = {};
+                        for (size_t i = 0; i < 9; ++i)
+                        {
+                            std::sort(s_pace2Ms[i].begin(), s_pace2Ms[i].end());
+                            const size_t n = s_pace2Ms[i].size();
+                            p50[i] = s_pace2Ms[i][std::min<size_t>(n - 1, static_cast<size_t>(0.50 * static_cast<double>(n)))];
+                            p95[i] = s_pace2Ms[i][std::min<size_t>(n - 1, static_cast<size_t>(0.95 * static_cast<double>(n)))];
+                            s_pace2Ms[i].clear();
+                        }
+                        ps2xSafeLog("[pace2] A=%.2f/%.2f B1=%.2f/%.2f B2=%.2f/%.2f B3=%.2f/%.2f B4=%.2f/%.2f B5=%.2f/%.2f B6=%.2f/%.2f C=%.2f/%.2f C1=%.2f/%.2f (p50/p95 ms)\n",
+                                    p50[0], p95[0], p50[1], p95[1], p50[2], p95[2], p50[3], p95[3],
+                                    p50[4], p95[4], p50[5], p95[5], p50[6], p95[6], p50[7], p95[7], p50[8], p95[8]);
+                    }
+                    s_paceSwapMs.clear();
+                    s_paceDrawMs.clear();
+                    s_paceWaitSumMs = 0.0;
+                    s_paceWaitCount = 0;
+                    s_paceResyncs = 0;
+                    s_paceLate2ms = 0;
+                    s_paceLogLastQpc = swapStampQpc;
+                }
             }
-            const auto gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT
-            EndDrawing();
+                gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; // PROBE-GT // SDL-FE
+                EndDrawing();
+                if (paceOn) // FIX-PACE1
+                {
+                    if (!skipPace && hasNewFrame) // FIX-PACE4
+                    {
+                        const int64_t afterSwapQpc = paceQpcNow();
+                        const int64_t cand1 = prevNextSwapQpc + periodTicks;
+                        const int64_t cand2 = afterSwapQpc + minAdvanceTicks;
+                        s_nextSwapQpc = (cand1 > cand2) ? cand1 : cand2;
+                    }
+                    else
+                    {
+                        s_nextSwapQpc = 0;
+                    }
+                }
+                ft3Record(ft3Tag, currentPresentSeq, currentGsKicks); // PROBE-V3H
+            }
+            else // SDL-FE
+            {
+#if defined(PS2X_HAS_SDL3) // RDG3
+                if (rdgfx_vk::active() && ps2xRdTakeoverOn() && !rdClassic) // RDG3
+                {
+                    const int64_t tDraw0 = paceQpcNow(); // PROBE-V3J
+                    rdgfx_vk::beginFrame(); // RDG3
+                    rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 1.0f); // RDG3
+                    const int64_t tBegin1 = paceQpcNow(); // PROBE-V3L
+                    int rw = 0, rh = 0; // RDG3
+                    rdgfx::getBackbufferSize(rw, rh); // RDG3
+                    const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth)); // RDG3
+                    const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight)); // RDG3
+                    const float screenWidth = static_cast<float>(rw); // RDG3
+                    const float screenHeight = static_cast<float>(rh); // RDG3
+                    // FIX-P1: live graphics settings getters
+                    extern int ps2xGfxGetAspectMode(); // FIX-P1
+                    extern float ps2xGfxGetAspectMax(); // FIX-P1
+                    const int s_aspectMode = ps2xGfxGetAspectMode(); // FIX-P1
+                    float s_aspect = 4.0f / 3.0f; // FIX-P1
+                    switch (s_aspectMode) // FIX-P1
+                    {
+                        case 0: s_aspect = 4.0f / 3.0f; break; // 4:3
+                        case 1: s_aspect = -1.0f; break;       // fill
+                        case 2: s_aspect = 16.0f / 9.0f; break;// 16:9
+                        case 3: s_aspect = 1.6f; break;        // 16:10
+                        case 4: s_aspect = 0.0f; break;        // native
+                        default: s_aspect = 4.0f / 3.0f; break;
+                    }
+                    const float s_aspectMax = ps2xGfxGetAspectMax(); // FIX-P1
+                    static float s_lastAspectLogged = 999.0f; // FIX-P1
+                    static float s_lastCapLogged = -999.0f;   // FIX-P1
+                    static float s_lastLoggedK = -999.0f;     // FIX-P1
+                    if (s_lastAspectLogged != s_aspect)       // FIX-P1
+                    {
+                        s_lastAspectLogged = s_aspect;        // FIX-P1
+                        s_lastCapLogged = -999.0f;            // FIX-P1
+                        s_lastLoggedK = -999.0f;              // FIX-P1
+                    }
+                    float dstWidth, dstHeight; // RDG3
+                    extern float g_rdAspectK; // RDG3
+                    if (s_aspect > 0.0f || s_aspect < 0.0f) // RDG3
+                    {
+                        const float winAspect = (screenHeight > 0.0f) ? (screenWidth / screenHeight) : (4.0f / 3.0f);
+                        const float k = winAspect / (4.0f / 3.0f);
+                        float boxAspect = (s_aspect > 0.0f) ? s_aspect : winAspect;
+                        if (s_aspect < 0.0f && ps2xRdTakeoverOn())
+                        {
+                            if (s_aspectMax > 0.0f && winAspect > s_aspectMax) // FIX-R6
+                            {
+                                boxAspect = s_aspectMax; // FIX-R6
+                                g_rdAspectK = s_aspectMax / (4.0f / 3.0f); // FIX-R6
+                                s_lastLoggedK = -999.0f; // FIX-P1
+                                if (std::abs(s_lastCapLogged - s_aspectMax) > 0.001f) // FIX-P1
+                                {
+                                    s_lastCapLogged = s_aspectMax; // FIX-P1
+                                    ps2xSafeLog("[aspect] fill capped at %.2f (window %.2f)\n", s_aspectMax, winAspect); // FIX-R6
+                                }
+                            }
+                            else
+                            {
+                                s_lastCapLogged = -999.0f; // FIX-P1
+                                if (k >= 1.0f)
+                                {
+                                    boxAspect = winAspect;
+                                    g_rdAspectK = k;
+                                }
+                                else
+                                {
+                                    boxAspect = 4.0f / 3.0f;
+                                    g_rdAspectK = 1.0f;
+                                }
+                                if (std::abs(s_lastLoggedK - k) > 0.001f) // FIX-P1
+                                {
+                                    s_lastLoggedK = k; // FIX-P1
+                                    ps2xSafeLog("[aspect] fill k=%.3f\n", k); // FIX-P1
+                                }
+                            }
+                        }
+                        else
+                        {
+                            s_lastCapLogged = -999.0f; // FIX-P1
+                            s_lastLoggedK = -999.0f;   // FIX-P1
+                            g_rdAspectK = 1.0f;
+                        }
+                        dstWidth = std::min(screenWidth, screenHeight * boxAspect);
+                        dstHeight = dstWidth / boxAspect;
+                    }
+                    else
+                    {
+                        g_rdAspectK = 1.0f;
+                        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+                        dstWidth = srcWidth * scale;
+                        dstHeight = srcHeight * scale;
+                    }
+                    const float dstX = (screenWidth - dstWidth) * 0.5f; // RDG3
+                    const float dstY = (screenHeight - dstHeight) * 0.5f; // RDG3
+                    const int64_t fg4RealDrawT0 = ps2xRdInterpActive() ? paceQpcNow() : 0; // FIX-FG4c
+                    (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight); // RDG3
+                    const int64_t fg4RealDrawT1 = ps2xRdInterpActive() ? paceQpcNow() : 0; // FIX-FG4c
+                    extern void ps2xRdGetDrawSeqs(uint64_t *seq3d, uint64_t *seq2d, uint32_t *flags); // PROBE-V3N
+                    uint64_t pub3d = 0, pub2d = 0; // PROBE-V3N
+                    uint32_t drawFlags = 0; // PROBE-V3N
+                    ps2xRdGetDrawSeqs(&pub3d, &pub2d, &drawFlags); // PROBE-V3N
+                    extern void ps2xRdGetPublishedSeqs(uint64_t *gen3d, uint64_t *gen2d); // PROBE-V3O
+                    uint64_t gen3d = 0, gen2d = 0; // PROBE-V3O
+                    ps2xRdGetPublishedSeqs(&gen3d, &gen2d); // PROBE-V3O
+                    extern void ps2xRdGetDrawSeqs2(int32_t *chosen2d, uint32_t *coverFail); // PROBE-V3O
+                    int32_t chosen2d = -1; // PROBE-V3O
+                    uint32_t coverFail = 0; // PROBE-V3O
+                    ps2xRdGetDrawSeqs2(&chosen2d, &coverFail); // PROBE-V3O
+                    const int64_t tDraw1 = paceQpcNow(); // PROBE-V3J
+                    const double qpcFreqDraw = static_cast<double>(paceQpcFreq()); // PROBE-V3J
+                    const float drawMs = (qpcFreqDraw > 0.0) ? static_cast<float>((tDraw1 - tDraw0) * 1000.0 / qpcFreqDraw) : 0.0f; // PROBE-V3J
+                    const float beginMs = (qpcFreqDraw > 0.0) ? static_cast<float>((tBegin1 - tDraw0) * 1000.0 / qpcFreqDraw) : 0.0f; // PROBE-V3L
+                    float b1Ms = 0.0f, b2Ms = 0.0f, b3Ms = 0.0f, b4Ms = 0.0f, b5Ms = 0.0f; // PROBE-V3K
+                    float totalMs = 0.0f; // PROBE-V3L
+                    if (isPace2Enabled()) // PROBE-V3K
+                    {
+                        int64_t b[6] = {};
+                        ps2xRdPace2Take(b);
+                        if (qpcFreqDraw > 0.0)
+                        {
+                            const double toMs = 1000.0 / qpcFreqDraw;
+                            totalMs = static_cast<float>(b[0] * toMs); // PROBE-V3L
+                            b1Ms = static_cast<float>(b[1] * toMs);
+                            b2Ms = static_cast<float>(b[2] * toMs);
+                            b3Ms = static_cast<float>(b[3] * toMs);
+                            b4Ms = static_cast<float>(b[4] * toMs);
+                            b5Ms = static_cast<float>(b[5] * toMs);
+                        }
+                    }
+                    if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
+                        m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
+                    // FIX-FG4b: check FG4 enablement before real-present pacing so real presents do not block until the next 60 Hz boundary
+                    static bool s_fg4Checked = false; // FIX-FG4b
+                    static bool s_fg4Enabled = false; // FIX-FG4b
+                    static int s_fg4Hz = 0; // FIX-FG4b
+                    static int s_fg4Pm = 0; // FIX-FG4b
+                    if (ps2xRdInterpActive() && !s_fg4Checked) // FIX-FG4b
+                    {
+                        s_fg4Checked = true;
+                        s_fg4Pm = ps2xSdlGetPresentMode();
+                        s_fg4Hz = fg4GetDisplayHz();
+                        const uint32_t fg4RateInit = fg4GetRate();
+                        if ((s_fg4Pm == 0 || s_fg4Pm == 3) && s_fg4Hz < static_cast<int>(fg4RateInit * 60u))
+                        {
+                            ps2xSafeLog("[fg4] disabled: display is locked to %d Hz, need >= %u x 60\n", s_fg4Hz, fg4RateInit);
+                            ps2xSafeLog("[fg4] fifo-locked hz=%d\n", s_fg4Hz); // FIX-FG4b
+                            s_fg4Enabled = false;
+                        }
+                        else
+                        {
+                            s_fg4Enabled = true;
+                        }
+                    }
+                    const bool fg4BypassPace = ps2xRdInterpActive() && s_fg4Enabled; // FIX-FG4b
+                    const int64_t tWorkEnd = paceQpcNow(); // PROBE-V3I
+                    const int64_t fg4BlockT0 = ps2xRdInterpActive() ? tWorkEnd : 0; // FIX-FG4b
+                    paceBeforeSwapSdl(hasNewFrame && !fg4BypassPace, presT0Qpc); // FIX-V3F // FIX-FG4b
+                    const int64_t tWaitEnd = paceQpcNow(); // PROBE-V3I
+                    rdgfx_vk::endFrame(); // RDG3
+                    ps2xSdlForcePoll(); // FIX-RDG4Q
+                    const int64_t tPresEnd = paceQpcNow(); // PROBE-V3I
+                    paceAfterSwapSdl(); // FIX-V3F
+                    const int64_t fg4BlockT1 = ps2xRdInterpActive() ? paceQpcNow() : 0; // FIX-FG4b
+                    const auto st = calcFt3Stages(tSeen, tWorkEnd, tWaitEnd, tPresEnd); // PROBE-V3I
+                    extern double ps2xRdTexTakeDecodeMs(uint32_t *countOut); // PROBE-V3J
+                    uint32_t texDecN = 0; // PROBE-V3J
+                    const float texDecMs = static_cast<float>(ps2xRdTexTakeDecodeMs(&texDecN)); // PROBE-V3J
+                    ft3Record(ft3Tag, currentPresentSeq, currentGsKicks, st.seenGap, st.work, st.wait, st.pres, drawMs, texDecMs, texDecN, b1Ms, b2Ms, b3Ms, b4Ms, b5Ms, beginMs, totalMs, pub3d, pub2d, drawFlags, gen3d, gen2d, chosen2d, coverFail); // PROBE-V3L // PROBE-V3N // PROBE-V3O
+
+                    // FEAT-FG4: display-rate pacing for interpolation (extra presents with varying t)
+                    if (ps2xRdInterpActive())
+                    {
+                        const uint32_t fg4Rate = fg4GetRate();
+                        static int64_t s_fg4LastArrivalQpc = 0;
+                        static double s_fg4SmoothedDMs = 0.0;
+                        static int64_t s_fg4LogLastQpc = 0;
+                        static uint32_t s_fg4RealPresents = 0u;
+                        static uint32_t s_fg4ExtraPresents = 0u;
+                        static uint32_t s_fg4Skipped = 0u;
+                        static uint32_t s_fg4LateExtras = 0u;
+                        static uint32_t s_fg4BreakEarly = 0u; // FIX-FG4b
+                        static uint32_t s_fg4BreakWait = 0u; // FIX-FG4b
+                        static double s_fg4BlockMsSum = 0.0; // FIX-FG4b
+                        static uint32_t s_fg4BlockCount = 0u; // FIX-FG4b
+                        static double s_fg4RealDrawMsSum = 0.0; // FIX-FG4c
+                        static uint32_t s_fg4RealDrawCount = 0u; // FIX-FG4c
+                        static double s_fg4ExtraDrawMsSum = 0.0; // FIX-FG4c
+                        static uint32_t s_fg4ExtraDrawCount = 0u; // FIX-FG4c
+                        static double s_fg4WaitMsSum = 0.0; // FIX-FG4c
+                        static double s_fg4SpinMsSum = 0.0; // FIX-FG4c
+                        static uint32_t s_fg4WaitCount = 0u; // FIX-FG4c
+                        static double s_fg4ExtraSwapMsSum = 0.0; // FIX-FG4c
+                        static uint32_t s_fg4Overrun = 0u; // FIX-FG4c
+                        static int64_t s_fg4EstReplayTicks = 0; // FIX-FG10b
+                        static int64_t s_fg4EstFullTicks = 0; // FIX-FG10b
+                        static uint32_t s_fg4SkipLoggedMask = 0u;
+
+                        const int64_t qpcFreqFg4 = paceQpcFreq();
+                        if (s_fg4Enabled && hasNewFrame && qpcFreqFg4 > 0)
+                        {
+                            s_fg4BlockMsSum += static_cast<double>(fg4BlockT1 - fg4BlockT0) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4b
+                            ++s_fg4BlockCount; // FIX-FG4b
+                            s_fg4RealDrawMsSum += static_cast<double>(fg4RealDrawT1 - fg4RealDrawT0) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                            ++s_fg4RealDrawCount; // FIX-FG4c
+                            if (s_fg4LastArrivalQpc != 0)
+                            {
+                                const double rawDMs = static_cast<double>(tSeen - s_fg4LastArrivalQpc) * 1000.0 / static_cast<double>(qpcFreqFg4);
+                                const double clampedDMs = std::max(8.0, std::min(40.0, rawDMs));
+                                s_fg4SmoothedDMs = (s_fg4SmoothedDMs <= 0.0) ? clampedDMs : std::max(8.0, std::min(40.0, 0.2 * clampedDMs + 0.8 * s_fg4SmoothedDMs));
+                            }
+                            s_fg4LastArrivalQpc = tSeen;
+                            ++s_fg4RealPresents;
+
+                            if (s_fg4SmoothedDMs > 0.0 && !ps2xSdlShouldClose())
+                            {
+                                const char *skipReason = nullptr;
+                                if (!ps2xRdInterpCanExtraPresent(&skipReason))
+                                {
+                                    ps2xRdFg10SetPrevOverrunSkipped(false); // FIX-FG10c
+                                    ++s_fg4Skipped;
+                                    const uint32_t bit = (skipReason && skipReason[0] == 't') ? 1u : ((skipReason && skipReason[0] == 'n' && skipReason[1] == 'o' && skipReason[2] == 't') ? 2u : 4u);
+                                    if ((s_fg4SkipLoggedMask & bit) == 0u)
+                                    {
+                                        s_fg4SkipLoggedMask |= bit;
+                                        ps2xSafeLog("[fg4] skip reason=%s\n", skipReason ? skipReason : "unknown");
+                                    }
+                                }
+                                else
+                                {
+                                    const int64_t dTicks = static_cast<int64_t>(std::llround(s_fg4SmoothedDMs * static_cast<double>(qpcFreqFg4) / 1000.0));
+                                    const int64_t estArrivalQpc = tSeen + dTicks; // FIX-FG4c
+                                    const int64_t marginTicks = qpcFreqFg4 / 2000; // FIX-FG10b: 0.5 ms waitMs margin
+                                    const bool replayAvail = ps2xRdFg10ReplayAvailable(); // FIX-FG10b
+                                    const int64_t estExtraTicks = replayAvail
+                                        ? ((s_fg4EstReplayTicks > 0) ? (s_fg4EstReplayTicks + marginTicks) : marginTicks)
+                                        : s_fg4EstFullTicks; // FIX-FG10b
+                                    const int64_t earlyMarginTicks = dTicks / 4; // FIX-FG4b: abandon only if next frame arrived > D*0.25 before planned extra time
+                                    const auto newFrameArrived = [&]() -> bool { // FIX-FG4b
+                                        return vblankLatchOn ? (g_hostPresentSeq.load(std::memory_order_acquire) != currentPresentSeq)
+                                                             : (g_gsFrameKicks.load(std::memory_order_acquire) != currentGsKicks);
+                                    };
+                                    int64_t nextArrivalQpc = 0; // FIX-FG4b
+                                    bool intervalOverrunSkipped = false; // FIX-FG10c
+                                    for (uint32_t k = 1u; k < fg4Rate; ++k)
+                                    {
+                                        const int64_t targetQpc = tSeen + (dTicks * static_cast<int64_t>(k)) / static_cast<int64_t>(fg4Rate);
+                                        const auto earlyArrived = [&]() -> bool { // FIX-FG4b
+                                            if (ps2xSdlShouldClose())
+                                                return true;
+                                            if (newFrameArrived())
+                                            {
+                                                if (nextArrivalQpc == 0)
+                                                    nextArrivalQpc = paceQpcNow();
+                                                if (nextArrivalQpc < (targetQpc - earlyMarginTicks))
+                                                    return true;
+                                            }
+                                            return false;
+                                        };
+                                        if (earlyArrived())
+                                        {
+                                            if (k == 1u)
+                                                ++s_fg4BreakEarly; // FIX-FG4b
+                                            break;
+                                        }
+                                        if (std::max(paceQpcNow(), targetQpc) + estExtraTicks > estArrivalQpc) // FIX-FG4c // FIX-FG10b
+                                        {
+                                            s_fg4Skipped += (fg4Rate - k);
+                                            ++s_fg4Overrun;
+                                            intervalOverrunSkipped = true; // FIX-FG10c
+                                            break;
+                                        }
+                                        int64_t waitTicks = 0; // FIX-FG4c
+                                        int64_t spinTicks = 0; // FIX-FG4c
+                                        const bool waitOk = fg4WaitUntilQpc(targetQpc, dTicks, qpcFreqFg4, earlyArrived, &waitTicks, &spinTicks); // FIX-FG4c
+                                        s_fg4WaitMsSum += static_cast<double>(waitTicks) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                                        s_fg4SpinMsSum += static_cast<double>(spinTicks) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                                        ++s_fg4WaitCount; // FIX-FG4c
+                                        if (!waitOk)
+                                        {
+                                            ++s_fg4BreakWait; // FIX-FG4b
+                                            break;
+                                        }
+                                        const int64_t afterWaitQpc = paceQpcNow(); // FIX-FG4c
+                                        if (afterWaitQpc + estExtraTicks > estArrivalQpc) // FIX-FG4c // FIX-FG10b
+                                        {
+                                            s_fg4Skipped += (fg4Rate - k);
+                                            ++s_fg4Overrun;
+                                            intervalOverrunSkipped = true; // FIX-FG10c
+                                            break;
+                                        }
+                                        if (afterWaitQpc > targetQpc + (2 * qpcFreqFg4 / 1000))
+                                            ++s_fg4LateExtras;
+                                        ps2xRdInterpSetT(static_cast<float>(k) / static_cast<float>(fg4Rate));
+                                        const int64_t extraT0Qpc = paceQpcNow();
+                                        rdgfx_vk::beginFrame();
+                                        rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 1.0f);
+                                        const int64_t extraDrawT0 = paceQpcNow(); // FIX-FG4c
+                                        (void)ps2xRdDraw(dstX, dstY, dstWidth, dstHeight);
+                                        const int64_t extraDrawT1 = paceQpcNow(); // FIX-FG4c
+                                        s_fg4ExtraDrawMsSum += static_cast<double>(extraDrawT1 - extraDrawT0) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                                        ++s_fg4ExtraDrawCount; // FIX-FG4c
+                                        if (m_debugUiInitialized && m_debugUiDrawCallback)
+                                            m_debugUiDrawCallback(*this, m_debugUiUserData);
+                                        const int64_t extraSwapT0 = paceQpcNow(); // FIX-FG4c
+                                        paceBeforeSwapSdl(false, extraT0Qpc);
+                                        rdgfx_vk::endFrame();
+                                        ps2xSdlForcePoll();
+                                        paceAfterSwapSdl();
+                                        const int64_t extraSwapT1 = paceQpcNow(); // FIX-FG4c
+                                        s_fg4ExtraSwapMsSum += static_cast<double>(extraSwapT1 - extraSwapT0) * 1000.0 / static_cast<double>(qpcFreqFg4); // FIX-FG4c
+                                        const int64_t thisExtraTicks = (extraDrawT1 - extraDrawT0) + (extraSwapT1 - extraSwapT0); // FIX-FG4c
+                                        if (ps2xRdFg10LastExtraReplayed()) // FIX-FG10b
+                                            s_fg4EstReplayTicks = (s_fg4EstReplayTicks == 0) ? thisExtraTicks : ((s_fg4EstReplayTicks * 3 + thisExtraTicks) / 4);
+                                        else
+                                            s_fg4EstFullTicks = (s_fg4EstFullTicks == 0) ? thisExtraTicks : ((s_fg4EstFullTicks * 3 + thisExtraTicks) / 4);
+                                        ++s_fg4ExtraPresents;
+                                        if (extraSwapT1 > estArrivalQpc && (k + 1u) < fg4Rate) // FIX-FG4c
+                                        {
+                                            s_fg4Skipped += (fg4Rate - 1u - k);
+                                            ++s_fg4Overrun;
+                                            intervalOverrunSkipped = true; // FIX-FG10c
+                                            break;
+                                        }
+                                    }
+                                    ps2xRdFg10SetPrevOverrunSkipped(intervalOverrunSkipped); // FIX-FG10c
+                                }
+                            }
+                        }
+
+                        if (s_fg4Enabled && qpcFreqFg4 > 0)
+                        {
+                            const int64_t nowFg4 = paceQpcNow();
+                            if (s_fg4LogLastQpc == 0)
+                                s_fg4LogLastQpc = nowFg4;
+                            else if ((nowFg4 - s_fg4LogLastQpc) >= qpcFreqFg4)
+                            {
+                                const double avgBlockMs = s_fg4BlockCount ? (s_fg4BlockMsSum / static_cast<double>(s_fg4BlockCount)) : 0.0; // FIX-FG4b
+                                const double avgDrawRealMs = s_fg4RealDrawCount ? (s_fg4RealDrawMsSum / static_cast<double>(s_fg4RealDrawCount)) : 0.0; // FIX-FG4c
+                                const double avgDrawExtraMs = s_fg4ExtraDrawCount ? (s_fg4ExtraDrawMsSum / static_cast<double>(s_fg4ExtraDrawCount)) : 0.0; // FIX-FG4c
+                                const double avgWaitMs = s_fg4WaitCount ? (s_fg4WaitMsSum / static_cast<double>(s_fg4WaitCount)) : 0.0; // FIX-FG4c
+                                const double avgCpuSpinMs = s_fg4WaitCount ? (s_fg4SpinMsSum / static_cast<double>(s_fg4WaitCount)) : 0.0; // FIX-FG4c
+                                const double avgSwapMs = s_fg4ExtraPresents ? (s_fg4ExtraSwapMsSum / static_cast<double>(s_fg4ExtraPresents)) : 0.0; // FIX-FG4c
+                                double extraUploadMsSum = 0.0; // FIX-FG4c
+                                uint64_t extraUploadVertsSum = 0u; // FIX-FG4c
+                                ps2xRdFg4TakeUploadStats(&extraUploadMsSum, &extraUploadVertsSum); // FIX-FG4c
+                                const double avgUploadMs = s_fg4ExtraPresents ? (extraUploadMsSum / static_cast<double>(s_fg4ExtraPresents)) : 0.0; // FIX-FG4c
+                                const double avgUploadVerts = s_fg4ExtraPresents ? (static_cast<double>(extraUploadVertsSum) / static_cast<double>(s_fg4ExtraPresents)) : 0.0; // FIX-FG4c
+                                ps2xSafeLog("[fg4] rate=%u D=%.2fms realPresents=%u extraPresents=%u skipped=%u lateExtras=%u breakEarly=%u breakWait=%u hz=%d pm=%d blockMs=%.2f drawRealMs=%.2f drawExtraMs=%.2f waitMs=%.2f swapMs=%.2f uploadMs=%.2f cpuSpinMs=%.2f uploadVerts=%.0f overrun=%u\n",
+                                            fg4Rate, s_fg4SmoothedDMs, s_fg4RealPresents, s_fg4ExtraPresents, s_fg4Skipped, s_fg4LateExtras,
+                                            s_fg4BreakEarly, s_fg4BreakWait, s_fg4Hz, s_fg4Pm, avgBlockMs,
+                                            avgDrawRealMs, avgDrawExtraMs, avgWaitMs, avgSwapMs, avgUploadMs, avgCpuSpinMs, avgUploadVerts, s_fg4Overrun); // FIX-FG4b // FIX-FG4c
+                                s_fg4RealPresents = 0u;
+                                s_fg4ExtraPresents = 0u;
+                                s_fg4Skipped = 0u;
+                                s_fg4LateExtras = 0u;
+                                s_fg4BreakEarly = 0u; // FIX-FG4b
+                                s_fg4BreakWait = 0u; // FIX-FG4b
+                                s_fg4BlockMsSum = 0.0; // FIX-FG4b
+                                s_fg4BlockCount = 0u; // FIX-FG4b
+                                s_fg4RealDrawMsSum = 0.0; // FIX-FG4c
+                                s_fg4RealDrawCount = 0u; // FIX-FG4c
+                                s_fg4ExtraDrawMsSum = 0.0; // FIX-FG4c
+                                s_fg4ExtraDrawCount = 0u; // FIX-FG4c
+                                s_fg4WaitMsSum = 0.0; // FIX-FG4c
+                                s_fg4SpinMsSum = 0.0; // FIX-FG4c
+                                s_fg4WaitCount = 0u; // FIX-FG4c
+                                s_fg4ExtraSwapMsSum = 0.0; // FIX-FG4c
+                                s_fg4Overrun = 0u; // FIX-FG4c
+                                s_fg4LogLastQpc = nowFg4;
+                            }
+                        }
+                    }
+                }
+                else // RDG3
+                {
+                    uint32_t prevTex = 0u; // FXC1
+                    int prevW = 0, prevH = 0; // FXC1
+                    uint32_t fxW = 0u, fxH = 0u, fxStride = 0u; // FXC1
+                    const uint8_t *fxRgba = nullptr; // FXC1
+                    const auto t_a0 = std::chrono::steady_clock::now(); // PROBE-V3B
+                    const bool hasPrev = ps2xRdGetPrevFrame(prevTex, prevW, prevH); // PROBE-FXC2
+                    fxRgba = ps2xSdlLastFrameRgba(fxW, fxH, fxStride); // PROBE-FXC2
+                    const auto t_a1 = std::chrono::steady_clock::now(); // PROBE-V3B
+                    const double cur_aMs = std::chrono::duration<double, std::milli>(t_a1 - t_a0).count(); // PROBE-V3B
+                    const bool hasRgba = (fxRgba != nullptr); // PROBE-FXC2
+                    static uint32_t s_fxcClassicFrames = 0u, s_fxcFxFlag = 0u, s_fxcPrevOk = 0u, s_fxcRgbaOk = 0u, s_fxcComposited = 0u; // PROBE-FXC2
+                    static auto s_fxcLastLog = std::chrono::steady_clock::now(); // PROBE-FXC2
+                    static auto s_fxtLastLog = std::chrono::steady_clock::now(); // PROBE-V3B
+                    ++s_fxcClassicFrames; // PROBE-FXC2
+                    if (rdFx) ++s_fxcFxFlag; // PROBE-FXC2
+                    if (hasPrev) ++s_fxcPrevOk; // PROBE-FXC2
+                    if (hasRgba) ++s_fxcRgbaOk; // PROBE-FXC2
+                    if (rdgfx_vk::active() && rdFx && hasPrev && hasRgba) // FXC1 // PROBE-FXC2
+                    {
+                        ++s_fxcComposited; // PROBE-FXC2
+                        const auto t_e0 = std::chrono::steady_clock::now(); // PROBE-V3B
+                        rdgfx_vk::beginFrame(); // FXC1
+                        rdgfx::clearScreenBuffers(0.0f, 0.0f, 0.0f, 1.0f); // FXC1
+                        const auto t_e1 = std::chrono::steady_clock::now(); // PROBE-V3B
+                        const double cur_eMs = std::chrono::duration<double, std::milli>(t_e1 - t_e0).count(); // PROBE-V3B
+
+                        const auto t_d0 = std::chrono::steady_clock::now(); // PROBE-V3B
+                        rdgfx_vk::drawFxBackground(prevTex, prevW, prevH); // FXC1
+                        const auto t_d1 = std::chrono::steady_clock::now(); // PROBE-V3B
+                        const double cur_dMs = std::chrono::duration<double, std::milli>(t_d1 - t_d0).count(); // PROBE-V3B
+
+                        rdgfx_vk::drawClassicAdditive(fxRgba, static_cast<int>(fxW), static_cast<int>(fxH), static_cast<int>(fxStride)); // FXC1
+                        if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
+                            m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
+
+                        const int64_t tWorkEnd = paceQpcNow(); // PROBE-V3I
+                        paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
+                        const int64_t tWaitEnd = paceQpcNow(); // PROBE-V3I
+                        const auto t_f0 = std::chrono::steady_clock::now(); // PROBE-V3B
+                        rdgfx_vk::endFrame(); // FXC1
+                        ps2xSdlForcePoll(); // FXC1
+                        const int64_t tPresEnd = paceQpcNow(); // PROBE-V3I
+                        const auto t_f1 = std::chrono::steady_clock::now(); // PROBE-V3B
+                        const double cur_fMs = std::chrono::duration<double, std::milli>(t_f1 - t_f0).count(); // PROBE-V3B
+                        paceAfterSwapSdl(); // FIX-V3F
+                        const auto st = calcFt3Stages(tSeen, tWorkEnd, tWaitEnd, tPresEnd); // PROBE-V3I
+                        ft3Record(ft3Tag, currentPresentSeq, currentGsKicks, st.seenGap, st.work, st.wait, st.pres); // PROBE-V3I
+
+                        ++probe_v3b::n; // PROBE-V3B
+                        probe_v3b::aSum += cur_aMs; // PROBE-V3B
+                        if (cur_aMs > probe_v3b::aMax) probe_v3b::aMax = cur_aMs; // PROBE-V3B
+                        probe_v3b::dSum += cur_dMs; // PROBE-V3B
+                        if (cur_dMs > probe_v3b::dMax) probe_v3b::dMax = cur_dMs; // PROBE-V3B
+                        probe_v3b::eSum += cur_eMs; // PROBE-V3B
+                        if (cur_eMs > probe_v3b::eMax) probe_v3b::eMax = cur_eMs; // PROBE-V3B
+                        probe_v3b::fSum += cur_fMs; // PROBE-V3B
+                        if (cur_fMs > probe_v3b::fMax) probe_v3b::fMax = cur_fMs; // PROBE-V3B
+                    }
+                    else
+                    {
+                        if (m_debugUiInitialized && m_debugUiDrawCallback) // DBG1
+                            m_debugUiDrawCallback(*this, m_debugUiUserData); // DBG1
+                        const int64_t tWorkEnd = paceQpcNow(); // PROBE-V3I
+                        paceBeforeSwapSdl(hasNewFrame, presT0Qpc); // FIX-V3F
+                        const int64_t tWaitEnd = paceQpcNow(); // PROBE-V3I
+                        ps2xSdlSetPresentRegion(presentWidth, presentHeight); // FIX-R5
+                        ps2xSdlPresent();
+                        ps2xSdlForcePoll(); // FIX-RDG4Q
+                        const int64_t tPresEnd = paceQpcNow(); // PROBE-V3I
+                        paceAfterSwapSdl(); // FIX-V3F
+                        const auto st = calcFt3Stages(tSeen, tWorkEnd, tWaitEnd, tPresEnd); // PROBE-V3I
+                        ft3Record(ft3Tag, currentPresentSeq, currentGsKicks, st.seenGap, st.work, st.wait, st.pres); // PROBE-V3I
+                    }
+                    const auto fxcNow = std::chrono::steady_clock::now(); // PROBE-FXC2
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(fxcNow - s_fxcLastLog).count() >= 1000) // PROBE-FXC2
+                    {
+                        s_fxcLastLog = fxcNow; // PROBE-FXC2
+                        ps2xSafeLog("[fxc] classicFrames=%u fxFlag=%u prevOk=%u rgbaOk=%u composited=%u\n",
+                                    s_fxcClassicFrames, s_fxcFxFlag, s_fxcPrevOk, s_fxcRgbaOk, s_fxcComposited); // PROBE-FXC2
+                    }
+                    static const bool s_probeV3bLogOn = []() { // PROBE-V3B
+                        const char *e = std::getenv("PS2X_RDVK_LOG"); // PROBE-V3B
+                        return (e && std::strcmp(e, "1") == 0); // PROBE-V3B
+                    }(); // PROBE-V3B
+                    if (s_probeV3bLogOn && std::chrono::duration_cast<std::chrono::milliseconds>(fxcNow - s_fxtLastLog).count() >= 1000) // PROBE-V3B
+                    {
+                        s_fxtLastLog = fxcNow; // PROBE-V3B
+                        const uint32_t cnt = probe_v3b::n; // PROBE-V3B
+                        const double invN = (cnt > 0) ? (1.0 / static_cast<double>(cnt)) : 0.0; // PROBE-V3B
+                        ps2xSafeLog("[fxt] n=%u a=%.2f/%.2f b=%.2f/%.2f c=%.2f/%.2f d=%.2f/%.2f e=%.2f/%.2f f=%.2f/%.2f waits=%u waitMs=%.2f  allocs=%u\n",
+                                    cnt,
+                                    probe_v3b::aSum * invN, probe_v3b::aMax,
+                                    probe_v3b::bSum * invN, probe_v3b::bMax,
+                                    probe_v3b::cSum * invN, probe_v3b::cMax,
+                                    probe_v3b::dSum * invN, probe_v3b::dMax,
+                                    probe_v3b::eSum * invN, probe_v3b::eMax,
+                                    probe_v3b::fSum * invN, probe_v3b::fMax,
+                                    probe_v3b::waits, probe_v3b::waitMs, probe_v3b::allocs); // PROBE-V3B
+                    } // PROBE-V3B
+                }
+#endif // RDG3
+                gtEd0 = ps2_gt_enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            }
             const auto presT1 = std::chrono::steady_clock::now();
             if (ps2_gt_enabled()) // PROBE-GT
                 s_gtPresentWaitNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(presT1 - gtEd0).count());
@@ -6670,7 +9757,7 @@ void PS2Runtime::run()
             // tools/cpu_per_frame.ps1), PCSX2 has no such cost. Poll at most every PS2X_IDLE_POLL_MS (default 4; 1 = old behaviour). EndDrawing polls once per presented frame anyway.
             static const int64_t s_idlePollUs = []() { const char *e = std::getenv("PS2X_IDLE_POLL_MS"); const long v = e ? std::atol(e) : 4; return static_cast<int64_t>(v < 1 ? 1 : v) * 1000; }();
             static auto s_lastPoll = std::chrono::steady_clock::now() - std::chrono::seconds(1);
-            if (std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - s_lastPoll).count() >= s_idlePollUs - 100)
+            if (!ps2xSdlActive() && std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - s_lastPoll).count() >= s_idlePollUs - 100) // SDL-FE
             {
                 PollInputEvents();
                 s_lastPoll = std::chrono::steady_clock::now();
@@ -6775,6 +9862,7 @@ void PS2Runtime::run()
 
             probe_ae::onBqTickSec(m_memory.getRDRAM(), ee_ms);
             probe_ae::bhTickCheckPerSec(m_memory.getRDRAM());
+            rw1Tick(m_memory.getRDRAM(), now); // PROBE-RW1
 
             if (g_trackedCurVtable.load(std::memory_order_relaxed) == 0x006adfa8u)
             {
@@ -6854,17 +9942,31 @@ void PS2Runtime::run()
             }
             char titleBuf[128];
             std::snprintf(titleBuf, sizeof(titleBuf), "Ape Escape 3 Recomp - FPS: %u (GS %llu)", currentFps, (unsigned long long)currentGsKicks);
-            SetWindowTitle(titleBuf);
+            if (ps2xSdlActive()) // SDL-FE
+                ps2xSdlSetTitle(titleBuf);
+            else
+                SetWindowTitle(titleBuf);
             s_fpsCounter = 0;
             s_lastFpsLogTime = now;
         }
 
-        if (WindowShouldClose())
+        if (ps2xSdlActive() ? ps2xSdlShouldClose() : WindowShouldClose()) // SDL-FE
         {
             RUNTIME_LOG("[run] window close requested, breaking out of loop");
             requestStop();
             break;
         }
+    }
+
+    if (s_ft3On) // FEAT-FT3
+    {
+        {
+            std::lock_guard<std::mutex> lk(ft3Mutex);
+            ft3Stop = true;
+        }
+        ft3Cv.notify_one();
+        if (ft3Thread.joinable())
+            ft3Thread.join();
     }
 
     requestStop();
@@ -6878,9 +9980,643 @@ void PS2Runtime::run()
         m_debugUiShutdownCallback(*this, m_debugUiUserData);
         m_debugUiInitialized = false;
     }
-    UnloadTexture(frameTex);
-    CloseWindow();
+    if (sdlMode) // SDL-FE
+    {
+        ps2xSdlShutdown();
+    }
+    else
+    {
+        UnloadTexture(frameTex);
+        CloseWindow();
+    }
 
     RUNTIME_LOG("[run] exiting loop");
 }
+
+// PROBE-M14
+#ifdef _WIN32
+#include <intrin.h> // PROBE-WW1
+extern "C" __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *hModule, char *lpFilename, unsigned long nSize);
+extern "C" __declspec(dllimport) int __stdcall SymInitialize(void *hProcess, const char *UserSearchPath, int fInvadeProcess);
+extern "C" __declspec(dllimport) int __stdcall SymFromAddr(void *hProcess, uint64_t Address, uint64_t *Displacement, void *Symbol);
+
+static void *ps2xDbgHelpProc() // PROBE-WW1
+{
+    static void *s_proc = []() {
+        void *proc = GetCurrentProcess();
+        char exePath[1024]{};
+        unsigned long len = GetModuleFileNameA(nullptr, exePath, sizeof(exePath) - 1);
+        for (unsigned long i = len; i > 0; --i)
+        {
+            if (exePath[i - 1] == '\\' || exePath[i - 1] == '/')
+            {
+                exePath[i - 1] = '\0';
+                break;
+            }
+        }
+        SymInitialize(proc, len > 0 ? exePath : nullptr, 1);
+        return proc;
+    }();
+    return s_proc;
+}
+
+static const char *ps2xResolveHostSym(void *addr, char *outName, size_t outNameSz, unsigned int &outOff) // PROBE-WW1
+{
+    struct Ps2xSymbolInfo
+    {
+        uint32_t SizeOfStruct;
+        uint32_t TypeIndex;
+        uint64_t Reserved[2];
+        uint32_t Index;
+        uint32_t Size;
+        uint64_t ModBase;
+        uint32_t Flags;
+        uint64_t Value;
+        uint64_t Address;
+        uint32_t Register;
+        uint32_t Scope;
+        uint32_t Tag;
+        uint32_t NameLen;
+        uint32_t MaxNameLen;
+        char Name[1];
+    };
+    static_assert(sizeof(Ps2xSymbolInfo) == 88);
+    static_assert(offsetof(Ps2xSymbolInfo, Name) == 84);
+
+    outOff = 0;
+    alignas(8) char buf[sizeof(Ps2xSymbolInfo) + 256]{};
+    auto *sym = reinterpret_cast<Ps2xSymbolInfo *>(buf);
+    sym->SizeOfStruct = sizeof(Ps2xSymbolInfo);
+    sym->MaxNameLen = 256;
+    uint64_t disp = 0;
+    if (SymFromAddr(ps2xDbgHelpProc(), reinterpret_cast<uint64_t>(addr), &disp, sym))
+    {
+        std::snprintf(outName, outNameSz, "%s", sym->Name);
+        outOff = static_cast<unsigned int>(disp);
+        return outName;
+    }
+    return "?";
+}
+#endif
+
+static std::mutex g_fpuProbeMtx;
+static std::unordered_map<void *, std::array<uint64_t, 3>> g_fpuProbeCounts;
+static std::chrono::steady_clock::time_point g_fpuProbeLastDump;
+static bool g_fpuProbeRegistered = false;
+
+static void ps2xFpuProbeDumpLocked()
+{
+    if (g_fpuProbeCounts.empty())
+        return;
+
+    struct Entry
+    {
+        void *ra;
+        uint64_t total;
+        std::array<uint64_t, 3> c;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(g_fpuProbeCounts.size());
+    for (const auto &kv : g_fpuProbeCounts)
+    {
+        uint64_t tot = kv.second[0] + kv.second[1] + kv.second[2];
+        entries.push_back({kv.first, tot, kv.second});
+    }
+    const size_t n = std::min<size_t>(20, entries.size());
+    std::partial_sort(entries.begin(), entries.begin() + n, entries.end(),
+                      [](const Entry &a, const Entry &b) { return a.total > b.total; });
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const Entry &e = entries[i];
+        const char *symName = "?";
+        unsigned int symOff = 0;
+#ifdef _WIN32
+        char nameBuf[256]{};
+        symName = ps2xResolveHostSym(e.ra, nameBuf, sizeof(nameBuf), symOff);
+#endif
+        std::fprintf(stderr, "[fpuprobe] n=%llu div0=%llu rsqrt0=%llu sat=%llu ra=%p sym=%s+0x%x\n",
+                     static_cast<unsigned long long>(e.total),
+                     static_cast<unsigned long long>(e.c[0]),
+                     static_cast<unsigned long long>(e.c[1]),
+                     static_cast<unsigned long long>(e.c[2]),
+                     e.ra, symName, symOff);
+    }
+    std::fflush(stderr);
+}
+
+static void ps2xFpuProbeAtExit()
+{
+    std::lock_guard<std::mutex> lk(g_fpuProbeMtx);
+    ps2xFpuProbeDumpLocked();
+}
+
+bool ps2xFpuProbeEnabled()
+{
+    static const bool s_on = []() {
+        const char *e = std::getenv("PS2X_FPU_PROBE");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    return s_on;
+}
+
+void ps2xFpuProbe(void *ra, int kind)
+{
+    if (kind < 0 || kind > 2)
+        return;
+    std::lock_guard<std::mutex> lk(g_fpuProbeMtx);
+    if (!g_fpuProbeRegistered)
+    {
+        g_fpuProbeRegistered = true;
+        g_fpuProbeLastDump = std::chrono::steady_clock::now();
+        std::atexit(ps2xFpuProbeAtExit);
+    }
+    g_fpuProbeCounts[ra][static_cast<size_t>(kind)]++;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_fpuProbeLastDump >= std::chrono::seconds(5))
+    {
+        g_fpuProbeLastDump = now;
+        ps2xFpuProbeDumpLocked();
+    }
+} // PROBE-M14
+
+// ---- PROBE-AN1: EE anomaly probe ------------------------------------------------------------------------------
+void ps2xAn1DumpAll(); // PROBE-AN1b (non-static, used from the SDL platform)
+static void ps2xAn1StartWatcher(); // PROBE-AN1c
+static uint64_t g_an1Seq = 0; // PROBE-AN1c: bumped on every recorded event (read racy on purpose, probe only)
+static bool ps2xAn1Init()
+{
+    const char *e = std::getenv("PS2X_AN1");
+    const bool on = e && e[0] == '1' && e[1] == '\0';
+    if (on)
+    {
+        std::atexit([]() { ps2xAn1DumpAll(); std::fflush(stderr); }); // PROBE-AN1b
+        std::at_quick_exit([]() { ps2xAn1DumpAll(); std::fflush(stderr); }); // PROBE-AN1c
+        ps2xAn1StartWatcher(); // PROBE-AN1c
+        std::fprintf(stderr, "[an1] enabled\n"); // PROBE-AN1b
+        std::fflush(stderr);
+    }
+    return on;
+}
+bool g_an1 = ps2xAn1Init(); // PROBE-AN1
+
+namespace
+{
+struct An1Entry // PROBE-AN1
+{
+    uint64_t count = 0;
+    uint32_t nfirst = 0;
+};
+struct An1First // PROBE-AN1
+{
+    uint32_t pc, a, b, r;
+    int kind;
+};
+std::mutex g_an1Mtx;
+std::unordered_map<uint64_t, An1Entry> g_an1Map;
+std::vector<An1First> g_an1First;
+const char *const kAn1Names[AN1_KIND_COUNT] = {
+    "fpu_slowpath", "f_result_nan", "f_result_inf", "f_result_denorm", "f_input_denorm", "f_expgap24", "f_div0", "f_sqrt_neg", "f_huge",
+    "v_result_nan", "v_result_inf", "v_result_denorm", "v_input_denorm", "v_expgap24", "v_huge", "f_input_exp255",
+    "q_div0", "q_sqrt_neg", "q_bad_result", "store_nan_or_huge", "v_slowpath", "f_rsqrt0", "v_input_exp255"};
+static_assert(sizeof(kAn1Names) / sizeof(kAn1Names[0]) == AN1_KIND_COUNT);
+
+inline uint32_t an1Bits(float f)
+{
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    return u;
+}
+} // namespace
+
+uint32_t ps2xAn1CurPc() // PROBE-AN1: last pushDispatchPc of this thread (0 when none)
+{
+    const DispatchHistory &h = g_dispatchHistory;
+    if (!h.wrapped && h.next == 0u)
+        return 0u;
+    return h.pcs[(h.next + static_cast<uint32_t>(h.pcs.size()) - 1u) % static_cast<uint32_t>(h.pcs.size())];
+}
+
+void ps2xAn1Ev(int kind, uint32_t a, uint32_t b, uint32_t r) // PROBE-AN1
+{
+    const uint32_t pc = ps2xAn1CurPc();
+    std::lock_guard<std::mutex> lk(g_an1Mtx);
+    An1Entry &e = g_an1Map[(static_cast<uint64_t>(pc) << 8) | static_cast<uint64_t>(kind & 0xFF)];
+    ++e.count;
+    ++g_an1Seq; // PROBE-AN1c
+    if (e.nfirst < 3u && g_an1First.size() < 400u)
+    {
+        ++e.nfirst;
+        g_an1First.push_back({pc, a, b, r, kind});
+    }
+}
+
+// Classify one scalar (FPU or one VU0 lane). a,b = inputs, r = final value returned to the guest.
+static void ps2xAn1Lane(bool vu, int op, float a, float b, float r)
+{
+    const uint32_t ua = an1Bits(a), ub = an1Bits(b), ur = an1Bits(r);
+    const uint32_t ea = (ua >> 23) & 0xFFu, eb = (ub >> 23) & 0xFFu, er = (ur >> 23) & 0xFFu;
+    const bool two = (op <= 3 || op == 5);
+    if (ea == 0xFFu || (two && eb == 0xFFu))
+        ps2xAn1Ev(vu ? AN1_V_IN_NANHUGE : AN1_IN_NANHUGE, ua, ub, ur);
+    if (er == 0xFFu)
+        ps2xAn1Ev(vu ? ((ur & 0x7FFFFFu) ? AN1_V_NAN : AN1_V_INF) : ((ur & 0x7FFFFFu) ? AN1_F_NAN : AN1_F_INF), ua, ub, ur);
+    else if (std::fabs(r) > 1.0e9f)
+        ps2xAn1Ev(vu ? AN1_V_HUGE : AN1_F_HUGE, ua, ub, ur);
+    if ((ea == 0u && (ua & 0x7FFFFFu)) || (two && eb == 0u && (ub & 0x7FFFFFu)))
+        ps2xAn1Ev(vu ? AN1_V_DENORM_IN : AN1_F_DENORM_IN, ua, ub, ur);
+    // Host result before the PS2 flush: a denormal means the guest result was flushed to zero.
+    float hr;
+    switch (op)
+    {
+    case 0: hr = a + b; break;
+    case 1: hr = a - b; break;
+    case 2: hr = a * b; break;
+    case 3: hr = (b != 0.0f) ? a / b : 1.0f; break;
+    case 4: hr = std::sqrt(std::fabs(a)); break;
+    default: hr = (b != 0.0f) ? a / std::sqrt(std::fabs(b)) : 1.0f; break;
+    }
+    const uint32_t uh = an1Bits(hr);
+    if (((uh >> 23) & 0xFFu) == 0u && (uh & 0x7FFFFFu))
+        ps2xAn1Ev(vu ? AN1_V_DENORM_RES : AN1_F_DENORM_RES, ua, ub, ur);
+    if ((op == 0 || op == 1) && ea != 0u && eb != 0u)
+    {
+        const int gap = static_cast<int>(ea) - static_cast<int>(eb);
+        if (gap >= 24 || gap <= -24)
+            ps2xAn1Ev(vu ? AN1_V_CANCEL : AN1_F_CANCEL, ua, ub, ur);
+    }
+    if (!vu)
+    {
+        if (op == 3 && eb == 0u)
+            ps2xAn1Ev(AN1_F_DIV0, ua, ub, ur);
+        if (op == 5 && eb == 0u)
+            ps2xAn1Ev(AN1_F_RSQRT0, ua, ub, ur);
+        if ((op == 4 && (ua & 0x80000000u) && ea != 0u) || (op == 5 && (ub & 0x80000000u) && eb != 0u))
+            ps2xAn1Ev(AN1_F_SQRTNEG, ua, ub, ur);
+    }
+}
+
+void ps2xAn1Fpu(int op, float a, float b, float r) // PROBE-AN1
+{
+    ps2xAn1Lane(false, op, a, b, r);
+}
+
+void ps2xAn1Vec(int op, __m128 a, __m128 b, __m128 r) // PROBE-AN1
+{
+    alignas(16) float la[4], lb[4], lr[4];
+    _mm_store_ps(la, a);
+    _mm_store_ps(lb, b);
+    _mm_store_ps(lr, r);
+    for (int i = 0; i < 4; ++i)
+        ps2xAn1Lane(true, op, la[i], lb[i], lr[i]);
+}
+
+void ps2xAn1Store(uint32_t addr, const void *p, int bytes) // PROBE-AN1: key = guest pc of the store, a = address, b = lane index, r = bad lane bits
+{
+    uint32_t w[4];
+    std::memcpy(w, p, static_cast<size_t>(bytes));
+    for (int i = 0; i < bytes / 4; ++i)
+    {
+        const uint32_t m = w[i] & 0x7FFFFFFFu;
+        const bool nan = m > 0x7F800000u && (w[i] >> 16) != 0xFFFFu && (w[i] >> 16) != 0x7FFFu;
+        const bool huge = m >= 0x4E6E6B28u && m < 0x7F800000u; // |x| >= 1e9
+        if (nan || huge)
+        {
+            ps2xAn1Ev(AN1_ST_BAD, addr, static_cast<uint32_t>(i), w[i]);
+            return;
+        }
+    }
+}
+
+void ps2xAn1DumpAll() // PROBE-AN1
+{
+    std::lock_guard<std::mutex> lk(g_an1Mtx);
+    std::vector<std::pair<uint64_t, uint64_t>> v; // count, key
+    v.reserve(g_an1Map.size());
+    for (const auto &kv : g_an1Map)
+        v.emplace_back(kv.second.count, kv.first);
+    std::sort(v.begin(), v.end(), [](const auto &x, const auto &y) { return x.first > y.first; });
+    ps2xSafeLog("[an1] dump begin entries=%zu\n", v.size()); // PROBE-AN1d
+    ps2xSafeLog("[an1] top 40 (pc, kind, count) of %zu\n", v.size());
+    for (size_t i = 0; i < v.size() && i < 40; ++i)
+        ps2xSafeLog("[an1] pc=0x%08x kind=%s count=%llu\n", static_cast<uint32_t>(v[i].second >> 8),
+                    kAn1Names[(v[i].second & 0xFF) < AN1_KIND_COUNT ? (v[i].second & 0xFF) : 0], static_cast<unsigned long long>(v[i].first));
+    for (const An1First &f : g_an1First)
+        ps2xSafeLog("[an1-first] pc=0x%08x kind=%s a=%08x b=%08x r=%08x\n", f.pc,
+                    kAn1Names[f.kind < AN1_KIND_COUNT ? f.kind : 0], f.a, f.b, f.r);
+    ps2xSafeLog("[an1] dump end\n"); // PROBE-AN1d
+    ps2xFlushLog(); // PROBE-AN1d
+}
+
+// PROBE-AN1c: frame-loop independent watcher (keys via GetAsyncKeyState, trigger files, 20 s auto dump when counters changed).
+static void ps2xAn1Reset()
+{
+    {
+        std::lock_guard<std::mutex> lk(g_an1Mtx);
+        g_an1Map.clear();
+        g_an1First.clear();
+    }
+    ps2xSafeLog("[an1] reset\n"); // PROBE-AN1d
+    ps2xFlushLog();
+}
+static void ps2xAn1StartWatcher()
+{
+    std::thread([]() {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto lastDump = t0;
+        uint64_t lastSeq = 0;
+        bool d9 = false, d10 = false;
+        for (;;)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            const auto now = std::chrono::steady_clock::now();
+#ifdef _WIN32
+            const bool k9 = (GetAsyncKeyState(0x78) & 0x8000) != 0;  // VK_F9
+            const bool k10 = (GetAsyncKeyState(0x79) & 0x8000) != 0; // VK_F10
+            if (k9 && !d9)
+                ps2xAn1Reset();
+            if (k10 && !d10)
+            {
+                ps2xAn1DumpAll();
+                lastDump = now;
+                lastSeq = g_an1Seq;
+            }
+            d9 = k9;
+            d10 = k10;
+#endif
+            std::error_code ec;
+            if (std::filesystem::exists("an1_reset.txt", ec))
+            {
+                std::filesystem::remove("an1_reset.txt", ec);
+                ps2xAn1Reset();
+            }
+            if (std::filesystem::exists("an1_dump.txt", ec))
+            {
+                std::filesystem::remove("an1_dump.txt", ec);
+                ps2xAn1DumpAll();
+                lastDump = now;
+                lastSeq = g_an1Seq;
+            }
+            if (now - lastDump >= std::chrono::seconds(20))
+            {
+                lastDump = now;
+                if (g_an1Seq != lastSeq)
+                {
+                    lastSeq = g_an1Seq;
+                    ps2xSafeLog("[an1] auto dump t=%u s\n", // PROBE-AN1d
+                                static_cast<unsigned>(std::chrono::duration_cast<std::chrono::seconds>(now - t0).count()));
+                    ps2xAn1DumpAll();
+                }
+            }
+        }
+    }).detach();
+}
+
+// Called once per frame from the main loop: F10 dumps, F9 (PS2X_AN1_RESET=F9) or a file an1_reset.txt in cwd clears.
+void ps2xAn1Poll(bool f9, bool f10)
+{
+    if (!g_an1)
+        return;
+    static const bool s_f9Reset = []() { const char *e = std::getenv("PS2X_AN1_RESET"); return e && e[0] == 'F' && e[1] == '9'; }();
+    bool reset = s_f9Reset && f9;
+    // PROBE-AN1b: callable from the raylib frame loop and from the SDL event poll (~1 kHz), so everything is time based.
+    static auto s_lastFile = std::chrono::steady_clock::now();
+    static auto s_lastDump = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s_lastFile >= std::chrono::milliseconds(250))
+    {
+        s_lastFile = now;
+        std::error_code ec0;
+        if (std::filesystem::exists("an1_reset.txt", ec0))
+        {
+            reset = true;
+            std::error_code ec;
+            std::filesystem::remove("an1_reset.txt", ec);
+        }
+    }
+    if (f10 || now - s_lastDump >= std::chrono::seconds(30))
+    {
+        s_lastDump = now;
+        ps2xAn1DumpAll();
+    }
+    if (reset)
+    {
+        std::lock_guard<std::mutex> lk(g_an1Mtx);
+        g_an1Map.clear();
+        g_an1First.clear();
+        ps2xSafeLog("[an1] reset\n"); // PROBE-AN1d
+        ps2xFlushLog();
+    }
+}
+// ---- end PROBE-AN1 --------------------------------------------------------------------------------------------
+
+void ps2xDevToggleMcChoice() // FIX-DK (FEAT-DE body, callable from SDL frontend)
+{
+    PS2Runtime *rt = s_activeRuntime.load(std::memory_order_acquire);
+    int cur = g_mcPendingChoice.load(std::memory_order_relaxed);
+    int next = 0;
+    if (cur == 0 || cur == 1)
+    {
+        next = (cur == 0) ? 1 : 0;
+    }
+    else
+    {
+        uint32_t guestVal = 0;
+        if (const uint8_t *rdram = rt ? rt->memory().getRDRAM() : nullptr)
+        {
+            std::memcpy(&guestVal, rdram + 0x00649910u, sizeof(uint32_t));
+        }
+        next = (guestVal == 0u) ? 1 : 0;
+    }
+    g_mcPendingChoice.store(next, std::memory_order_relaxed);
+    ps2xSafeLog("[mc] pending=%s\n", (next == 0) ? "boy" : "girl");
+}
+
+void ps2xDumpEeRam() // PROBE-DR1
+{
+    PS2Runtime *rt = s_activeRuntime.load(std::memory_order_acquire);
+    const uint8_t *rdram = rt ? rt->memory().getRDRAM() : nullptr;
+    if (!rdram)
+        return;
+
+    static std::atomic<uint32_t> s_counter{0};
+    const uint32_t n = s_counter.fetch_add(1, std::memory_order_relaxed) + 1u;
+
+    std::error_code ec;
+    std::filesystem::create_directories("logs", ec);
+
+    char path[64];
+    std::snprintf(path, sizeof(path), "logs/ramdump_%u.bin", n);
+    if (FILE *f = std::fopen(path, "wb"))
+    {
+        std::fwrite(rdram, 1, PS2_RAM_SIZE, f);
+        std::fclose(f);
+        ps2xSafeLog("[ramdump] wrote %s\n", path);
+    }
+} // PROBE-DR1
+
+// PROBE-WW1
+uint32_t g_ps2wwBase = 0u;
+uint32_t g_ps2wwLen = 0u;
+
+static const bool g_ps2wwInit = []() {
+    const char *env = std::getenv("PS2X_WWATCH");
+    if (!env || !env[0])
+        return false;
+    char *end = nullptr;
+    unsigned long base = std::strtoul(env, &end, 0);
+    if (end == env || !end || *end != ':')
+        return false;
+    char *lenEnd = nullptr;
+    unsigned long len = std::strtoul(end + 1, &lenEnd, 0);
+    if (lenEnd == end + 1 || len == 0)
+        return false;
+    constexpr unsigned long kMaxLen = 0x100000ul;
+    if (len > kMaxLen)
+        len = kMaxLen;
+    g_ps2wwBase = static_cast<uint32_t>(base) & 0x01FFFFFFu;
+    g_ps2wwLen = static_cast<uint32_t>(len);
+    return true;
+}();
+
+static std::mutex g_wwMtx;
+static uint32_t g_wwHits = 0u;
+static uint32_t g_wwLogged = 0u;
+static std::unordered_map<std::string, uint32_t> g_wwSymHits;
+static std::unordered_map<uint32_t, uint32_t> g_wwFn0Hits; // PROBE-WW3
+static std::chrono::steady_clock::time_point g_wwLastSummary;
+static bool g_wwAtExitRegistered = false;
+
+// PROBE-WW2
+static const uint32_t g_wwAfter = []() {
+    const char *env = std::getenv("PS2X_WWATCH_AFTER");
+    if (!env || !env[0])
+        return 0u;
+    char *end = nullptr;
+    unsigned long v = std::strtoul(env, &end, 0);
+    return (end != env) ? static_cast<uint32_t>(v) : 0u;
+}();
+
+static const uint32_t g_wwMax = []() {
+    const char *env = std::getenv("PS2X_WWATCH_MAX");
+    if (!env || !env[0])
+        return 400u;
+    char *end = nullptr;
+    unsigned long v = std::strtoul(env, &end, 0);
+    if (end == env)
+        return 400u;
+    if (v < 1ul)
+        v = 1ul;
+    if (v > 200000ul)
+        v = 200000ul;
+    return static_cast<uint32_t>(v);
+}();
+
+static const bool g_wwSize4 = []() {
+    const char *env = std::getenv("PS2X_WWATCH_SIZE4");
+    return env && std::strcmp(env, "1") == 0;
+}(); // PROBE-WW2
+
+static void ps2xWwatchDumpSummaryLocked()
+{
+    for (const auto &kv : g_wwSymHits)
+    {
+        ps2xSafeLog("[wwatch] summary sym=%s hits=%u\n", kv.first.c_str(), kv.second);
+    }
+    for (const auto &kv : g_wwFn0Hits) // PROBE-WW3
+    {
+        ps2xSafeLog("[wwatch] summary fn0=0x%08x hits=%u\n", kv.first, kv.second);
+    }
+}
+
+static void ps2xWwatchAtExit()
+{
+    std::lock_guard<std::mutex> lk(g_wwMtx);
+    ps2xWwatchDumpSummaryLocked();
+}
+
+#ifdef _MSC_VER
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+void ps2xGuestWriteHit(uint32_t addr, uint32_t size, uint64_t val)
+{
+    if (g_wwSize4 && size != 4u) // PROBE-WW2
+        return;
+
+    PS2Runtime *rt = s_activeRuntime.load(std::memory_order_acquire); // PROBE-WW2
+    const uint32_t vbl = rt ? static_cast<uint32_t>(rt->eeScheduler().currentVSyncTick()) : 0u;
+    if (vbl < g_wwAfter) // PROBE-WW2
+        return;
+
+#ifdef _MSC_VER
+    void *ra = _ReturnAddress();
+#else
+    void *ra = __builtin_return_address(0);
+#endif
+    char nameBuf[256]{};
+    unsigned int symOff = 0u;
+#ifdef _WIN32
+    const char *symName = ps2xResolveHostSym(ra, nameBuf, sizeof(nameBuf), symOff);
+#else
+    const char *symName = "?";
+#endif
+
+    float fval = 0.0f;
+    const uint32_t u32 = static_cast<uint32_t>(val);
+    std::memcpy(&fval, &u32, sizeof(fval));
+
+    // PROBE-WW3: 3 most recent entries of thread_local g_dispatchHistory (newest first) + guest sp/ra
+    const DispatchHistory &dh = g_dispatchHistory;
+    const uint32_t dhCap = static_cast<uint32_t>(dh.pcs.size());
+    const uint32_t dhCount = dh.wrapped ? dhCap : dh.next;
+    auto recentFn = [&](uint32_t ago) -> uint32_t {
+        return (ago < dhCount) ? dh.pcs[(dh.next + dhCap - 1u - ago) % dhCap] : 0u;
+    };
+    const uint32_t fn0 = recentFn(0u);
+    const uint32_t fn1 = recentFn(1u);
+    const uint32_t fn2 = recentFn(2u);
+    uint32_t guestSp = 0u;
+    uint32_t guestRa = 0u;
+    uint32_t gPc = 0u, gA0 = 0u, gA1 = 0u, gA2 = 0u, gA3 = 0u; // PROBE-WW4
+    R5900Context *wwCtx = g_fnReplayCtx.load(std::memory_order_acquire); // PROBE-WW4
+    if (!wwCtx && rt) wwCtx = rt->eeScheduler().currentContext(); // PROBE-WW4
+    if (R5900Context *ctx = wwCtx)
+    {
+        guestSp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+        guestRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+        gPc = ctx->pc; // PROBE-WW4
+        gA0 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[4], 0)); // PROBE-WW4
+        gA1 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[5], 0)); // PROBE-WW4
+        gA2 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[6], 0)); // PROBE-WW4
+        gA3 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[7], 0)); // PROBE-WW4
+    }
+
+    std::lock_guard<std::mutex> lk(g_wwMtx);
+    if (!g_wwAtExitRegistered)
+    {
+        g_wwAtExitRegistered = true;
+        g_wwLastSummary = std::chrono::steady_clock::now();
+        std::atexit(ps2xWwatchAtExit);
+    }
+    const uint32_t hitIdx = ++g_wwHits;
+    const uint32_t symHitIdx = ++g_wwSymHits[symName]; // PROBE-WW2
+    ++g_wwFn0Hits[fn0]; // PROBE-WW3
+    if (g_wwLogged < g_wwMax) // PROBE-WW2
+    {
+        ++g_wwLogged;
+        ps2xSafeLog("[wwatch] #%u addr=0x%08x size=%u val=0x%llx float=%g sym=%s+0x%x hostra=%p vbl=%u n=%u fn0=0x%08x fn1=0x%08x fn2=0x%08x sp=0x%08x ra=0x%08x pc=0x%08x a0=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x\n", // PROBE-WW2 // PROBE-WW3 // PROBE-WW4
+                    hitIdx, addr, size, static_cast<unsigned long long>(val),
+                    static_cast<double>(fval), symName, symOff, ra, vbl, symHitIdx,
+                    fn0, fn1, fn2, guestSp, guestRa, gPc, gA0, gA1, gA2, gA3);
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_wwLastSummary >= std::chrono::seconds(10))
+    {
+        g_wwLastSummary = now;
+        ps2xWwatchDumpSummaryLocked();
+    }
+} // PROBE-WW1
 
