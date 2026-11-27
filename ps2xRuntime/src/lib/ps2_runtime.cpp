@@ -3466,6 +3466,97 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         });
     }
 
+    // FIX-BLUR1 (Hack Ledger): PS2X_DROPBLUR=1 and PS2X_DROPGUARD=0 restore the game's behaviour.
+    if (0x0051E198u >= g_ps2RecompiledFunctionTableBase && 0x0051E198u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot51e198 = (0x0051E198u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig51e198 = g_ps2RecompiledFunctionTable[slot51e198];
+        static const bool s_dropBlurOriginal = []() { const char *e = std::getenv("PS2X_DROPBLUR"); return e && std::strcmp(e, "1") == 0; }();
+        static const bool s_dropGuard = []() { const char *e = std::getenv("PS2X_DROPGUARD"); return !(e && std::strcmp(e, "0") == 0); }();
+        if (s_orig51e198)
+        {
+            replaceFunction(0x0051E198u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+                static bool s_slowRing[20] = {};
+                static uint32_t s_ringPos = 0;
+                static uint32_t s_slowCount = 0;
+                static uint64_t s_prevTick = 0;
+                static bool s_havePrevTick = false;
+                static bool s_forced = false;
+                static uint32_t s_savedWord = 0;
+                static uint32_t s_calls = 0;
+                static uint32_t s_forcedCalls = 0;
+                static uint32_t s_sustainedCalls = 0;
+                static uint32_t s_returnedCalls = 0;
+
+                uint8_t *const halfRateByte = rdram + 0x00649DD8u;
+                const auto readWord = [rdram]() {
+                    uint32_t v;
+                    std::memcpy(&v, rdram + 0x00649DD0u, sizeof(v));
+                    return v;
+                };
+                const auto restoreForced = [&]() {
+                    if (*halfRateByte == 0 && readWord() == s_savedWord)
+                    {
+                        *halfRateByte = 1;
+                        s_forced = false;
+                    }
+                };
+
+                ++s_calls;
+                if (!s_dropBlurOriginal)
+                {
+                    const uint32_t zero = 0;
+                    std::memcpy(rdram + 0x0072D498u, &zero, sizeof(zero));
+                }
+
+                if (s_dropGuard)
+                {
+                    const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
+                    if (s_havePrevTick)
+                    {
+                        const bool slow = (tick - s_prevTick) >= 2;
+                        s_slowCount -= s_slowRing[s_ringPos] ? 1u : 0u;
+                        s_slowRing[s_ringPos] = slow;
+                        s_slowCount += slow ? 1u : 0u;
+                        s_ringPos = (s_ringPos + 1) % 20;
+                    }
+                    s_prevTick = tick;
+                    s_havePrevTick = true;
+
+                    const bool sustained = s_slowCount >= 10;
+                    if (sustained)
+                        ++s_sustainedCalls;
+
+                    if (s_forced)
+                        restoreForced();
+                    if (!sustained && *halfRateByte == 1)
+                    {
+                        s_savedWord = readWord();
+                        *halfRateByte = 0;
+                        s_forced = true;
+                        ++s_forcedCalls;
+                    }
+                }
+
+                // Logged at entry: the code after the original call is often not reached.
+                if (s_calls % 600 == 0)
+                    ps2xSafeLog("[dropblur] calls=%u forced=%u sustained=%u returned=%u\n", s_calls, s_forcedCalls, s_sustainedCalls, s_returnedCalls);
+
+                const uint32_t ra = getRegU32(ctx, 31);
+                s_orig51e198(rdram, ctx, runtime);
+
+                // Only restore once the routine has actually returned to its caller.
+                if (ctx->pc == ra)
+                {
+                    ++s_returnedCalls;
+                    if (s_forced)
+                        restoreForced();
+                }
+            });
+            ps2xSafeLog("[dropblur] override on blur=%d guard=%d\n", s_dropBlurOriginal ? 1 : 0, s_dropGuard ? 1 : 0);
+        }
+    }
+
     // Syscall wrappers called via jump (J) instructions not emitted into recompiled table:
     static auto wrapperSyscall2 = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
         ps2xSafeLog( "[syscall-wrapper] Dispatching syscall 2 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
