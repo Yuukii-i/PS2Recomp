@@ -2830,8 +2830,8 @@ inline void recordClipPolygon(const uint8_t *vu, int32_t polyCount, bool copyS, 
         for (int32_t k = 0; k < polyCount; ++k)
         {
             const uint32_t qOut = 877u + 4u * static_cast<uint32_t>(k);
-            const uint32_t w3 = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
-            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f; // FIX-E1b
+            const uint32_t w3 = ldw(vu, qOut & 0x3FFu, 3u); // FIX-TR12 FOG qword
+            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f;
             f.rdVerts[v0 + static_cast<size_t>(k)] = makeRdVert(
                 ldq(vu, 918u + 3u * static_cast<uint32_t>(k)),
                 ldq(vu, qOut + 1u),
@@ -2892,8 +2892,8 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
         for (int32_t j = 0; j < N; ++j)
         {
             const uint32_t qOut = (e7 + 1u + 4u * static_cast<uint32_t>(j)) & 0x3FFu;
-            const uint32_t w3 = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
-            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f; // FIX-E1b
+            const uint32_t w3 = ldw(vu, qOut & 0x3FFu, 3u); // FIX-TR12 FOG qword
+            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f;
             f.rdVerts[v0 + static_cast<size_t>(j)] = makeRdVert(
                 Ps[j],
                 ldq(vu, (qOut + 1u) & 0x3FFu),
@@ -2901,7 +2901,7 @@ inline void recordRigid(const uint8_t *vu, int32_t N, bool copyS, __m128 c1v, __
                 fog); // FIX-E1b
             if (j >= 2)
             {
-                const uint32_t adc = w3; // FIX-E1b
+                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
                 if (!(adc & 0x8000u))
                 {
                     f.rdIndices.push_back(base + static_cast<uint32_t>(j - 2));
@@ -2974,8 +2974,8 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
         {
             const uint32_t qOut = ubase + 1u + 4u * static_cast<uint32_t>(v);
             const int32_t idx = static_cast<int16_t>(ilw(vu, (i4base + static_cast<uint32_t>(v)) & 0x3FFu, 0u));
-            const uint32_t w3 = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FIX-E1b
-            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f; // FIX-E1b
+            const uint32_t w3 = ldw(vu, qOut & 0x3FFu, 3u); // FIX-TR12 FOG qword
+            const float fog = static_cast<float>((w3 >> 4) & 0xFFu) / 255.0f;
             f.rdVerts[v0 + static_cast<size_t>(v)] = makeRdVert(
                 ldq(vu, (636u + static_cast<uint32_t>(idx)) & 0x3FFu),
                 ldq(vu, qOut + 1u),
@@ -2983,7 +2983,7 @@ inline void recordSkinned(const uint8_t *vu, int32_t N, bool vi10, __m128 c1v, _
                 fog); // FIX-E1b
             if (v >= 2)
             {
-                const uint32_t adc = w3; // FEAT-RD27 // FIX-E1b
+                const uint32_t adc = ldw(vu, (qOut + 3u) & 0x3FFu, 3u); // FEAT-RD27 // FIX-E1b
                 if (!(adc & 0x8000u))
                 {
                     f.rdIndices.push_back(base + static_cast<uint32_t>(v - 2));

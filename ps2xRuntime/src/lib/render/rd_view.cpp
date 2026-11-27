@@ -1130,11 +1130,11 @@ static inline bool rdFogEnvEnabled() // FIX-E1c
     return s_fogEnabled;
 }
 
-static inline bool rdFogZeroEnvEnabled() // FIX-E1d
+static inline bool rdFogZeroEnvEnabled() // FIX-E1d // FIX-TR12
 {
     static const bool s_fogZero = []{
         const char *e = std::getenv("PS2X_RD_FOG_ZERO");
-        return e && e[0] == '1';
+        return !(e && e[0] == '0'); // FIX-TR12
     }();
     return s_fogZero;
 }
