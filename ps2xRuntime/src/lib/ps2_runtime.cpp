@@ -28,6 +28,7 @@ extern std::atomic<bool> g_rdFrameIsClassic; // FEAT-RD18
 extern std::atomic<bool> g_rdFrameIsFx; // FXC1
 extern bool ps2xRdGetPrevFrame(uint32_t &texId, int &w, int &h); // FXC1
 extern void ps2xPadMarker(); // PROBE-MK
+extern bool ps2xIpuIdecJob(uint8_t *rdram, uint32_t jobAddr);
 extern std::atomic<int> g_mcPendingChoice; // FEAT-DE
 void ps2xDevToggleMcChoice(); // FIX-DK
 extern void ps2xMcInit(); // FEAT-DE
@@ -3426,25 +3427,16 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     }
 
     // C332: IPU job queue (0x100E64 starts a toIPU/fromIPU DMA + IDEC job; the DMA-end interrupt 0x100F7C retires it).
-    // There is no IPU emulation, so the interrupt never fired and the main thread waited on the job forever
-    // (white screen after picking a level). Retire the job at once; the decoded picture is not produced.
-    // Hack Ledger: PS2X_IPU_HLE=0 disables.
+    // The IDEC picture job is now decoded via ps2xIpuIdecJob; then 0x100F7C is dispatched to retire the job.
+    // Hack Ledger: PS2X_IPU_HLE=0 disables the whole override, PS2X_IPU_DECODE=0 only the decoding.
     if (0x00100E64u >= g_ps2RecompiledFunctionTableBase && 0x00100E64u < g_ps2RecompiledFunctionTableEnd)
     {
         const char *ipuHle = std::getenv("PS2X_IPU_HLE");
         if (!(ipuHle && ipuHle[0] == '0'))
         {
             replaceFunction(0x00100E64u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
-                static int s_n = 0;
-                if (s_n < 8)
-                {
-                    ++s_n;
-                    const uint32_t job = getRegU32(ctx, 4);
-                    ps2xSafeLog("[ipu] job=0x%08x cmdb=0x%02x ctlb=0x%02x inQw=0x%x outQw=0x%x src=0x%08x dst=0x%08x (retired without decode)%s",
-                                job, rdram[job + 2], rdram[job + 3], *reinterpret_cast<const uint16_t *>(rdram + job + 4),
-                                *reinterpret_cast<const uint16_t *>(rdram + job + 6), *reinterpret_cast<const uint32_t *>(rdram + job + 8),
-                                *reinterpret_cast<const uint32_t *>(rdram + job + 12), "\n");
-                }
+                const uint32_t job = getRegU32(ctx, 4);
+                ps2xIpuIdecJob(rdram, job);
                 const uint32_t ra = getRegU32(ctx, 31);
                 (void)runtime->dispatchGuestBranch(rdram, ctx, 0x100F7Cu, 0x100E64u, ra, PS2Runtime::GuestBranchKind::DirectCall, "JAL");
             });
