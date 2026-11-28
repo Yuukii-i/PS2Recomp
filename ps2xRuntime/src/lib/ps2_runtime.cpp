@@ -3558,6 +3558,46 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         }
     }
 
+    // FIX-EYES1: correct palette-blend function at guest 0x00100400.
+    if (0x00100400u >= g_ps2RecompiledFunctionTableBase && 0x00100400u < g_ps2RecompiledFunctionTableEnd)
+    {
+        const uint32_t slot100400 = (0x00100400u - g_ps2RecompiledFunctionTableBase) >> 2;
+        static RecompiledFunction s_orig100400 = g_ps2RecompiledFunctionTable[slot100400];
+        static const bool s_clutBlendFix = []() { const char *e = std::getenv("PS2X_CLUTBLEND_FIX"); return !(e && std::strcmp(e, "0") == 0); }();
+        if (s_clutBlendFix)
+        {
+            replaceFunction(0x00100400u, [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+                const uint32_t dst = getRegU32(ctx, 4);
+                const uint32_t src1 = getRegU32(ctx, 5);
+                const uint32_t src2 = getRegU32(ctx, 6);
+                const uint32_t byteCount = getRegU32(ctx, 7);
+                const uint32_t weights = getRegU32(ctx, 8);
+                const int16_t f = static_cast<int16_t>(weights & 0xFFFFu);
+                const int16_t g = static_cast<int16_t>((weights >> 16) & 0xFFFFu);
+
+                uint32_t offset = 0;
+                do
+                {
+                    uint8_t s1[16];
+                    uint8_t s2[16];
+                    for (uint32_t j = 0; j < 16; ++j)
+                    {
+                        s1[j] = runtime->Load8(rdram, ctx, src1 + offset + j);
+                        s2[j] = runtime->Load8(rdram, ctx, src2 + offset + j);
+                    }
+                    for (uint32_t j = 0; j < 16; ++j)
+                    {
+                        const uint8_t blended = static_cast<uint8_t>(((static_cast<int>(s1[j]) * f + static_cast<int>(s2[j]) * g) >> 8));
+                        runtime->Store8(rdram, ctx, dst + offset + j, blended);
+                    }
+                    offset += 16;
+                } while (offset < byteCount);
+
+                ctx->pc = getRegU32(ctx, 31);
+            });
+        }
+    }
+
     // Syscall wrappers called via jump (J) instructions not emitted into recompiled table:
     static auto wrapperSyscall2 = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
         ps2xSafeLog( "[syscall-wrapper] Dispatching syscall 2 at pc=0x%08x (ra=0x%08x)\n", ctx->pc, getRegU32(ctx, 31));
