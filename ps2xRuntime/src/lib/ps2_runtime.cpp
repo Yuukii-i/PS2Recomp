@@ -5,6 +5,7 @@ extern bool g_ps2Ft2On; extern "C" void ps2_ft2_ev(uint32_t type, uint64_t arg);
 #ifdef _WIN32
 #include <io.h>
 #endif
+#include "render/rd_enhance.h" // FEAT-ENH3
 #include "ps2_runtime.h"
 void ps2xAn1DumpAll(); // PROBE-AN1c
 extern void ps2xEeGfxDecompInstall(PS2Runtime &); // DECOMP-BM
@@ -8900,6 +8901,10 @@ void PS2Runtime::run()
 
         if (shouldPresent)
         {
+            if (ps2xEnhanceOn()) // FEAT-ENH3
+            {
+                ps2xEnhanceProfileTick(m_memory.getRDRAM()); // FEAT-ENH3
+            }
             // PERF-MB: delivered-frame cadence ([ft] line every 5 s). A locked 60 means p99 well under 16.7 ms and no interval over 20 ms.
             if (currentPresentSeq != s_lastPresentedSeq)
             {

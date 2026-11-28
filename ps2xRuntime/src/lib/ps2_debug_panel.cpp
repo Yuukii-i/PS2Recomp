@@ -41,6 +41,7 @@ extern bool ps2xEnhanceOn(); // FEAT-ENH1
 extern void ps2xEnhanceSetOn(bool); // FEAT-ENH1
 extern int ps2xEnhanceDebugView(); // FEAT-ENH2
 extern void ps2xEnhanceSetDebugView(int); // FEAT-ENH2
+#include "render/rd_enhance.h" // FEAT-ENH3
 namespace rdgfx_vk
 {
     int getRenderScalePercent();
@@ -2213,6 +2214,122 @@ namespace
         }
     }
 
+    // FEAT-ENH3: live editing of the per-level / per-zone enhanced profile
+    static void drawEnhanceProfileControls()
+    {
+        const std::string stage = ps2xEnhanceStageName();
+        const std::string files = ps2xEnhanceFilesInUse();
+        ImGui::Text("Stage: %s", stage.empty() ? "(none)" : stage.c_str());
+        ImGui::TextWrapped("Files: %s", files.empty() ? "(none)" : files.c_str());
+        if (ps2xEnhanceUnsaved())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "unsaved changes");
+        }
+        ImGui::BeginDisabled(stage.empty());
+        if (ImGui::Button("Save for zone"))
+        {
+            ps2xEnhanceSave(false);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Save for level"))
+        {
+            ps2xEnhanceSave(true);
+        }
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("Effects are not built yet; these values are stored for later.");
+
+        RdEnhanceSettings s = ps2xEnhanceSettings(); // taken after Save, which reloads
+        bool changed = false;
+        const auto slider = [&changed](const char *label, float &value, float lo, float hi)
+        {
+            changed |= ImGui::SliderFloat(label, &value, lo, hi);
+        };
+        const auto color = [&changed](const char *label, float *rgb)
+        {
+            changed |= ImGui::ColorEdit3(label, rgb, ImGuiColorEditFlags_Float);
+        };
+        const auto group = [](const char *name) -> bool
+        {
+            ImGui::PushID(name);
+            return ImGui::CollapsingHeader(name);
+        };
+
+        if (group("Colour grading"))
+        {
+            changed |= ImGui::Checkbox("On", &s.grade.on);
+            slider("Strength", s.grade.strength, 0.0f, 1.0f);
+            slider("Exposure", s.grade.exposure, 0.0f, 4.0f);
+            slider("Contrast", s.grade.contrast, 0.0f, 2.0f);
+            slider("Saturation", s.grade.saturation, 0.0f, 2.0f);
+            color("Tint", s.grade.tint);
+        }
+        ImGui::PopID();
+
+        if (group("Bloom"))
+        {
+            changed |= ImGui::Checkbox("On", &s.bloom.on);
+            slider("Strength", s.bloom.strength, 0.0f, 1.0f);
+            slider("Threshold", s.bloom.threshold, 0.0f, 4.0f);
+            slider("Radius", s.bloom.radius, 0.0f, 8.0f);
+        }
+        ImGui::PopID();
+
+        if (group("Fog"))
+        {
+            changed |= ImGui::Checkbox("On", &s.fog.on);
+            slider("Strength", s.fog.strength, 0.0f, 1.0f);
+            color("Color", s.fog.color);
+            slider("Start", s.fog.start, 0.0f, 20000.0f);
+            slider("End", s.fog.end, 0.0f, 20000.0f);
+            slider("Height", s.fog.height, -20000.0f, 20000.0f);
+            slider("Falloff", s.fog.falloff, 0.0f, 10.0f);
+            slider("Sky", s.fog.sky, 0.0f, 1.0f);
+        }
+        ImGui::PopID();
+
+        if (group("Corner darkening"))
+        {
+            changed |= ImGui::Checkbox("On", &s.ao.on);
+            slider("Strength", s.ao.strength, 0.0f, 1.0f);
+            slider("Radius", s.ao.radius, 0.0f, 200.0f);
+            slider("Bias", s.ao.bias, 0.0f, 1.0f);
+        }
+        ImGui::PopID();
+
+        if (group("Depth of field"))
+        {
+            changed |= ImGui::Checkbox("On", &s.dof.on);
+            slider("Strength", s.dof.strength, 0.0f, 1.0f);
+            slider("Focus", s.dof.focus, 0.0f, 20000.0f);
+            slider("Range", s.dof.range, 0.0f, 20000.0f);
+            slider("Blur", s.dof.blur, 0.0f, 8.0f);
+        }
+        ImGui::PopID();
+
+        if (group("Light shafts"))
+        {
+            changed |= ImGui::Checkbox("On", &s.shafts.on);
+            slider("Strength", s.shafts.strength, 0.0f, 1.0f);
+            slider("Length", s.shafts.length, 0.0f, 4.0f);
+            slider("Decay", s.shafts.decay, 0.0f, 1.0f);
+        }
+        ImGui::PopID();
+
+        // The sun has no on/strength fields in RdEnhanceSettings
+        if (group("Sun"))
+        {
+            changed |= ImGui::SliderFloat3("Direction", s.sunDir, -1.0f, 1.0f);
+            color("Color", s.sunColor);
+            color("Ambient", s.ambient);
+        }
+        ImGui::PopID();
+
+        if (changed)
+        {
+            ps2xEnhanceSetSettings(s);
+        }
+    }
+
     // FIX-P3
     static void drawGraphicsTab()
     {
@@ -2324,6 +2441,10 @@ namespace
         if (!vkActive)
         {
             ImGui::EndDisabled();
+        }
+        if (ps2xEnhanceOn()) // FEAT-ENH3
+        {
+            drawEnhanceProfileControls();
         }
 
         int curPresent = ps2xSdlGetPresentMode();
