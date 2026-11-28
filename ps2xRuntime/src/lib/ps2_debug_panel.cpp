@@ -37,10 +37,13 @@ extern int ps2xSdlGetPresentMode();
 extern void ps2xSdlSetPresentMode(int);
 extern bool ps2xSdlPresentModeSupported(int);
 extern void ps2xSdlGetWindowPixelSize(int *w, int *h);
+extern bool ps2xEnhanceOn(); // FEAT-ENH1
+extern void ps2xEnhanceSetOn(bool); // FEAT-ENH1
 namespace rdgfx_vk
 {
     int getRenderScalePercent();
     void setRenderScalePercent(int);
+    bool active(); // FEAT-ENH1
 }
 namespace rdgfx
 {
@@ -2298,6 +2301,22 @@ namespace
         if (ImGui::Checkbox("Fullscreen (F11)", &fullscreen))
         {
             ps2xSdlSetFullscreen(fullscreen);
+        }
+
+        // FEAT-ENH1: Enhanced graphics checkbox, disabled unless rdgfx_vk::active()
+        const bool vkActive = rdgfx_vk::active();
+        if (!vkActive)
+        {
+            ImGui::BeginDisabled();
+        }
+        bool enhanced = ps2xEnhanceOn();
+        if (ImGui::Checkbox("Enhanced graphics", &enhanced))
+        {
+            ps2xEnhanceSetOn(enhanced);
+        }
+        if (!vkActive)
+        {
+            ImGui::EndDisabled();
         }
 
         int curPresent = ps2xSdlGetPresentMode();
