@@ -3,6 +3,7 @@
 #include <cstring>
 #include "raylib.h"
 #include "rd_gfx.h" // RDG1
+#include "rd_enhance.h" // FEAT-ENH1
 #ifdef _WIN32
 extern "C" __declspec(dllimport) int __stdcall QueryPerformanceCounter(long long *lpPerformanceCount); // FIX-RD90
 extern "C" __declspec(dllimport) int __stdcall QueryPerformanceFrequency(long long *lpFrequency); // FIX-RD90
@@ -31,6 +32,9 @@ namespace rdgfx_vk
 bool active();
 void setFog(float, float, float, float);
 }
+#else
+// FEAT-ENH1: no-op fallback for non-Vulkan builds
+void ps2xEnhanceApply(const RdEnhanceFrame &frame) { (void)frame; }
 #endif
 
 // PROBE-PACE2
@@ -7510,6 +7514,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d);
             curVao = 0u;
         }
+        if (ps2xEnhanceOn() && !g_rdGpu.drawBatches.empty()) { RdEnhanceFrame f; f.vpScaleZ = g_rdGpu.vpScaleZ; f.vpOffsetZ = g_rdGpu.vpOffsetZ; ps2xEnhanceApply(f); } // FEAT-ENH1
         draw2dUntil(0u, true); // FEAT-RD8
         if (drawProfOn) // PROBE-FG5
             g_fg5Prof.other2DTicks += (fg5QpcNow() - fg5Tail2dT0);

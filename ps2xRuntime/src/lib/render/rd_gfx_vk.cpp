@@ -1,6 +1,7 @@
 // RDG2: Vulkan implementation of rdgfx:: interface.
 
 #include "rd_gfx_vk.h"
+#include "rd_enhance.h" // FEAT-ENH1
 
 #if defined(PS2X_HAS_SDL3)
 
@@ -40,6 +41,7 @@ double ps2xSdlVkLastBeginWaitMs(); // PROBE-RDG4P
 VkImageView ps2xSdlVkCurrentSwapView();
 bool ps2xSdlImGuiRecord(VkCommandBuffer cb, VkImage swapImage, VkImageView swapView, uint32_t w, uint32_t h);
 extern int ps2xGfxGetAspectMode(); // FIX-P2
+extern void ps2xSafeLog(const char *fmt, ...); // FEAT-ENH1: raw stderr is redirected to NUL
 extern "C" bool ps2xRdDrawProfIn3d(); // PROBE-FG5
 extern "C" void ps2xRdDrawProfAddVk(int64_t stateBindTicks, int64_t uniformTicks, int64_t drawCallTicks,
                                     uint64_t nStateChanges, uint64_t nUniformUpdates, uint64_t nDraws); // PROBE-FG5
@@ -847,10 +849,14 @@ std::filesystem::path getExeDir()
     return std::filesystem::current_path();
 }
 
+void enhanceDestroyTargets(); // FEAT-ENH1 (rd_enhance_vk.inc)
+void enhanceVerifyCollect(uint32_t frameIdx); // PROBE-ENH1
+
 void destroyTargets()
 {
     if (s_vk.device == VK_NULL_HANDLE)
         return;
+    enhanceDestroyTargets(); // FEAT-ENH1
     if (s_vk.colorView != VK_NULL_HANDLE)
     {
         vkDestroyImageView(s_vk.device, s_vk.colorView, nullptr);
@@ -978,7 +984,7 @@ bool ensureTargets(uint32_t w, uint32_t h)
     }
 
     if (!createImageAndView(w, h, VK_FORMAT_D32_SFLOAT, s_vk.msaaSamples,
-                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, // FEAT-ENH1
                             VK_IMAGE_ASPECT_DEPTH_BIT, s_vk.depthImage, s_vk.depthMem, s_vk.depthView))
     {
         destroyTargets();
@@ -2191,6 +2197,8 @@ void beginFrame()
         s_vk.curFrameDescHits = 0;
         s_vk.curFrameDescMisses = 0;
     }
+
+    enhanceVerifyCollect(frameIdx); // PROBE-ENH1: this slot's fence has completed
 
     s_vk.cmd = cmd;
     s_vk.swapImage = swapImg;
@@ -4060,6 +4068,15 @@ void endBackbufferCopy(const rdgfx::BackbufferCopyState &) {}
 
 uint32_t getLastError() { return 0u; }
 
+#include "rd_enhance_vk.inc" // FEAT-ENH1
+
 } // namespace rdgfx_vk
+
+// FEAT-ENH1
+void ps2xEnhanceApply(const RdEnhanceFrame &frame)
+{
+    if (rdgfx_vk::active())
+        rdgfx_vk::enhanceApply(frame);
+}
 
 #endif // PS2X_HAS_SDL3

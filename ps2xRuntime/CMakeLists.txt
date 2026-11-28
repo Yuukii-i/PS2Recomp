@@ -580,6 +580,8 @@ if(PS2X_ENABLE_SDL3 AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # RDG2
         file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/shaders") # RDG2
         set(PS2X_RD_VERT_SPV "${CMAKE_BINARY_DIR}/shaders/rd.vert.spv") # RDG2
         set(PS2X_RD_FRAG_SPV "${CMAKE_BINARY_DIR}/shaders/rd.frag.spv") # RDG2
+        set(PS2X_FX_FULL_VERT_SPV "${CMAKE_BINARY_DIR}/shaders/fx_full.vert.spv") # FEAT-ENH1
+        set(PS2X_FX_COMPOSITE_FRAG_SPV "${CMAKE_BINARY_DIR}/shaders/fx_composite.frag.spv") # FEAT-ENH1
         add_custom_command( # RDG2
             OUTPUT "${PS2X_RD_VERT_SPV}" # RDG2
             COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.2 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rd.vert" -o "${PS2X_RD_VERT_SPV}" # RDG2 FIX-RDG3C
@@ -594,12 +596,26 @@ if(PS2X_ENABLE_SDL3 AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # RDG2
             COMMENT "Compiling rd.frag -> rd.frag.spv" # RDG2
             VERBATIM # RDG2
         ) # RDG2
-        add_custom_target(ps2x_rd_shaders DEPENDS "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}") # RDG2
+        add_custom_command( # FEAT-ENH1
+            OUTPUT "${PS2X_FX_FULL_VERT_SPV}" # FEAT-ENH1
+            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.2 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fx_full.vert" -o "${PS2X_FX_FULL_VERT_SPV}" # FEAT-ENH1
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fx_full.vert" # FEAT-ENH1
+            COMMENT "Compiling fx_full.vert -> fx_full.vert.spv" # FEAT-ENH1
+            VERBATIM # FEAT-ENH1
+        ) # FEAT-ENH1
+        add_custom_command( # FEAT-ENH1
+            OUTPUT "${PS2X_FX_COMPOSITE_FRAG_SPV}" # FEAT-ENH1
+            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.2 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fx_composite.frag" -o "${PS2X_FX_COMPOSITE_FRAG_SPV}" # FEAT-ENH1
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fx_composite.frag" # FEAT-ENH1
+            COMMENT "Compiling fx_composite.frag -> fx_composite.frag.spv" # FEAT-ENH1
+            VERBATIM # FEAT-ENH1
+        ) # FEAT-ENH1
+        add_custom_target(ps2x_rd_shaders DEPENDS "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}" "${PS2X_FX_FULL_VERT_SPV}" "${PS2X_FX_COMPOSITE_FRAG_SPV}") # RDG2 FEAT-ENH1
         add_dependencies(ps2_runtime ps2x_rd_shaders) # RDG2
         add_custom_command( # RDG2
             TARGET ps2EntryRunner POST_BUILD # RDG2
             COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:ps2EntryRunner>/shaders" # RDG2
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}" "$<TARGET_FILE_DIR:ps2EntryRunner>/shaders/" # RDG2
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}" "${PS2X_FX_FULL_VERT_SPV}" "${PS2X_FX_COMPOSITE_FRAG_SPV}" "$<TARGET_FILE_DIR:ps2EntryRunner>/shaders/" # RDG2 FEAT-ENH1
             VERBATIM # RDG2
         ) # RDG2
     else() # RDG2

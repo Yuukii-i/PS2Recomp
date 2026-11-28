@@ -209,6 +209,11 @@ void ps2xLoadConfig()
     if (!rscale.empty())
         setEnvDefault("PS2X_RENDER_SCALE", rscale);
 
+    // FEAT-ENH1: enhanced graphics config key
+    std::string enhanced = get("graphics.enhanced");
+    if (!enhanced.empty())
+        setEnvDefault("PS2X_ENHANCED", enhanced);
+
     // FIX-R8: hud_anchor config key
     std::string hudAnchor = lower(get("graphics.hud_anchor"));
     if (!hudAnchor.empty())
@@ -226,7 +231,8 @@ void ps2xLoadConfig()
               << " fullscreen=" << eff("PS2X_FULLSCREEN") // FIX-R1
               << " vsync=" << eff("PS2X_VK_PRESENT") // FIX-R1
               << " render_scale=" << eff("PS2X_RENDER_SCALE") // FIX-R2
-              << " hud_anchor=" << eff("PS2X_HUD_ANCHOR") << std::endl; // FIX-R8
+              << " hud_anchor=" << eff("PS2X_HUD_ANCHOR") // FIX-R8
+              << " enhanced=" << eff("PS2X_ENHANCED") << std::endl; // FEAT-ENH1
     }); // FIX-CFG1
 }
 
@@ -236,6 +242,7 @@ namespace
 std::atomic<int> s_gfxAspectMode{0}; // FIX-P1
 std::atomic<float> s_gfxAspectMax{21.0f / 9.0f}; // FIX-P1
 std::atomic<float> s_gfxHudSafeAspect{0.0f}; // FIX-P1
+std::atomic<bool> s_gfxEnhanced{false}; // FEAT-ENH1
 std::once_flag s_gfxInitOnce; // FIX-P1
 
 void ps2xGfxInitLazy() // FIX-P1
@@ -344,6 +351,16 @@ void ps2xGfxInitLazy() // FIX-P1
                     s_gfxHudSafeAspect.store(0.0f);
             }
         }
+
+        const char *enh = std::getenv("PS2X_ENHANCED"); // FEAT-ENH1
+        if (enh && *enh) // FEAT-ENH1
+        {
+            s_gfxEnhanced.store(std::strcmp(enh, "1") == 0 || std::strcmp(enh, "true") == 0 || std::strcmp(enh, "on") == 0); // FEAT-ENH1
+        }
+        else // FEAT-ENH1
+        {
+            s_gfxEnhanced.store(false); // FEAT-ENH1
+        }
     });
 }
 } // namespace
@@ -382,6 +399,18 @@ void ps2xGfxSetHudSafeAspect(float a) // FIX-P1
 {
     ps2xGfxInitLazy();
     s_gfxHudSafeAspect.store(a);
+}
+
+bool ps2xEnhanceOn() // FEAT-ENH1
+{
+    ps2xGfxInitLazy();
+    return s_gfxEnhanced.load();
+}
+
+void ps2xEnhanceSetOn(bool on) // FEAT-ENH1
+{
+    ps2xGfxInitLazy();
+    s_gfxEnhanced.store(on);
 }
 
 bool ps2xGfxSaveIni(int renderScalePct, int vsyncMode, int fullscreen) // FIX-P1
@@ -466,6 +495,7 @@ bool ps2xGfxSaveIni(int renderScalePct, int vsyncMode, int fullscreen) // FIX-P1
         {"aspect_max", aspectMaxStr},
         {"hud_anchor", hudAnchorStr},
         {"render_scale", std::to_string(renderScalePct)},
+        {"enhanced", ps2xEnhanceOn() ? "1" : "0"}, // FEAT-ENH1
         {"vsync", vsyncStr},
         {"fullscreen", (fullscreen != 0) ? "1" : "0"}
     };
