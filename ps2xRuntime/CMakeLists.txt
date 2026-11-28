@@ -610,12 +610,28 @@ if(PS2X_ENABLE_SDL3 AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_VITA) # RDG2
             COMMENT "Compiling fx_composite.frag -> fx_composite.frag.spv" # FEAT-ENH1
             VERBATIM # FEAT-ENH1
         ) # FEAT-ENH1
-        add_custom_target(ps2x_rd_shaders DEPENDS "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}" "${PS2X_FX_FULL_VERT_SPV}" "${PS2X_FX_COMPOSITE_FRAG_SPV}") # RDG2 FEAT-ENH1
+        set(PS2X_FX_DEBUG_FRAG_SPV "${CMAKE_BINARY_DIR}/shaders/fx_debug.frag.spv") # FEAT-ENH2
+        set(PS2X_FX_DEBUG_MS_FRAG_SPV "${CMAKE_BINARY_DIR}/shaders/fx_debug_ms.frag.spv") # FEAT-ENH2
+        add_custom_command( # FEAT-ENH2
+            OUTPUT "${PS2X_FX_DEBUG_FRAG_SPV}" # FEAT-ENH2
+            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.2 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fx_debug.frag" -o "${PS2X_FX_DEBUG_FRAG_SPV}" # FEAT-ENH2
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fx_debug.frag" # FEAT-ENH2
+            COMMENT "Compiling fx_debug.frag -> fx_debug.frag.spv" # FEAT-ENH2
+            VERBATIM # FEAT-ENH2
+        ) # FEAT-ENH2
+        add_custom_command( # FEAT-ENH2
+            OUTPUT "${PS2X_FX_DEBUG_MS_FRAG_SPV}" # FEAT-ENH2
+            COMMAND "${PS2X_RD_GLSLC}" -O --target-env=vulkan1.2 -DENH_MSAA "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fx_debug.frag" -o "${PS2X_FX_DEBUG_MS_FRAG_SPV}" # FEAT-ENH2
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fx_debug.frag" # FEAT-ENH2
+            COMMENT "Compiling fx_debug.frag -> fx_debug_ms.frag.spv" # FEAT-ENH2
+            VERBATIM # FEAT-ENH2
+        ) # FEAT-ENH2
+        add_custom_target(ps2x_rd_shaders DEPENDS "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}" "${PS2X_FX_FULL_VERT_SPV}" "${PS2X_FX_COMPOSITE_FRAG_SPV}" "${PS2X_FX_DEBUG_FRAG_SPV}" "${PS2X_FX_DEBUG_MS_FRAG_SPV}") # RDG2 FEAT-ENH1
         add_dependencies(ps2_runtime ps2x_rd_shaders) # RDG2
         add_custom_command( # RDG2
             TARGET ps2EntryRunner POST_BUILD # RDG2
             COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:ps2EntryRunner>/shaders" # RDG2
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}" "${PS2X_FX_FULL_VERT_SPV}" "${PS2X_FX_COMPOSITE_FRAG_SPV}" "$<TARGET_FILE_DIR:ps2EntryRunner>/shaders/" # RDG2 FEAT-ENH1
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PS2X_RD_VERT_SPV}" "${PS2X_RD_FRAG_SPV}" "${PS2X_FX_FULL_VERT_SPV}" "${PS2X_FX_COMPOSITE_FRAG_SPV}" "${PS2X_FX_DEBUG_FRAG_SPV}" "${PS2X_FX_DEBUG_MS_FRAG_SPV}" "$<TARGET_FILE_DIR:ps2EntryRunner>/shaders/" # RDG2 FEAT-ENH1
             VERBATIM # RDG2
         ) # RDG2
     else() # RDG2

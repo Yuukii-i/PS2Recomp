@@ -39,6 +39,8 @@ extern bool ps2xSdlPresentModeSupported(int);
 extern void ps2xSdlGetWindowPixelSize(int *w, int *h);
 extern bool ps2xEnhanceOn(); // FEAT-ENH1
 extern void ps2xEnhanceSetOn(bool); // FEAT-ENH1
+extern int ps2xEnhanceDebugView(); // FEAT-ENH2
+extern void ps2xEnhanceSetDebugView(int); // FEAT-ENH2
 namespace rdgfx_vk
 {
     int getRenderScalePercent();
@@ -2313,6 +2315,11 @@ namespace
         if (ImGui::Checkbox("Enhanced graphics", &enhanced))
         {
             ps2xEnhanceSetOn(enhanced);
+        }
+        int debugView = ps2xEnhanceDebugView(); // FEAT-ENH2
+        if (ImGui::Combo("Enhanced debug view", &debugView, "None\0Depth\0Grid\0")) // FEAT-ENH2
+        {
+            ps2xEnhanceSetDebugView(debugView);
         }
         if (!vkActive)
         {
