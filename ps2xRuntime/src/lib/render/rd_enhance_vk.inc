@@ -23,6 +23,47 @@ struct EnhDebugPush // FEAT-ENH2: matches shaders/fx_debug.frag
 };
 static_assert(sizeof(EnhDebugPush) <= 128, "push constants must fit in 128 bytes"); // FEAT-ENH2
 
+struct EnhFxUniforms // FEAT-ENH4: std140, matches shaders/fx_effects.frag
+{
+    float worldFromNdc[16];  // column-major
+    float clipFromWorld[16]; // column-major
+    float camRowW[4];
+    float camPos[4];   // xyz camera position, w: NDC x units per world unit at view distance 1
+    float viewport[4]; // x, y, width, height of the 3D viewport
+    float target[4];   // width, height, 1/width, 1/height
+    float sunDir[4];   // xyz towards the sun, normalised; w: 1 if usable
+    float sunColor[4];
+    float ao[4];       // strength, radius, bias
+    float shadow[4];   // strength, length, softness
+    float fogColor[4]; // rgb, strength
+    float fogRange[4]; // start, end, height, falloff
+    float shafts[4];   // fog.sky, strength, length, decay
+    float dof[4];      // strength, focus, range, blur
+    float bloom[4];    // strength, threshold, radius
+    float grade[4];    // strength, exposure, contrast, saturation
+    float tint[4];
+};
+static_assert(sizeof(EnhFxUniforms) == (2 * 16 + 15 * 4) * sizeof(float), "std140 layout"); // FEAT-ENH4
+
+constexpr uint32_t kEnhLevels = 4; // FEAT-ENH4: 1/2, 1/4, 1/8, 1/16
+
+struct EnhFx // FEAT-ENH4: created on first use, destroyed with the other post targets
+{
+    bool ready = false;
+    bool failed = false;
+    VkImage level[kEnhLevels] = {};
+    VkDeviceMemory levelMem[kEnhLevels] = {};
+    VkImageView levelView[kEnhLevels] = {};
+    uint32_t levelW[kEnhLevels] = {};
+    uint32_t levelH[kEnhLevels] = {};
+    std::vector<BufferCopy> ubos; // one per frame in flight
+    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+    VkPipelineLayout pipeLayout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkDescriptorPool descPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> sets; // one per frame in flight
+};
+
 struct EnhState
 {
     VkPipelineLayout dbgPipeLayout = VK_NULL_HANDLE; // FEAT-ENH2
@@ -44,6 +85,7 @@ struct EnhState
     std::vector<VkDescriptorSet> sets; // one per frame in flight
     std::vector<EnhVerifySlot> verify; // PROBE-ENH1
     uint64_t appliedFrames = 0; // PROBE-ENH1
+    EnhFx fx; // FEAT-ENH4
 };
 
 EnhState s_enh;
@@ -66,6 +108,32 @@ void enhDestroyBuffer(BufferCopy &b) // PROBE-ENH1
     b = BufferCopy{};
 }
 
+// FEAT-ENH4: same caller guarantee as enhanceDestroyTargets().
+void enhDestroyEffects()
+{
+    EnhFx &fx = s_enh.fx;
+    if (fx.pipeline != VK_NULL_HANDLE)
+        vkDestroyPipeline(s_vk.device, fx.pipeline, nullptr);
+    if (fx.pipeLayout != VK_NULL_HANDLE)
+        vkDestroyPipelineLayout(s_vk.device, fx.pipeLayout, nullptr);
+    if (fx.descPool != VK_NULL_HANDLE)
+        vkDestroyDescriptorPool(s_vk.device, fx.descPool, nullptr); // frees the sets
+    if (fx.setLayout != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(s_vk.device, fx.setLayout, nullptr);
+    for (BufferCopy &b : fx.ubos)
+        enhDestroyBuffer(b);
+    for (uint32_t i = 0; i < kEnhLevels; ++i)
+    {
+        if (fx.levelView[i] != VK_NULL_HANDLE)
+            vkDestroyImageView(s_vk.device, fx.levelView[i], nullptr);
+        if (fx.level[i] != VK_NULL_HANDLE)
+            vkDestroyImage(s_vk.device, fx.level[i], nullptr);
+        if (fx.levelMem[i] != VK_NULL_HANDLE)
+            vkFreeMemory(s_vk.device, fx.levelMem[i], nullptr);
+    }
+    fx = EnhFx{};
+}
+
 // Caller guarantees the GPU is not using any of these (device idle, or never submitted).
 void enhanceDestroyTargets()
 {
@@ -77,6 +145,7 @@ void enhanceDestroyTargets()
         enhDestroyBuffer(slot.after);
     }
     s_enh.verify.clear(); // PROBE-ENH1
+    enhDestroyEffects(); // FEAT-ENH4
 
     if (s_enh.dbgPipeline != VK_NULL_HANDLE) // FEAT-ENH2
         vkDestroyPipeline(s_vk.device, s_enh.dbgPipeline, nullptr);
@@ -215,7 +284,8 @@ bool enhLoadPipeline(const char *fragName, VkPipelineLayout layout, VkFormat dep
 bool enhCreateResources()
 {
     if (!createImageAndView(s_vk.targetW, s_vk.targetH, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
-                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT, // FEAT-ENH4: source of the downsample chain
                             VK_IMAGE_ASPECT_COLOR_BIT, s_enh.copyImage, s_enh.copyMem, s_enh.copyView))
         return false;
 
@@ -504,8 +574,8 @@ bool enhInvert4(const double (&m)[4][4], double (&out)[4][4])
     return true;
 }
 
-// False: no usable camera or 3D draw, the caller draws the plain composite.
-bool enhBuildDebugPush(const RdEnhanceFrame &frame, int view, EnhDebugPush &push)
+// World <-> NDC of this frame's world picture. False: no usable camera or 3D draw.
+bool enhBuildMatrices(const RdEnhanceFrame &frame, double (&clipFromWorld)[4][4], double (&inv)[4][4]) // FEAT-ENH4
 {
     if (!frame.cameraValid || s_vk.enh3dCount == 0u)
         return false;
@@ -525,14 +595,23 @@ bool enhBuildDebugPush(const RdEnhanceFrame &frame, int view, EnhDebugPush &push
         {0.0, 0.0, 0.0, 1.0}};
 
     // camera[0..3] is column 0 (VU1 quadword 998).
-    double clipFromWorld[4][4] = {};
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            clipFromWorld[r][c] = 0.0;
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c)
             for (int k = 0; k < 4; ++k)
                 clipFromWorld[r][c] += g[r][k] * static_cast<double>(frame.camera[c * 4 + k]);
 
+    return enhInvert4(clipFromWorld, inv);
+}
+
+// False: no usable camera or 3D draw, the caller draws the plain composite.
+bool enhBuildDebugPush(const RdEnhanceFrame &frame, int view, EnhDebugPush &push)
+{
+    double clipFromWorld[4][4];
     double inv[4][4];
-    if (!enhInvert4(clipFromWorld, inv))
+    if (!enhBuildMatrices(frame, clipFromWorld, inv))
         return false;
 
     push = EnhDebugPush{};
@@ -564,7 +643,8 @@ void enhSetFullViewport()
 
 // Colour-only rendering instance, so depth can be sampled. Leaves no rendering active and
 // returns depth to its attachment layout with the contents unchanged.
-void enhDrawDebug(const EnhDebugPush &push, bool useMsaa)
+void enhDrawWithDepth(VkPipeline pipeline, VkPipelineLayout layout, VkDescriptorSet set,
+                      const EnhDebugPush *push, bool useMsaa) // FEAT-ENH4: debug views and effects
 {
     const VkPipelineStageFlags2 depthStages = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
                                               VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
@@ -595,11 +675,11 @@ void enhDrawDebug(const EnhDebugPush &push, bool useMsaa)
     ri.pColorAttachments = &colorAtt;
 
     vkCmdBeginRendering(s_vk.cmd, &ri);
-    vkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_enh.dbgPipeline);
+    vkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     enhSetFullViewport();
-    vkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_enh.dbgPipeLayout, 0, 1,
-                            &s_enh.sets[s_vk.curFrame], 0, nullptr);
-    vkCmdPushConstants(s_vk.cmd, s_enh.dbgPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
+    if (push)
+        vkCmdPushConstants(s_vk.cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(*push), push);
     vkCmdDraw(s_vk.cmd, 3, 1, 0, 0);
     vkCmdEndRendering(s_vk.cmd);
 
@@ -610,6 +690,324 @@ void enhDrawDebug(const EnhDebugPush &push, bool useMsaa)
                  s_vk.depthLayout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     s_vk.depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     enhAttachmentBarrier(); // colour written here is loaded by the next pass
+}
+
+// ---- FEAT-ENH4: screen-space effects
+
+bool enhAnyEffect(const RdEnhanceSettings &s)
+{
+    return (s.grade.on && s.grade.strength > 0.0f) || (s.bloom.on && s.bloom.strength > 0.0f) ||
+           (s.fog.on && s.fog.strength > 0.0f) || (s.ao.on && s.ao.strength > 0.0f) ||
+           (s.dof.on && s.dof.strength > 0.0f) || (s.shafts.on && s.shafts.strength > 0.0f) ||
+           (s.shadows.on && s.shadows.strength > 0.0f);
+}
+
+// False: no usable camera this frame.
+bool enhBuildFxUniforms(const RdEnhanceFrame &frame, const RdEnhanceSettings &s, EnhFxUniforms &u)
+{
+    double m[4][4];
+    double inv[4][4];
+    if (!enhBuildMatrices(frame, m, inv))
+        return false;
+    if (!(s_vk.enh3dViewport.width >= 1.0f) || !(s_vk.enh3dViewport.height >= 1.0f))
+        return false;
+
+    // The camera is the point that projects to clip x = y = w = 0.
+    if (!(std::fabs(inv[3][2]) > 0.0))
+        return false;
+
+    u = EnhFxUniforms{};
+    for (int c = 0; c < 4; ++c)
+    {
+        for (int r = 0; r < 4; ++r)
+        {
+            u.worldFromNdc[c * 4 + r] = static_cast<float>(inv[r][c]);
+            u.clipFromWorld[c * 4 + r] = static_cast<float>(m[r][c]);
+        }
+        u.camRowW[c] = frame.camera[c * 4 + 3];
+    }
+    for (int i = 0; i < 3; ++i)
+    {
+        u.camPos[i] = static_cast<float>(inv[i][2] / inv[3][2]);
+        if (!std::isfinite(u.camPos[i]))
+            return false;
+    }
+
+    // Horizontal focal scale: row 0 without any part along the view direction (row 3).
+    double dot03 = 0.0, dot33 = 0.0;
+    for (int i = 0; i < 3; ++i)
+    {
+        dot03 += m[0][i] * m[3][i];
+        dot33 += m[3][i] * m[3][i];
+    }
+    if (!(dot33 > 0.0))
+        return false;
+    double focal2 = 0.0;
+    for (int i = 0; i < 3; ++i)
+    {
+        const double v = m[0][i] - dot03 / dot33 * m[3][i];
+        focal2 += v * v;
+    }
+    u.camPos[3] = static_cast<float>(std::sqrt(focal2));
+
+    u.viewport[0] = s_vk.enh3dViewport.x;
+    u.viewport[1] = s_vk.enh3dViewport.y;
+    u.viewport[2] = s_vk.enh3dViewport.width;
+    u.viewport[3] = s_vk.enh3dViewport.height;
+    u.target[0] = static_cast<float>(s_vk.targetW);
+    u.target[1] = static_cast<float>(s_vk.targetH);
+    u.target[2] = 1.0f / u.target[0];
+    u.target[3] = 1.0f / u.target[1];
+
+    const float sunLen = std::sqrt(s.sunDir[0] * s.sunDir[0] + s.sunDir[1] * s.sunDir[1] + s.sunDir[2] * s.sunDir[2]);
+    if (sunLen > 1e-4f)
+    {
+        for (int i = 0; i < 3; ++i)
+            u.sunDir[i] = s.sunDir[i] / sunLen;
+        u.sunDir[3] = 1.0f;
+    }
+    for (int i = 0; i < 3; ++i)
+    {
+        u.sunColor[i] = s.sunColor[i];
+        u.fogColor[i] = s.fog.color[i];
+        u.tint[i] = s.grade.tint[i];
+    }
+
+    // A strength of 0 switches that effect off in the shader.
+    u.ao[0] = s.ao.on ? s.ao.strength : 0.0f;
+    u.ao[1] = s.ao.radius;
+    u.ao[2] = s.ao.bias;
+    u.shadow[0] = s.shadows.on ? s.shadows.strength : 0.0f;
+    u.shadow[1] = s.shadows.length;
+    u.shadow[2] = s.shadows.softness;
+    u.fogColor[3] = s.fog.on ? s.fog.strength : 0.0f;
+    u.fogRange[0] = s.fog.start;
+    u.fogRange[1] = s.fog.end;
+    u.fogRange[2] = s.fog.height;
+    u.fogRange[3] = s.fog.falloff;
+    u.shafts[0] = s.fog.sky;
+    u.shafts[1] = s.shafts.on ? s.shafts.strength : 0.0f;
+    u.shafts[2] = s.shafts.length;
+    u.shafts[3] = s.shafts.decay;
+    u.dof[0] = s.dof.on ? s.dof.strength : 0.0f;
+    u.dof[1] = s.dof.focus;
+    u.dof[2] = s.dof.range;
+    u.dof[3] = s.dof.blur;
+    u.bloom[0] = s.bloom.on ? s.bloom.strength : 0.0f;
+    u.bloom[1] = s.bloom.threshold;
+    u.bloom[2] = s.bloom.radius;
+    u.grade[0] = s.grade.on ? s.grade.strength : 0.0f;
+    u.grade[1] = s.grade.exposure;
+    u.grade[2] = s.grade.contrast;
+    u.grade[3] = s.grade.saturation;
+    return true;
+}
+
+bool enhCreateEffects()
+{
+    EnhFx &fx = s_enh.fx;
+    for (uint32_t i = 0; i < kEnhLevels; ++i)
+    {
+        fx.levelW[i] = std::max(1u, s_vk.targetW >> (i + 1));
+        fx.levelH[i] = std::max(1u, s_vk.targetH >> (i + 1));
+        if (!createImageAndView(fx.levelW[i], fx.levelH[i], VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+                                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT, fx.level[i], fx.levelMem[i], fx.levelView[i]))
+            return false;
+    }
+
+    // 0: colour copy, 1: depth, 2..5: downsampled colour, 6: settings
+    constexpr uint32_t kImages = 2 + kEnhLevels;
+    VkDescriptorSetLayoutBinding bindings[kImages + 1]{};
+    for (uint32_t i = 0; i < kImages; ++i)
+        bindings[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    bindings[kImages] = {kImages, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo dslci{};
+    dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dslci.bindingCount = kImages + 1;
+    dslci.pBindings = bindings;
+    if (vkCreateDescriptorSetLayout(s_vk.device, &dslci, nullptr, &fx.setLayout) != VK_SUCCESS)
+        return false;
+
+    VkPipelineLayoutCreateInfo plci{};
+    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &fx.setLayout;
+    if (vkCreatePipelineLayout(s_vk.device, &plci, nullptr, &fx.pipeLayout) != VK_SUCCESS)
+        return false;
+
+    const VkDescriptorPoolSize poolSizes[2] = {
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kImages * s_vk.framesInFlight},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, s_vk.framesInFlight}};
+    VkDescriptorPoolCreateInfo dpci{};
+    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpci.maxSets = s_vk.framesInFlight;
+    dpci.poolSizeCount = 2;
+    dpci.pPoolSizes = poolSizes;
+    if (vkCreateDescriptorPool(s_vk.device, &dpci, nullptr, &fx.descPool) != VK_SUCCESS)
+        return false;
+
+    const VkSampler nearest = getOrCreateSampler(SamplerKey{rdgfx::TextureFilter::Nearest, rdgfx::TextureFilter::Nearest,
+                                                            rdgfx::TextureWrap::Clamp, rdgfx::TextureWrap::Clamp});
+    const VkSampler linear = getOrCreateSampler(SamplerKey{rdgfx::TextureFilter::Linear, rdgfx::TextureFilter::Linear,
+                                                           rdgfx::TextureWrap::Clamp, rdgfx::TextureWrap::Clamp});
+    if (nearest == VK_NULL_HANDLE || linear == VK_NULL_HANDLE)
+        return false;
+
+    fx.ubos.assign(s_vk.framesInFlight, BufferCopy{});
+    fx.sets.assign(s_vk.framesInFlight, VK_NULL_HANDLE);
+    for (uint32_t f = 0; f < s_vk.framesInFlight; ++f)
+    {
+        if (!createHostBuffer(sizeof(EnhFxUniforms),
+                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, fx.ubos[f]))
+            return false;
+
+        VkDescriptorSetAllocateInfo dsai{};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = fx.descPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &fx.setLayout;
+        if (vkAllocateDescriptorSets(s_vk.device, &dsai, &fx.sets[f]) != VK_SUCCESS)
+            return false;
+
+        VkDescriptorImageInfo images[kImages];
+        images[0] = {nearest, s_enh.copyView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        images[1] = {nearest, s_vk.depthView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
+        for (uint32_t i = 0; i < kEnhLevels; ++i)
+            images[2 + i] = {linear, fx.levelView[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        const VkDescriptorBufferInfo ubo{fx.ubos[f].buffer, 0, sizeof(EnhFxUniforms)};
+
+        VkWriteDescriptorSet writes[kImages + 1]{};
+        for (uint32_t i = 0; i <= kImages; ++i)
+        {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = fx.sets[f];
+            writes[i].dstBinding = i;
+            writes[i].descriptorCount = 1;
+            if (i < kImages)
+            {
+                writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                writes[i].pImageInfo = &images[i];
+            }
+            else
+            {
+                writes[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                writes[i].pBufferInfo = &ubo;
+            }
+        }
+        vkUpdateDescriptorSets(s_vk.device, kImages + 1, writes, 0, nullptr);
+    }
+
+    // No depth attachment: the depth image is sampled while this pipeline draws.
+    const bool ms = s_vk.msaaSamples > VK_SAMPLE_COUNT_1_BIT;
+    return enhLoadPipeline(ms ? "fx_effects_ms.frag.spv" : "fx_effects.frag.spv", fx.pipeLayout,
+                           VK_FORMAT_UNDEFINED, fx.pipeline);
+}
+
+// Created on first use, so effects that cannot be built never disable the plain composite.
+bool enhEnsureEffects()
+{
+    if (s_enh.fx.ready)
+        return true;
+    if (s_enh.fx.failed)
+        return false;
+    if (enhCreateEffects())
+    {
+        s_enh.fx.ready = true;
+        return true;
+    }
+    enhDestroyEffects(); // nothing of it has been submitted
+    s_enh.fx.failed = true;
+    ps2xSafeLog("[enh] effect resource creation failed\n");
+    return false;
+}
+
+// Blits the colour copy down the chain. The copy starts and ends in SHADER_READ_ONLY.
+void enhBuildChain()
+{
+    EnhFx &fx = s_enh.fx;
+    // Source stage FRAGMENT chains with the barrier that made the copy readable.
+    imageBarrier(s_vk.cmd, s_enh.copyImage, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    VkImage src = s_enh.copyImage;
+    int32_t srcW = static_cast<int32_t>(s_vk.targetW);
+    int32_t srcH = static_cast<int32_t>(s_vk.targetH);
+    for (uint32_t i = 0; i < kEnhLevels; ++i)
+    {
+        // Earlier frames may still be sampling this level.
+        imageBarrier(s_vk.cmd, fx.level[i], VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+        const int32_t dstW = static_cast<int32_t>(fx.levelW[i]);
+        const int32_t dstH = static_cast<int32_t>(fx.levelH[i]);
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.srcOffsets[1] = {srcW, srcH, 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.dstOffsets[1] = {dstW, dstH, 1};
+        vkCmdBlitImage(s_vk.cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       fx.level[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+        imageBarrier(s_vk.cmd, fx.level[i], VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        src = fx.level[i];
+        srcW = dstW;
+        srcH = dstH;
+    }
+
+    for (uint32_t i = 0; i <= kEnhLevels; ++i)
+    {
+        imageBarrier(s_vk.cmd, i == 0 ? s_enh.copyImage : fx.level[i - 1], VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+}
+
+// Written in the command stream, so a second apply in the same frame keeps its own values.
+void enhUploadUniforms(const EnhFxUniforms &u)
+{
+    enhMemoryBarrier(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    vkCmdUpdateBuffer(s_vk.cmd, s_enh.fx.ubos[s_vk.curFrame].buffer, 0, sizeof(u), &u);
+    enhMemoryBarrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_UNIFORM_READ_BIT);
+}
+
+// True: the effects were drawn. False: nothing was recorded, the caller draws the plain composite.
+bool enhApplyEffects(const RdEnhanceFrame &frame, bool useMsaa)
+{
+    static std::string s_loggedStage;
+    const std::string stage = ps2xEnhanceStageName();
+    const RdEnhanceSettings settings = ps2xEnhanceSettings();
+    if (stage.empty() || !enhAnyEffect(settings))
+    {
+        s_loggedStage.clear();
+        return false;
+    }
+
+    EnhFxUniforms u;
+    if (!enhBuildFxUniforms(frame, settings, u) || !enhEnsureEffects())
+        return false;
+
+    if (s_loggedStage != stage)
+    {
+        s_loggedStage = stage;
+        ps2xSafeLog("[enh] effects on stage=%s\n", stage.c_str());
+    }
+
+    enhBuildChain();
+    enhUploadUniforms(u);
+    enhDrawWithDepth(s_enh.fx.pipeline, s_enh.fx.pipeLayout, s_enh.fx.sets[s_vk.curFrame], nullptr, useMsaa);
+    return true;
 }
 
 } // namespace
@@ -663,7 +1061,10 @@ void enhanceApply(const RdEnhanceFrame &frame)
     const int view = ps2xEnhanceDebugView(); // FEAT-ENH2
     if (view != 0 && enhBuildDebugPush(frame, view, push) && enhEnsureDebugPipeline()) // FEAT-ENH2
     {
-        enhDrawDebug(push, useMsaa);
+        enhDrawWithDepth(s_enh.dbgPipeline, s_enh.dbgPipeLayout, s_enh.sets[s_vk.curFrame], &push, useMsaa);
+    }
+    else if (view == 0 && enhApplyEffects(frame, useMsaa)) // FEAT-ENH4
+    {
     }
     else
     {

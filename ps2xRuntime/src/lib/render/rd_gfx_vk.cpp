@@ -2232,7 +2232,7 @@ void beginFrame()
     s_vk.curFrame = frameIdx;
     s_vk.inRenderPass = false;
     s_vk.firstPassInFrame = true;
-    s_vk.enhTrack = ps2xEnhanceOn() && ps2xEnhanceDebugView() != 0; // FEAT-ENH2
+    s_vk.enhTrack = ps2xEnhanceOn(); // FEAT-ENH2 FEAT-ENH4: effects need the 3D mapping too
     s_vk.enh3dCount = 0; // FEAT-ENH2
     invalidateCommandBufferState(); // PERF-RDG4R
     s_vk.cachedDescSet = VK_NULL_HANDLE;

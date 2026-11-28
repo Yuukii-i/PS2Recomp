@@ -2236,7 +2236,7 @@ namespace
             ps2xEnhanceSave(true);
         }
         ImGui::EndDisabled();
-        ImGui::TextWrapped("Effects are not built yet; these values are stored for later.");
+        ImGui::TextWrapped("Effects run in levels only; menus and the title are left as they are."); // FEAT-ENH4
 
         RdEnhanceSettings s = ps2xEnhanceSettings(); // taken after Save, which reloads
         bool changed = false;
@@ -2312,6 +2312,15 @@ namespace
             slider("Strength", s.shafts.strength, 0.0f, 1.0f);
             slider("Length", s.shafts.length, 0.0f, 4.0f);
             slider("Decay", s.shafts.decay, 0.0f, 1.0f);
+        }
+        ImGui::PopID();
+
+        if (group("Sun shadows")) // FEAT-ENH4
+        {
+            changed |= ImGui::Checkbox("On", &s.shadows.on);
+            slider("Strength", s.shadows.strength, 0.0f, 1.0f);
+            slider("Length", s.shadows.length, 0.0f, 2000.0f);
+            slider("Softness", s.shadows.softness, 0.0f, 1.0f);
         }
         ImGui::PopID();
 
