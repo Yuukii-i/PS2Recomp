@@ -4150,6 +4150,47 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 }
                 ps2xSafeLog("[hud] anchor=%s margin=%.1f fb px\n", modeStr, m); // FIX-P1
             }
+            // FIX-SNOW1: many small 64x64-textured UI sprites (snow) keep their position over the full width
+            static const bool s_snowWide = []{ const char *e = std::getenv("PS2X_SNOW_WIDE"); return !(e && e[0] == '0'); }(); // FIX-SNOW1
+            const auto isFlakeBatch = [&](const Rd2DBatch &b) -> bool { // FIX-SNOW1
+                return ((b.prim >> 4) & 1ull) != 0ull &&
+                       ((b.tex0 >> 26) & 0xFull) == 6ull && ((b.tex0 >> 30) & 0xFull) == 6ull &&
+                       static_cast<size_t>(b.first) + b.count <= g_rdGpu.local2dScratch.size();
+            };
+            const auto isFlakeQuad = [&](size_t first) -> bool { // FIX-SNOW1
+                const RdVert *v = &g_rdGpu.local2dScratch[first];
+                float x0 = v[0].pos[0], x1 = x0, y0 = v[0].pos[1], y1 = y0;
+                for (int k = 1; k < 6; ++k)
+                {
+                    x0 = std::min(x0, v[k].pos[0]); x1 = std::max(x1, v[k].pos[0]);
+                    y0 = std::min(y0, v[k].pos[1]); y1 = std::max(y1, v[k].pos[1]);
+                }
+                return x1 - x0 <= 32.0f && y1 - y0 <= 32.0f;
+            };
+            uint32_t flakeCount = 0u; // FIX-SNOW1
+            uint32_t flakeTag = 0u;   // FIX-SNOW1
+            if (s_snowWide)
+            {
+                for (const Rd2DBatch &b : g_rdGpu.local2dBatches)
+                {
+                    if (!isFlakeBatch(b))
+                        continue;
+                    for (uint32_t k = 0u; k + 6u <= b.count; k += 6u)
+                    {
+                        if (!isFlakeQuad(static_cast<size_t>(b.first) + k))
+                            continue;
+                        ++flakeCount;
+                        flakeTag = static_cast<uint32_t>((b.prim >> 48) & 0xFFull);
+                    }
+                }
+            }
+            const bool snowFrame = flakeCount >= 100u; // FIX-SNOW1
+            static bool s_snowLogged = false;          // FIX-SNOW1
+            if (snowFrame && !s_snowLogged)
+            {
+                s_snowLogged = true;
+                ps2xSafeLog("[snow] tag=%u quads=%u\n", flakeTag, flakeCount);
+            }
             for (Rd2DBatch &b : g_rdGpu.local2dBatches)
             {
                 float minX, maxX, minY, maxY;
@@ -4161,6 +4202,33 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 const float dc = cx - 0.5f * fbW; // FIX-RD64
                 static const bool s_uiLayout = []{ const char *e = std::getenv("PS2X_UI_LAYOUT"); return !(e && e[0] == '0'); }(); // FIX-UI5
                 const uint32_t uiTag = static_cast<uint32_t>((b.prim >> 48) & 0xFFull);
+                if (snowFrame && b.count % 6u == 0u && isFlakeBatch(b)) // FIX-SNOW1: any uiTag; before the full-screen test and the anchoring below
+                {
+                    bool allFlakes = true;
+                    for (uint32_t k = 0u; k < b.count && allFlakes; k += 6u)
+                        allFlakes = isFlakeQuad(static_cast<size_t>(b.first) + k);
+                    if (allFlakes)
+                    {
+                        for (uint32_t k = 0u; k < b.count; k += 6u)
+                        {
+                            RdVert *v = &g_rdGpu.local2dScratch[static_cast<size_t>(b.first) + k];
+                            float x0 = v[0].pos[0], x1 = x0;
+                            for (int j = 1; j < 6; ++j)
+                            {
+                                x0 = std::min(x0, v[j].pos[0]); x1 = std::max(x1, v[j].pos[0]);
+                            }
+                            const float qc = 0.5f * (x0 + x1);
+                            for (int j = 0; j < 6; ++j)
+                                v[j].pos[0] = qc + (v[j].pos[0] - qc) * scaleToShader;
+                        }
+                        if (b.scissor != 0ull)
+                        {
+                            const float n1 = std::max(0.0f, std::min(2047.0f, fbW - 1.0f));
+                            b.scissor = (b.scissor & ~(0x7FFull | (0x7FFull << 16))) | (static_cast<uint64_t>(n1) << 16);
+                        }
+                        continue;
+                    }
+                }
                 if (s_uiLayout && uiTag != 0u) // FIX-UI5
                 {
                     if (minX <= 1.0f && maxX >= fbW - 1.0f && bh >= 0.9f * fbH)
