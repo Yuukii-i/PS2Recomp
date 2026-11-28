@@ -61,6 +61,14 @@ struct RdEnhanceSettings {
         float decay = 0.95f;
     } shafts;
 
+    // FEAT-ENH4
+    struct Shadows {
+        bool on = false;
+        float strength = 0.0f;
+        float length = 300.0f;
+        float softness = 0.5f;
+    } shadows;
+
     float sunDir[3] = {0.0f, 1.0f, 0.0f};
     float sunColor[3] = {1.0f, 1.0f, 1.0f};
     float ambient[3] = {0.2f, 0.2f, 0.2f};

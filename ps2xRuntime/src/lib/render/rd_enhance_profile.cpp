@@ -80,6 +80,12 @@ static const FieldAccessor kFields[] = {
     SETTING_FIELD("shafts.length", ValueType::Float, shafts.length),
     SETTING_FIELD("shafts.decay", ValueType::Float, shafts.decay),
 
+    // FEAT-ENH4: sun shadows
+    SETTING_FIELD("shadows.on", ValueType::Bool, shadows.on),
+    SETTING_FIELD("shadows.strength", ValueType::Float, shadows.strength),
+    SETTING_FIELD("shadows.length", ValueType::Float, shadows.length),
+    SETTING_FIELD("shadows.softness", ValueType::Float, shadows.softness),
+
     // Sun / Ambient
     SETTING_FIELD("sun.dir", ValueType::Float3, sunDir),
     SETTING_FIELD("sun.color", ValueType::Float3, sunColor),
