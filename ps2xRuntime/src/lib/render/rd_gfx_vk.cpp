@@ -498,6 +498,16 @@ struct RdVkState
     uint64_t statPassBegun = 0;
     bool firstDrawLogged = false;
 
+    // FEAT-ENH2: transform of this frame's largest 3D draw (tracked only with a debug view)
+    bool enhTrack = false;
+    uint32_t enh3dCount = 0;
+    float enhFlip[4] = {};
+    float enhVpA[4] = {};
+    float enhVpB[4] = {};
+    float enhFbSize[2] = {};
+    float enhZBias = 0.0f;
+    VkViewport enh3dViewport{};
+
     // PROBE-RDG4P
     int probeDrawDepth = 0;
     int probeTexDepth = 0;
@@ -1726,6 +1736,21 @@ uint32_t resolveBoundEbo()
     return s_vk.boundEbo;
 }
 
+// FEAT-ENH2
+void enhTrackDraw(uint32_t count)
+{
+    const PushConstants &pc = s_vk.pc;
+    if (pc.uMode2d != 0 || !(pc.uVpB[3] > 0.5f) || count <= s_vk.enh3dCount || !s_vk.lastVpValid)
+        return;
+    s_vk.enh3dCount = count;
+    std::memcpy(s_vk.enhFlip, pc.uFlip, sizeof(s_vk.enhFlip));
+    std::memcpy(s_vk.enhVpA, pc.uVpA, sizeof(s_vk.enhVpA));
+    std::memcpy(s_vk.enhVpB, pc.uVpB, sizeof(s_vk.enhVpB));
+    std::memcpy(s_vk.enhFbSize, pc.uFbSize, sizeof(s_vk.enhFbSize));
+    s_vk.enhZBias = pc.uZBias;
+    s_vk.enh3dViewport = s_vk.lastVp;
+}
+
 bool prepareDraw()
 {
     ProbeDrawScope drawProbe; // PROBE-RDG4P
@@ -2207,6 +2232,8 @@ void beginFrame()
     s_vk.curFrame = frameIdx;
     s_vk.inRenderPass = false;
     s_vk.firstPassInFrame = true;
+    s_vk.enhTrack = ps2xEnhanceOn() && ps2xEnhanceDebugView() != 0; // FEAT-ENH2
+    s_vk.enh3dCount = 0; // FEAT-ENH2
     invalidateCommandBufferState(); // PERF-RDG4R
     s_vk.cachedDescSet = VK_NULL_HANDLE;
 
@@ -2959,6 +2986,8 @@ void drawArrays(rdgfx::PrimitiveTopology, int first, int count)
     const int64_t fg5DrawT0 = fg5On ? probeQpcNow() : 0; // PROBE-FG5
     const uint32_t firstInst = fg6StateCacheEnabled() ? (s_vk.curAtInvert != 0 ? 1u : 0u) : 0u; // FIX-FG8
     vkCmdDraw(s_vk.cmd, static_cast<uint32_t>(count), 1, static_cast<uint32_t>(first), firstInst); // FIX-FG8
+    if (s_vk.enhTrack) // FEAT-ENH2
+        enhTrackDraw(count);
     if (fg5On) // PROBE-FG5
         ps2xRdDrawProfAddVk(0, 0, probeQpcNow() - fg5DrawT0, 0, 0, 1);
 }
@@ -3002,6 +3031,8 @@ void drawIndexed(rdgfx::PrimitiveTopology, uint32_t first, uint32_t count, bool 
     const int64_t fg5DrawT0 = fg5On ? probeQpcNow() : 0; // PROBE-FG5
     const uint32_t firstInst = fg6StateCacheEnabled() ? (s_vk.curAtInvert != 0 ? 1u : 0u) : 0u; // FIX-FG8
     vkCmdDrawIndexed(s_vk.cmd, count, 1, first, 0, firstInst); // FIX-FG8
+    if (s_vk.enhTrack) // FEAT-ENH2
+        enhTrackDraw(count);
     if (fg5On) // PROBE-FG5 / PROBE-FG9
     {
         const int64_t fg5T1 = probeQpcNow();

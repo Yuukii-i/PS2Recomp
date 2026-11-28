@@ -649,6 +649,8 @@ struct Rd3DFrame // FEAT-RD13 // FEAT-RD14
     uint32_t masked = 0;
     float vpScaleZ = 0.0f;
     float vpOffsetZ = 0.0f;
+    float camera[16] = {};    // FEAT-ENH2
+    bool cameraValid = false; // FEAT-ENH2
     uint32_t sMin = 0;
     uint32_t sMax = 0;
 };
@@ -686,6 +688,10 @@ size_t g_rd3dCount = 0; // FEAT-RD13
 uint64_t g_rd3dSeq = 0; // FEAT-RD13
 float g_rdLastVpScaleZ = 0.0f;  // FEAT-RD11
 float g_rdLastVpOffsetZ = 0.0f; // FEAT-RD11
+float g_rdPendingCamera[16] = {};    // FEAT-ENH2
+bool g_rdPendingCameraValid = false; // FEAT-ENH2
+float g_rdLastCamera[16] = {};       // FEAT-ENH2
+bool g_rdLastCameraValid = false;    // FEAT-ENH2
 bool g_rdEverPublished = false;
 
 Rd2DFrame g_rd2dFrames[2]; // FEAT-RD13: [0]=newest, [1]=previous
@@ -707,6 +713,8 @@ struct RdGpuSlot // FEAT-RD14
     uint32_t masked = 0;
     float vpScaleZ = 0.0f;
     float vpOffsetZ = 0.0f;
+    float camera[16] = {};    // FEAT-ENH2
+    bool cameraValid = false; // FEAT-ENH2
     uint32_t sMin = 0;
     uint32_t sMax = 0;
     uint32_t curBaseVertex = 0;
@@ -785,6 +793,8 @@ struct RdGpuState
     uint64_t totalPointLineSkipped = 0; // FEAT-RD8
     float vpScaleZ = 0.0f;  // FEAT-RD11
     float vpOffsetZ = 0.0f; // FEAT-RD11
+    float camera[16] = {};    // FEAT-ENH2
+    bool cameraValid = false; // FEAT-ENH2
     double totalUploadMs = 0.0; // FIX-RD90
     std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
 };
@@ -1933,6 +1943,15 @@ void ps2xRdSpikeNoteVu1Bad(uint32_t kickSerial, uint32_t nVerts) // PROBE-M7
         s_spikeVu1Bad.push_back(SpikeVu1BadEntry{kickSerial & 0x3FFFFFFFu, nVerts});
 }
 
+// FEAT-ENH2: camera of the frame the next ps2xRdPublishLean call publishes
+void ps2xRdPublishCamera(const float *camera)
+{
+    std::lock_guard<std::mutex> lock(g_rdMutex);
+    g_rdPendingCameraValid = camera != nullptr;
+    if (camera)
+        std::memcpy(g_rdPendingCamera, camera, sizeof(g_rdPendingCamera));
+}
+
 void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ) // FEAT-RD14
 {
     uint32_t sMin = 0u; // FEAT-RD13
@@ -1968,6 +1987,11 @@ void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indice
     {
         g_rdLastVpScaleZ = vpScaleZ;
         g_rdLastVpOffsetZ = vpOffsetZ;
+    }
+    if (g_rdPendingCameraValid) // FEAT-ENH2
+    {
+        std::memcpy(g_rdLastCamera, g_rdPendingCamera, sizeof(g_rdLastCamera));
+        g_rdLastCameraValid = true;
     }
     size_t chosen = kRdSlotCount; // FEAT-RD34: never overwrite a pinned slot
     for (size_t step = 0; step < kRdSlotCount; ++step)
@@ -2331,6 +2355,8 @@ void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indice
     slot.masked = maskedDraws;
     slot.vpScaleZ = g_rdLastVpScaleZ;
     slot.vpOffsetZ = g_rdLastVpOffsetZ;
+    std::memcpy(slot.camera, g_rdLastCamera, sizeof(slot.camera)); // FEAT-ENH2
+    slot.cameraValid = g_rdLastCameraValid; // FEAT-ENH2
     slot.sMin = sMin;
     slot.sMax = sMax;
     slot.seq = ++g_rd3dSeq;
@@ -3311,6 +3337,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             gs.masked = rf.masked;
                             gs.vpScaleZ = rf.vpScaleZ;
                             gs.vpOffsetZ = rf.vpOffsetZ;
+                            std::memcpy(gs.camera, rf.camera, sizeof(gs.camera)); // FEAT-ENH2
+                            gs.cameraValid = rf.cameraValid; // FEAT-ENH2
                             gs.sMin = rf.sMin;
                             gs.sMax = rf.sMax;
                             pendingUpload[idx] = true;
@@ -3673,6 +3701,9 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
         uint32_t candMasked = g_rdGpu.lastMaskedDraws;
         float candVpScaleZ = g_rdGpu.vpScaleZ;
         float candVpOffsetZ = g_rdGpu.vpOffsetZ;
+        float candCamera[16]; // FEAT-ENH2
+        std::memcpy(candCamera, g_rdGpu.camera, sizeof(candCamera)); // FEAT-ENH2
+        bool candCameraValid = g_rdGpu.cameraValid; // FEAT-ENH2
         if (!chosen2d.mainRanges.empty())
         {
             const uint32_t sFirst = chosen2d.mainRanges.front().first;
@@ -3699,6 +3730,11 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                             {
                                 candVpScaleZ = f3.vpScaleZ;
                                 candVpOffsetZ = f3.vpOffsetZ;
+                            }
+                            if (f3.cameraValid) // FEAT-ENH2
+                            {
+                                std::memcpy(candCamera, f3.camera, sizeof(candCamera));
+                                candCameraValid = true;
                             }
                         }
                         candBatches.push_back(RdDrawBatch{b, slotIdx});
@@ -3855,6 +3891,8 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
             g_rdGpu.lastMaskedDraws = candMasked;
             g_rdGpu.vpScaleZ = candVpScaleZ;
             g_rdGpu.vpOffsetZ = candVpOffsetZ;
+            std::memcpy(g_rdGpu.camera, candCamera, sizeof(g_rdGpu.camera)); // FEAT-ENH2
+            g_rdGpu.cameraValid = candCameraValid; // FEAT-ENH2
             g_rdGpu.lastMainSerialCount = chosen2d.mainSerialCount;
             g_rdGpu.hasCompleteComposition = true;
 
@@ -7514,7 +7552,7 @@ bool ps2xRdDraw(float x, float y, float w, float h) // FEAT-RD1
                 rdSetUniformInt(rdgfx::Uniform::Mode2d, mode2d);
             curVao = 0u;
         }
-        if (ps2xEnhanceOn() && !g_rdGpu.drawBatches.empty()) { RdEnhanceFrame f; f.vpScaleZ = g_rdGpu.vpScaleZ; f.vpOffsetZ = g_rdGpu.vpOffsetZ; ps2xEnhanceApply(f); } // FEAT-ENH1
+        if (ps2xEnhanceOn() && !g_rdGpu.drawBatches.empty()) { RdEnhanceFrame f; f.vpScaleZ = g_rdGpu.vpScaleZ; f.vpOffsetZ = g_rdGpu.vpOffsetZ; std::memcpy(f.camera, g_rdGpu.camera, sizeof(f.camera)); f.cameraValid = g_rdGpu.cameraValid; ps2xEnhanceApply(f); } // FEAT-ENH1
         draw2dUntil(0u, true); // FEAT-RD8
         if (drawProfOn) // PROBE-FG5
             g_fg5Prof.other2DTicks += (fg5QpcNow() - fg5Tail2dT0);

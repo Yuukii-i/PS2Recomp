@@ -56,6 +56,8 @@ extern float g_rdAspectK; // FIX-WS1
 extern int g_ps2xWsMode; // FIX-WS2
 extern void ps2xRdPublish(const RdVert *v, size_t n, const RdBatch *b, size_t nb, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD2 // FEAT-RD11
 extern void ps2xRdPublishLean(std::vector<RdVert> &verts, std::vector<uint32_t> &indices, std::vector<RdBatch> &batches, uint32_t skippedDraws, uint32_t maskedDraws, float vpScaleZ, float vpOffsetZ); // FEAT-RD14
+extern void ps2xRdPublishCamera(const float *camera); // FEAT-ENH2
+extern bool ps2xEnhanceOn(); // FEAT-ENH2
 extern std::atomic<uint32_t> g_rdKickSerial; // FEAT-RD5
 extern std::atomic<uint32_t> g_rdMergedSpan; // FEAT-RD17
 extern uint64_t ps2xRdLookupContentId(uint32_t serial); // FEAT-RD5
@@ -997,6 +999,9 @@ struct SceneFrame
     uint32_t bestVpVerts = 0;         // FEAT-RD14
     float vpScaleZ = 0.0f;            // FEAT-RD14
     float vpOffsetZ = 0.0f;           // FEAT-RD14
+    float camera[16] = {};            // FEAT-ENH2: quads 998..1001 of the draw that gave vpScaleZ
+    bool cameraValid = false;         // FEAT-ENH2
+    std::vector<uint64_t> camHashes;  // FEAT-ENH2: distinct cameras (PS2X_ENH_DEBUG only)
     float curVpS[2] = {0.0f, 0.0f};   // FEAT-RD21
     float curVpO[2] = {0.0f, 0.0f};   // FEAT-RD21
     uint32_t curCamHash = 0u;         // PROBE-RD26
@@ -1022,6 +1027,8 @@ struct SceneFrame
         bestVpVerts = 0;   // FEAT-RD14
         vpScaleZ = 0.0f;   // FEAT-RD14
         vpOffsetZ = 0.0f;  // FEAT-RD14
+        cameraValid = false; // FEAT-ENH2
+        camHashes.clear();   // FEAT-ENH2
     }
 };
 
@@ -2424,6 +2431,39 @@ inline void dumpSceneFrame(const SceneFrame &f)
     }
 }
 
+inline bool enhDebugEnv() // FEAT-ENH2
+{
+    static const bool s_on = []{ const char *e = std::getenv("PS2X_ENH_DEBUG"); return e && *e; }();
+    return s_on;
+}
+
+// FEAT-ENH2: once per published frame, log once per second how many cameras the frames use.
+inline void enhCameraStats(const SceneFrame &f)
+{
+    static thread_local float s_prev[16] = {};
+    static thread_local bool s_havePrev = false;
+    static thread_local uint32_t s_frames = 0u, s_maxDistinct = 0u, s_changed = 0u;
+    static thread_local std::chrono::steady_clock::time_point s_last = std::chrono::steady_clock::now();
+    ++s_frames;
+    s_maxDistinct = std::max(s_maxDistinct, static_cast<uint32_t>(f.camHashes.size()));
+    if (f.cameraValid)
+    {
+        if (s_havePrev && std::memcmp(s_prev, f.camera, sizeof(s_prev)) != 0)
+            ++s_changed;
+        std::memcpy(s_prev, f.camera, sizeof(s_prev));
+        s_havePrev = true;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s_last >= std::chrono::seconds(1))
+    {
+        ::ps2xSafeLog("[enh] cam frames=%u maxDistinctPerFrame=%u changed=%u\n", s_frames, s_maxDistinct, s_changed);
+        s_frames = 0u;
+        s_maxDistinct = 0u;
+        s_changed = 0u;
+        s_last = now;
+    }
+}
+
 inline void onFlush()
 {
     // PERF-SA: advance the double buffer only when a new frame was presented, not on every VIF1 drain
@@ -2449,6 +2489,9 @@ inline void onFlush()
         const size_t profVerts = cur.rdVerts.size();
         {
             RecScope rs(kRpPublish); // FEAT-RD32
+            if (enhDebugEnv()) // FEAT-ENH2
+                enhCameraStats(cur);
+            ::ps2xRdPublishCamera(cur.cameraValid ? cur.camera : nullptr); // FEAT-ENH2
             ::ps2xRdPublishLean(cur.rdVerts, cur.rdIndices, cur.rdBatches, 0u, cur.maskedDraws, cur.vpScaleZ, cur.vpOffsetZ);
         }
         if (recProfOn())
@@ -2750,6 +2793,14 @@ inline bool beginLeanDraw(const uint8_t *vu, SceneFrame &f, uint32_t vertCount, 
         }
         f.curCamHash = h; // PROBE-RD26
     }
+    if (enhDebugEnv()) // FEAT-ENH2
+    {
+        uint64_t h = 1469598103934665603ull;
+        const uint8_t *cp = vu + (998u << 4);
+        for (uint32_t i = 0; i < 64u; ++i) { h ^= cp[i]; h *= 1099511628211ull; }
+        if (std::find(f.camHashes.begin(), f.camHashes.end(), h) == f.camHashes.end())
+            f.camHashes.push_back(h);
+    }
     RecScope rs(kRpBegin); // FEAT-RD32
     ++f.leanDraws;
     alignas(16) float vps[4];
@@ -2763,6 +2814,11 @@ inline bool beginLeanDraw(const uint8_t *vu, SceneFrame &f, uint32_t vertCount, 
         f.bestVpVerts = vertCount;
         f.vpScaleZ = vps[2];
         f.vpOffsetZ = vpo[2];
+        if (enhDebugEnv() || ::ps2xEnhanceOn()) // FEAT-ENH2
+        {
+            std::memcpy(f.camera, vu + (998u << 4), sizeof(f.camera));
+            f.cameraValid = true;
+        }
     }
     const uint32_t ctxt = static_cast<uint32_t>((t_scene.gs.prim >> 9) & 1ull);
     if (static_cast<uint32_t>(t_scene.gs.frame[ctxt] >> 32) == 0xFFFFFFFFu)

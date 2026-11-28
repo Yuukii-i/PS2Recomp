@@ -243,6 +243,7 @@ std::atomic<int> s_gfxAspectMode{0}; // FIX-P1
 std::atomic<float> s_gfxAspectMax{21.0f / 9.0f}; // FIX-P1
 std::atomic<float> s_gfxHudSafeAspect{0.0f}; // FIX-P1
 std::atomic<bool> s_gfxEnhanced{false}; // FEAT-ENH1
+std::atomic<int> s_gfxEnhanceDebug{0}; // FEAT-ENH2
 std::once_flag s_gfxInitOnce; // FIX-P1
 
 void ps2xGfxInitLazy() // FIX-P1
@@ -361,6 +362,10 @@ void ps2xGfxInitLazy() // FIX-P1
         {
             s_gfxEnhanced.store(false); // FEAT-ENH1
         }
+
+        const char *dbg = std::getenv("PS2X_ENH_DEBUG"); // FEAT-ENH2
+        if (dbg && !std::strcmp(dbg, "depth")) s_gfxEnhanceDebug.store(1); // FEAT-ENH2
+        else if (dbg && !std::strcmp(dbg, "grid")) s_gfxEnhanceDebug.store(2); // FEAT-ENH2
     });
 }
 } // namespace
@@ -411,6 +416,18 @@ void ps2xEnhanceSetOn(bool on) // FEAT-ENH1
 {
     ps2xGfxInitLazy();
     s_gfxEnhanced.store(on);
+}
+
+int ps2xEnhanceDebugView() // FEAT-ENH2
+{
+    ps2xGfxInitLazy();
+    return s_gfxEnhanceDebug.load();
+}
+
+void ps2xEnhanceSetDebugView(int view) // FEAT-ENH2
+{
+    ps2xGfxInitLazy();
+    s_gfxEnhanceDebug.store((view == 1 || view == 2) ? view : 0);
 }
 
 bool ps2xGfxSaveIni(int renderScalePct, int vsyncMode, int fullscreen) // FIX-P1
