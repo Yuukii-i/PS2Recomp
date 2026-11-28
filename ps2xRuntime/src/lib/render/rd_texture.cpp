@@ -74,7 +74,7 @@ namespace
 {
 std::atomic<const uint8_t *> g_rdVram{nullptr}; // FEAT-RD3
 
-constexpr uint32_t kRdRingSize = 65536u; // FEAT-RD5
+constexpr uint32_t kRdRingSize = 1u << 19; // FEAT-RD5 // FIX-GEOHOLE1: states were overwritten before late frames drew
 struct RdSerialSlot                      // FEAT-RD5
 {
     std::atomic<uint32_t> serial{0};
